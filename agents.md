@@ -1,0 +1,54 @@
+# PZ b42 Mod 开发工作区
+
+## 项目状态与目标
+
+- `RailroaderMP` 的功能已合并进 Railroader 官方版本；独立版本不再维护，也不作为本项目依赖或实现对照。当前唯一目标是 Railroader RV。
+- RV 采用程序化生成路线：不内置地图；服务端仅在指定区域加载后生成路线、建筑和对象。
+- 服务端权威：客户端只提交操作意图，不提交可信坐标或世界状态。服务端验证玩家、权限、范围、目标区域、当前状态和请求阶段，执行所有世界变更、网络同步与失败回滚。
+
+## 基线与只读来源
+
+- 当前基线的唯一事实源为 `game-decompiled/42.20.4/metadata.txt`；版本、BuildID、反编译元数据和复核结果只从此处读取。基线更新完成前不得在其他文档重复猜测数字或路径。
+- 必须先读取 `.github/copilot-instructions.md`。官方 Lua 快照 `official lua scripts/` 只读，作为 API/脚本 ground truth；目录职责为 `client/`（UI、交互、渲染、客户端表现）、`server/`（服务端玩法、世界、物品、载具、AI、配方）、`shared/`（常量、工具、共享数据定义）。
+- `reference mods/` 只读，仅用于参考可复用代码和配置；禁止修改，禁止复制数据文件；需要导航时直接检查实际目录。
+- `game-decompiled/` 只读，仅用于接口核验和静态分析，不能替代运行时测试。
+- `broken/` 当前为空；只有实际存在的待修复模组才能列入此处，不保留虚构清单。
+
+## 目录职责
+
+```text
+official lua scripts/                 官方 Lua 只读参考
+reference mods/                       Workshop 模组只读参考
+game-decompiled/42.20.4/              当前 Java 反编译基线
+broken/                                实际存在的待修复模组
+RailroaderRVTest/
+  contents/mods/RailroaderRVTest/42/  RV 模组包
+    media/lua/client/                 菜单、客户端意图请求
+    media/lua/server/                 服务端验证、生成、同步、回滚
+    media/lua/shared/                 共享常量与布局契约
+  README.md                           技术路线、契约与验收范围
+  workshop.txt                        Workshop 元数据
+modinfos.json                         模组 metadata，只读、禁止全量读取
+```
+
+## 开发流程与硬约束
+
+- 基线和版本默认已复核；每项任务不做基线复核（默认满足要求），除非有明确证据证明基线变更对模组api有影响，否则严禁反复确认基线、检查版本或要求重复确认。
+- 主 agent 只负责统筹、约束、审核和验收，禁止自行编码、探索等；不得盲信子 agent 结论，必须检查证据、变更和测试结果。
+- 子 agent 只能使用自定义 agent `luna_worker`，具体实施由该子 agent 完成。除非必须复用上下文，每次任务指派新的子 agent；不得用内置 `default`、`worker` 或 `explorer` 代替。
+- 对任何涉及代码、配置、测试、项目分析或文件修改的任务，主 agent 必须先显式启动 `luna_worker`，并在其返回结果前不得直接实施任务或修改文件；纯粹的简短问答可不启动。
+- 启动失败、不可用、返回失败或任务边界不清时，主 agent 必须停止并报告，不得降级为主 agent 直接实施，也不得改用其他子 agent。
+- `gpt-5.6-luna` 只是模型名，不等于已经使用 `luna_worker`；委派时必须核对 agent 名称和返回的任务结果。
+- 主 agent 必须审核 `luna_worker` 返回的任务范围、证据、变更文件和测试/验证结果；最终报告必须注明委派状态、验证证据、变更文件和未解决问题，无法提供时不得宣称任务完成。
+- 本文件提供行为约束，不构成运行时硬门禁；若任务要求 fail-closed，必须另外配置 Hook 或外部编排器，拒绝未经过 `luna_worker` 的写入操作。
+- 子 agent 任务可能较长；没有明确卡死迹象时，主 agent 严禁中断任务。
+- 采用“直接实现 → 测试 → 修复问题”的开发模式；不是 TDD。
+- 搜索或新增代码/脚本目录时，维护该目录的 `agent.md`（描述结构与职责）；代码变更同步更新对应说明。只做与任务直接相关的最小修改。
+
+## `modinfos.json` 约束
+
+`modinfos.json` 存储约 2000 个模组的 metadata，只读。文件很大，禁止全量读取或加载进上下文；仅允许定向搜索与房车功能相近、相似、或可能解决当前 bug 的模组条目。确认目标后，可以用 `steamcmd` 下载对应 Workshop 模组，读取其源代码作参考；不得修改 `modinfos.json`。
+
+## 验证原则
+
+源码扫描、JSON 解析、布局与数量断言可作为快速检查；最终仍需按任务范围进行运行时/联机验证。官方来源、参考模组和反编译缓存均不得被当作运行时测试替代品。

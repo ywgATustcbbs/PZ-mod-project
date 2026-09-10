@@ -1,0 +1,11 @@
+# Project-local exclusions
+/.github/
+/.rv-lua-parse/
+/.venv/
+/game-decompiled/
+/official lua scripts/
+/reference mods/
+/steamcmd/
+/testserver/
+/modinfos.json
+__pycache__/

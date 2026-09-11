@@ -82,6 +82,12 @@ def main() -> int:
     package_root = root / "RailroaderRVTest" / "contents" / "mods" / MOD_ID / "42"
     server_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server.lua"
     client_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_ContextMenu.lua"
+    railroader_server_path = (
+        package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_RailroaderServer.lua"
+    )
+    railroader_client_path = (
+        package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_RailroaderContextMenu.lua"
+    )
     constants_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_Constants.lua"
     layout_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_Layout.lua"
     start_bat_path = root / "testserver" / "steamcmd" / "380870" / "StartServer64 - test.bat"
@@ -98,12 +104,318 @@ def main() -> int:
     )
     checks.true(server_path.is_file(), f"server Lua is missing: {server_path}")
     checks.true(client_path.is_file(), f"client Lua is missing: {client_path}")
+    checks.true(
+        railroader_server_path.is_file(),
+        f"Railroader server adapter is missing: {railroader_server_path}",
+    )
+    checks.true(
+        railroader_client_path.is_file(),
+        f"Railroader client adapter is missing: {railroader_client_path}",
+    )
     checks.true(constants_path.is_file(), f"shared constants Lua is missing: {constants_path}")
     checks.true(start_bat_path.is_file(), f"server launcher batch is missing: {start_bat_path}")
 
     if server_path.is_file() and client_path.is_file():
         server = read_utf8(server_path)
         client = read_utf8(client_path)
+        railroader_server = (
+            read_utf8(railroader_server_path)
+            if railroader_server_path.is_file()
+            else ""
+        )
+        railroader_client = (
+            read_utf8(railroader_client_path)
+            if railroader_client_path.is_file()
+            else ""
+        )
+
+        # Railroader adapter executable contracts.  These source-level tests
+        # intentionally exercise the authority/race decisions without loading
+        # the game: the official Lua snapshot is not a runtime test substitute.
+        checks.true(
+            '== "rr_loco"' in railroader_server
+            and '== "rr_loco"' in railroader_client,
+            "Railroader adapter does not identify rr_loco on both sides",
+        )
+        checks.true(
+            'serverTrain.active' in railroader_server
+            and 'trainEntity.active' in railroader_server
+            and 'authority == "singleplayer"' in railroader_server
+            and "train.rider" in railroader_server
+            and "RR.Ride" in railroader_server,
+            "adapter does not distinguish RR_ServerTrain MP and TrainEntity/Ride SP state",
+        )
+        checks.true(
+            ".Body.hullDistance" in railroader_server
+            and "sourceWithinRange" in railroader_server
+            and "RV_MOUNT_REACH" in railroader_server
+            and "or 24" not in railroader_server,
+            "server entry range is not the Railroader hull-distance contract",
+        )
+        checks.true(
+            "ride.MOUNT_REACH" in railroader_client
+            and "nearestBoardable(reach)" in railroader_client
+            and "C.RV_ENTER_RANGE or 24" not in railroader_client,
+            "client menu does not use Railroader MOUNT_REACH",
+        )
+        checks.true(
+            "singleplayerDismount" in railroader_server
+            and "singleplayerMount" in railroader_server
+            and "ride.dismount" in railroader_server
+            and "ride.mountRecord" in railroader_server
+            and "ride.dismount, true" in railroader_client
+            and "ride.mountRecord" in railroader_client,
+            "SP Ride cleanup/remount and client transition ordering are missing",
+        )
+        checks.true(
+            'args.action ~= "exit"' in railroader_client
+            and 'args.action ~= "generation-failed"' in railroader_client,
+            "SP generation-failed transition does not remount through Ride after teleport",
+        )
+        checks.true(
+            all(token in railroader_server for token in (
+                "_seatNames", "_claims", "_cmdSeq", "markResync",
+                "setBlockMovement", "setCanShout", "setIsResting",
+            )),
+            "MP seat writes do not cover official claim/name/command/resync and player flags",
+        )
+        checks.true(
+            "action == \"enter\"" in railroader_client
+            and "action == \"generation-failed\"" in railroader_client
+            and "action == \"exit\"" in railroader_client
+            and "prepareGenerationRelocation" in railroader_client
+            and "prepareGenerationRelocation" in client
+            and "rr.MPClient" in railroader_client
+            and "_boardPending" in railroader_client,
+            "RVTeleport transition does not cover enter/failure/exit MP snapshot races",
+        )
+
+        # The current-square refresh uses the public IsoMovingObject overload;
+        # Java userdata is not a Lua table, so writing dirty grid-stack fields
+        # would flood the client log with an exception on every retry tick.
+        current_square_refresh = section(
+            railroader_client,
+            r"local function refreshCurrentSquare",
+            r"local function currentSquareMatches",
+        )
+        checks.true(
+            current_square_refresh is not None
+            and "player:setCurrentSquareFromPosition(x, y, z)" in current_square_refresh
+            and "pcall" in current_square_refresh
+            and "dirtyRecalcGridStack" not in railroader_client,
+            "Railroader client current-square refresh uses an unsafe Java-field write or lacks the official three-argument call",
+        )
+        checks.true(
+            "playerObj:setCurrentSquareFromPosition(x, y, z)" in client
+            and "dirtyRecalcGridStack" not in client,
+            "generic client relocation still uses an unsafe current-square refresh path",
+        )
+        checks.true(
+            "CURRENT_SQUARE_REFRESH_TICKS" in railroader_client
+            and "pending.ticks > CURRENT_SQUARE_REFRESH_TICKS" in railroader_client
+            and "Menu._rvCurrentSquareRefresh = nil" in railroader_client,
+            "current-square refresh retry is not bounded and cleaned up",
+        )
+
+        # The first generation Relocate is a separate race from RVTeleport:
+        # the server may have removed the seat while the client is still
+        # locally mounted.  Verify the Railroader-only marker, call ordering,
+        # and token-scoped duplicate-dismount guard precisely.
+        queue_transition = section(
+            server,
+            r"local function queueGeneration",
+            r"local function ackPayloadToken",
+        )
+        relocate_handler = section(
+            client,
+            r"function Client\.onServerCommand",
+            r"function Client\.onTick",
+        )
+        ride_transition = section(
+            railroader_client,
+            r"local function prepareRideTransition",
+            r"local function finishRideTransition",
+        )
+        generation_relocation = section(
+            railroader_client,
+            r"function Menu\.prepareGenerationRelocation",
+            r"local function worldLocomotive",
+        )
+        generation_staging = section(
+            railroader_client,
+            r"function Menu\.prepareGenerationStaging",
+            r"local function worldLocomotive",
+        )
+        final_handler = section(
+            client,
+            r"if command == COMMAND_FINAL_RELOCATE then",
+            r"if command ~= COMMAND_RELOCATE then return end",
+        )
+        final_relocation = section(
+            server,
+            r"local function relocatePlayerIntoHouse",
+            r"local function generateForPlayer",
+        )
+        checks.true(
+            queue_transition is not None
+            and re.search(
+                r'if type\(railroaderData\) == "table" then[\s\S]*?'
+                r'relocatePayload\.railroaderTransition = true[\s\S]*?end',
+                queue_transition,
+            ) is not None
+            and "COMMAND_RELOCATE, relocatePayload" in queue_transition,
+            "Railroader staging marker is not server-only or not sent via Relocate payload",
+        )
+        if queue_transition is not None:
+            marker_guard = queue_transition.find(
+                'if type(railroaderData) == "table" then'
+            )
+            marker_write = queue_transition.find(
+                "relocatePayload.railroaderTransition = true"
+            )
+            checks.true(
+                marker_guard >= 0 and marker_write > marker_guard,
+                "Relocate marker is not guarded by Railroader generation data",
+            )
+        checks.true(
+            relocate_handler is not None
+            and "args.railroaderTransition == true" in relocate_handler
+            and "prepareGenerationStaging" in relocate_handler
+            and "if not preparedOk or prepared ~= true then return end" in relocate_handler,
+            "client Relocate handler does not recognize the strict Railroader staging marker",
+        )
+        if relocate_handler is not None:
+            marker_pos = relocate_handler.find("args.railroaderTransition == true")
+            staging_pos = relocate_handler.find(
+                "prepareGenerationStaging", marker_pos
+            )
+            teleport_pos = relocate_handler.find(
+                "playerObj:teleportTo", staging_pos
+            )
+            checks.true(
+                marker_pos >= 0 and staging_pos > marker_pos and teleport_pos > staging_pos,
+                "staging Ride cleanup is not ordered before the server Relocate teleport",
+            )
+        checks.true(
+            generation_staging is not None
+            and "validGenerationFinalHint(args)" in generation_staging
+            and "prepareRideTransition(args)" in generation_staging
+            and "_rvGenerationTransition" in railroader_client,
+            "Railroader staging helper does not use the existing Ride transition and guard",
+        )
+        checks.true(
+            generation_relocation is not None
+            and "generationTransitionMatches" in generation_relocation
+            and "pending.finalSeen = true" in generation_relocation
+            and "prepareRideTransition(args)" in generation_relocation,
+            "FinalRelocate does not distinguish the first staging transition from duplicate callbacks",
+        )
+        checks.true(
+            final_relocation is not None
+            and re.search(
+                r'if type\(prepared\.railroader\) == "table" then[\s\S]*?'
+                r'finalPayload\.railroaderTransition = true',
+                final_relocation,
+            ) is not None,
+            "Railroader FinalRelocate payload does not carry the strict server marker",
+        )
+        checks.true(
+            final_handler is not None
+            and "validRailroaderFinalHint(args)" in final_handler
+            and "hasGenerationTransition" in final_handler
+            and "if (marked or pending)" in final_handler
+            and "prepareGenerationRelocation" in final_handler,
+            "FinalRelocate handler does not gate Ride preparation on marker or same-token staging",
+        )
+        if final_handler is not None:
+            prepare_pos = final_handler.find("prepareGenerationRelocation")
+            guard_pos = final_handler.find("if (marked or pending)")
+            checks.true(
+                guard_pos >= 0 and prepare_pos > guard_pos,
+                "ordinary FinalRelocate can call the Railroader transition without its gate",
+            )
+        checks.true(
+            generation_relocation is not None
+            and "if not validGenerationFinalHint(args) then return false end" in generation_relocation
+            and "return false" in generation_relocation,
+            "Railroader FinalRelocate adapter does not no-op ordinary technical payloads",
+        )
+
+        # On a quick authoritative exit, the target record must receive the
+        # official gate even if Ride.current is already nil; a beside exit may
+        # not arm that gate.
+        exit_transition = None
+        if ride_transition is not None:
+            exit_start = ride_transition.find('elseif action == "exit" then')
+            return_pos = ride_transition.find("    return record", exit_start)
+            if exit_start >= 0 and return_pos > exit_start:
+                exit_transition = ride_transition[exit_start:return_pos]
+        checks.true(
+            exit_transition is not None
+            and "if wantsSeat and record then" in exit_transition
+            and "record._boardPending = true" in exit_transition
+            and "if ride.current then" in exit_transition
+            and exit_transition.find("record._boardPending = true")
+            < exit_transition.find("if ride.current then")
+            and re.search(r"if old then\s*old\._boardPending", exit_transition) is None,
+            "exit transition does not arm the target record independently of Ride.current (or arms beside)",
+        )
+        checks.true(
+            "recordAtPlayerCoordinate" in railroader_server
+            and "inRegion(position, record.region)" in railroader_server
+            and "RV_REGION_SIZE" in railroader_server
+            and "damaged-map-fallback" in railroader_server
+            and "validMappingRecord" in railroader_server
+            and "copyPose(record.locoPosition)" in railroader_server
+            and "copyPose(record.enterPosition)" in railroader_server
+            and "inactive-mapped" in railroader_server
+            and "persistedBesidePosition" in railroader_server
+            and "inactive-mapped-fallback" in railroader_server
+            and '"outside-rv"' in railroader_server
+            and "trainPose(train)" in railroader_server
+            and "usableFallbackCoordinate" in railroader_server
+            and 'isValidSquare' in railroader_server,
+            "exit reverse lookup does not use the 100x100 passenger-coordinate map/fallback",
+        )
+        exit_player = section(
+            railroader_server,
+            r"local function exitPlayer",
+            r"local function commandArgument",
+        )
+        checks.true(
+            exit_player is not None
+            and "if damaged or not record or not train" not in exit_player
+            and re.search(
+                r'if lookupState == "outside-rv" then[\s\S]*?'
+                r'return false, "player is outside the RV area"[\s\S]*?'
+                r'end\s+if damaged or not record then',
+                exit_player,
+            ) is not None
+            and re.search(
+                r'if damaged or not record then[\s\S]*?damagedMapFallback',
+                exit_player,
+            ) is not None
+            and re.search(
+                r'if not train then[\s\S]*?persistedBesidePosition\(record\)'
+                r'[\s\S]*?lookupState ~= "inactive-mapped"[\s\S]*?'
+                r'role = "beside"',
+                exit_player,
+            ) is not None
+            and "putPassenger" not in exit_player[exit_player.find("if not train then"):]
+            .split("local onlineId", 1)[0],
+            "inactive mapping does not use a persisted beside target without inventing a seat",
+        )
+        checks.true(
+            re.search(
+                r'if moving then[\s\S]*?freePassengerSeat\(train\)[\s\S]*?all passenger positions',
+                railroader_server,
+            ) is not None
+            and re.search(
+                r'freePassengerSeat\(train\)[\s\S]*?elseif train\.driver == nil[\s\S]*?besidePosition',
+                railroader_server,
+            ) is not None,
+            "exit seat order does not enforce moving-passenger and stopped passenger/driver/beside rules",
+        )
 
         if constants_path.is_file():
             constants = read_utf8(constants_path)
@@ -1784,9 +2096,10 @@ def main() -> int:
     if mod_info_path.is_file():
         mod_info = read_utf8(mod_info_path)
         checks.true(
-            re.search(r"(?m)^require=\\BuildingCraft\s*$", mod_info) is not None
+            re.search(r"(?m)^require=\\BuildingCraft,\\Railroader\s*$", mod_info)
+            is not None
             and len(re.findall(r"(?m)^require=", mod_info)) == 1,
-            "RailroaderRVTest mod.info must contain exactly require=\\BuildingCraft",
+            "RailroaderRVTest mod.info must preserve BuildingCraft and require Railroader",
         )
 
     if readme_path.is_file():
@@ -1898,7 +2211,8 @@ def main() -> int:
     print(
         "RV static tests passed: payload contract, UTF-8 launcher contract, "
         "relocation handshake, stale-room guard, entity/fluid component contract, rollback contract, "
-        "persistence documentation, Lua syntax."
+        "Railroader SP/MP adapter, hull-distance/seat transition contracts, persistence documentation, "
+        "Lua syntax."
     )
     return 0
 

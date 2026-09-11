@@ -4,6 +4,6 @@ authors=RailroaderRV contributors
 description=Independent procedural RV generation technical validation for Project Zomboid Build 42.
 versionMin=42.20.0
 modversion=0.1.0-tech
-require=\BuildingCraft
+require=\BuildingCraft,\Railroader
 url=
 versionurl=

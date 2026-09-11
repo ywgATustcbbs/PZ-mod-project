@@ -75,6 +75,12 @@ local function finiteNumber(value)
     return number
 end
 
+local function validRailroaderFinalHint(args)
+    return type(args) == "table" and args.railroaderTransition == true
+        and type(args.token) == "string" and args.token ~= ""
+        and args.locoId ~= nil and tostring(args.locoId) ~= ""
+end
+
 local function localPlayerByOnlineId(onlineId)
     local count = getNumActivePlayers()
     for playerNum = 0, count - 1 do
@@ -340,6 +346,13 @@ local function tryApplyFinalRelocation(args)
     local teleported = pcall(function()
         playerObj:teleportTo(x, y, z)
     end)
+    if teleported and type(playerObj.setCurrentSquareFromPosition) == "function" then
+        -- teleportTo updates coordinates only. Use the official three-argument
+        -- IsoMovingObject overload to refresh the client cache.  Do not write
+        -- Java IsoPlayer fields from Lua; the server's temporary west-neighbour
+        -- floor transaction remains the authoritative roof repair.
+        pcall(function() playerObj:setCurrentSquareFromPosition(x, y, z) end)
+    end
     return teleported
 end
 
@@ -369,6 +382,25 @@ function Client.onServerCommand(module, command, args)
         return
     end
     if command == COMMAND_FINAL_RELOCATE then
+        -- Only a server-marked Railroader generation may touch Ride state.
+        -- Ordinary technical Generate still uses this generic final teleport,
+        -- but must not dismount a locomotive the player happens to occupy.
+        local rv = rawget(_G, "RailroaderRV")
+        local railroaderMenu = rv and rv.RailroaderContextMenu
+        local marked = validRailroaderFinalHint(args)
+        local pending = false
+        if not marked and railroaderMenu
+            and type(railroaderMenu.hasGenerationTransition) == "function" then
+            local pendingOk, pendingValue = pcall(
+                railroaderMenu.hasGenerationTransition, args)
+            pending = pendingOk and pendingValue == true
+        end
+        if (marked or pending) and railroaderMenu
+            and type(railroaderMenu.prepareGenerationRelocation) == "function" then
+            local preparedOk, prepared = pcall(
+                railroaderMenu.prepareGenerationRelocation, args)
+            if not preparedOk or prepared ~= true then return end
+        end
         applyFinalRelocation(args)
         return
     end
@@ -385,6 +417,24 @@ function Client.onServerCommand(module, command, args)
     local playerObj = localPlayerByOnlineId(onlineId)
     if not playerObj or playerObj:isDead() then
         return
+    end
+    -- Railroader generation removes the official seat before this staging
+    -- teleport.  Clear the local Ride state first, but only for the strict
+    -- server-created marker; ordinary technical Generate must keep this
+    -- bridge completely Railroader-agnostic.
+    if args.railroaderTransition == true then
+        local rv = rawget(_G, "RailroaderRV")
+        local railroaderMenu = rv and rv.RailroaderContextMenu
+        if railroaderMenu
+            and type(railroaderMenu.prepareGenerationStaging) == "function" then
+            local preparedOk, prepared = pcall(
+                railroaderMenu.prepareGenerationStaging, args)
+            if not preparedOk or prepared ~= true then return end
+        else
+            -- Do not acknowledge a Railroader staging move if its Ride
+            -- transition hook was not loaded; the server will cancel safely.
+            return
+        end
     end
     -- This is a targeted server instruction, not a client-selected build
     -- coordinate.  Do not inspect the target square here: teleportTo is the
@@ -446,8 +496,19 @@ function Client.onTick()
     pendingRelocation = nil
 end
 
-Events.OnFillWorldObjectContextMenu.Add(Client.onFillWorldObjectContextMenu)
 Events.OnServerCommand.Add(Client.onServerCommand)
 Events.OnTick.Add(Client.onTick)
+-- Events.OnFillWorldObjectContextMenu is registered by
+-- RV_RailroaderContextMenu after this relocation bridge loads.
+
+-- The technical Generate button is retained as a dormant compatibility helper,
+-- but the live world/animal menu is owned by the Railroader adapter.  Loading it
+-- here guarantees RV_Server/RV_ContextMenu can keep their existing relocation
+-- handshake while the new menu remains a separate, bounded module.
+local railroaderMenuOk, railroaderMenuError = pcall(require, "RailroaderRV/RV_RailroaderContextMenu")
+if not railroaderMenuOk then
+    print("[RailroaderRVTest] Railroader RV context menu unavailable: "
+        .. tostring(railroaderMenuError))
+end
 
 return Client

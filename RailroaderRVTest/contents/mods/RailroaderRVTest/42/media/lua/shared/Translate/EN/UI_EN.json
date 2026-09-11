@@ -1,3 +1,5 @@
 {
-    "ContextMenu_RailroaderRVTest_Generate": "Test Generate RV"
+    "ContextMenu_RailroaderRVTest_Generate": "Test Generate RV",
+    "ContextMenu_RailroaderRVTest_Enter": "Enter RV",
+    "ContextMenu_RailroaderRVTest_Exit": "Exit RV"
 }

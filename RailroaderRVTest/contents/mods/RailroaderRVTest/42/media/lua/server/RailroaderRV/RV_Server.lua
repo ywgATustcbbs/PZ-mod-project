@@ -11,8 +11,17 @@ local COMMAND_RELOCATE = "Relocate"
 local COMMAND_RELOCATE_ACK = "RelocateAck"
 local COMMAND_FINAL_RELOCATE = "FinalRelocate"
 local COMMAND_REFRESH_ROOM_OWNERSHIP = "RefreshRoomOwnership"
+local COMMAND_RV_ENTER = "EnterRV"
+local COMMAND_RV_EXIT = "ExitRV"
 local MANIFEST_KEY = "RailroaderRVTest.Manifest"
 local unpackFn = (table and table.unpack) or unpack
+
+-- Railroader entry/exit is implemented by RV_RailroaderServer.lua.  These
+-- callbacks keep the long-running generation transaction authoritative without
+-- making the generic Generate command depend on Railroader being installed.
+local railroaderValidationHook = nil
+local railroaderCommitHook = nil
+local railroaderFailureHook = nil
 
 local function loadModule(name, globalName)
     local ok, result = pcall(require, name)
@@ -39,6 +48,11 @@ end
 -- only for a debugger reload; normal loading must return the actual tables.
 local Constants = loadModule("RailroaderRV/RV_Constants", "RV_Constants")
 local LayoutContract = loadModule("RailroaderRV/RV_Layout", "RV_Layout")
+local roofRepairOk, RoofRepair = pcall(require, "RailroaderRV/RV_RoofRepair")
+if not roofRepairOk or type(RoofRepair) ~= "table"
+    or type(RoofRepair.run) ~= "function" then
+    RoofRepair = nil
+end
 
 local RV = rawget(_G, "RailroaderRV") or {}
 rawset(_G, "RailroaderRV", RV)
@@ -2700,8 +2714,7 @@ local function relocatePlayerIntoHouse(player, prepared)
     if x ~= anchorX + 0.5 or y ~= anchorY + 0.5 or z ~= anchorZ then
         error("RailroaderRVTest: final relocation is not the house interior center")
     end
-    local sentOk = callGlobal("sendServerCommand", player, COMMAND_MODULE,
-        COMMAND_FINAL_RELOCATE, {
+    local finalPayload = {
             token = prepared.token,
             generation = requiredInteger(prepared.generation,
                 "final relocation generation"),
@@ -2709,7 +2722,20 @@ local function relocatePlayerIntoHouse(player, prepared)
             x = x,
             y = y,
             z = z,
-        })
+    }
+    -- Railroader generation removed the official seat before staging.  Carry
+    -- only a transition hint so the client adapter can run Ride.dismount(true)
+    -- before this final RV teleport; seat truth still comes from Railroader's
+    -- next server snapshot.
+    if type(prepared.railroader) == "table" then
+        finalPayload.railroaderTransition = true
+        finalPayload.action = "enter"
+        finalPayload.locoId = prepared.railroader.locoId
+        finalPayload.role = prepared.railroader.sourceRole
+        finalPayload.seat = prepared.railroader.sourceSeat
+    end
+    local sentOk = callGlobal("sendServerCommand", player, COMMAND_MODULE,
+        COMMAND_FINAL_RELOCATE, finalPayload)
     if not sentOk then
         error("RailroaderRVTest: final server-to-client relocation command failed")
     end
@@ -2751,9 +2777,27 @@ local function generateForPlayer(player, prepared)
         if not playerOk then
             error(positionOrReason)
         end
-        local permissionOk, permissionReason = validateGenerationPermission(player)
-        if not permissionOk then
-            error(permissionReason)
+        -- The ordinary technical-test button requires the debug capability.
+        -- Railroader requests have already passed their own server-side train,
+        -- range, seat and movement checks in RV_RailroaderServer.
+        if prepared.railroader == nil then
+            local permissionOk, permissionReason = validateGenerationPermission(player)
+            if not permissionOk then
+                error(permissionReason)
+            end
+        end
+        if prepared.railroader ~= nil and not railroaderValidationHook then
+            error("Railroader RV validation hook is unavailable")
+        end
+        if prepared.railroader ~= nil and railroaderValidationHook then
+            local railOk, railResult, railReason = pcall(
+                railroaderValidationHook, player, prepared.railroader, prepared)
+            if not railOk then
+                error(safeErrorText(railResult))
+            end
+            if railResult ~= true then
+                error(railReason or "Railroader generation request is no longer valid")
+            end
         end
         local identityOk, identityOrReason = playerIdentity(player)
         if not identityOk or identityOrReason.key ~= prepared.identity.key then
@@ -2828,6 +2872,24 @@ local function generateForPlayer(player, prepared)
                 end
             end
         end
+        if buildOk and prepared.railroader ~= nil and not railroaderCommitHook then
+            buildOk = false
+            buildError = "Railroader RV commit hook is unavailable"
+        end
+        if buildOk and prepared.railroader ~= nil and railroaderCommitHook then
+            -- Persist the train/RV/player relation while the generation is
+            -- still inside the same rollback gate.  A failed mapping write is
+            -- therefore treated like any other failed build stage.
+            local commitOk, commitResult, commitReason = pcall(
+                railroaderCommitHook, player, prepared.railroader, prepared)
+            if not commitOk then
+                buildOk = false
+                buildError = commitResult
+            elseif commitResult ~= true then
+                buildOk = false
+                buildError = commitReason or "Railroader RV mapping commit failed"
+            end
+        end
         if not buildOk then
             -- The lamp is intentionally last, but any phase can fail.  Remove
             -- every object tagged by this generation before exposing FAILED;
@@ -2862,7 +2924,7 @@ local function generateForPlayer(player, prepared)
     return finalizeGeneration(manifest, ok, resultOrError)
 end
 
-local function queueGeneration(player, authoritativePosition)
+local function queueGeneration(player, authoritativePosition, railroaderData)
     if pendingGeneration ~= nil or transactionBusy then
         return false, "generation already queued or in progress"
     end
@@ -2951,20 +3013,33 @@ local function queueGeneration(player, authoritativePosition)
             y = stagingDestination.y,
             z = stagingDestination.z,
         },
+        railroader = railroaderData,
     }
 
     -- GameServer.sendTeleport is not exposed to B42.20 Lua.  The targeted
     -- server command performs the client half of relocation; teleportTo is
     -- also applied to the authoritative server object.  The acknowledgement
     -- carries only an opaque token and cannot supply a trusted destination.
+    local relocatePayload = {
+        token = token,
+        onlineId = identityOrReason.onlineId,
+        x = stagingDestination.x,
+        y = stagingDestination.y,
+        z = stagingDestination.z,
+    }
+    -- Only a Railroader-backed generation carries a local Ride transition
+    -- hint.  The marker is intentionally server-created and is not part of
+    -- the ordinary technical Generate protocol; its coordinates remain the
+    -- server-selected staging destination above.
+    if type(railroaderData) == "table" then
+        relocatePayload.railroaderTransition = true
+        relocatePayload.action = "enter"
+        relocatePayload.locoId = railroaderData.locoId
+        relocatePayload.role = railroaderData.sourceRole
+        relocatePayload.seat = railroaderData.sourceSeat
+    end
     local sentOk = callGlobal("sendServerCommand", player, COMMAND_MODULE,
-        COMMAND_RELOCATE, {
-            token = token,
-            onlineId = identityOrReason.onlineId,
-            x = stagingDestination.x,
-            y = stagingDestination.y,
-            z = stagingDestination.z,
-        })
+        COMMAND_RELOCATE, relocatePayload)
     if not sentOk then
         pendingGeneration = nil
         return false, "server-to-client relocation command failed"
@@ -2980,6 +3055,64 @@ local function queueGeneration(player, authoritativePosition)
         .. tostring(stagingDestination.z) .. " anchor=" .. tostring(destination.x)
         .. "," .. tostring(destination.y) .. "," .. tostring(destination.z))
     return true
+end
+
+-- Public only to the sibling Railroader adapter.  Keeping these tiny hooks on
+-- the existing transaction avoids exposing generation internals to clients.
+function RV.Server.setRailroaderValidationHook(callback)
+    railroaderValidationHook = type(callback) == "function" and callback or nil
+end
+
+function RV.Server.setRailroaderCommitHook(callback)
+    railroaderCommitHook = type(callback) == "function" and callback or nil
+end
+
+function RV.Server.setRailroaderFailureHook(callback)
+    railroaderFailureHook = type(callback) == "function" and callback or nil
+end
+
+function RV.Server.requestRailroaderGeneration(player, railroaderData)
+    if type(railroaderData) ~= "table" then
+        return false, "Railroader generation data is missing"
+    end
+    if not railroaderValidationHook or not railroaderCommitHook
+        or not railroaderFailureHook then
+        return false, "Railroader RV transaction hooks are unavailable"
+    end
+    return queueGeneration(player, nil, railroaderData)
+end
+
+-- Re-run the official add-floor/remove-floor neighbour invalidation after an
+-- existing RV entry or reconnect.  Bounds come from the persisted generation
+-- manifest; only a damaged/legacy manifest falls back to the fixed shared
+-- anchor, never to client coordinates.
+function RV.Server.repairRoofVisuals(player)
+    if not RoofRepair then
+        return false, "roof repair module is unavailable"
+    end
+    local manifestOk, manifestOrError = pcall(manifestTable)
+    if not manifestOk or type(manifestOrError) ~= "table" then
+        return false, safeErrorText(manifestOrError)
+    end
+    local manifest = manifestOrError
+    local bounds = manifest.bounds
+    if type(bounds) ~= "table" then
+        local targetX = requiredInteger(Constants.TELEPORT_X,
+            "roof repair anchor x")
+        local targetY = requiredInteger(Constants.TELEPORT_Y,
+            "roof repair anchor y")
+        local targetZ = requiredInteger(Constants.TELEPORT_Z,
+            "roof repair anchor z")
+        local layoutOk, layoutOrError = pcall(makeLayout, targetX, targetY,
+            targetZ)
+        if not layoutOk then return false, safeErrorText(layoutOrError) end
+        local boundsOk, boundsOrError = pcall(boundsFor, layoutOrError)
+        if not boundsOk then return false, safeErrorText(boundsOrError) end
+        bounds = boundsOrError
+    end
+    local ok, result, reason = pcall(RoofRepair.run, player, bounds)
+    if not ok then return false, safeErrorText(result) end
+    return result == true, reason
 end
 
 local function ackPayloadToken(args)
@@ -3029,6 +3162,10 @@ end
 local function cancelPending(reason)
     local pending = pendingGeneration
     pendingGeneration = nil
+    if pending and pending.railroader ~= nil and railroaderFailureHook then
+        pcall(railroaderFailureHook, pending.player, pending.railroader, reason,
+            pending)
+    end
     print("[RailroaderRVTest] queued generation cancelled player="
         .. (pending and pending.identity.key or "unknown") .. ": "
         .. safeErrorText(reason))
@@ -3051,10 +3188,12 @@ function RV.Server.OnTick()
         cancelPending(playerOrReason)
         return
     end
-    local permissionOk, permissionReason = validateGenerationPermission(playerOrReason)
-    if not permissionOk then
-        cancelPending(permissionReason)
-        return
+    if pending.railroader == nil then
+        local permissionOk, permissionReason = validateGenerationPermission(playerOrReason)
+        if not permissionOk then
+            cancelPending(permissionReason)
+            return
+        end
     end
     -- Keep the liveness/world-coordinate check active while waiting for the
     -- server-side player object to observe the client relocation.  A stale
@@ -3096,9 +3235,14 @@ function RV.Server.OnTick()
         return
     end
 
-    local ok, reason = generateForPlayer(playerOrReason, pending)
+    local completedPending = pending
+    local ok, reason = generateForPlayer(playerOrReason, completedPending)
     pendingGeneration = nil
     if not ok then
+        if completedPending.railroader ~= nil and railroaderFailureHook then
+            pcall(railroaderFailureHook, playerOrReason,
+                completedPending.railroader, reason, completedPending)
+        end
         print("[RailroaderRVTest] generation failed: " .. tostring(reason))
     else
         print("[RailroaderRVTest] generation committed READY")
@@ -3106,6 +3250,19 @@ function RV.Server.OnTick()
 end
 
 function RV.Server.OnClientCommand(module, command, player, args)
+    -- OnClientCommand is shared by every mod.  Foreign Railroader/vanilla
+    -- commands are not RV requests and must not be reported as malformed RV
+    -- traffic.
+    if module ~= COMMAND_MODULE then
+        return
+    end
+    -- The Railroader adapter owns these two commands.  This handler is also
+    -- registered on the same event, so do not let the generic empty-payload
+    -- validator log them as malformed Generate requests.
+    if module == COMMAND_MODULE
+        and (command == COMMAND_RV_ENTER or command == COMMAND_RV_EXIT) then
+        return
+    end
     if module == COMMAND_MODULE and command == COMMAND_RELOCATE_ACK then
         local ackOk, accepted, reason = pcall(acknowledgeRelocation, player, args)
         if not ackOk then
@@ -3141,6 +3298,24 @@ if Events and Events.OnClientCommand and type(Events.OnClientCommand.Add) == "fu
 end
 if Events and Events.OnTick and type(Events.OnTick.Add) == "function" then
     Events.OnTick.Add(RV.Server.OnTick)
+end
+
+-- Load after RV.Server has been fully constructed.  The adapter is intentionally
+-- a separate file so the generic generation transaction remains readable and
+-- the Railroader dependency stays optional for the technical test button.
+local railroaderAdapterOk, railroaderAdapterOrError = pcall(require,
+    "RailroaderRV/RV_RailroaderServer")
+if not railroaderAdapterOk then
+    print("[RailroaderRVTest] Railroader RV adapter unavailable: "
+        .. safeErrorText(railroaderAdapterOrError))
+elseif type(railroaderAdapterOrError) == "table"
+    and type(railroaderAdapterOrError.installTransactionHooks) == "function" then
+    local hooksInstalled = railroaderAdapterOrError.installTransactionHooks()
+    if hooksInstalled then
+        print("[RailroaderRVTest] Railroader RV transaction hooks installed.")
+    else
+        print("[RailroaderRVTest] Railroader RV transaction hooks unavailable.")
+    end
 end
 
 return RV.Server

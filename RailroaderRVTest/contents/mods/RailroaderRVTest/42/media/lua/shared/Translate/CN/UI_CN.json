@@ -1,3 +1,5 @@
 {
-    "ContextMenu_RailroaderRVTest_Generate": "测试生成房车"
+    "ContextMenu_RailroaderRVTest_Generate": "测试生成房车",
+    "ContextMenu_RailroaderRVTest_Enter": "进入房车",
+    "ContextMenu_RailroaderRVTest_Exit": "退出房车"
 }

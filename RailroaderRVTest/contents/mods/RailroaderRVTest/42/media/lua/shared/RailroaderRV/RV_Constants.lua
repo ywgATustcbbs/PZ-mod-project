@@ -1,7 +1,8 @@
 -- RailroaderRVTest shared constants.
 --
 -- This module has no dependency on RailroaderMP or Architect.  BuildingCraft
--- is a required runtime dependency for the player-built light sprite below.
+-- and Railroader are required runtime dependencies for the light/locomotive
+-- adapters below.
 -- The server side owns all world mutation; these values are shared only so
 -- that the client request and server layout use the same contract.
 
@@ -15,6 +16,10 @@ C.NAMESPACE = "RailroaderRV"
 C.COMMAND_GENERATE = "Generate"
 C.COMMAND_FINAL_RELOCATE = "FinalRelocate"
 C.COMMAND_REFRESH_ROOM_OWNERSHIP = "RefreshRoomOwnership"
+C.COMMAND_RV_ENTER = "EnterRV"
+C.COMMAND_RV_EXIT = "ExitRV"
+C.COMMAND_RV_TELEPORT = "RVTeleport"
+C.RV_MAP_KEY = "RailroaderRVTest.TrainMap"
 C.TECH_VERSION = "0.1.1-tech"
 
 -- The current test button always targets this server-selected destination.
@@ -22,6 +27,29 @@ C.TECH_VERSION = "0.1.1-tech"
 C.TELEPORT_X = 20050
 C.TELEPORT_Y = 2050
 C.TELEPORT_Z = 0
+
+-- The generated room is an RV destination, not a Railroader room.  The
+-- persistent map uses a half-open 100x100 XY region so that the reverse lookup
+-- is based on the passenger's coordinate and never on an IsoRoom/id value.
+C.RV_REGION_SIZE = 100
+C.RV_REGION_MIN_OFFSET_X = -50
+C.RV_REGION_MIN_OFFSET_Y = -50
+C.RV_REGION_MAX_OFFSET_X = C.RV_REGION_MIN_OFFSET_X + C.RV_REGION_SIZE
+C.RV_REGION_MAX_OFFSET_Y = C.RV_REGION_MIN_OFFSET_Y + C.RV_REGION_SIZE
+C.RV_MOUNT_REACH = 2.0
+-- Kept as an adapter-facing alias for older callers.  Both client and server
+-- must measure from the Railroader body hull, never from the locomotive centre.
+C.RV_ENTER_RANGE = C.RV_MOUNT_REACH
+C.RV_STOPPED_SPEED = 0.05
+C.RV_MAX_PASSENGERS = 5
+
+-- Railroader's shared depot contract is the safe last-resort destination when
+-- an RV coordinate is still occupied but every persisted train mapping is
+-- unusable.  The server prefers RR.Spawn.DEPOT and only uses these coordinates
+-- when the official route modules are unavailable during recovery.
+C.RV_FALLBACK_X = 11606
+C.RV_FALLBACK_Y = 9851
+C.RV_FALLBACK_Z = 0
 
 -- The destructive clear footprint is an inclusive 101 x 101 square, centered around the
 -- destination anchor.  The server walks every valid z level when applying it.

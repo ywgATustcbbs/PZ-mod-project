@@ -6,6 +6,12 @@
 -- and a safe staging coordinate outside the old/new structure footprints.
 
 require "RailroaderRV/RV_Constants"
+local boundaryClientLoaded, BoundaryClient = pcall(require,
+    "RailroaderRV/RV_BoundaryClient")
+if not boundaryClientLoaded then
+    print("[RailroaderRVTest] RV boundary client unavailable: "
+        .. tostring(BoundaryClient))
+end
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.Client = RailroaderRV.Client or {}
@@ -22,11 +28,20 @@ local pendingRelocation = nil
 local pendingFinalRelocation = nil
 local roomOwnershipGuards = {}
 local RELOCATION_TIMEOUT_TICKS = 600
--- IsoRegions has no public Lua completion event. A bounded guard plus a
--- stable tail covers the asynchronous rebuild without keeping permanent state.
+-- IsoRegions has no public Lua completion event.  The initial generation
+-- guard is also the only server-authoritative identity/bounds packet a client
+-- receives for this footprint, so it must remain armed after the generation
+-- transaction.  A later wall/floor removal can cause another asynchronous
+-- region packet to retire the same IsoRoom; releasing the guard after a quiet
+-- tail leaves that packet unchecked and exposes ParameterFirearmRoomSize to a
+-- RoomDef=nil reference on the next player update.
 local ROOM_OWNERSHIP_MIN_TICKS = 1800
 local ROOM_OWNERSHIP_STABLE_TICKS = 120
-local ROOM_OWNERSHIP_MAX_TICKS = 7200
+
+local function roomOwnershipGuardKey(rvId, generation, bitmapVersion)
+    return tostring(rvId) .. ":" .. tostring(generation) .. ":"
+        .. tostring(bitmapVersion)
+end
 
 local function finiteInteger(value)
     local valueType = type(value)
@@ -76,9 +91,15 @@ local function finiteNumber(value)
 end
 
 local function validRailroaderFinalHint(args)
+    local generation = type(args) == "table" and finiteInteger(args.generation)
+    local bitmapVersion = type(args) == "table"
+        and finiteInteger(args.bitmapVersion)
     return type(args) == "table" and args.railroaderTransition == true
         and type(args.token) == "string" and args.token ~= ""
         and args.locoId ~= nil and tostring(args.locoId) ~= ""
+        and args.rvId ~= nil and tostring(args.rvId) ~= ""
+        and generation ~= nil and generation >= 1
+        and bitmapVersion == C.BITMAP_VERSION
 end
 
 local function localPlayerByOnlineId(onlineId)
@@ -188,9 +209,13 @@ local function refreshInvalidRoomOwnership(guard)
 end
 
 local function beginRoomOwnershipRefresh(args)
+    local rvId = args.rvId
     local generation = finiteInteger(args.generation)
+    local bitmapVersion = finiteInteger(args.bitmapVersion)
     local newBounds = readRoomRefreshBounds(args, "new")
-    if generation == nil or generation < 1 or newBounds == nil
+    if rvId == nil or tostring(rvId) == "" or generation == nil
+        or generation < 1 or bitmapVersion ~= C.BITMAP_VERSION
+        or newBounds == nil
         or args.hasOld ~= true and args.hasOld ~= false then
         return
     end
@@ -199,18 +224,33 @@ local function beginRoomOwnershipRefresh(args)
         oldBounds = readRoomRefreshBounds(args, "old")
         if oldBounds == nil then return end
     end
-    roomOwnershipGuards[generation] = {
+    local key = roomOwnershipGuardKey(rvId, generation, bitmapVersion)
+    -- A current generation packet contains the authoritative previous/current
+    -- footprints needed for this swap.  Retain monitors for other RV IDs, but
+    -- do not keep a prior generation's geometry alive after this identity has
+    -- been accepted; that would turn old bounds into a permanent client path.
+    for existingKey, existingGuard in pairs(roomOwnershipGuards) do
+        if existingKey ~= key
+            and tostring(existingGuard.rvId) == tostring(rvId) then
+            roomOwnershipGuards[existingKey] = nil
+        end
+    end
+    roomOwnershipGuards[key] = {
+        key = key,
+        rvId = tostring(rvId),
         generation = generation,
+        bitmapVersion = bitmapVersion,
         oldBounds = oldBounds,
         newBounds = newBounds,
         ticks = 0,
         stableTicks = 0,
         totalCleared = 0,
+        monitorReady = false,
     }
     -- Arm immediately, before any ordered removal/rebuild packets that follow
     -- this broadcast server command are applied.
-    local _, cleared = refreshInvalidRoomOwnership(roomOwnershipGuards[generation])
-    roomOwnershipGuards[generation].totalCleared = cleared
+    local _, cleared = refreshInvalidRoomOwnership(roomOwnershipGuards[key])
+    roomOwnershipGuards[key].totalCleared = cleared
 end
 
 local function finalTargetRoomIsValid(x, y, z)
@@ -258,7 +298,6 @@ local function finalTargetRoomIsValid(x, y, z)
 end
 
 local function updateRoomOwnershipGuards()
-    local finished = {}
     for generation, guard in pairs(roomOwnershipGuards) do
         guard.ticks = guard.ticks + 1
         local scanOk, cleared = refreshInvalidRoomOwnership(guard)
@@ -268,19 +307,20 @@ local function updateRoomOwnershipGuards()
         else
             guard.stableTicks = 0
         end
-        if guard.ticks >= ROOM_OWNERSHIP_MAX_TICKS then
-            print("[RailroaderRVTest] client room ownership guard expired generation="
-                .. tostring(generation) .. " cleared=" .. tostring(guard.totalCleared))
-            finished[#finished + 1] = generation
-        elseif guard.ticks >= ROOM_OWNERSHIP_MIN_TICKS
+        -- The warm-up/stable tail is diagnostic only.  This monitor is kept
+        -- for the lifetime of the current identity because a later wall or
+        -- floor removal may deliver another region rebuild after the initial
+        -- generation has been READY for a long time.  OnTick runs after
+        -- IsoRegions.update and before the next player update, so clearing the
+        -- exact invalid reference here prevents ParameterFirearmRoomSize from
+        -- observing IsoRoom.getRoomDef()==nil.
+        if not guard.monitorReady
+            and guard.ticks >= ROOM_OWNERSHIP_MIN_TICKS
             and guard.stableTicks >= ROOM_OWNERSHIP_STABLE_TICKS then
-            print("[RailroaderRVTest] client room ownership guard complete generation="
+            guard.monitorReady = true
+            print("[RailroaderRVTest] client room ownership monitor active generation="
                 .. tostring(generation) .. " cleared=" .. tostring(guard.totalCleared))
-            finished[#finished + 1] = generation
         end
-    end
-    for i = 1, #finished do
-        roomOwnershipGuards[finished[i]] = nil
     end
 end
 
@@ -314,18 +354,23 @@ end
 
 local function tryApplyFinalRelocation(args)
     local token = args.token
+    local rvId = args.rvId
     local generation = finiteInteger(args.generation)
+    local bitmapVersion = finiteInteger(args.bitmapVersion)
     local onlineId = finiteInteger(args.onlineId)
     local x = finiteNumber(args.x)
     local y = finiteNumber(args.y)
     local z = finiteNumber(args.z)
-    if type(token) ~= "string" or token == "" or generation == nil
-        or generation < 1 or onlineId == nil
+    if type(token) ~= "string" or token == "" or rvId == nil
+        or tostring(rvId) == "" or generation == nil or generation < 1
+        or bitmapVersion ~= C.BITMAP_VERSION or onlineId == nil
         or x == nil or y == nil or z == nil or z < -32 or z > 31 then
         return true
     end
-    local guard = roomOwnershipGuards[generation]
-    if guard == nil then
+    local guard = roomOwnershipGuards[roomOwnershipGuardKey(
+        rvId, generation, bitmapVersion)]
+    if guard == nil or tostring(guard.rvId) ~= tostring(rvId)
+        or guard.bitmapVersion ~= bitmapVersion then
         return false
     end
     -- The network handler performs this synchronously before teleportTo.  This
@@ -388,14 +433,7 @@ function Client.onServerCommand(module, command, args)
         local rv = rawget(_G, "RailroaderRV")
         local railroaderMenu = rv and rv.RailroaderContextMenu
         local marked = validRailroaderFinalHint(args)
-        local pending = false
-        if not marked and railroaderMenu
-            and type(railroaderMenu.hasGenerationTransition) == "function" then
-            local pendingOk, pendingValue = pcall(
-                railroaderMenu.hasGenerationTransition, args)
-            pending = pendingOk and pendingValue == true
-        end
-        if (marked or pending) and railroaderMenu
+        if marked and railroaderMenu
             and type(railroaderMenu.prepareGenerationRelocation) == "function" then
             local preparedOk, prepared = pcall(
                 railroaderMenu.prepareGenerationRelocation, args)
@@ -410,13 +448,36 @@ function Client.onServerCommand(module, command, args)
     local x = finiteInteger(args.x)
     local y = finiteInteger(args.y)
     local z = finiteInteger(args.z)
+    local rvId = args.rvId
+    local generation = finiteInteger(args.generation)
+    local bitmapVersion = finiteInteger(args.bitmapVersion)
+    local roofRepairTransition = args.roofRepairTransition == true
+    local roofRepairPhase = args.roofRepairPhase
     if type(token) ~= "string" or token == "" or onlineId == nil
+        or rvId == nil or tostring(rvId) == "" or generation == nil
+        or generation < 1 or bitmapVersion ~= C.BITMAP_VERSION
         or x == nil or y == nil or z == nil or z < -32 or z > 31 then
+        return
+    end
+    if roofRepairTransition
+        and roofRepairPhase ~= "temporary" and roofRepairPhase ~= "return" then
+        return
+    end
+    if roofRepairTransition and roofRepairPhase == "temporary"
+        and args.haloText ~= "正在刷新房间" then
         return
     end
     local playerObj = localPlayerByOnlineId(onlineId)
     if not playerObj or playerObj:isDead() then
         return
+    end
+    if roofRepairTransition and roofRepairPhase == "temporary"
+        and type(playerObj.setHaloNote) == "function" then
+        -- The text is display-only server data.  It does not grant authority,
+        -- supply a coordinate, or participate in the token acknowledgement.
+        pcall(function()
+            playerObj:setHaloNote(args.haloText, 255, 255, 255, 1500)
+        end)
     end
     -- Railroader generation removes the official seat before this staging
     -- teleport.  Clear the local Ride state first, but only for the strict
@@ -453,6 +514,9 @@ function Client.onServerCommand(module, command, args)
     pendingRelocation = {
         token = token,
         onlineId = onlineId,
+        rvId = tostring(rvId),
+        generation = generation,
+        bitmapVersion = bitmapVersion,
         x = x,
         y = y,
         z = z,
@@ -501,7 +565,7 @@ Events.OnTick.Add(Client.onTick)
 -- Events.OnFillWorldObjectContextMenu is registered by
 -- RV_RailroaderContextMenu after this relocation bridge loads.
 
--- The technical Generate button is retained as a dormant compatibility helper,
+-- The technical Generate button remains a separate helper,
 -- but the live world/animal menu is owned by the Railroader adapter.  Loading it
 -- here guarantees RV_Server/RV_ContextMenu can keep their existing relocation
 -- handshake while the new menu remains a separate, bounded module.

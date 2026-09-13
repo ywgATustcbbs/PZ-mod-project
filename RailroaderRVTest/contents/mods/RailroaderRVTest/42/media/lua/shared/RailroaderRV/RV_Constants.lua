@@ -19,8 +19,19 @@ C.COMMAND_REFRESH_ROOM_OWNERSHIP = "RefreshRoomOwnership"
 C.COMMAND_RV_ENTER = "EnterRV"
 C.COMMAND_RV_EXIT = "ExitRV"
 C.COMMAND_RV_TELEPORT = "RVTeleport"
+C.COMMAND_RV_BOUNDARY_CORRECTION = "RVBoundaryCorrection"
+C.COMMAND_RV_BITMAP = "RVBitmap"
+C.COMMAND_RV_BITMAP_CLEAR = "RVBitmapClear"
 C.RV_MAP_KEY = "RailroaderRVTest.TrainMap"
-C.TECH_VERSION = "0.1.1-tech"
+C.MANIFEST_KEY = "RailroaderRVTest.Manifest"
+C.TECH_VERSION = "0.2.0-tech"
+C.MANIFEST_SCHEMA_VERSION = 1
+C.MAP_SCHEMA_VERSION = 1
+C.RV_RECORD_SCHEMA_VERSION = 1
+C.RV_RELATION_SCHEMA_VERSION = 1
+C.BOUNDARY_SCHEMA_VERSION = 1
+C.LAYOUT_SCHEMA_VERSION = 4
+C.SAVE_REBUILD_REQUIRED = "RailroaderRVTest: 开发版本存档不兼容，请删除该测试存档并重建 (delete this test save and rebuild it)"
 
 -- The current test button always targets this server-selected destination.
 -- Clients never send or choose these coordinates.
@@ -32,37 +43,35 @@ C.TELEPORT_Z = 0
 -- persistent map uses a half-open 100x100 XY region so that the reverse lookup
 -- is based on the passenger's coordinate and never on an IsoRoom/id value.
 C.RV_REGION_SIZE = 100
+C.RV_MANAGED_WIDTH = 100
+C.RV_MANAGED_HEIGHT = 100
+C.BITMAP_SCHEMA_VERSION = 1
+C.BITMAP_VERSION = 1
 C.RV_REGION_MIN_OFFSET_X = -50
 C.RV_REGION_MIN_OFFSET_Y = -50
 C.RV_REGION_MAX_OFFSET_X = C.RV_REGION_MIN_OFFSET_X + C.RV_REGION_SIZE
 C.RV_REGION_MAX_OFFSET_Y = C.RV_REGION_MIN_OFFSET_Y + C.RV_REGION_SIZE
+C.RV_MANAGED_MIN_Z_OFFSET = 0
+-- maxZ is half-open.  The current generated layout owns the base and roof
+-- layers; future layouts may add more layers without changing XY semantics.
+C.RV_MANAGED_MAX_Z_OFFSET = 2
 C.RV_MOUNT_REACH = 2.0
--- Kept as an adapter-facing alias for older callers.  Both client and server
--- must measure from the Railroader body hull, never from the locomotive centre.
-C.RV_ENTER_RANGE = C.RV_MOUNT_REACH
 C.RV_STOPPED_SPEED = 0.05
 C.RV_MAX_PASSENGERS = 5
 
--- Railroader's shared depot contract is the safe last-resort destination when
--- an RV coordinate is still occupied but every persisted train mapping is
--- unusable.  The server prefers RR.Spawn.DEPOT and only uses these coordinates
--- when the official route modules are unavailable during recovery.
-C.RV_FALLBACK_X = 11606
-C.RV_FALLBACK_Y = 9851
-C.RV_FALLBACK_Z = 0
-
--- The destructive clear footprint is an inclusive 101 x 101 square, centered around the
--- destination anchor.  The server walks every valid z level when applying it.
+-- The generation/management footprint uses the same half-open 100 x 100 XY
+-- contract as the boundary bitmap.  maxX/maxY are exclusive.
 C.CLEAR_MIN_OFFSET_X = -50
-C.CLEAR_MAX_OFFSET_X = 50
+C.CLEAR_MAX_OFFSET_X = C.CLEAR_MIN_OFFSET_X + C.RV_MANAGED_WIDTH
 C.CLEAR_MIN_OFFSET_Y = -50
-C.CLEAR_MAX_OFFSET_Y = 50
-C.CLEAR_ALL_Z = true
--- IsoWorld.isValidSquare() accepts the inclusive B42.20 vertical range
--- -32..31.  The server still visits only already-loaded squares, so this
--- does not manufacture a 64-level column while clearing an abandoned plot.
-C.CLEAR_MIN_Z = -32
-C.CLEAR_MAX_Z = 31
+C.CLEAR_MAX_OFFSET_Y = C.CLEAR_MIN_OFFSET_Y + C.RV_MANAGED_HEIGHT
+C.CLEAR_MIN_Z = C.TELEPORT_Z + C.RV_MANAGED_MIN_Z_OFFSET
+C.CLEAR_MAX_Z = C.TELEPORT_Z + C.RV_MANAGED_MAX_Z_OFFSET
+C.BOUNDARY_TICK_INTERVAL = 1
+C.BOUNDARY_RECOVERY_COOLDOWN_TICKS = 8
+C.BOUNDARY_TRANSITION_TIMEOUT_TICKS = 120
+C.BOUNDARY_SNAPSHOT_TIMEOUT_TICKS = 120
+C.BOUNDARY_SNAPSHOT_REFRESH_TICKS = 60
 
 -- The generated cabin has a six-cell east/west interior and a forty-cell
 -- north/south interior.  The one-cell wall ring therefore spans 7 x 41
@@ -136,22 +145,6 @@ C.LIGHT_PROPERTIES = {
     moveType = "MoveType",
     moveTypeValue = "WallObject",
 }
-
--- Flat aliases are the server implementation's deliberately small input
--- surface.  Keep them derived from SPRITES so the layout cannot silently use
--- a different tile vocabulary.
-C.WOOD_FLOOR_SPRITE = C.SPRITES.woodFloor.sprite
-C.WALL_WEST_SPRITE = C.SPRITES.wall.sprite
-C.WALL_NORTH_SPRITE = C.SPRITES.wall.northSprite
-C.WALL_NW_SPRITE = C.SPRITES.wallNW.sprite
-C.WALL_SE_SPRITE = C.SPRITES.wallSE.sprite
-C.ROOF_FLOOR_SPRITE = C.SPRITES.roofFloor.sprite
-C.LIGHT_SPRITE = C.SPRITES.wallLamp.sprite
-C.RAIN_COLLECTOR_SPRITE = C.SPRITES.rainCollector.sprite
-C.RAIN_BARREL_SPRITE = C.RAIN_COLLECTOR_SPRITE
-C.GENERATOR_SPRITE = C.SPRITES.generator.sprite
-C.COUNTER_SPRITE = C.SPRITES.counter.sprite
-C.SINK_SPRITE = C.SPRITES.sink.sprite
 
 -- Object/item type names are hints for the server implementation.  They are
 -- kept here to make the eventual IsoRoom/object implementation replaceable

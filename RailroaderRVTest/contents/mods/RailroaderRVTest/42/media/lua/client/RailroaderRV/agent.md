@@ -3,10 +3,12 @@
 RV_RailroaderContextMenu.lua 负责识别官方 rr_loco、提交进入/退出意图、接收服务端
 座位/车外传送，并在官方动物菜单与世界菜单 hook 上替换机车入口；RV_ContextMenu.lua
 保留生成事务的客户端定向传送与房间 guard。进入请求只提交 locoId 提示，退出请求为空；
-服务端重新验证机车、玩家座位、速度、范围和所有坐标。房车内部菜单只根据固定 100x100
+服务端重新验证机车、玩家座位、速度、范围和所有坐标。房车内部菜单只根据固定 100x100×Z
 坐标区间显示退出，不依赖 room/id。
 
-世界菜单优先使用 `RR.Ride.nearestBoardable` 的 2.1 活跃机车记录，并保留点击动物路径；若
+世界菜单优先使用 `RR.Ride.nearestBoardable` 的 2.1 活跃机车记录；点击 `worldObjects` 时
+先用官方 `instanceof(object, "IsoAnimal")` 确认对象类别，再读取 `getAnimalType`，避免把
+普通世界对象送入动物 API；并保留点击动物路径。若
 官方 `RR_AnimalMenuFilter` 尚未安装，才对 `AnimalContextMenu.doMenu` 做一次回退包装，同时
 保留官方 re-rail 入口。
 
@@ -20,13 +22,25 @@ footprint 外的 `Relocate` staging 目标，完成本地 `teleportTo` 后回传
 传送前要求目标 `getGridSquare` 存在。位置、权限、到达复核、传送后加载等待和世界变更仍
 由服务端决定。
 
-`RefreshRoomOwnership` 是服务端向所有已连接客户端广播的旧/新 footprint guard，不按请求
-玩家过滤。完整 7x41 墙矩形已经包含 6x40 室内，扫描不再重复追加 room loop。客户端只在
+`RV_BoundaryClient.lua` 接收服务端的 `rvId/generation/bitmapVersion` 快照，在当前 RV
+100×100×Z scope 内用 bitmap 预测 active→inactive 的 swept transition，并同步修正本地
+position/next/last 状态；没有快照或当前位置已经在 scope 外时保持 inert。它不创建碰撞体、
+不删除对象、不接受客户端坐标作为权限依据；Lua 被关闭、快照过期或预测失败时，服务端
+`RV_BoundaryServer` 的 recovery 仍是唯一安全边界。
+服务端在进出 RV、generation swap 或清理映射时发送 `RVBitmapClear`，客户端只清除匹配的
+旧反馈快照，避免退出后残留预测在非当前 RV 中生效；该消息不改变服务端关系或权限。
+
+`RefreshRoomOwnership` 在 generation swap 时由服务端向所有已连接客户端广播旧/新 footprint
+guard；已有 RV entry 或 reconnect/presence 则由服务端用同一命令定向对应客户端。完整
+7x41 墙矩形已经包含 6x40 室内，扫描不再重复追加 room loop。客户端只在
 方格仍返回 `IsoRoom`、但该方格的 `RoomDef` 已为 `nil` 时执行 `setRoomID(-1)`；最终
 `FinalRelocate` 处理器会在本地 `teleportTo` 前同步执行同一 guard 扫描；有效的新房或旧房
 room ID 不得被修改，也不得调用 `setRoom(nil)`、`ResetIsoWorldRegion` 或额外重算。由于没有
-公开的 region rebuild 完成事件，多个 generation guard 可并存，并以最短监测期、连续稳定
-tick 和硬超时跨 tick 运行后自动清理。
+公开的 region rebuild 完成事件，generation guard 在初始稳定尾部后不会释放，而是作为当前
+`rvId:generation:bitmapVersion` 的持续 footprint monitor 每个 `OnTick` 扫描。`OnTick` 位于
+`IsoRegions.update` 之后、下一次 `IsoPlayer.updateInternal2/updateEmitter` 之前；因此墙/地板
+异步移除导致的后续 `IsoRoom.def=nil` 也会在 FMOD 参数读取前被清除。新的当前 generation
+命令会替换旧 identity；monitor 只使用服务端发送的当前 schema bounds，不推断或扩大范围。
 
 服务端选定的 `RVTeleport`/`FinalRelocate` 落地后，客户端可调用官方
 `IsoMovingObject:setCurrentSquareFromPosition(float x, float y, float z)` 三参重载刷新
@@ -40,14 +54,20 @@ tick 和硬超时跨 tick 运行后自动清理。
 关系或传送权限。客户端不得给 Java `IsoPlayer` userdata 写入
 `dirtyRecalcGridStack` 等字段（Kahlua 会报 `attempted index of non-table`）。屋顶视觉
 修复以服务端在房车西北墙角西侧临时添加并删除木地板的事务为事实源，客户端刷新不替代
-该事务。
+该事务。拆墙后的第一阶段 roof-refresh 复用同一 `Relocate`/严格 token-only `RelocateAck`：
+服务端把玩家移到当前 boundary bitmap 声明的 100×100 scope 中心与固定实验层
+`ROOF_REPAIR_TEMP_Z=-15`，客户端只执行服务端坐标并回执 token；临时阶段以
+`setHaloNote("正在刷新房间",255,255,255,1500)`
+显示中文提示。客户端不提交目标坐标、回程位置、加载状态或地板动作，服务端在到达后的
+5/10/15 tick 完成权威修复后另发回程命令。同 x/y 改 z 不构成 chunk unload/reload；跨 chunk
+方案留待第一阶段运行时失败后设计。
 
 房车内部退出入口同时注册在 `OnPreFillWorldObjectContextMenu` 和
 `OnFillWorldObjectContextMenu`：官方后一个事件在右键目标没有可抓取世界对象时会被
 `fetch.c == 0` 短路，而 RV 内通常只右键普通地板。前一个事件只依据玩家是否位于
 固定 100x100 RV 区块添加 `Exit RV`，不依赖 locomotive 实体、room 或 ModData 已经
-在客户端恢复；服务器收到退出意图后再按持久化区块映射反查机车，映射损坏时走默认
-马尔德劳退出点。
+在客户端恢复；服务器收到退出意图后再按当前 schema 持久化区块映射反查机车；mapping
+不完整时拒绝操作，提示删除测试存档并重建，且不执行默认全局退出传送。
 
 Railroader 2.1 的 `RVTeleport` 处理还必须经过 `RR.Ride`：进入和生成失败先调用官方
 `dismount(true)`，让 `RR_MPClient` 的 `_dismountAt` stale-seat grace 先于坐标写入；生成失败
@@ -66,3 +86,6 @@ driver/passenger 时，即使本地 `RR.Ride.current` 已经为空，也要在�
 普通技术 `FinalRelocate` 没有 `railroaderTransition` marker 时，客户端 adapter 必须严格
 no-op，不得因玩家当前恰好乘坐机车而调用 `prepareRideTransition`；同 token 的已存在
 staging transition 才是唯一允许的无 marker 重试例外。
+
+客户端不得实现任何旧存档/旧字段兼容或转换逻辑；缺少当前 bitmap identity 时保持 inert，
+由服务端 authoritative gate 负责拒绝并通知用户删档重建。

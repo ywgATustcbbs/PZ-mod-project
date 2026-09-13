@@ -80,20 +80,24 @@ local function playerPosition(player)
 end
 
 local function targetRegion()
-    local minX = (finiteInteger(C.TELEPORT_X) or 0)
-        + (finiteInteger(C.RV_REGION_MIN_OFFSET_X) or -50)
-    local minY = (finiteInteger(C.TELEPORT_Y) or 0)
-        + (finiteInteger(C.RV_REGION_MIN_OFFSET_Y) or -50)
-    local size = finiteInteger(C.RV_REGION_SIZE) or 100
+    local minX = finiteInteger(C.TELEPORT_X) + finiteInteger(C.RV_REGION_MIN_OFFSET_X)
+    local minY = finiteInteger(C.TELEPORT_Y) + finiteInteger(C.RV_REGION_MIN_OFFSET_Y)
+    local size = finiteInteger(C.RV_REGION_SIZE)
+    local minZ = finiteInteger(C.TELEPORT_Z) + finiteInteger(C.RV_MANAGED_MIN_Z_OFFSET)
+    local maxZ = finiteInteger(C.TELEPORT_Z) + finiteInteger(C.RV_MANAGED_MAX_Z_OFFSET)
     return { minX = minX, minY = minY, maxX = minX + size,
-        maxY = minY + size, z = finiteInteger(C.TELEPORT_Z) or 0 }
+        maxY = minY + size, minZ = minZ, maxZ = maxZ }
 end
 
 local function inRegion(position, region)
     if not position or not region then return false end
+    local minZ = finiteNumber(region.minZ)
+    local maxZ = finiteNumber(region.maxZ)
     return position.x >= region.minX and position.x < region.maxX
         and position.y >= region.minY and position.y < region.maxY
-        and math.floor(position.z) == region.z
+        and minZ ~= nil and maxZ ~= nil
+        and math.floor(position.z) >= math.floor(minZ)
+        and math.floor(position.z) < math.floor(maxZ)
 end
 
 local function mapContainsPlayer(player)
@@ -101,26 +105,19 @@ local function mapContainsPlayer(player)
     if not position then return false end
     local target = targetRegion()
     if not inRegion(position, target) then return false end
-    -- The coordinate gate is authoritative for menu presentation too.  ModData
-    -- is consulted only as a useful hint; a damaged/missing map must still
-    -- expose Exit so the server can perform the documented depot fallback.
-    local map
-    if ModData and type(ModData.get) == "function" then
-        local ok, value = pcall(ModData.get, C.RV_MAP_KEY)
-        if ok and type(value) == "table" then map = value end
-    end
-    if not map or type(map.locomotives) ~= "table" then return true end
-    for _, record in pairs(map.locomotives) do
-        if type(record) == "table" and type(record.region) == "table"
-            and inRegion(position, record.region) then
-            return true
-        end
-    end
+    -- The server mapping gate is authoritative.  The client only decides
+    -- whether to show the local affordance from its fixed coordinate scope.
     return true
 end
 
+local function isIsoAnimal(animal)
+    if not animal or type(instanceof) ~= "function" then return false end
+    local ok, result = pcall(instanceof, animal, "IsoAnimal")
+    return ok and result == true
+end
+
 local function locomotiveType(animal)
-    if not animal then return nil end
+    if not isIsoAnimal(animal) then return nil end
     local ok, value = pcall(function() return animal:getAnimalType() end)
     return ok and tostring(value) or nil
 end
@@ -235,6 +232,14 @@ local CURRENT_SQUARE_REFRESH_TICKS = 120
 
 local function generationTransitionMatches(pending, args)
     if type(pending) ~= "table" or type(args) ~= "table" then return false end
+    local generation = finiteInteger(args.generation)
+    local bitmapVersion = finiteInteger(args.bitmapVersion)
+    if pending.rvId == nil or args.rvId == nil
+        or tostring(pending.rvId) ~= tostring(args.rvId)
+        or pending.generation == nil or generation ~= pending.generation
+        or pending.bitmapVersion == nil or bitmapVersion ~= pending.bitmapVersion then
+        return false
+    end
     if pending.token ~= nil and args.token ~= nil then
         return tostring(pending.token) == tostring(args.token)
     end
@@ -281,6 +286,9 @@ local function prepareRideTransition(args)
     Menu._rvTransition = {
         action = action, locoId = args.locoId, role = args.role,
         seat = finiteInteger(args.seat), expires = nowMs() + 2500,
+        rvId = args.rvId and tostring(args.rvId) or nil,
+        generation = finiteInteger(args.generation),
+        bitmapVersion = finiteInteger(args.bitmapVersion),
     }
     if action == "generation-failed" then
         -- A failed generation ends the one-shot staging transition.  The
@@ -355,7 +363,7 @@ local function currentSquareMatches(player, x, y, z)
         and finiteInteger(squareZ) == math.floor(z)
 end
 
-local function scheduleCurrentSquareRefresh(player, x, y, z)
+local function scheduleCurrentSquareRefresh(player, x, y, z, relation)
     if not player then return end
     Menu._rvCurrentSquareRefresh = {
         player = player,
@@ -363,6 +371,11 @@ local function scheduleCurrentSquareRefresh(player, x, y, z)
         y = y,
         z = z,
         ticks = 0,
+        rvId = type(relation) == "table" and relation.rvId or nil,
+        generation = type(relation) == "table"
+            and finiteInteger(relation.generation) or nil,
+        bitmapVersion = type(relation) == "table"
+            and finiteInteger(relation.bitmapVersion) or nil,
     }
     refreshCurrentSquare(player, x, y, z)
     if currentSquareMatches(player, x, y, z) then
@@ -409,17 +422,15 @@ local function finishRideTransition(args, record, player)
 end
 
 local function validGenerationFinalHint(args)
+    local generation = type(args) == "table" and finiteInteger(args.generation)
+    local bitmapVersion = type(args) == "table"
+        and finiteInteger(args.bitmapVersion)
     return type(args) == "table" and args.railroaderTransition == true
         and type(args.token) == "string" and args.token ~= ""
         and args.locoId ~= nil and tostring(args.locoId) ~= ""
-end
-
--- This read-only probe lets the generic relocation bridge recognize a
--- same-token retry even if an old packet omitted the marker.  It never
--- mutates Ride state and ordinary FinalRelocate has no matching transition.
-function Menu.hasGenerationTransition(args)
-    local pending = activeGenerationTransition()
-    return pending ~= nil and generationTransitionMatches(pending, args)
+        and args.rvId ~= nil and tostring(args.rvId) ~= ""
+        and generation ~= nil and generation >= 1
+        and bitmapVersion == C.BITMAP_VERSION
 end
 
 -- Called by RV_ContextMenu's generic FinalRelocate bridge.  It shares the
@@ -446,6 +457,9 @@ function Menu.prepareGenerationRelocation(args)
     Menu._rvGenerationTransition = {
         token = args.token,
         locoId = args.locoId,
+        rvId = tostring(args.rvId),
+        generation = finiteInteger(args.generation),
+        bitmapVersion = finiteInteger(args.bitmapVersion),
         finalSeen = true,
         expiresAt = nowMs() + GENERATION_TRANSITION_TTL_MS,
     }
@@ -468,6 +482,9 @@ function Menu.prepareGenerationStaging(args)
     Menu._rvGenerationTransition = {
         token = args.token,
         locoId = args.locoId,
+        rvId = tostring(args.rvId),
+        generation = finiteInteger(args.generation),
+        bitmapVersion = finiteInteger(args.bitmapVersion),
         expiresAt = nowMs() + GENERATION_TRANSITION_TTL_MS,
     }
     return true
@@ -538,7 +555,7 @@ function Menu.OnServerCommand(module, command, args)
     local record = prepareRideTransition(args)
     local teleported = pcall(function() player:teleportTo(x, y, z) end)
     if teleported then
-        scheduleCurrentSquareRefresh(player, x, y, z)
+        scheduleCurrentSquareRefresh(player, x, y, z, args)
     end
     finishRideTransition(args, record, player)
 end

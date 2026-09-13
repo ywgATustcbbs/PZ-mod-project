@@ -165,11 +165,79 @@ local function candidateList(bounds)
     return result
 end
 
+-- RoofRepair.run deliberately performs the add/remove only after this
+-- read-only readiness probe has succeeded.  B42 may expose the player square
+-- before all neighbouring wall/roof squares have streamed into the same
+-- IsoCell; calling the mutation during that window reports a misleading
+-- completion and leaves the client roof cache unchanged.  Keep the probe
+-- bounded to the current manifest's wall/roof geometry and the actual repair
+-- candidates.  No square is created or modified here.
+local function loadedRepairSquares(player, bounds)
+    if type(bounds) ~= "table" then
+        return false, "RV bounds are unavailable"
+    end
+    local cell = getCell(player)
+    if not cell then return false, "server IsoCell is unavailable" end
+    local seen = {}
+    local function requireSquare(x, y, z, role)
+        local key = tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
+        if seen[key] then return true end
+        seen[key] = true
+        if not worldSquareIsValid(x, y, z) then
+            return false, "roof repair " .. tostring(role)
+                .. " is outside the legal world"
+        end
+        if not getSquare(cell, x, y, z) then
+            return false, "roof repair squares are not loaded"
+        end
+        return true
+    end
+
+    local wallMinX = integer(bounds.wallMinX, "wallMinX")
+    local wallMaxX = integer(bounds.wallMaxX, "wallMaxX")
+    local wallMinY = integer(bounds.wallMinY, "wallMinY")
+    local wallMaxY = integer(bounds.wallMaxY, "wallMaxY")
+    local wallZ = integer(bounds.z, "z")
+    for y = wallMinY, wallMaxY do
+        for x = wallMinX, wallMaxX do
+            local ready, reason = requireSquare(x, y, wallZ, "wall")
+            if not ready then return false, reason end
+        end
+    end
+
+    local roofMinX = integer(bounds.roofMinX, "roofMinX")
+    local roofMaxX = integer(bounds.roofMaxX, "roofMaxX")
+    local roofMinY = integer(bounds.roofMinY, "roofMinY")
+    local roofMaxY = integer(bounds.roofMaxY, "roofMaxY")
+    local roofZ = integer(bounds.roofZ, "roofZ")
+    for y = roofMinY, roofMaxY do
+        for x = roofMinX, roofMaxX do
+            local ready, reason = requireSquare(x, y, roofZ, "roof")
+            if not ready then return false, reason end
+        end
+    end
+
+    local candidates = candidateList(bounds)
+    for i = 1, #candidates do
+        local point = candidates[i]
+        local ready, reason = requireSquare(point.x, point.y, point.z,
+            "repair target")
+        if not ready then return false, reason end
+    end
+    return true
+end
+
+function Repair.isLoaded(player, bounds)
+    local ok, loaded, reason = pcall(loadedRepairSquares, player, bounds)
+    if not ok then return false, tostring(loaded) end
+    return loaded == true, reason
+end
+
 local function repairInternal(player, bounds)
     if type(bounds) ~= "table" then return false, "RV bounds are unavailable" end
     local cell = getCell(player)
     if not cell then return false, "server IsoCell is unavailable" end
-    local sprite = C.ROOF_FLOOR_SPRITE or C.WOOD_FLOOR_SPRITE
+    local sprite = C.SPRITES.roofFloor.sprite
     if type(sprite) ~= "string" or sprite == "" then
         return false, "wood floor sprite is unavailable"
     end

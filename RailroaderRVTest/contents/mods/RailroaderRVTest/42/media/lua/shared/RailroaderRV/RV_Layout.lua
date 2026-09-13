@@ -5,6 +5,7 @@
 -- applies the returned plan only after validating the requesting player.
 
 require "RailroaderRV/RV_Constants"
+local Bitmap = require "RailroaderRV/RV_Bitmap"
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.Layout = RailroaderRV.Layout or {}
@@ -12,27 +13,31 @@ RailroaderRV.Layout = RailroaderRV.Layout or {}
 local Layout = RailroaderRV.Layout
 local C = RailroaderRV.Constants
 
-Layout.VERSION = 3
+Layout.SCHEMA_VERSION = C.LAYOUT_SCHEMA_VERSION
 
 local function point(x, y, z)
     return { x = x, y = y, z = z }
 end
 
-local function rectangle(minX, maxX, minY, maxY, z)
+local function rectangle(minX, maxX, minY, maxY, z, minZ, maxZ, halfOpen)
     return {
         minX = minX,
         maxX = maxX,
         minY = minY,
         maxY = maxY,
         z = z,
+        minZ = minZ,
+        maxZ = maxZ,
+        halfOpen = halfOpen == true,
     }
 end
 
 local function offsetPoint(anchor, offset)
-    return point(anchor.cx + offset.x, anchor.cy + offset.y, anchor.cz + offset.z)
+    return point(anchor.x + offset.x, anchor.y + offset.y, anchor.z + offset.z)
 end
 
 local function appendWall(result, x, y, z, north, sprite, role, corner)
+    local axis = north == true and "N" or "W"
     result[#result + 1] = {
         x = x,
         y = y,
@@ -43,6 +48,8 @@ local function appendWall(result, x, y, z, north, sprite, role, corner)
         corner = corner == true,
         edgeNorth = north == true,
         edgeWest = north == false,
+        axis = axis,
+        edgeKey = Bitmap.edgeKey(axis, x, y, z),
     }
 end
 
@@ -64,10 +71,10 @@ end
 -- north-facing and one west-facing constructor orientation respectively.
 local function wallCoordinatesForAnchor(cx, cy, cz)
     local result = {}
-    local northSprite = C.WALL_NORTH_SPRITE
-    local westSprite = C.WALL_WEST_SPRITE
-    local nwSprite = C.WALL_NW_SPRITE
-    local seSprite = C.WALL_SE_SPRITE
+    local northSprite = C.SPRITES.wall.northSprite
+    local westSprite = C.SPRITES.wall.sprite
+    local nwSprite = C.SPRITES.wallNW.sprite
+    local seSprite = C.SPRITES.wallSE.sprite
 
     local interiorMinX = cx + C.INTERIOR_MIN_OFFSET_X
     local interiorMaxX = cx + C.INTERIOR_MAX_OFFSET_X
@@ -114,7 +121,9 @@ local function validateWallCoordinates(wallCoordinates, cx, cy, cz)
         if type(entry) ~= "table" or type(entry.x) ~= "number"
             or type(entry.y) ~= "number" or type(entry.z) ~= "number"
             or type(entry.north) ~= "boolean" or type(entry.role) ~= "string"
-            or type(entry.sprite) ~= "string" or type(entry.corner) ~= "boolean" then
+            or type(entry.sprite) ~= "string" or type(entry.corner) ~= "boolean"
+            or type(entry.edgeSide) ~= "string"
+            or type(entry.edgeKey) ~= "string" then
             error("RailroaderRV: wall entry is malformed at index " .. tostring(i))
         end
         local coordinateKey = tostring(entry.x) .. ":" .. tostring(entry.y)
@@ -135,14 +144,15 @@ local function validateWallCoordinates(wallCoordinates, cx, cy, cz)
         orientationByCoordinate[coordinateKey] = orientationByCoordinate[coordinateKey] or {}
         orientationByCoordinate[coordinateKey][entry.north and "north" or "west"] = true
         local expectedRole = entry.north and "wall-north" or "wall-west"
-        local expectedSprite = entry.north and C.WALL_NORTH_SPRITE or C.WALL_WEST_SPRITE
+        local expectedSprite = entry.north and C.SPRITES.wall.northSprite
+            or C.SPRITES.wall.sprite
         if entry.corner then
             if coordinateKey == nwKey then
                 expectedRole = "corner-nw"
-                expectedSprite = C.WALL_NW_SPRITE
+                expectedSprite = C.SPRITES.wallNW.sprite
             elseif coordinateKey == seKey then
                 expectedRole = "corner-se"
-                expectedSprite = C.WALL_SE_SPRITE
+                expectedSprite = C.SPRITES.wallSE.sprite
             else
                 error("RailroaderRV: corner wall is not at NW or SE")
             end
@@ -163,6 +173,40 @@ local function validateWallCoordinates(wallCoordinates, cx, cy, cz)
     return uniqueCoordinateCount, northCount, westCount, cornerCount
 end
 
+-- The wall object's square and the owned boundary edge are separate facts.
+-- In particular the east wall is hosted by W(x+1,y,z), and the south wall
+-- is hosted by N(x,y+1,z), where x/y are the adjacent interior cell. Keep
+-- the canonical edge metadata on every generated entry for later tagging and
+-- cleanup; never infer it back from an inactive tile at audit time.
+local function annotateWallEdges(wallCoordinates, cx, cy)
+    local interiorMaxX = cx + C.INTERIOR_MAX_OFFSET_X
+    local interiorMaxY = cy + C.INTERIOR_MAX_OFFSET_Y
+    for i = 1, #wallCoordinates do
+        local entry = wallCoordinates[i]
+        local side, cellX, cellY
+        if entry.north then
+            if entry.y == interiorMaxY + 1 then
+                side, cellX, cellY = "south", entry.x, entry.y - 1
+            else
+                side, cellX, cellY = "north", entry.x, entry.y
+            end
+        elseif entry.x == interiorMaxX + 1 then
+            side, cellX, cellY = "east", entry.x - 1, entry.y
+        else
+            side, cellX, cellY = "west", entry.x, entry.y
+        end
+        local edgeKey = Bitmap.edgeForSide(side, cellX, cellY, entry.z)
+        if not edgeKey then
+            error("RailroaderRV: wall edge metadata is malformed")
+        end
+        entry.edgeSide = side
+        entry.edgeCellX, entry.edgeCellY = cellX, cellY
+        entry.edgeHostX = side == "east" and cellX + 1 or cellX
+        entry.edgeHostY = side == "south" and cellY + 1 or cellY
+        entry.edgeKey = edgeKey
+    end
+end
+
 -- Build one complete plan from the supplied integer map-cell anchor.  The
 -- server passes the shared fixed teleport target as this anchor; callers must
 -- not derive the generation anchor from client coordinates.
@@ -176,15 +220,62 @@ function Layout.make(cx, cy, cz)
         cx + C.CLEAR_MAX_OFFSET_X,
         cy + C.CLEAR_MIN_OFFSET_Y,
         cy + C.CLEAR_MAX_OFFSET_Y,
-        nil
+        nil,
+        cz + C.RV_MANAGED_MIN_Z_OFFSET,
+        cz + C.RV_MANAGED_MAX_Z_OFFSET,
+        true
     )
-    clear.allZ = C.CLEAR_ALL_Z
+    local managed = Bitmap.makeScope(
+        cx + C.RV_REGION_MIN_OFFSET_X,
+        cy + C.RV_REGION_MIN_OFFSET_Y,
+        cz + C.RV_MANAGED_MIN_Z_OFFSET,
+        cz + C.RV_MANAGED_MAX_Z_OFFSET,
+        C.RV_MANAGED_WIDTH,
+        C.RV_MANAGED_HEIGHT
+    )
+    if not managed then
+        error("RailroaderRV: managed 100x100xZ scope is malformed")
+    end
+    local bitmap = {
+        schemaVersion = Bitmap.SCHEMA_VERSION,
+        bitmapVersion = C.BITMAP_VERSION,
+        originX = managed.originX,
+        originY = managed.originY,
+        width = managed.width,
+        height = managed.height,
+        minZ = managed.minZ,
+        maxZ = managed.maxZ,
+        layers = {},
+        encoding = "bytes",
+    }
+    -- The active/build geometry comes from the layout planner, never from
+    -- objects observed in the world.  Both current cabin layers are active
+    -- in this test layout; future irregular rooms can set arbitrary cells.
+    for z = managed.minZ, managed.maxZ - 1 do
+        local layer = Bitmap.newLayer(managed.width, managed.height, false, false)
+        if z == cz or z == cz + C.ROOF_Z_OFFSET then
+            for y = cy + C.INTERIOR_MIN_OFFSET_Y,
+                cy + C.INTERIOR_MAX_OFFSET_Y do
+                for x = cx + C.INTERIOR_MIN_OFFSET_X,
+                    cx + C.INTERIOR_MAX_OFFSET_X do
+                    local ix, iy = x - managed.originX, y - managed.originY
+                    Bitmap.setCell(layer, ix, iy, true, managed.width,
+                        managed.height, "walk")
+                    Bitmap.setCell(layer, ix, iy, true, managed.width,
+                        managed.height, "build")
+                end
+            end
+        end
+        bitmap.layers[z] = layer
+    end
 
-    -- Keep the player-floor alias tied to the complete clear footprint.  The
-    -- room-specific floor remains the separate 6 x 40 interior contract below;
-    -- do not materialize the large clear area as a coordinate list.
+    -- Keep the player-floor planning rectangle tied to the complete clear
+    -- footprint.  The room-specific floor remains the separate 6 x 40
+    -- interior contract below; do not materialize the large clear area as a
+    -- coordinate list.
     local playerFloor = rectangle(
-        clear.minX, clear.maxX, clear.minY, clear.maxY, cz
+        clear.minX, clear.maxX, clear.minY, clear.maxY, cz,
+        clear.minZ, clear.maxZ, true
     )
     local interior = rectangle(
         cx + C.INTERIOR_MIN_OFFSET_X,
@@ -208,51 +299,62 @@ function Layout.make(cx, cy, cz)
         cz + C.ROOF_Z_OFFSET
     )
     local wallCoordinates = wallCoordinatesForAnchor(cx, cy, cz)
+    annotateWallEdges(wallCoordinates, cx, cy)
     local wallCoordinateCount, northCount, westCount, cornerCount =
         validateWallCoordinates(wallCoordinates, cx, cy, cz)
 
     local anchor = {
-        cx = cx,
-        cy = cy,
-        cz = cz,
-        -- The x/y/z spelling is the serialized/server-facing contract.  Keep
-        -- cx/cy/cz for callers that use the planner's original terminology.
         x = cx,
         y = cy,
         z = cz,
     }
 
+    local shellEdges = {}
+    for i = 1, #wallCoordinates do
+        local entry = wallCoordinates[i]
+        local axis = (entry.edgeSide == "north" or entry.edgeSide == "south")
+            and "N" or "W"
+        local edgeKey = entry.edgeKey
+        if not edgeKey or shellEdges[edgeKey] then
+            error("RailroaderRV: duplicate or malformed shell edge "
+                .. tostring(edgeKey))
+        end
+        entry.axis = axis
+        shellEdges[edgeKey] = {
+            edgeKey = edgeKey,
+            rvId = nil,
+            generation = nil,
+            hostX = entry.edgeHostX,
+            hostY = entry.edgeHostY,
+            z = entry.z,
+            axis = axis,
+            side = entry.edgeSide,
+            objectX = entry.x,
+            objectY = entry.y,
+            objectZ = entry.z,
+            role = entry.role,
+            corner = entry.corner == true,
+            replacementAllowed = true,
+        }
+    end
+
     local result = {
-        version = Layout.VERSION,
+        schemaVersion = Layout.SCHEMA_VERSION,
         anchor = anchor,
-        center = point(cx, cy, cz),
         clear = clear,
-        clearBounds = clear,
-        playerFloor = playerFloor,
-        interior = interior,
-        interiorFloor = interior,
-        woodFloor = interior,
+        managed = managed,
+        bitmap = bitmap,
+        shellEdges = shellEdges,
+        room = interior,
         wall = wall,
-        walls = wall,
         roof = roof,
-        features = {
-            lamp = offsetPoint(anchor, C.LAMP_OFFSET),
-            counter = offsetPoint(anchor, C.COUNTER_OFFSET),
-            sink = offsetPoint(anchor, C.SINK_OFFSET),
-            rainCollector = offsetPoint(anchor, C.RAIN_COLLECTOR_OFFSET),
-            generator = offsetPoint(anchor, C.GENERATOR_OFFSET),
-        },
+        wallCoordinates = wallCoordinates,
+        light = offsetPoint(anchor, C.LAMP_OFFSET),
+        counter = offsetPoint(anchor, C.COUNTER_OFFSET),
+        sink = offsetPoint(anchor, C.SINK_OFFSET),
+        barrel = offsetPoint(anchor, C.RAIN_COLLECTOR_OFFSET),
+        generator = offsetPoint(anchor, C.GENERATOR_OFFSET),
     }
-
-    -- Named aliases make the contract easy to consume from server code while
-    -- keeping all coordinates derived from one anchor.
-    result.lamp = result.features.lamp
-    result.counter = result.features.counter
-    result.sink = result.features.sink
-    result.rainCollector = result.features.rainCollector
-    result.generator = result.features.generator
-
-    result.wallCoordinates = wallCoordinates
     result.wallCount = #wallCoordinates
     result.wallObjectCount = #wallCoordinates
     result.wallCoordinateCount = wallCoordinateCount
@@ -268,17 +370,13 @@ function Layout.fromPlayer(player)
     return Layout.make(player:getX(), player:getY(), player:getZ())
 end
 
--- Common aliases retained as a small compatibility surface for the server
--- worker.  All aliases return the same pure plan shape.
-Layout.new = Layout.make
-Layout.forPlayer = Layout.fromPlayer
-Layout.planForPlayer = Layout.fromPlayer
-
 function Layout.eachRect(rect, callback, z)
     if not rect or not callback then return end
     local resolvedZ = z or rect.z
-    for y = rect.minY, rect.maxY do
-        for x = rect.minX, rect.maxX do
+    local maxX = rect.halfOpen and rect.maxX - 1 or rect.maxX
+    local maxY = rect.halfOpen and rect.maxY - 1 or rect.maxY
+    for y = rect.minY, maxY do
+        for x = rect.minX, maxX do
             callback(x, y, resolvedZ)
         end
     end
@@ -287,16 +385,18 @@ end
 function Layout.eachPerimeter(rect, callback, z)
     if not rect or not callback then return end
     local resolvedZ = z or rect.z
-    for x = rect.minX, rect.maxX do
+    local maxX = rect.halfOpen and rect.maxX - 1 or rect.maxX
+    local maxY = rect.halfOpen and rect.maxY - 1 or rect.maxY
+    for x = rect.minX, maxX do
         callback(x, rect.minY, resolvedZ)
-        if rect.maxY ~= rect.minY then
-            callback(x, rect.maxY, resolvedZ)
+        if maxY ~= rect.minY then
+            callback(x, maxY, resolvedZ)
         end
     end
-    for y = rect.minY + 1, rect.maxY - 1 do
+    for y = rect.minY + 1, maxY - 1 do
         callback(rect.minX, y, resolvedZ)
-        if rect.maxX ~= rect.minX then
-            callback(rect.maxX, y, resolvedZ)
+        if maxX ~= rect.minX then
+            callback(maxX, y, resolvedZ)
         end
     end
 end
@@ -305,19 +405,19 @@ end
 -- the required XY footprint and lets the server supply the valid z range.
 function Layout.eachClearXY(plan, callback)
     if not plan or not plan.clear or not callback then return end
-    for y = plan.clear.minY, plan.clear.maxY do
-        for x = plan.clear.minX, plan.clear.maxX do
+    for y = plan.clear.minY, plan.clear.maxY - 1 do
+        for x = plan.clear.minX, plan.clear.maxX - 1 do
             callback(x, y)
         end
     end
 end
 
--- Apply the same XY footprint to an explicitly resolved inclusive z range.
+-- Apply the same XY footprint to an explicitly resolved half-open z range.
 -- The caller supplies minZ/maxZ from the loaded cell because map heights are
 -- not fixed by this mod.  This is the intended all-valid-z server API.
 function Layout.eachClear(plan, minZ, maxZ, callback)
     if not plan or not plan.clear or not callback then return end
-    for z = minZ, maxZ do
+    for z = minZ, maxZ - 1 do
         Layout.eachClearXY(plan, function(x, y)
             callback(x, y, z)
         end)

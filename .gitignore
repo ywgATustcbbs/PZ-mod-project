@@ -2,6 +2,7 @@
 /.github/
 /.rv-lua-parse/
 /.venv/
+.tmp-railroader-2.1/
 /game-decompiled/
 /official lua scripts/
 /reference mods/

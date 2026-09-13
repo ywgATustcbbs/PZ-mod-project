@@ -49,6 +49,14 @@ modinfos.json                         模组 metadata，只读、禁止全量读
 - 禁止通过隐藏命令行窗口或隐藏控制台的方式启动测试服务器；一键测试启动的服务器控制台必须对用户可见。
 - 搜索或新增代码/脚本目录时，维护该目录的 `agent.md`（描述结构与职责）；代码变更同步更新对应说明。只做与任务直接相关的最小修改。
 
+### RailroaderRVTest 开发期存档 schema 强制门
+
+- RailroaderRVTest 开发期 MUST 只支持当前代码声明的 manifest、bitmap、shell ledger、RV mapping 和异步身份 schema。
+- 任何缺失、过期、部分写入、字段别名、旧 bounds、旧 bitmap、旧 mapping、旧 generation 或旧 manifest MUST 立即拒绝当前 RV 操作，并向用户明确提示删除该测试存档并重建。
+- 代码 MUST NOT 自动迁移、转换、推断、兼容旧字段，MUST NOT 用旧数据生成 geometry、删除对象、传送玩家或运行 boundary guard，也 MUST NOT 自动删除/修改旧存档。
+- 新建空容器可以按当前 schema 初始化；这不构成旧数据迁移。失败后的当前 schema 数据也不得降级成旧结构路径。
+- 兼容未来 schema 只有在用户以后明确重新授权后才可设计和实现；在此之前不得添加 fallback、alias 或 new/old conversion 分支。
+
 ## `modinfos.json` 约束
 
 `modinfos.json` 存储约 2000 个模组的 metadata，只读。文件很大，禁止全量读取或加载进上下文；仅允许定向搜索与房车功能相近、相似、或可能解决当前 bug 的模组条目。确认目标后，可以用 `steamcmd` 下载对应 Workshop 模组，读取其源代码作参考；不得修改 `modinfos.json`。

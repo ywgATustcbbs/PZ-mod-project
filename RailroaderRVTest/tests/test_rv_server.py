@@ -90,6 +90,9 @@ def main() -> int:
     )
     constants_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_Constants.lua"
     layout_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_Layout.lua"
+    bitmap_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_Bitmap.lua"
+    boundary_server_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_BoundaryServer.lua"
+    boundary_client_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_BoundaryClient.lua"
     start_bat_path = root / "testserver" / "steamcmd" / "380870" / "StartServer64 - test.bat"
     runner_path = root / "testserver" / "run_test.py"
     testserver_agent_path = root / "testserver" / "agent.md"
@@ -113,6 +116,15 @@ def main() -> int:
         f"Railroader client adapter is missing: {railroader_client_path}",
     )
     checks.true(constants_path.is_file(), f"shared constants Lua is missing: {constants_path}")
+    checks.true(bitmap_path.is_file(), f"shared bitmap Lua is missing: {bitmap_path}")
+    checks.true(
+        boundary_server_path.is_file(),
+        f"boundary server Lua is missing: {boundary_server_path}",
+    )
+    checks.true(
+        boundary_client_path.is_file(),
+        f"boundary client Lua is missing: {boundary_client_path}",
+    )
     checks.true(start_bat_path.is_file(), f"server launcher batch is missing: {start_bat_path}")
 
     if server_path.is_file() and client_path.is_file():
@@ -127,6 +139,134 @@ def main() -> int:
             read_utf8(railroader_client_path)
             if railroader_client_path.is_file()
             else ""
+        )
+        bitmap = read_utf8(bitmap_path) if bitmap_path.is_file() else ""
+        boundary_server = (
+            read_utf8(boundary_server_path) if boundary_server_path.is_file() else ""
+        )
+        boundary_client = (
+            read_utf8(boundary_client_path) if boundary_client_path.is_file() else ""
+        )
+
+        checks.true(
+            all(token in bitmap for token in (
+                "BITMAP_SCHEMA_VERSION", "newBitset", "toHex", "fromHex",
+                "containsScope", "isActive", "isBuildable", "segmentValid",
+                "nearestActive", "edgeForSide", "bitmapVersion ~= C.BITMAP_VERSION",
+                "local tz = t + offsets[l]",
+            )),
+            "shared RV bitmap contract is incomplete",
+        )
+        checks.true(
+            "x + 1" in bitmap and "y + 1" in bitmap
+            and 'edgeKey("W", x + 1' in bitmap
+            and 'edgeKey("N", x, y + 1' in bitmap,
+            "east/south shell ownership does not use adjacent PZ W/N hosts",
+        )
+        checks.true(
+            '"^([NW]):(-?%d+):(-?%d+):(-?%d+)$"' in server
+            and '"^([NW]):(-?%d+):(-?%d+):(-?%d+)$"' in boundary_server
+            and '"^(N|W):' not in server
+            and '"^(N|W):' not in boundary_server,
+            "shell edge validators use unsupported Lua pattern alternation",
+        )
+        checks.true(
+            all(token in boundary_server for token in (
+                "function updatePlayer", "segmentValid", "Bitmap.nearestActive",
+                "teleportTo", "COMMAND_RV_BITMAP",
+                "COMMAND_RV_BOUNDARY_CORRECTION", "transmitRemoveItemFromSquare",
+                "shellEdgeAllowed", "sameBoundary",
+            ))
+            and "not Bitmap.containsScope(boundary.bitmap" in boundary_server,
+            "server boundary authority/scope guard contract is incomplete",
+        )
+        checks.true(
+            "current square has not been loaded" in boundary_server
+            and "if not ok or current == nil then return false end" in boundary_server
+            and "if not sq then return end" in boundary_server,
+            "server boundary state advances across unloaded squares",
+        )
+        checks.true(
+            all(token in boundary_server for token in (
+                "tag.rvId ~= nil", "tag.generation ~= nil",
+                "tag.bitmapVersion ~= nil", "tostring(tag.rvId)",
+                "integer(tag.bitmapVersion)", "edge.bitmapVersion",
+                "shell host ownership is uncertain", "shellEdgeKeysForAction",
+                "actionMatchesObject", "existingNamespace",
+                "overwrite it merely because a build event happened at the same",
+                "tag.edgeKeys = action.edgeKeys", "edge.side ~= \"north\"",
+                "integer(edge.objectX) ~= edgeX", "includesHost",
+                "Bitmap.containsScope(boundary.bitmap, objectX, objectY, objectZ)",
+                "conflicting top-level/nested owner",
+                "actionMatchesObject(action, objectX, objectY, objectZ)",
+            )),
+            "shell/build audit does not require full tag identity or host-aware attribution",
+        )
+        checks.true(
+            "currentManifestValid" in server
+            and "requireCurrentManifest" in server
+            and "SAVE_REBUILD_REQUIRED" in server
+            and "manifest.schemaVersion" in server
+            and "manifest.boundary" in server
+            and "persistedBoundsMatchBoundary" not in server
+            and "manifest.version = 1" not in server
+            and "isTaggedForGeneration(objects[i], generation, rvId," in server
+            and "clearSquare(square, generation, rvId, bitmapVersion)" in server
+            and "walkBounds(cell, oldBounds" in server
+            and "currentBoundsValid" in server
+            and "insideInclusive" not in server,
+            "generation cleanup lacks the current manifest identity gate",
+        )
+        checks.true(
+            "repairRoofVisuals" in server
+            and "pcall(requireCurrentManifest, manifest, false)" in server
+            and "return false, Constants.SAVE_REBUILD_REQUIRED" in server,
+            "roof repair does not require a current manifest before using bounds",
+        )
+        checks.true(
+            "local function rectInside" in server
+            and "is outside the bitmap scope" in server
+            and "Bitmap.containsScope(planned.bitmap, point.x, point.y, point.z)" in server,
+            "layout feature/structure coordinates are not clipped to the bitmap scope",
+        )
+        checks.true(
+            "function Boundary.beginTransition(player, rvId, generation, token, kind," in boundary_server
+            and "local version = integer(bitmapVersion)" in boundary_server
+            and "bitmapVersion = transitionBitmapVersion" in server
+            and "transitionBitmapVersion)" in server
+            and "record.bitmapVersion)" in railroader_server,
+            "transition state does not carry the complete RV bitmap identity",
+        )
+        checks.true(
+            "RV boundary entry service is unavailable" in railroader_server
+            and "RV boundary exit service is unavailable" in railroader_server,
+            "Railroader entry/exit can bypass the server boundary service",
+        )
+        checks.true(
+            "currentBoundsValid" in server
+            and "manifest.boundary.managed" in server
+            and "Bitmap.containsScope(bitmap, entry.x, entry.y, entry.z)" in server,
+            "persisted RV bounds are not checked against the current bitmap scope",
+        )
+        checks.true(
+            "local function roomOwnershipGuardKey" in server
+            and "guard.key = roomOwnershipGuardKey" in server
+            and "roomOwnershipGuards[guard.key] = guard" in server,
+            "server room-ownership guard is not keyed by the full RV boundary identity",
+        )
+        checks.true(
+            all(token in boundary_client for token in (
+                "OnPlayerUpdate", "OnServerCommand", "segmentValid",
+                "setBlockMovement", "COMMAND_RV_BITMAP_CLEAR",
+            ))
+            and "prediction" in boundary_client.lower(),
+            "client boundary prediction contract is incomplete",
+        )
+        checks.true(
+            "applyPosition(player, { x = x, y = y, z = z })" in boundary_client
+            and '"setNextX"' in boundary_client
+            and '"setLastZ"' in boundary_client,
+            "client correction does not reset movement history fields",
         )
 
         # Railroader adapter executable contracts.  These source-level tests
@@ -263,6 +403,9 @@ def main() -> int:
                 r'relocatePayload\.railroaderTransition = true[\s\S]*?end',
                 queue_transition,
             ) is not None
+            and "relocatePayload.rvId = tostring(transitionRvId)" in queue_transition
+            and "generation = transitionGeneration" in queue_transition
+            and "bitmapVersion = transitionBitmapVersion" in queue_transition
             and "COMMAND_RELOCATE, relocatePayload" in queue_transition,
             "Railroader staging marker is not server-only or not sent via Relocate payload",
         )
@@ -280,6 +423,8 @@ def main() -> int:
         checks.true(
             relocate_handler is not None
             and "args.railroaderTransition == true" in relocate_handler
+            and "local rvId = args.rvId" in relocate_handler
+            and "rvId = tostring(rvId)" in relocate_handler
             and "prepareGenerationStaging" in relocate_handler
             and "if not preparedOk or prepared ~= true then return end" in relocate_handler,
             "client Relocate handler does not recognize the strict Railroader staging marker",
@@ -322,14 +467,15 @@ def main() -> int:
         checks.true(
             final_handler is not None
             and "validRailroaderFinalHint(args)" in final_handler
-            and "hasGenerationTransition" in final_handler
-            and "if (marked or pending)" in final_handler
+            and "if marked and railroaderMenu" in final_handler
+            and "hasGenerationTransition" not in final_handler
+            and "if (marked or pending)" not in final_handler
             and "prepareGenerationRelocation" in final_handler,
-            "FinalRelocate handler does not gate Ride preparation on marker or same-token staging",
+            "FinalRelocate handler does not gate Ride preparation on the current server marker",
         )
         if final_handler is not None:
             prepare_pos = final_handler.find("prepareGenerationRelocation")
-            guard_pos = final_handler.find("if (marked or pending)")
+            guard_pos = final_handler.find("if marked and railroaderMenu")
             checks.true(
                 guard_pos >= 0 and prepare_pos > guard_pos,
                 "ordinary FinalRelocate can call the Railroader transition without its gate",
@@ -364,18 +510,302 @@ def main() -> int:
             "recordAtPlayerCoordinate" in railroader_server
             and "inRegion(position, record.region)" in railroader_server
             and "RV_REGION_SIZE" in railroader_server
-            and "damaged-map-fallback" in railroader_server
             and "validMappingRecord" in railroader_server
             and "copyPose(record.locoPosition)" in railroader_server
-            and "copyPose(record.enterPosition)" in railroader_server
             and "inactive-mapped" in railroader_server
             and "persistedBesidePosition" in railroader_server
-            and "inactive-mapped-fallback" in railroader_server
+            and "type(record.boundary) ~= \"table\"" in railroader_server
+            and "record.bitmapVersion" in railroader_server
+            and "roofRepairRoomKey" in railroader_server
+            and "tostring(record.bitmapVersion)" in railroader_server
             and '"outside-rv"' in railroader_server
             and "trainPose(train)" in railroader_server
-            and "usableFallbackCoordinate" in railroader_server
+            and "usableCoordinate" in railroader_server
             and 'isValidSquare' in railroader_server,
-            "exit reverse lookup does not use the 100x100 passenger-coordinate map/fallback",
+            "exit reverse lookup does not use the current 100x100 mapping contract",
+        )
+        existing_entry = section(
+            railroader_server,
+            r"local function enterExisting",
+            r"local function enterPlayer",
+        )
+        checks.true(
+            existing_entry is not None,
+            "existing RV entry path is missing",
+        )
+        if existing_entry is not None:
+            monitor_pos = existing_entry.find("armRoomOwnershipMonitor")
+            transition_pos = existing_entry.find("local armed = Boundary.beginTransition")
+            move_pos = existing_entry.find("movePlayer")
+            checks.true(
+                monitor_pos >= 0
+                and transition_pos > monitor_pos
+                and move_pos > monitor_pos,
+                "existing RV entry moves before arming its current room monitor",
+            )
+
+        presence_monitor = section(
+            railroader_server,
+            r"local function repairInsidePlayers",
+            r"function Adapter\.OnTick",
+        )
+        checks.true(
+            presence_monitor is not None,
+            "inside-player presence/reconnect monitor path is missing",
+        )
+        if presence_monitor is not None:
+            checks.true(
+                "roomMonitorPlayers[presenceKey] == player" in presence_monitor
+                and "roomMonitorPlayers[presenceKey] = player" in presence_monitor
+                and "for presenceKey in pairs(roomMonitorPlayers)" in presence_monitor
+                and "armRoomOwnershipMonitor(player, record" in presence_monitor,
+                "presence/reconnect path does not re-arm the per-client current monitor",
+            )
+
+        shell_wall = section(
+            boundary_server,
+            r"function Boundary\.isCurrentShellWall",
+            r"local function appendShellEdgeKey",
+        )
+        checks.true(
+            shell_wall is not None,
+            "boundary server has no strict current RV shell-wall detector",
+        )
+        if shell_wall is not None:
+            checks.true(
+                all(
+                    token in shell_wall
+                    for token in (
+                        "decodeBoundary",
+                        'instanceof", object, "IsoThumpable"',
+                        'getObjectIndex")',
+                        "RailroaderRVTest",
+                        "nested.edgeKey",
+                        "shellEdgeAllowed(boundary, nested",
+                        "Bitmap.containsScope(bitmap",
+                    )
+                )
+                and "wall-north" in shell_wall
+                and "wall-west" in shell_wall
+                and "corner-nw" in shell_wall
+                and "corner-se" in shell_wall,
+                "shell-wall detector does not require the current type/tag/ledger identity",
+            )
+
+        wall_removal = section(
+            railroader_server,
+            r"local function queueWallRoofRepairForObject",
+            r"insidePlayerForRecord = function",
+        )
+        checks.true(
+            wall_removal is not None,
+            "Railroader server has no object-removal roof-repair hook",
+        )
+        if wall_removal is not None:
+            checks.true(
+                all(
+                    token in wall_removal
+                    for token in (
+                        "processIsServer()",
+                        "Boundary.isCurrentShellWall",
+                        "validRecord(record)",
+                        "wall removal matched",
+                        "wall roof repair queued",
+                    )
+                ),
+                "wall-removal matcher does not use server identity and room-key debounce",
+            )
+        scheduled_roof = section(
+            railroader_server,
+            r"scheduleRoofRepair = function",
+            r"local function queueWallRoofRepairForObject",
+        )
+        checks.true(
+            scheduled_roof is not None,
+            "delayed roof repair scheduler is missing",
+        )
+        if scheduled_roof is not None:
+            checks.true(
+                all(
+                    token in scheduled_roof
+                    for token in (
+                        "validRecord(record)",
+                        "insidePlayerForRecord(map, record)",
+                        "pendingWallRoofRepairs[roomKey]",
+                        "dueTicks",
+                        "nextAttempt",
+                        "ROOF_REPAIR_DELAY_TICKS",
+                        "ROOF_REPAIR_ATTEMPTS",
+                    )
+                ),
+                "roof repair scheduler does not enforce current identity/inside player or bounded retries",
+            )
+            checks.true(
+                "ROOF_REPAIR_DELAY_TICKS = 5" in railroader_server
+                and "ROOF_REPAIR_ATTEMPTS = 3" in railroader_server
+                and "pending.dueTicks[attempt] = now"
+                in railroader_server
+                and 'ROOF_REPAIR_DELAY_REASON = "wall-removal-delayed"'
+                in railroader_server,
+                "wall-removal repair schedule does not define the bounded 5/10/15-tick contract",
+            )
+        checks.true(
+            "function Adapter.onObjectAboutToBeRemoved" in railroader_server
+            and "queueWallRoofRepairForObject(object, \"object-about-to-be-removed\")"
+            in railroader_server
+            and "function Adapter.onDestroyIsoThumpable" in railroader_server
+            and "queueWallRoofRepairForObject(object, \"destroy-iso-thumpable\")"
+            in railroader_server,
+            "wall-removal events do not share the strict de-duplicated matcher",
+        )
+        tick_repair = section(
+            railroader_server,
+            r"function Adapter\.OnTick",
+            r"-- PZ loads files in this directory alphabetically",
+        )
+        checks.true(
+            tick_repair is not None
+            and "processPendingWallRoofRepairs()" in tick_repair
+            and "if Adapter._ticks % 30 ~= 0 then return end" in tick_repair
+            and "repairInsidePlayers(map)" in tick_repair,
+            "delayed roof repair is not deferred into the server 30-tick presence path",
+        )
+        runtime_clear = section(
+            railroader_server,
+            r"local function clearRoofRepairRuntimeState",
+            r"local function processPendingWallRoofRepairs",
+        )
+        checks.true(
+            runtime_clear is not None
+            and "roomTransitionStates = {}" in runtime_clear
+            and "pendingWallRoofRepairs[roomKey] = nil" in runtime_clear
+            and "clearRoofRepairRuntimeState()" in tick_repair,
+            "schema failure does not clear transient roof-repair state",
+        )
+        room_transition = section(
+            railroader_server,
+            r"local function authoritativeRoomState",
+            r"local function repairInsidePlayers",
+        )
+        checks.true(
+            room_transition is not None,
+            "authoritative server room-state sampler is missing",
+        )
+        if room_transition is not None:
+            checks.true(
+                all(
+                    token in room_transition
+                    for token in (
+                        'getCurrentSquare")',
+                        'getRoom")',
+                        'getRoomDef")',
+                        'isInARoom")',
+                        "inRoom",
+                    )
+                ),
+                "room transition sampler does not use authoritative square room state",
+            )
+        transition_monitor = section(
+            railroader_server,
+            r"observeRoomTransitions = function",
+            r"local function processPendingWallRoofRepairs",
+        )
+        checks.true(
+            transition_monitor is not None
+            and "previous.inRoom == true" in transition_monitor
+            and 'scheduleRoofRepair(map, observed.record, "room-transition")'
+            in transition_monitor
+            and "observed.roomStateAvailable" in transition_monitor
+            and "roomTransitionStates[roomKey] = nil" in transition_monitor
+            and "reason=presence-lost" in transition_monitor,
+            "room transition monitor does not schedule once per current identity or clear stale presence",
+        )
+        delayed_attempts = section(
+            railroader_server,
+            r"local function processPendingWallRoofRepairs",
+            r"function Adapter\.OnTick",
+        )
+        checks.true(
+            delayed_attempts is not None
+            and "insidePlayerForRecord(map, record, pending)" in delayed_attempts
+            and "repairRoofForPlayer(player," in delayed_attempts
+            and "ROOF_REPAIR_DELAY_REASON" in delayed_attempts
+            and "attempt=" in delayed_attempts
+            and "identity-mismatch" in delayed_attempts
+            and "no-authoritative-inside-player" in delayed_attempts,
+            "delayed roof attempts do not revalidate current identity and authoritative inside player",
+        )
+        roof_relocation = section(
+            server,
+            r"local function currentRoofRepairContext",
+            r"local function validateRequest",
+        )
+        checks.true(
+            roof_relocation is not None
+            and "Bitmap.validate(bitmap)" in roof_relocation
+            and "Bitmap.decode(manifest.boundary.bitmap)" in roof_relocation
+            and "originX + math.floor(width / 2)" in roof_relocation
+            and "originY + math.floor(height / 2)" in roof_relocation
+            and "local ROOF_REPAIR_TEMP_Z = -15" in server
+            and "z = ROOF_REPAIR_TEMP_Z" in roof_relocation
+            and "roofRepairTemporarySquareSafe" in roof_relocation
+            and "roof repair temporary destination is still room geometry"
+            in roof_relocation,
+            "roof relocation does not derive the current bitmap center/fixed temp layer or leave room geometry",
+        )
+        roof_relocation_service = section(
+            server,
+            r"function RV.Server.beginRoofRepairRelocation",
+            r"function RV.Server.consumeRoofRepairRelocationArrival",
+        )
+        checks.true(
+            roof_relocation_service is not None
+            and "Boundary.beginTransition" in roof_relocation_service
+            and "COMMAND_RELOCATE, relocatePayload" in roof_relocation_service
+            and "roofRepairTransition = true" in roof_relocation_service
+            and 'relocatePayload.haloText = "正在刷新房间"' in roof_relocation_service
+            and "teleportTo" in roof_relocation_service
+            and "request.returnPosition" in roof_relocation_service,
+            "roof relocation service does not keep authority/identity/visual marker on the existing bridge",
+        )
+        roof_server_tick = section(
+            server,
+            r"local function processPendingRoofRepairRelocation",
+            r"function RV.Server.OnTick",
+        )
+        checks.true(
+            roof_server_tick is not None
+            and "roofRepairTargetReady" in roof_server_tick
+            and "RelocateAck" not in roof_server_tick
+            and "roofRepairRelocationArrival" in roof_server_tick,
+            "roof relocation server tick does not wait for authoritative arrival/readiness",
+        )
+        checks.true(
+            all(token in client for token in (
+                "roofRepairTransition", "roofRepairPhase",
+                'args.haloText ~= "正在刷新房间"',
+                "setHaloNote", "RelocateAck",
+            )),
+            "client roof relocation handler lacks display-only halo and token ACK contract",
+        )
+        checks.true(
+            "server.completeRoofRepairRelocation" in railroader_server
+            and "roofRepairSquaresLoaded" in railroader_server
+            and "pending.dueTicks[attempt] = now" in railroader_server
+            and "attempt * ROOF_REPAIR_DELAY_TICKS" in railroader_server
+            and "returnPosition = sourcePosition" in railroader_server
+            and "relocation.relocationStarted == true" in railroader_server,
+            "Railroader adapter does not implement delayed loaded-square repair and captured-position return",
+        )
+        checks.true(
+            "Events.OnObjectAboutToBeRemoved.Add(Adapter.onObjectAboutToBeRemoved)"
+            in railroader_server,
+            "server shell-wall removal hook is not registered on the authoritative event",
+        )
+        checks.true(
+            "Events.OnDestroyIsoThumpable.Add(Adapter.onDestroyIsoThumpable)"
+            in railroader_server,
+            "server thumpable-destroy event supplement is not registered",
         )
         exit_player = section(
             railroader_server,
@@ -388,11 +818,11 @@ def main() -> int:
             and re.search(
                 r'if lookupState == "outside-rv" then[\s\S]*?'
                 r'return false, "player is outside the RV area"[\s\S]*?'
-                r'end\s+if damaged or not record then',
+                r'end\s+if not record then',
                 exit_player,
             ) is not None
             and re.search(
-                r'if damaged or not record then[\s\S]*?damagedMapFallback',
+                r'if not record then[\s\S]*?C\.SAVE_REBUILD_REQUIRED',
                 exit_player,
             ) is not None
             and re.search(
@@ -420,6 +850,34 @@ def main() -> int:
         if constants_path.is_file():
             constants = read_utf8(constants_path)
             checks.true(
+                all(token in constants for token in (
+                    "MANIFEST_SCHEMA_VERSION", "MAP_SCHEMA_VERSION",
+                    "RV_RECORD_SCHEMA_VERSION", "RV_RELATION_SCHEMA_VERSION",
+                    "BOUNDARY_SCHEMA_VERSION", "LAYOUT_SCHEMA_VERSION",
+                    "BITMAP_SCHEMA_VERSION", "BITMAP_VERSION",
+                    "SAVE_REBUILD_REQUIRED",
+                ))
+                and "delete this test save and rebuild it" in constants,
+                "current schema constants do not expose the save-rebuild failure contract",
+            )
+            checks.true(
+                "manifest.version ~= nil" in server
+                and "map.version ~= nil" in railroader_server
+                and "record.version ~= nil" in railroader_server
+                and "relation.locomotive ~= nil" in railroader_server
+                and "encoded.version ~= nil" in bitmap
+                and "boundary.version ~= nil" in boundary_server,
+                "old persisted field shapes are not rejected by current-only gates",
+            )
+            checks.true(
+                "requireCurrentManifest(manifest, true)" in server
+                and "error(C.SAVE_REBUILD_REQUIRED)" in railroader_server
+                and "Bitmap.decode(encoded)" in boundary_server
+                and "bitmapVersion ~= C.BITMAP_VERSION" in bitmap
+                and "integer(bitmapVersion) ~= C.BITMAP_VERSION" in boundary_server,
+                "schema mismatch does not fail closed with the stable rebuild message",
+            )
+            checks.true(
                 re.search(r"C\.TELEPORT_X\s*=\s*20050", constants) is not None
                 and re.search(r"C\.TELEPORT_Y\s*=\s*2050", constants) is not None
                 and re.search(r"C\.TELEPORT_Z\s*=\s*0", constants) is not None,
@@ -427,10 +885,18 @@ def main() -> int:
             )
             checks.true(
                 re.search(r"C\.CLEAR_MIN_OFFSET_X\s*=\s*-50", constants) is not None
-                and re.search(r"C\.CLEAR_MAX_OFFSET_X\s*=\s*50", constants) is not None
+                and re.search(
+                    r"C\.CLEAR_MAX_OFFSET_X\s*=\s*C\.CLEAR_MIN_OFFSET_X\s*\+\s*C\.RV_MANAGED_WIDTH",
+                    constants,
+                ) is not None
                 and re.search(r"C\.CLEAR_MIN_OFFSET_Y\s*=\s*-50", constants) is not None
-                and re.search(r"C\.CLEAR_MAX_OFFSET_Y\s*=\s*50", constants) is not None,
-                "shared constants do not define the centered 101x101 cleanup footprint",
+                and re.search(
+                    r"C\.CLEAR_MAX_OFFSET_Y\s*=\s*C\.CLEAR_MIN_OFFSET_Y\s*\+\s*C\.RV_MANAGED_HEIGHT",
+                    constants,
+                ) is not None
+                and re.search(r"C\.RV_MANAGED_WIDTH\s*=\s*100", constants) is not None
+                and re.search(r"C\.RV_MANAGED_HEIGHT\s*=\s*100", constants) is not None,
+                "shared constants do not define the half-open 100x100 managed footprint",
             )
             checks.true(
                 re.search(r'C\.COMMAND_FINAL_RELOCATE\s*=\s*["\']FinalRelocate["\']', constants)
@@ -613,7 +1079,9 @@ def main() -> int:
             )
             for field_name in (
                 "owner",
+                "rvId",
                 "generation",
+                "bitmapVersion",
                 "role",
                 "previousSprite",
                 "createdByGeneration",
@@ -645,6 +1113,14 @@ def main() -> int:
             checks.true(
                 "generated object tag verification failed" in tagger,
                 "tagObject no longer verifies its local tag before the creator sends it",
+            )
+            checks.true(
+                "generated object boundary identity is incomplete" in tagger
+                and "data.rvId" in tagger
+                and "data.bitmapVersion" in tagger
+                and "data.RailroaderRVTest.rvId" in tagger
+                and "data.RailroaderRVTest.bitmapVersion" in tagger,
+                "generated objects do not carry the full rvId/generation/bitmapVersion identity",
             )
 
         validate = section(
@@ -734,6 +1210,13 @@ def main() -> int:
                 and "stagingDestination =" in queue,
                 "fixed cleanup plan is not captured before relocation",
             )
+            checks.true(
+                "requireCurrentManifest" in queue
+                and "local oldBounds = manifest.generation ~= nil and manifest.bounds or nil" in queue
+                and "persistedBoundsMatchBoundary" not in queue
+                and "prior bounds are untrusted" not in queue,
+                "generation queue does not gate current manifest data before using bounds",
+            )
             validation_pos = queue.find(
                 "validateTargetCoordinates(plannedBounds, destination)"
             )
@@ -809,13 +1292,13 @@ def main() -> int:
             checks.true(
                 "relocation target" in target_coordinates
                 and "clearMinX ~= targetX - 50" in target_coordinates
-                and "clearMaxX ~= targetX + 50" in target_coordinates
+                and "clearMaxX ~= targetX - 50 + 100" in target_coordinates
                 and "clearMinY ~= targetY - 50" in target_coordinates
-                and "clearMaxY ~= targetY + 50" in target_coordinates
-                and "bounds.clearMaxX - bounds.clearMinX + 1 ~= 101" in target_coordinates
-                and "bounds.clearMaxY - bounds.clearMinY + 1 ~= 101" in target_coordinates
-                and "for y = bounds.clearMinY, bounds.clearMaxY" in target_coordinates
-                and "for x = bounds.clearMinX, bounds.clearMaxX" in target_coordinates
+                and "clearMaxY ~= targetY - 50 + 100" in target_coordinates
+                and "bounds.clearMaxX - bounds.clearMinX ~= 100" in target_coordinates
+                and "bounds.clearMaxY - bounds.clearMinY ~= 100" in target_coordinates
+                and "for y = bounds.clearMinY, bounds.clearMaxY - 1" in target_coordinates
+                and "for x = bounds.clearMinX, bounds.clearMaxX - 1" in target_coordinates
                 and "for y = bounds.roofMinY, bounds.roofMaxY" in target_coordinates
                 and 'validWorldCoordinate(x, y, bounds.roofZ, "roof")' in target_coordinates
                 and "bounds.roomMaxX - bounds.roomMinX + 1 ~= 6" in target_coordinates
@@ -837,12 +1320,12 @@ def main() -> int:
         if preflight is not None:
             checks.true(
                 "validateTargetCoordinates(bounds" in preflight
-                and "All 10201 base squares" in preflight,
+                and "All 10000 base squares" in preflight,
                 "loaded-area preflight does not reuse the target contract before loading",
             )
             checks.true(
-                "All 10201 base squares" in preflight,
-                "loaded-area preflight does not document all 10201 base squares",
+                "All 10000 base squares" in preflight,
+                "loaded-area preflight does not document all 10000 base squares",
             )
             checks.true(
                 "allowIncomplete" in preflight
@@ -897,10 +1380,10 @@ def main() -> int:
             )
             checks.true(
                 'setGenerationPhase(manifest, generation, "WOOD_FLOOR")' in build_generation
-                and 'createFloor(square, woodSprite, generation, "wood_floor")' in build_generation
+                and 'createFloor(square, woodSprite, generation, "wood_floor", tagContext)' in build_generation
                 and "Interior floor: exactly 6x40" in build_generation
-                and "walls_interior_house_03_22" in build_generation
-                and "walls_interior_house_03_23" in build_generation
+                and "nwWallSprite" in build_generation
+                and "seWallSprite" in build_generation
                 and "#wallCoordinates ~= 92" in build_generation
                 and "northEdges ~= 12" in build_generation
                 and "westEdges ~= 80" in build_generation
@@ -956,7 +1439,8 @@ def main() -> int:
                 "local rollbackOk, rollbackError = pcall(function()", rollback_start
             )
             remove_call = generation.find(
-                "removeGeneration(cell, bounds, generation)", rollback_call
+                "removeGeneration(cell, bounds, generation, manifest.rvId",
+                rollback_call
             )
             checks.true(
                 rollback_start >= 0
@@ -974,7 +1458,7 @@ def main() -> int:
             checks.true(
                 'setGenerationPhase(manifest, generation, "FINAL_RELOCATE")' in generation
                 and "finalRelocationOk" in generation
-                and "removeGeneration(cell, bounds, generation)" in generation,
+                and "removeGeneration(cell, bounds, generation, manifest.rvId" in generation,
                 "final relocation failure does not enter the generation rollback path",
             )
 
@@ -1254,6 +1738,49 @@ def main() -> int:
                 "broadcast room guard does not carry server-authoritative old/new bounds",
             )
 
+        targeted_room_guard = section(
+            server,
+            r"local function armTargetedClientRoomOwnershipGuard",
+            r"local function ensureRoofSquare",
+        )
+        checks.true(
+            targeted_room_guard is not None,
+            "targeted existing-entry room monitor helper is missing",
+        )
+        if targeted_room_guard is not None:
+            checks.true(
+                'callGlobal("sendServerCommand", player, COMMAND_MODULE,'
+                in targeted_room_guard
+                and "hasOld = false" in targeted_room_guard
+                and 'copyRoomRefreshBounds(payload, "new", newBounds)'
+                in targeted_room_guard,
+                "targeted room monitor does not send only the current server bounds",
+            )
+
+        current_room_monitor = section(
+            server,
+            r"function RV\.Server\.armCurrentRoomOwnershipMonitor",
+            r"local function ackPayloadToken",
+        )
+        checks.true(
+            current_room_monitor is not None,
+            "current-manifest room monitor API is missing",
+        )
+        if current_room_monitor is not None:
+            checks.true(
+                "pcall(manifestTable)" in current_room_monitor
+                and "pcall(requireCurrentManifest, manifest, false)"
+                in current_room_monitor
+                and "manifest.bounds" in current_room_monitor
+                and "manifest.rvId" in current_room_monitor
+                and "record.rvId" in current_room_monitor
+                and "record.generation" in current_room_monitor
+                and "record.bitmapVersion" in current_room_monitor
+                and "return false, Constants.SAVE_REBUILD_REQUIRED"
+                in current_room_monitor,
+                "existing-entry monitor does not fail closed on current identity/schema",
+            )
+
         server_guard_tick = section(
             server,
             r"local function processServerRoomOwnershipGuards",
@@ -1348,9 +1875,35 @@ def main() -> int:
         if client_room_begin is not None:
             checks.true(
                 "localPlayerByOnlineId" not in client_room_begin
-                and "roomOwnershipGuards[generation]" in client_room_begin,
-                "client room guard is requester-only or cannot retain overlapping generations",
+                and "roomOwnershipGuardKey" in client_room_begin
+                and "roomOwnershipGuards[key]" in client_room_begin,
+                "client room guard is requester-only or not keyed by full RV identity",
             )
+            checks.true(
+                "local rvId = args.rvId" in client_room_begin
+                and "local bitmapVersion = finiteInteger(args.bitmapVersion)" in client_room_begin
+                and "rvId = tostring(rvId)" in client_room_begin
+                and "bitmapVersion = bitmapVersion" in client_room_begin,
+                "client room guard does not retain the full RV boundary identity",
+            )
+            checks.true(
+                "for existingKey, existingGuard in pairs(roomOwnershipGuards)" in client_room_begin
+                and "roomOwnershipGuards[existingKey] = nil" in client_room_begin,
+                "client room monitor retains stale geometry after a same-RV generation swap",
+            )
+
+        final_client_room = section(
+            client,
+            r"local function tryApplyFinalRelocation",
+            r"local function applyFinalRelocation",
+        )
+        checks.true(
+            final_client_room is not None
+            and "local rvId = args.rvId" in final_client_room
+            and "local bitmapVersion = finiteInteger(args.bitmapVersion)" in final_client_room
+            and "guard.bitmapVersion ~= bitmapVersion" in final_client_room,
+            "final relocation does not reject stale RV generation/bitmap identity",
+        )
 
         client_room_tick = section(
             client,
@@ -1362,12 +1915,14 @@ def main() -> int:
             checks.true(
                 "ROOM_OWNERSHIP_MIN_TICKS" in client_room_tick
                 and "ROOM_OWNERSHIP_STABLE_TICKS" in client_room_tick
-                and "ROOM_OWNERSHIP_MAX_TICKS" in client_room_tick,
-                "client room guard lacks bounded and stable cross-tick lifecycle",
+                and "guard.monitorReady" in client_room_tick,
+                "client room monitor lacks stable warm-up state",
             )
             checks.true(
-                "roomOwnershipGuards[finished[i]] = nil" in client_room_tick,
-                "client room guard is not cleaned after completion/timeout",
+                "ROOM_OWNERSHIP_MAX_TICKS" not in client
+                and "roomOwnershipGuards[finished[i]] = nil" not in client_room_tick
+                and "client room ownership monitor active generation=" in client_room_tick,
+                "client room monitor still retires after the initial generation tail",
             )
 
         checks.true(
@@ -1533,7 +2088,7 @@ def main() -> int:
             )
             checks.true(
                 "createNewGridSquare" in roof_helper,
-                "roof helper has no documented compatible square-creation fallback",
+                "roof helper has no documented alternate square-creation API path",
             )
             checks.true(
                 roof_helper.count("getSquare(cell, x, y, z)") >= 2,
@@ -1594,7 +2149,7 @@ def main() -> int:
         checks.true(light_validate is not None, "validatePlayerLightSprite function is missing")
         if light_validate is not None:
             checks.true(
-                'expectedSprite = Constants.LIGHT_SPRITE or "BuildingCraft_Light_17"' in light_validate
+                'expectedSprite = Constants.SPRITES.wallLamp.sprite' in light_validate
                 and "player light must be BuildCraft custom-house switch 1" in light_validate,
                 "player light validation does not reject a non-BuildingCraft custom switch",
             )
@@ -2111,12 +2666,12 @@ def main() -> int:
             "README does not identify the required BuildCraft custom-house switch dependency",
         )
         checks.true(
-            "x=20000..20100" in readme
-            and "y=2000..2100" in readme
+            "x=[20000,20100)" in readme
+            and "y=[2000,2100)" in readme
             and "staging" in readme
             and "再等待并复核" in readme
             and "加载等待期间不做任何世界修改" in readme
-            and "10201 个 base 方格" in readme,
+            and "10000 个 base 方格" in readme,
             "README does not document the fixed footprint and post-teleport wait",
         )
         checks.true(
@@ -2143,6 +2698,12 @@ def main() -> int:
             "lighting_indoor_01_16" not in readme
             and "Facing=E" not in readme,
             "README still documents the retired vanilla lamp or Facing=E assumption",
+        )
+        checks.true(
+            "当前只实现上述同 scope 临时外移阶段" in readme
+            and "chunk unload/reload" in readme
+            and "第一阶段运行时仍不能刷新屋顶" in readme,
+            "README does not distinguish the first roof relocation phase from deferred chunk-cycle work",
         )
 
     checks.true(runner_path.is_file(), f"one-click test runner is missing: {runner_path}")

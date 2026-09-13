@@ -26,6 +26,8 @@ if processIsClient() and not processIsServer() then
 end
 
 require("RailroaderRV/RV_Constants")
+local boundaryLoaded, Boundary = pcall(require, "RailroaderRV/RV_BoundaryServer")
+if not boundaryLoaded or type(Boundary) ~= "table" then Boundary = nil end
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.RailroaderServer = RailroaderRV.RailroaderServer or {}
@@ -35,6 +37,21 @@ local C = RailroaderRV.Constants
 local unpackFn = (table and table.unpack) or unpack
 local roofRepairRooms = {}
 local roofRepairPlayers = {}
+local roomMonitorPlayers = {}
+local pendingWallRoofRepairs = {}
+local roomTransitionStates = {}
+-- The dedicated server tick is 10 Hz in the runtime evidence.  Keep the
+-- requested 0.5/1.0/1.5 second retries as 5/10/15 ticks after the temporary
+-- relocation has arrived; this is deliberately not the old 30/60/90 contract.
+local ROOF_REPAIR_DELAY_TICKS = 5
+local ROOF_REPAIR_ATTEMPTS = 3
+local ROOF_REPAIR_DELAY_REASON = "wall-removal-delayed"
+local transitionSequence = 0
+local validateMapSchema
+local recordForLoco
+local insidePlayerForRecord
+local scheduleRoofRepair
+local observeRoomTransitions
 
 local function number(value)
     local valueType = type(value)
@@ -124,6 +141,13 @@ local function copyPosition(position)
     local x, y, z = number(position.x), number(position.y), number(position.z)
     if x == nil or y == nil or z == nil then return nil end
     return { x = x, y = y, z = z }
+end
+
+local function newTransitionToken(kind, record)
+    transitionSequence = transitionSequence + 1
+    return tostring(kind) .. ":" .. tostring(record and record.locoId or "rv")
+        .. ":" .. tostring(record and record.generation or 0) .. ":"
+        .. tostring(os.time()) .. ":" .. tostring(transitionSequence)
 end
 
 -- Persisted locomotive poses may include a forward vector.  Keep that vector
@@ -336,7 +360,7 @@ local function besidePosition(train)
         z = position.z }
 end
 
-local function usableFallbackCoordinate(position)
+local function usableCoordinate(position)
     local x, y, z = number(position and position.x), number(position and position.y),
         number(position and position.z)
     if x == nil or y == nil or z == nil or z < -32 or z > 31 then
@@ -350,24 +374,18 @@ local function usableFallbackCoordinate(position)
 end
 
 -- An unloaded locomotive cannot receive a fabricated seat assignment.  Use
--- only the server-persisted locomotive pose, then choose a conservative side
--- neighbour and validate its legal world square.  Older records may lack a
--- direction, so the candidate list includes both sides and one-tile fallbacks.
+-- only the complete current-schema locomotive pose, then choose a conservative
+-- side neighbour and validate its legal world square.
 local function persistedBesidePosition(record)
     if type(record) ~= "table" then return nil end
     local base = copyPose(record.locoPosition)
-    local historical = copyPose(record.enterPosition)
-    if not base then base = historical end
     if not base then return nil end
 
     local dx, dy = number(base.dirX), number(base.dirY)
-    if (dx == nil or dy == nil) and historical then
-        dx, dy = number(historical.dirX), number(historical.dirY)
-    end
-    dx, dy = dx or 0, dy or -1
+    if dx == nil or dy == nil then return nil end
     local length = math.sqrt(dx * dx + dy * dy)
-    if length <= 0.0001 then dx, dy = 0, -1
-    else dx, dy = dx / length, dy / length end
+    if length <= 0.0001 then return nil end
+    dx, dy = dx / length, dy / length
 
     local candidates = {
         { x = base.x - dy * 2.0, y = base.y + dx * 2.0, z = base.z },
@@ -378,7 +396,7 @@ local function persistedBesidePosition(record)
         { x = base.x, y = base.y - 1.0, z = base.z },
     }
     for i = 1, #candidates do
-        if usableFallbackCoordinate(candidates[i]) then
+        if usableCoordinate(candidates[i]) then
             return candidates[i]
         end
     end
@@ -626,16 +644,58 @@ local function putDriver(train, player, onlineId)
 end
 
 local function mapData()
-    if not ModData or type(ModData.getOrCreate) ~= "function" then
-        error("ModData.getOrCreate is unavailable")
+    if not ModData then
+        error(C.SAVE_REBUILD_REQUIRED)
     end
-    local ok, map = pcall(ModData.getOrCreate, C.RV_MAP_KEY)
-    if not ok or type(map) ~= "table" then
+    local map
+    if type(ModData.get) == "function" then
+        local ok, value = pcall(ModData.get, C.RV_MAP_KEY)
+        if not ok then error(C.SAVE_REBUILD_REQUIRED) end
+        map = value
+    elseif type(ModData.getOrCreate) == "function" then
+        local ok, value = pcall(ModData.getOrCreate, C.RV_MAP_KEY)
+        if not ok then error("Railroader RV map ModData is unavailable") end
+        map = value
+    else
         error("Railroader RV map ModData is unavailable")
     end
-    map.version = 1
-    if type(map.locomotives) ~= "table" then map.locomotives = {} end
-    if type(map.players) ~= "table" then map.players = {} end
+    if map == nil then
+        if type(ModData.getOrCreate) ~= "function" then
+            error("Railroader RV map ModData is unavailable")
+        end
+        local ok, value = pcall(ModData.getOrCreate, C.RV_MAP_KEY)
+        if not ok or type(value) ~= "table" then
+            error("Railroader RV map ModData is unavailable")
+        end
+        map = value
+        map.schemaVersion = C.MAP_SCHEMA_VERSION
+        map.locomotives = {}
+        map.players = {}
+    elseif type(map) ~= "table" then
+        error(C.SAVE_REBUILD_REQUIRED)
+    else
+        local empty = true
+        for _ in pairs(map) do
+            empty = false
+            break
+        end
+        if empty then
+            -- An empty key is a new save's uninitialised map, not a persisted
+            -- This is an empty new container.  Initialise only the current
+            -- schema; a non-empty incompatible container is rejected above.
+            map.schemaVersion = C.MAP_SCHEMA_VERSION
+            map.locomotives = {}
+            map.players = {}
+        elseif integer(map.schemaVersion) ~= C.MAP_SCHEMA_VERSION
+            or map.version ~= nil
+            or type(map.locomotives) ~= "table"
+            or type(map.players) ~= "table" then
+            error(C.SAVE_REBUILD_REQUIRED)
+        end
+    end
+    if validateMapSchema and not validateMapSchema(map) then
+        error(C.SAVE_REBUILD_REQUIRED)
+    end
     return map
 end
 
@@ -646,11 +706,13 @@ local function transmitMap()
 end
 
 local function rvRegion()
-    local minX = integer(C.TELEPORT_X) + (integer(C.RV_REGION_MIN_OFFSET_X) or -50)
-    local minY = integer(C.TELEPORT_Y) + (integer(C.RV_REGION_MIN_OFFSET_Y) or -50)
-    local size = integer(C.RV_REGION_SIZE) or 100
+    local minX = integer(C.TELEPORT_X) + integer(C.RV_REGION_MIN_OFFSET_X)
+    local minY = integer(C.TELEPORT_Y) + integer(C.RV_REGION_MIN_OFFSET_Y)
+    local size = integer(C.RV_REGION_SIZE)
+    local minZ = integer(C.TELEPORT_Z) + integer(C.RV_MANAGED_MIN_Z_OFFSET)
+    local maxZ = integer(C.TELEPORT_Z) + integer(C.RV_MANAGED_MAX_Z_OFFSET)
     return { minX = minX, minY = minY, maxX = minX + size,
-        maxY = minY + size, z = integer(C.TELEPORT_Z) or 0, size = size }
+        maxY = minY + size, minZ = minZ, maxZ = maxZ }
 end
 
 local function inRegion(position, region)
@@ -658,37 +720,103 @@ local function inRegion(position, region)
     local x, y, z = number(position.x), number(position.y), number(position.z)
     local minX, minY = number(region.minX), number(region.minY)
     local maxX, maxY = number(region.maxX), number(region.maxY)
-    local regionZ = number(region.z)
+    local minZ, maxZ = number(region.minZ), number(region.maxZ)
     if not x or not y or not z or not minX or not minY or not maxX or not maxY
-        or not regionZ then return false end
+        or not minZ or not maxZ then return false end
     return x >= minX and x < maxX and y >= minY and y < maxY
-        and math.floor(z) == math.floor(regionZ)
+        and math.floor(z) >= math.floor(minZ)
+        and math.floor(z) < math.floor(maxZ)
 end
 
 local function validRegion(region)
     if type(region) ~= "table" then return false end
-    local size = integer(C.RV_REGION_SIZE) or 100
+    if region.z ~= nil or region.size ~= nil then return false end
+    local size = integer(C.RV_REGION_SIZE)
     local minX, minY = integer(region.minX), integer(region.minY)
+    local minZ, maxZ = integer(region.minZ), integer(region.maxZ)
     return minX ~= nil and minY ~= nil and integer(region.maxX) == minX + size
-        and integer(region.maxY) == minY + size and integer(region.z) ~= nil
+        and integer(region.maxY) == minY + size
+        and minZ ~= nil and maxZ ~= nil and maxZ > minZ
 end
 
 local function validMappingRecord(record)
     if type(record) ~= "table" or record.generated ~= true
-        or record.locoId == nil or not validRegion(record.region) then
+        or record.version ~= nil
+        or integer(record.schemaVersion) ~= C.RV_RECORD_SCHEMA_VERSION
+        or record.locoId == nil or tostring(record.locoId) == ""
+        or record.rvId == nil or tostring(record.rvId) ~= tostring(record.locoId)
+        or integer(record.boundarySchemaVersion) ~= C.BOUNDARY_SCHEMA_VERSION
+        or integer(record.bitmapVersion) ~= C.BITMAP_VERSION
+        or integer(record.generation) == nil or integer(record.generation) < 1
+        or not validRegion(record.region) then
         return false
     end
-    if record.players ~= nil and type(record.players) ~= "table" then
+    if type(record.boundary) ~= "table"
+        or type(record.players) ~= "table"
+        or copyPosition(record.rvPosition) == nil
+        or copyPosition(record.enterPosition) == nil
+        or copyPose(record.locoPosition) == nil
+        or number(record.locoPosition.dirX) == nil
+        or number(record.locoPosition.dirY) == nil then
         return false
     end
-    return copyPosition(record.rvPosition) ~= nil
+    if Boundary and type(Boundary.registerGeneration) == "function" then
+        local ok, valid = pcall(Boundary.registerGeneration,
+            record.locoId, record.generation, record.boundary, nil)
+        if not ok or valid ~= true then return false end
+    else
+        return false
+    end
+    for name, rider in pairs(record.players) do
+        if type(name) ~= "string" or type(rider) ~= "table"
+            or rider.version ~= nil or rider.locomotive ~= nil
+            or integer(rider.schemaVersion) ~= C.RV_RELATION_SCHEMA_VERSION
+            or integer(rider.onlineId) == nil
+            or type(rider.inside) ~= "boolean" then
+            return false
+        end
+    end
+    return true
 end
 
 local function validRecord(record)
     return validMappingRecord(record)
 end
 
-local function recordForLoco(map, locoId)
+validateMapSchema = function(map)
+    if type(map) ~= "table"
+        or integer(map.schemaVersion) ~= C.MAP_SCHEMA_VERSION
+        or type(map.locomotives) ~= "table"
+        or type(map.players) ~= "table" then
+        return false
+    end
+    for key, record in pairs(map.locomotives) do
+        if type(key) ~= "string" or not validMappingRecord(record)
+            or tostring(record.locoId) ~= key then
+            return false
+        end
+    end
+    for name, relation in pairs(map.players) do
+        if type(name) ~= "string" or type(relation) ~= "table"
+            or relation.locomotive ~= nil
+            or integer(relation.schemaVersion) ~= C.RV_RELATION_SCHEMA_VERSION
+            or integer(relation.onlineId) == nil
+            or type(relation.inside) ~= "boolean" then
+            return false
+        end
+        if relation.inside == true then
+            local record = relation.locoId and recordForLoco(map, relation.locoId)
+            if not record or type(record.players) ~= "table"
+                or type(record.players[name]) ~= "table"
+                or record.players[name].inside ~= true then
+                return false
+            end
+        end
+    end
+    return true
+end
+
+recordForLoco = function(map, locoId)
     if not map or not map.locomotives or locoId == nil then return nil, nil end
     local wanted = tostring(locoId)
     for key, record in pairs(map.locomotives) do
@@ -701,8 +829,15 @@ local function recordForLoco(map, locoId)
 end
 
 local function roofRepairRoomKey(record)
-    if type(record) ~= "table" or record.locoId == nil then return nil end
-    return tostring(record.locoId) .. ":" .. tostring(record.generation or "0")
+    if type(record) ~= "table" or record.locoId == nil
+        or record.rvId == nil or tostring(record.rvId) == ""
+        or tostring(record.rvId) ~= tostring(record.locoId)
+        or integer(record.generation) == nil or integer(record.generation) < 1
+        or integer(record.bitmapVersion) ~= C.BITMAP_VERSION then
+        return nil
+    end
+    return tostring(record.rvId) .. ":" .. tostring(record.generation)
+        .. ":" .. tostring(record.bitmapVersion)
 end
 
 -- The repair is deliberately best-effort: a missing target chunk must not
@@ -724,8 +859,11 @@ local function repairRoofForPlayer(player, record, force, reason)
     if repaired == true then
         roofRepairRooms[roomKey] = true
         local name = playerName(player)
-        if name then roofRepairPlayers[name] = true end
-        print("[RailroaderRVTest] roof visual repair complete room=" .. roomKey
+        if name then roofRepairPlayers[name .. ":" .. roomKey] = true end
+        -- This is an authoritative add/remove application only.  The server
+        -- cannot prove the client's rendered roof cache, so never label this
+        -- line as visual success.
+        print("[RailroaderRVTest] roof repair applied room=" .. roomKey
             .. " reason=" .. tostring(reason or "entry")
             .. " detail=" .. tostring(detail or "ok"))
         return true, detail
@@ -736,40 +874,57 @@ local function repairRoofForPlayer(player, record, force, reason)
     return false, detail
 end
 
+-- The generation transaction broadcasts a room guard, but an existing RV entry
+-- or a newly connected player does not pass through that transaction.  Ask the
+-- generic server layer to validate the current manifest/mapping identity and
+-- send the current footprint only to this player.
+local function armRoomOwnershipMonitor(player, record, reason)
+    local server = RailroaderRV and RailroaderRV.Server
+    if not server or type(server.armCurrentRoomOwnershipMonitor) ~= "function" then
+        return false, "room ownership monitor service is unavailable"
+    end
+    local ok, armed, detail = pcall(server.armCurrentRoomOwnershipMonitor,
+        player, record)
+    if not ok then
+        print("[RailroaderRVTest] room ownership monitor error: " .. tostring(armed))
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
+    if armed ~= true then
+        print("[RailroaderRVTest] room ownership monitor deferred reason="
+            .. tostring(reason or "entry") .. ": " .. tostring(detail or "unknown"))
+        return false, detail or "room ownership monitor could not be armed"
+    end
+    print("[RailroaderRVTest] room ownership monitor ready reason="
+        .. tostring(reason or "entry"))
+    return true
+end
+
 -- The reverse lookup intentionally starts with the passenger coordinate.  It
--- never asks a world-room API, a room identifier, or a generated object which RV the
--- player belongs to.  A coordinate in the target region with no sound mapping
--- is the explicit damaged-data state handled by exitPlayer().  A valid mapping
--- whose live locomotive is temporarily absent is retained for a persisted
--- vehicle-pose beside fallback.  Coordinates outside the target 100x100 region
--- are a separate outside-rv rejection and never use the damaged-map fallback.
+-- never asks a world-room API, a room identifier, or a generated object which
+-- RV the player belongs to.  A current-schema mapping whose live locomotive
+-- is temporarily absent is retained for the persisted
+-- vehicle-pose exit.  Coordinates outside the target 100x100 region are a
+-- separate outside-rv rejection and are never corrected by this adapter.
 local function recordAtPlayerCoordinate(map, player)
     local position = playerPosition(player)
-    if not position then return nil, nil, nil, false, "outside-rv" end
+    if not position then return nil, nil, nil, "outside-rv" end
     local target = rvRegion()
     if not inRegion(position, target) then
-        return nil, nil, nil, false, "outside-rv"
+        return nil, nil, nil, "outside-rv"
     end
-    local sawRegion = false
     for key, record in pairs(map.locomotives or {}) do
         if type(record) == "table" and inRegion(position, record.region) then
-            sawRegion = true
-            if validMappingRecord(record) then
-                local train = findTrain(record.locoId)
-                if train and trainPosition(train) then
-                    return record, key, train, false, "active-mapped"
-                end
-                if copyPose(record.locoPosition)
-                    or copyPose(record.enterPosition) then
-                    return record, key, nil, false, "inactive-mapped"
-                end
-                return nil, nil, nil, true, "damaged-map"
+            if not validMappingRecord(record) then
+                error(C.SAVE_REBUILD_REQUIRED)
             end
-            return nil, nil, nil, true, "damaged-map"
+            local train = findTrain(record.locoId)
+            if train and trainPosition(train) then
+                return record, key, train, "active-mapped"
+            end
+            return record, key, nil, "inactive-mapped"
         end
     end
-    if sawRegion then return nil, nil, nil, true, "damaged-map" end
-    return nil, nil, nil, false, nil
+    return nil, nil, nil, "unmapped-rv"
 end
 
 local function sendResult(player, ok, reason)
@@ -795,7 +950,15 @@ local function movePlayer(player, position, action, relation)
         payload.locoId = relation.locoId
         payload.role = relation.role
         payload.seat = relation.seat
-        payload.fallback = relation.fallback
+        if relation.rvId ~= nil and tostring(relation.rvId) ~= ""
+            and integer(relation.generation) ~= nil
+            and integer(relation.generation) >= 1
+            and integer(relation.bitmapVersion) ~= nil
+            and integer(relation.bitmapVersion) == C.BITMAP_VERSION then
+            payload.rvId = tostring(relation.rvId)
+            payload.generation = integer(relation.generation)
+            payload.bitmapVersion = integer(relation.bitmapVersion)
+        end
     end
     local sent = callGlobal("sendServerCommand", player, C.MOD_ID,
         C.COMMAND_RV_TELEPORT, payload)
@@ -807,45 +970,26 @@ local function movePlayer(player, position, action, relation)
     return safeCall(player, "teleportTo", position.x, position.y, position.z)
 end
 
-local function fallbackPosition()
-    local rr = rawget(_G, "RR")
-    local spawn = rr and rr.Spawn and rr.Spawn.DEPOT
-    local spline = rr and rr.Spline
-    local routes = rr and rr.Routes
-    if spawn and spline and routes and type(spline.sample) == "function"
-        and type(routes.get) == "function" then
-        local ok, route = pcall(routes.get, spawn.routeId)
-        if ok and route then
-            local sampled, point = pcall(spline.sample, route, spawn.distance)
-            if sampled and type(point) == "table"
-                and number(point.x) and number(point.y) then
-                return { x = number(point.x), y = number(point.y),
-                    z = number(point.z) or 0 }
-            end
-        end
-    end
-    return { x = number(C.RV_FALLBACK_X) or 11606,
-        y = number(C.RV_FALLBACK_Y) or 9851,
-        z = number(C.RV_FALLBACK_Z) or 0 }
-end
-
 local function markPlayerOutside(map, record, key, player, position, seat, role)
     local name = playerName(player)
     if not name then return end
     local relation = map.players[name]
     if type(relation) ~= "table" then relation = {} end
     relation.locoId = record and tostring(record.locoId) or relation.locoId
-    relation.locomotive = key or relation.locomotive
     relation.onlineId = playerId(player)
+    relation.schemaVersion = C.RV_RELATION_SCHEMA_VERSION
     relation.inside = false
     relation.role = role
     relation.seat = seat
     relation.exitPosition = copyPosition(position)
     map.players[name] = relation
     if record then
-        if type(record.players) ~= "table" then record.players = {} end
+        if type(record.players) ~= "table" then
+            error(C.SAVE_REBUILD_REQUIRED)
+        end
         local rider = record.players[name]
         if type(rider) ~= "table" then rider = {} end
+        rider.schemaVersion = C.RV_RELATION_SCHEMA_VERSION
         rider.onlineId = playerId(player)
         rider.inside = false
         rider.role = role
@@ -859,18 +1003,24 @@ local function markPlayerInside(map, record, key, player, sourcePosition,
     sourceRole, sourceSeat)
     local name = playerName(player)
     if not name then error("Railroader RV player username is unavailable") end
+    local enterPosition = copyPosition(sourcePosition)
+    if not enterPosition then error(C.SAVE_REBUILD_REQUIRED) end
     local relation = {
-        locoId = tostring(record.locoId), locomotive = key,
+        schemaVersion = C.RV_RELATION_SCHEMA_VERSION,
+        locoId = tostring(record.locoId),
         onlineId = playerId(player), inside = true,
         role = sourceRole, seat = sourceSeat,
-        enterPosition = copyPosition(sourcePosition),
+        enterPosition = enterPosition,
     }
     map.players[name] = relation
-    if type(record.players) ~= "table" then record.players = {} end
+    if type(record.players) ~= "table" then
+        error(C.SAVE_REBUILD_REQUIRED)
+    end
     record.players[name] = {
+        schemaVersion = C.RV_RELATION_SCHEMA_VERSION,
         onlineId = relation.onlineId, inside = true,
         role = sourceRole, seat = sourceSeat,
-        enterPosition = copyPosition(sourcePosition),
+        enterPosition = enterPosition,
     }
 end
 
@@ -889,21 +1039,25 @@ local function sourceWithinRange(player, train)
     local rr = rawget(_G, "RR")
     local officialReach = rr and rr.Ride and rr.Ride.MOUNT_REACH
     local reach = number(officialReach) or number(C.RV_MOUNT_REACH)
-        or number(C.RV_ENTER_RANGE) or 2.0
     return distance ~= nil and distance <= reach
 end
 
 local function requestData(train, player, role, seat, sourcePosition)
+    local entryPosition = copyPosition(sourcePosition)
+    local locoPosition = trainPose(train)
+    if not entryPosition or not locoPosition then
+        error(C.SAVE_REBUILD_REQUIRED)
+    end
     return {
         locoId = tostring(trainId(train)), sourceRole = role, sourceSeat = seat,
         playerUsername = playerName(player), playerOnlineId = playerId(player),
-        entryPosition = copyPosition(sourcePosition),
+        entryPosition = entryPosition,
         region = rvRegion(), rvPosition = {
-            x = (integer(C.TELEPORT_X) or 0) + 0.5,
-            y = (integer(C.TELEPORT_Y) or 0) + 0.5,
-            z = integer(C.TELEPORT_Z) or 0,
+            x = integer(C.TELEPORT_X) + 0.5,
+            y = integer(C.TELEPORT_Y) + 0.5,
+            z = integer(C.TELEPORT_Z),
         },
-        locoPosition = trainPose(train),
+        locoPosition = locoPosition,
     }
 end
 
@@ -913,9 +1067,27 @@ end
 
 local function enterExisting(player, train, record, key, sourceRole,
     sourceSeat, sourcePosition, map)
+    if not Boundary or type(Boundary.beginTransition) ~= "function"
+        or type(Boundary.completeTransition) ~= "function" then
+        return false, "RV boundary entry service is unavailable"
+    end
     local onlineId = playerId(player)
     local target = copyPosition(record.rvPosition)
-    if not target then return false, "RV entry point is damaged" end
+    if not target then return false, C.SAVE_REBUILD_REQUIRED end
+    -- Re-arm the persistent client stale-room monitor before changing seats or
+    -- moving the player.  A missing/incompatible current manifest therefore
+    -- fails closed without performing the RV teleport.
+    local monitorOk, monitorReason = armRoomOwnershipMonitor(player, record,
+        "existing-entry")
+    if not monitorOk then return false, monitorReason end
+    local transitionToken = newTransitionToken("entry", record)
+    if Boundary and type(Boundary.beginTransition) == "function" then
+        local armed = Boundary.beginTransition(player, record.locoId,
+            record.generation, transitionToken, "entry", record.bitmapVersion)
+        if armed ~= true then
+            return false, "RV boundary entry transition could not be armed"
+        end
+    end
     local removedRole, removedSeat = removeSeatForEntry(train, player, onlineId)
     if removedRole == "external" then removedSeat = nil end
     local oldRelation = map.players[playerName(player)]
@@ -927,6 +1099,8 @@ local function enterExisting(player, train, record, key, sourceRole,
         sourceSeat)
     local moved = movePlayer(player, target, "enter", {
         locoId = trainId(train), role = sourceRole, seat = sourceSeat,
+        rvId = record.locoId, generation = record.generation,
+        bitmapVersion = record.bitmapVersion,
     })
     if not moved then
         map.players[playerName(player)] = oldRelation
@@ -936,7 +1110,13 @@ local function enterExisting(player, train, record, key, sourceRole,
         elseif removedRole == "passenger" and removedSeat ~= nil then
             putPassenger(train, player, onlineId, removedSeat)
         end
+        if Boundary and type(Boundary.clearPlayer) == "function" then
+            Boundary.clearPlayer(player)
+        end
         return false, "RV entry teleport failed"
+    end
+    if Boundary and type(Boundary.completeTransition) == "function" then
+        Boundary.completeTransition(player, transitionToken)
     end
     record.locoPosition = trainPose(train) or record.locoPosition
     -- The server has just moved the player into the persisted RV footprint;
@@ -955,8 +1135,12 @@ local function enterPlayer(player, locoId)
     local onlineId, name = playerId(player), playerName(player)
     if onlineId == nil or not name then return false, "player identity is unavailable" end
     local map = mapData()
-    local _, _, _, inside = recordAtPlayerCoordinate(map, player)
-    if inside then return false, "player is already inside an RV" end
+    local existingRecord, existingKey, _, lookupState =
+        recordAtPlayerCoordinate(map, player)
+    if lookupState == "unmapped-rv" then
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
+    if existingRecord then return false, "player is already inside an RV" end
     local train = findTrain(locoId)
     if not train then return false, "target is not an active Railroader locomotive" end
     local role, seat = playerRole(train, onlineId)
@@ -1024,39 +1208,71 @@ local function restoreAfterGenerationFailure(player, data)
             if not occupied then putPassenger(train, player, onlineId, data.removedSeat) end
         end
     end
-    local source = copyPosition(data.sourcePosition or data.entryPosition)
+    local source = copyPosition(data.sourcePosition)
     if source then
         movePlayer(player, source, "generation-failed", {
             locoId = data.locoId, role = data.sourceRole, seat = data.sourceSeat,
+            rvId = data.rvId, generation = data.generation,
+            bitmapVersion = data.bitmapVersion,
         })
+    end
+    if Boundary and type(Boundary.clearPlayer) == "function" then
+        Boundary.clearPlayer(player)
     end
 end
 
 local function commitGeneration(player, data, prepared)
     local map = mapData()
     local locoId = tostring(data.locoId)
+    local generation = integer(prepared and prepared.generation)
+    if not generation or not Boundary
+        or type(prepared and prepared.boundary) ~= "table"
+        or type(Boundary.registerGeneration) ~= "function"
+        or not Boundary.registerGeneration(locoId, generation,
+            prepared.boundary, nil) then
+        return false, "RV boundary manifest registration failed"
+    end
     local record, key = recordForLoco(map, locoId)
     if not record then
         key, record = locoId, {}
         map.locomotives[key] = record
     end
     local train = findTrain(locoId)
-    record.version = 1
+    record.schemaVersion = C.RV_RECORD_SCHEMA_VERSION
     record.generated = true
     record.locoId = locoId
-    record.generation = integer(prepared and prepared.generation) or record.generation
-    record.region = data.region or rvRegion()
+    record.rvId = locoId
+    record.generation = generation
+    if not validRegion(data.region) then return false, C.SAVE_REBUILD_REQUIRED end
+    record.region = {
+        minX = integer(data.region.minX), minY = integer(data.region.minY),
+        maxX = integer(data.region.maxX), maxY = integer(data.region.maxY),
+        minZ = integer(data.region.minZ), maxZ = integer(data.region.maxZ),
+    }
     record.rvPosition = copyPosition(data.rvPosition)
-        or { x = (integer(C.TELEPORT_X) or 0) + 0.5,
-            y = (integer(C.TELEPORT_Y) or 0) + 0.5,
-            z = integer(C.TELEPORT_Z) or 0 }
     record.enterPosition = copyPosition(data.entryPosition)
-        or copyPosition(record.rvPosition)
-    record.locoPosition = train and trainPose(train) or data.locoPosition
-        or record.locoPosition
+    record.locoPosition = train and trainPose(train) or copyPose(data.locoPosition)
+    record.boundarySchemaVersion = C.BOUNDARY_SCHEMA_VERSION
+    record.bitmapVersion = C.BITMAP_VERSION
+    record.boundary = prepared.boundary
+    record.managed = prepared.boundary.managed
+    if not record.rvPosition or not record.enterPosition
+        or not record.locoPosition
+        or number(record.locoPosition.dirX) == nil
+        or number(record.locoPosition.dirY) == nil then
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
+    if type(record.players) ~= "table" then record.players = {} end
+    if not Boundary.registerGeneration(locoId, record.generation,
+        prepared.boundary, record) then
+        return false, "RV boundary manifest registration failed"
+    end
     record.updatedAt = os.time()
     markPlayerInside(map, record, key, player,
         data.entryPosition, data.sourceRole, data.sourceSeat)
+    if type(Boundary.completeTransition) == "function" then
+        Boundary.completeTransition(player, prepared.token)
+    end
     repairRoofForPlayer(player, record, true, "generation-entry")
     transmitMap()
     return true
@@ -1072,48 +1288,53 @@ local function validateGeneration(player, data)
     return true
 end
 
-local function damagedMapFallback(player, map)
-    local fallback = fallbackPosition()
-    if not movePlayer(player, fallback, "damaged-map-fallback") then
-        return false, "damaged RV map fallback teleport failed"
-    end
-    local name = playerName(player)
-    if name then
-        if type(map.players[name]) ~= "table" then map.players[name] = {} end
-        map.players[name].inside = false
-    end
-    transmitMap()
-    return true
-end
-
 local function exitPlayer(player)
     if not player or playerDead(player) then
         return false, "player is unavailable"
     end
+    if not Boundary or type(Boundary.beginTransition) ~= "function"
+        or type(Boundary.completeTransition) ~= "function" then
+        return false, "RV boundary exit service is unavailable"
+    end
     local map = mapData()
-    local record, key, train, damaged, lookupState =
+    local record, key, train, lookupState =
         recordAtPlayerCoordinate(map, player)
     if lookupState == "outside-rv" then
         return false, "player is outside the RV area"
     end
-    if damaged or not record then
-        return damagedMapFallback(player, map)
+    if not record then
+        return false, C.SAVE_REBUILD_REQUIRED
     end
     if not train then
         local target = persistedBesidePosition(record)
-        if not target then return damagedMapFallback(player, map) end
+        if not target then return false, C.SAVE_REBUILD_REQUIRED end
         -- The mapping is valid but the locomotive is inactive/unloaded.  Do
         -- not invent a driver/passenger seat; use only a persisted beside
         -- target and retain the explicit state for diagnostics and tests.
-        if lookupState ~= "inactive-mapped" then
-            return damagedMapFallback(player, map)
+        if lookupState ~= "inactive-mapped" then return false, C.SAVE_REBUILD_REQUIRED end
+        local transitionToken = newTransitionToken("exit", record)
+        if Boundary and type(Boundary.beginTransition) == "function" then
+            local armed = Boundary.beginTransition(player, record.locoId,
+                record.generation, transitionToken, "exit", record.bitmapVersion)
+            if armed ~= true then
+                return false, "RV boundary exit transition could not be armed"
+            end
         end
         local moved = movePlayer(player, target, "exit", {
             locoId = record.locoId, role = "beside", seat = nil,
-            fallback = "inactive-mapped-fallback",
+            rvId = record.locoId, generation = record.generation,
+            bitmapVersion = record.bitmapVersion,
         })
-        if not moved then return false, "inactive locomotive exit teleport failed" end
+        if not moved then
+            if Boundary and type(Boundary.completeTransition) == "function" then
+                Boundary.completeTransition(player, transitionToken)
+            end
+            return false, "inactive locomotive exit teleport failed"
+        end
         markPlayerOutside(map, record, key, player, target, nil, "beside")
+        if Boundary and type(Boundary.clearPlayer) == "function" then
+            Boundary.clearPlayer(player)
+        end
         transmitMap()
         return true
     end
@@ -1139,21 +1360,41 @@ local function exitPlayer(player)
     end
     if not target then return false, "locomotive exit position is unavailable" end
 
+    local transitionToken = newTransitionToken("exit", record)
+    if Boundary and type(Boundary.beginTransition) == "function" then
+        local armed = Boundary.beginTransition(player, record.locoId,
+            record.generation, transitionToken, "exit", record.bitmapVersion)
+        if armed ~= true then
+            return false, "RV boundary exit transition could not be armed"
+        end
+    end
+
     local assigned = false
     if role == "passenger" then assigned = putPassenger(train, player, onlineId, seat)
     elseif role == "driver" then assigned = putDriver(train, player, onlineId) end
     if role ~= "beside" and not assigned then
+        if Boundary and type(Boundary.completeTransition) == "function" then
+            Boundary.completeTransition(player, transitionToken)
+        end
         return false, "locomotive seat became occupied"
     end
     local moved = movePlayer(player, target, "exit", {
         locoId = trainId(train), role = role, seat = seat,
+        rvId = record.locoId, generation = record.generation,
+        bitmapVersion = record.bitmapVersion,
     })
     if not moved then
         if role ~= "beside" then forgetTrainSeat(train, player, onlineId) end
+        if Boundary and type(Boundary.completeTransition) == "function" then
+            Boundary.completeTransition(player, transitionToken)
+        end
         return false, "RV exit teleport failed"
     end
     record.locoPosition = trainPose(train) or record.locoPosition
     markPlayerOutside(map, record, key, player, target, seat, role)
+    if Boundary and type(Boundary.clearPlayer) == "function" then
+        Boundary.clearPlayer(player)
+    end
     transmitMap()
     return true
 end
@@ -1165,11 +1406,22 @@ local function commandArgument(args, key)
     return ok and value or nil
 end
 
+local function roofRepairOwnsPlayer(player)
+    for _, pending in pairs(pendingWallRoofRepairs) do
+        if type(pending) == "table" and pending.player == player then
+            return true
+        end
+    end
+    return false
+end
+
 function Adapter.OnClientCommand(module, command, player, args)
     if module ~= C.MOD_ID then return end
     if command ~= C.COMMAND_RV_ENTER and command ~= C.COMMAND_RV_EXIT then return end
     local ok, result, reason
-    if command == C.COMMAND_RV_ENTER then
+    if roofRepairOwnsPlayer(player) then
+        result, reason = false, "roof repair refresh is in progress"
+    elseif command == C.COMMAND_RV_ENTER then
         local locoId = commandArgument(args, "locoId")
         if locoId == nil then
             result, reason = false, "locomotive id is missing"
@@ -1219,8 +1471,29 @@ local function onlinePlayersSnapshot()
     return result
 end
 
+-- On the server, the player square is authoritative.  Generated RV rooms are
+-- represented by IsoRegions and may not have a static IsoRoom/RoomDef, so the
+-- transition signal is the square's isInARoom() result; getRoom()/getRoomDef()
+-- are sampled as supporting state and diagnostics only.
+local function authoritativeRoomState(player)
+    local squareOk, square = call(player, "getCurrentSquare")
+    if not squareOk or not square then return nil end
+    local roomOk, room = call(square, "getRoom")
+    if not roomOk then return nil end
+    local roomDefOk, roomDef = call(square, "getRoomDef")
+    if not roomDefOk then return nil end
+    local insideOk, inside = call(square, "isInARoom")
+    if not insideOk or type(inside) ~= "boolean" then return nil end
+    return {
+        inRoom = inside == true,
+        hasRoom = room ~= nil,
+        hasRoomDef = roomDef ~= nil,
+    }
+end
+
 local function repairInsidePlayers(map)
     local present = {}
+    local observedRooms = {}
     local players = onlinePlayersSnapshot()
     for i = 1, #players do
         local player = players[i]
@@ -1231,29 +1504,511 @@ local function repairInsidePlayers(map)
             local position = playerPosition(player)
             if record and validRecord(record) and position
                 and inRegion(position, record.region) then
-                present[name] = true
+                local roomKey = roofRepairRoomKey(record)
+                local presenceKey = roomKey and name
+                    and (name .. ":" .. roomKey) or nil
+                if presenceKey then present[presenceKey] = true end
+                if roomKey then
+                    local observed = observedRooms[roomKey]
+                    if not observed then
+                        observed = {
+                            record = record,
+                            inRoom = nil,
+                            hasRoom = false,
+                            hasRoomDef = false,
+                            roomStateAvailable = false,
+                        }
+                        observedRooms[roomKey] = observed
+                    end
+                    local roomState = authoritativeRoomState(player)
+                    if roomState then
+                        if observed.inRoom == nil then
+                            observed.inRoom = roomState.inRoom
+                        else
+                            observed.inRoom = observed.inRoom or roomState.inRoom
+                        end
+                        observed.hasRoom = observed.hasRoom or roomState.hasRoom
+                        observed.hasRoomDef = observed.hasRoomDef
+                            or roomState.hasRoomDef
+                        observed.roomStateAvailable = true
+                    end
+                end
                 local currentOnlineId = playerId(player)
                 local reconnect = currentOnlineId ~= nil
                     and relation.onlineId ~= nil
                     and tostring(currentOnlineId) ~= tostring(relation.onlineId)
-                local firstPresence = roofRepairPlayers[name] ~= true
-                repairRoofForPlayer(player, record, firstPresence or reconnect,
-                    reconnect and "reconnect" or "presence")
+                local firstPresence = presenceKey == nil
+                    or roofRepairPlayers[presenceKey] ~= true
+                local monitorReady = false
+                if presenceKey then
+                    monitorReady = roomMonitorPlayers[presenceKey] == player
+                    if not monitorReady then
+                        monitorReady = armRoomOwnershipMonitor(player, record,
+                            reconnect and "reconnect" or "presence")
+                        if monitorReady then
+                            roomMonitorPlayers[presenceKey] = player
+                        end
+                    end
+                end
+                -- A wall-removal transaction owns the player until its return
+                -- ACK.  Do not run the ordinary presence repair concurrently
+                -- while that player is temporarily relocated; the transaction
+                -- itself performs the delayed 5/10/15-tick attempts.
+                if monitorReady and not (roomKey
+                    and pendingWallRoofRepairs[roomKey] ~= nil) then
+                    repairRoofForPlayer(player, record, firstPresence or reconnect,
+                        reconnect and "reconnect" or "presence")
+                end
             end
         end
     end
+    observeRoomTransitions(map, observedRooms)
     -- A later appearance of the same username is treated as a new connection,
     -- so the repair is retriggered even when the map generation is unchanged.
-    for name in pairs(roofRepairPlayers) do
-        if not present[name] then roofRepairPlayers[name] = nil end
+    for presenceKey in pairs(roofRepairPlayers) do
+        if not present[presenceKey] then roofRepairPlayers[presenceKey] = nil end
+    end
+    for presenceKey in pairs(roomMonitorPlayers) do
+        if not present[presenceKey] then roomMonitorPlayers[presenceKey] = nil end
+    end
+end
+
+-- One matched event or authoritative room transition owns one schedule for
+-- the complete current RV identity.  The schedule intentionally starts after
+-- the event/transition so the asynchronous object, neighbour and IsoRegions
+-- work has time to settle; it never persists or infers geometry.
+scheduleRoofRepair = function(map, record, source)
+    if type(map) ~= "table" or not validRecord(record) then return false end
+    local roomKey = roofRepairRoomKey(record)
+    if not roomKey then return false end
+    local player = insidePlayerForRecord and insidePlayerForRecord(map, record)
+        or nil
+    if not player then return false end
+    if pendingWallRoofRepairs[roomKey] then return true end
+
+    local sourcePosition = playerPosition(player)
+    if not sourcePosition then return false end
+    local name = playerName(player)
+    local relation = name and map.players and map.players[name] or nil
+    local rider = name and record.players and record.players[name] or nil
+    if type(relation) ~= "table" or relation.inside ~= true
+        or tostring(relation.locoId) ~= tostring(record.locoId)
+        or type(rider) ~= "table"
+        or integer(relation.onlineId) ~= integer(rider.onlineId) then
+        return false
+    end
+
+    local now = Adapter._ticks or 0
+    pendingWallRoofRepairs[roomKey] = {
+        roomKey = roomKey,
+        player = player,
+        rvId = tostring(record.rvId),
+        generation = integer(record.generation),
+        bitmapVersion = integer(record.bitmapVersion),
+        identityKey = tostring(relation.onlineId) .. ":" .. tostring(name),
+        returnPosition = sourcePosition,
+        startTick = now + 1,
+        dueTicks = nil,
+        nextAttempt = 1,
+        relocationStarted = false,
+        relocationPhase = "queued",
+        source = tostring(source or "room-transition"),
+        scheduledAtTick = now,
+    }
+    print("[RailroaderRVTest] roof repair scheduled room=" .. roomKey
+        .. " source=" .. tostring(source or "room-transition")
+        .. " relocationStartTick=" .. tostring(now + 1)
+        .. " attempts=" .. tostring(ROOF_REPAIR_ATTEMPTS)
+        .. " delayTicks=" .. tostring(ROOF_REPAIR_DELAY_TICKS))
+    return true
+end
+
+-- Both legal server-side removal paths pass the authoritative IsoThumpable
+-- before it is detached.  In particular, 42.20.4's
+-- SledgehammerDestroyPacket delegates to RemoveItemFromSquarePacket, which
+-- raises OnObjectAboutToBeRemoved immediately before removeFromWorld and
+-- removeFromSquare.  OnDestroyIsoThumpable is retained for direct thumpable
+-- destruction paths and uses the same strict matcher.  Never infer ownership
+-- from a coordinate, action name, or client payload.
+local function queueWallRoofRepairForObject(object, source)
+    if not processIsServer() or not Boundary
+        or type(Boundary.isCurrentShellWall) ~= "function" then
+        return false
+    end
+    local mapOk, map = pcall(mapData)
+    if not mapOk or type(map) ~= "table" then return false end
+    local match
+    for _, record in pairs(map.locomotives or {}) do
+        local wallOk, isCurrentWall = false, false
+        if type(record) == "table" and record.rvId ~= nil
+            and validRecord(record) then
+            wallOk, isCurrentWall = pcall(Boundary.isCurrentShellWall,
+                object, record.boundary)
+        end
+        if wallOk and isCurrentWall == true then
+            if match then
+                -- A duplicate current identity is not a reason to guess which
+                -- mapping owns the object.  Leave the removal untouched and
+                -- do not enqueue a cross-RV repair.
+                return false
+            end
+            match = record
+        end
+    end
+    if not match then return false end
+    local roomKey = roofRepairRoomKey(match)
+    if not roomKey then return false end
+
+    -- The two events may be raised for one removal.  The room key is the
+    -- current rvId:generation:bitmapVersion identity, so one delayed schedule
+    -- collapses duplicates without suppressing a later removal.
+    local scheduled = scheduleRoofRepair(map, match, source)
+    if scheduled then
+        print("[RailroaderRVTest] wall removal matched room=" .. roomKey
+            .. " source=" .. tostring(source or "object-about-to-be-removed"))
+        print("[RailroaderRVTest] wall roof repair queued room=" .. roomKey
+            .. " delayTicks=" .. tostring(ROOF_REPAIR_DELAY_TICKS)
+            .. " attempts=" .. tostring(ROOF_REPAIR_ATTEMPTS)
+            .. " source=" .. tostring(source or "object-about-to-be-removed"))
+    end
+    return scheduled
+end
+
+function Adapter.onObjectAboutToBeRemoved(object)
+    queueWallRoofRepairForObject(object, "object-about-to-be-removed")
+end
+
+-- Some direct IsoThumpable destruction paths expose the object through the
+-- OnDestroyIsoThumpable event.  The normal 42.20.4 sledgehammer packet is
+-- covered by OnObjectAboutToBeRemoved above; this second hook is intentionally
+-- a strict, de-duplicated supplement rather than a client-command path.
+function Adapter.onDestroyIsoThumpable(object, _playerObj)
+    queueWallRoofRepairForObject(object, "destroy-iso-thumpable")
+end
+
+insidePlayerForRecord = function(map, record, relocation)
+    if type(map) ~= "table" or type(record) ~= "table"
+        or type(record.players) ~= "table" then return nil end
+    local wanted = tostring(record.rvId or record.locoId)
+    local relocationActive = type(relocation) == "table"
+        and relocation.relocationStarted == true
+    local players = onlinePlayersSnapshot()
+    for i = 1, #players do
+        local player = players[i]
+        local name = playerName(player)
+        local relation = name and map.players[name] or nil
+        local rider = name and record.players[name] or nil
+        local position = playerPosition(player)
+        local currentOnlineId = playerId(player)
+        if not playerDead(player)
+            and type(relation) == "table" and type(rider) == "table"
+            and relation.inside == true and rider.inside == true
+            and tostring(relation.locoId) == wanted
+            and integer(relation.onlineId) == integer(rider.onlineId)
+            and position
+            and (inRegion(position, record.region)
+                or (relocationActive and relocation.player == player))
+            and (currentOnlineId == nil
+                or integer(relation.onlineId) == currentOnlineId)
+            and (currentOnlineId == nil
+                or integer(rider.onlineId) == currentOnlineId) then
+            return player
+        end
+    end
+    return nil
+end
+
+observeRoomTransitions = function(map, observedRooms)
+    for roomKey, observed in pairs(observedRooms) do
+        local previous = roomTransitionStates[roomKey]
+        if observed.roomStateAvailable
+            and previous and previous.inRoom == true
+            and observed.inRoom ~= true then
+            local scheduled = scheduleRoofRepair(map, observed.record, "room-transition")
+            print("[RailroaderRVTest] room transition detected room=" .. roomKey
+                .. " previous=inside current=outside scheduled="
+                .. tostring(scheduled))
+        end
+        if observed.roomStateAvailable then
+            roomTransitionStates[roomKey] = {
+                inRoom = observed.inRoom == true,
+                hasRoom = observed.hasRoom == true,
+                hasRoomDef = observed.hasRoomDef == true,
+                observedAtTick = Adapter._ticks or 0,
+            }
+        end
+    end
+    -- Do not carry a player's previous room state across a missing presence,
+    -- disconnect, scope exit, or identity change.
+    for roomKey in pairs(roomTransitionStates) do
+        if not observedRooms[roomKey] then
+            local pending = pendingWallRoofRepairs[roomKey]
+            local relocationActive = pending
+                and pending.relocationStarted == true
+                and pending.relocationPhase ~= "complete"
+            if not relocationActive then
+                roomTransitionStates[roomKey] = nil
+                if pending then
+                    pendingWallRoofRepairs[roomKey] = nil
+                    print("[RailroaderRVTest] roof repair schedule cancelled room="
+                        .. roomKey .. " reason=presence-lost")
+                end
+            end
+        end
+    end
+    -- An object event can schedule after the previous 30-tick observation,
+    -- so also cancel a schedule that has no prior transition-state entry.
+    for roomKey in pairs(pendingWallRoofRepairs) do
+        if not observedRooms[roomKey] then
+            local pending = pendingWallRoofRepairs[roomKey]
+            local relocationActive = pending
+                and pending.relocationStarted == true
+                and pending.relocationPhase ~= "complete"
+            if not relocationActive then
+                pendingWallRoofRepairs[roomKey] = nil
+                print("[RailroaderRVTest] roof repair schedule cancelled room="
+                    .. roomKey .. " reason=presence-lost")
+            end
+        end
+    end
+end
+
+local function clearRoofRepairRuntimeState()
+    -- These are transient requests and observations only; no persisted map
+    -- field is changed.  A current-schema failure must not leave a delayed
+    -- callback armed for a later tick if the map becomes readable again.
+    roomTransitionStates = {}
+    for roomKey in pairs(pendingWallRoofRepairs) do
+        local pending = pendingWallRoofRepairs[roomKey]
+        local server = RailroaderRV and RailroaderRV.Server
+        if pending and pending.relocationStarted and server
+            and type(server.cancelRoofRepairRelocation) == "function" then
+            pcall(server.cancelRoofRepairRelocation, "current RV schema state changed")
+        end
+        pendingWallRoofRepairs[roomKey] = nil
+    end
+end
+
+local function cancelPendingWallRoofRepair(roomKey, pending, reason)
+    local server = RailroaderRV and RailroaderRV.Server
+    if pending and pending.relocationStarted and server
+        and type(server.cancelRoofRepairRelocation) == "function" then
+        pcall(server.cancelRoofRepairRelocation, reason)
+    end
+    if pendingWallRoofRepairs[roomKey] == pending then
+        pendingWallRoofRepairs[roomKey] = nil
+    end
+    print("[RailroaderRVTest] roof repair schedule cancelled room="
+        .. tostring(roomKey) .. " reason=" .. tostring(reason))
+end
+
+local function beginRoofRepairPhase(player, pending, phase)
+    local server = RailroaderRV and RailroaderRV.Server
+    if not server or type(server.beginRoofRepairRelocation) ~= "function" then
+        return false, "roof repair relocation service is unavailable"
+    end
+    local ok, started, detail = pcall(server.beginRoofRepairRelocation, player, {
+        roomKey = pending.roomKey,
+        identityKey = pending.identityKey,
+        rvId = pending.rvId,
+        generation = pending.generation,
+        bitmapVersion = pending.bitmapVersion,
+        phase = phase,
+        returnPosition = pending.returnPosition,
+    })
+    if not ok then return false, tostring(started) end
+    if started ~= true then return false, detail or "roof repair relocation was rejected" end
+    return true, detail
+end
+
+local function processPendingWallRoofRepairs()
+    local now = Adapter._ticks or 0
+    local server = RailroaderRV and RailroaderRV.Server
+    if not server or type(server.getRoofRepairRelocationState) ~= "function" then
+        return
+    end
+
+    local mapOk, mapOrReason = pcall(mapData)
+    if not mapOk or type(mapOrReason) ~= "table" then
+        -- Current-only schema failure never falls through to geometry or a
+        -- legacy repair.  Cancel any active relocation before dropping these
+        -- transient schedules.
+        clearRoofRepairRuntimeState()
+        return
+    end
+    local map = mapOrReason
+    for roomKey, pending in pairs(pendingWallRoofRepairs) do
+        if type(pending) ~= "table"
+            or integer(pending.generation) == nil
+            or integer(pending.bitmapVersion) ~= C.BITMAP_VERSION
+            or type(pending.returnPosition) ~= "table" then
+            cancelPendingWallRoofRepair(roomKey, pending, "malformed roof repair schedule")
+        elseif pendingWallRoofRepairs[roomKey] == pending then
+            local state, stateDetail = server.getRoofRepairRelocationState(
+                pending.rvId, pending.generation, pending.bitmapVersion)
+            if state == "failed" then
+                server.consumeRoofRepairRelocationFailure(pending.rvId,
+                    pending.generation, pending.bitmapVersion)
+                cancelPendingWallRoofRepair(roomKey, pending,
+                    stateDetail or "roof repair relocation failed")
+            else
+                local record = recordForLoco(map, pending.rvId)
+                if not record or tostring(record.rvId) ~= pending.rvId
+                    or integer(record.generation) ~= pending.generation
+                    or integer(record.bitmapVersion) ~= pending.bitmapVersion
+                    or not validRecord(record) then
+                    cancelPendingWallRoofRepair(roomKey, pending,
+                        "identity-mismatch")
+                else
+                    local player = insidePlayerForRecord(map, record, pending)
+                    if not player then
+                        cancelPendingWallRoofRepair(roomKey, pending,
+                            "no-authoritative-inside-player")
+                    elseif pending.relocationPhase == "queued" then
+                        if now >= (pending.startTick or now + 1) then
+                            local started, detail = beginRoofRepairPhase(player,
+                                pending, "temporary")
+                            if not started then
+                                cancelPendingWallRoofRepair(roomKey, pending,
+                                    detail)
+                            else
+                                pending.relocationStarted = true
+                                pending.relocationPhase = "temporary"
+                                pending.relocationToken = detail
+                                print("[RailroaderRVTest] roof repair temporary relocation started room="
+                                    .. roomKey .. " token=" .. tostring(detail))
+                            end
+                        end
+                    elseif pending.relocationPhase == "temporary" then
+                        local arrival = server.consumeRoofRepairRelocationArrival(
+                            player)
+                        if arrival then
+                            if arrival.phase ~= "temporary"
+                                or arrival.roomKey ~= roomKey then
+                                cancelPendingWallRoofRepair(roomKey, pending,
+                                    "unexpected roof repair relocation phase")
+                            else
+                                pending.relocationPhase = "repairing"
+                                pending.repairStartTick = now
+                                pending.dueTicks = {}
+                                for attempt = 1, ROOF_REPAIR_ATTEMPTS do
+                                    pending.dueTicks[attempt] = now
+                                        + attempt * ROOF_REPAIR_DELAY_TICKS
+                                end
+                                print("[RailroaderRVTest] roof repair temporary relocation ready room="
+                                    .. roomKey .. " target=managed-center-tempZ(-15)"
+                                    .. " dueTicks="
+                                    .. table.concat(pending.dueTicks, ","))
+                            end
+                        end
+                    elseif pending.relocationPhase == "repairing" then
+                        local attempt = integer(pending.nextAttempt)
+                        local dueTick = attempt and pending.dueTicks
+                            and integer(pending.dueTicks[attempt]) or nil
+                        if not attempt or attempt < 1
+                            or attempt > ROOF_REPAIR_ATTEMPTS or not dueTick then
+                            cancelPendingWallRoofRepair(roomKey, pending,
+                                "malformed roof repair retry schedule")
+                        elseif now >= dueTick then
+                            local loaded, loadedDetail = false,
+                                "roof repair squares are not loaded"
+                            local loadedCallOk, loadedResult, loadedReason =
+                                pcall(server.roofRepairSquaresLoaded, player,
+                                    record)
+                            if loadedCallOk then
+                                loaded, loadedDetail = loadedResult,
+                                    loadedReason
+                            else
+                                loadedDetail = tostring(loadedResult)
+                            end
+                            local repaired, detail
+                            if loaded == true then
+                                repaired, detail = repairRoofForPlayer(player,
+                                    record, true, ROOF_REPAIR_DELAY_REASON)
+                            else
+                                repaired, detail = false,
+                                    loadedDetail or "roof repair squares are not loaded"
+                            end
+                            print("[RailroaderRVTest] roof repair attempt room="
+                                .. roomKey .. " attempt=" .. tostring(attempt)
+                                .. "/" .. tostring(ROOF_REPAIR_ATTEMPTS)
+                                .. " result="
+                                .. (repaired and "applied" or "deferred")
+                                .. " detail=" .. tostring(detail or "unknown"))
+                            pending.nextAttempt = attempt + 1
+                            if attempt >= ROOF_REPAIR_ATTEMPTS then
+                                pending.relocationPhase = "returning"
+                                local started, returnDetail =
+                                    beginRoofRepairPhase(player, pending, "return")
+                                if not started then
+                                    cancelPendingWallRoofRepair(roomKey,
+                                        pending, returnDetail)
+                                else
+                                    pending.returnToken = returnDetail
+                                    pending.returnArrived = false
+                                    print("[RailroaderRVTest] roof repair return relocation started room="
+                                        .. roomKey .. " token="
+                                        .. tostring(returnDetail))
+                                end
+                            end
+                        end
+                    elseif pending.relocationPhase == "returning" then
+                        if not pending.returnArrived then
+                            local arrival = server.consumeRoofRepairRelocationArrival(
+                                player)
+                            if arrival then
+                                if arrival.phase ~= "return"
+                                    or arrival.roomKey ~= roomKey
+                                    or arrival.token ~= pending.returnToken then
+                                    cancelPendingWallRoofRepair(roomKey,
+                                        pending, "unexpected roof repair return phase")
+                                else
+                                    pending.returnArrived = true
+                                end
+                            end
+                        end
+                        if pendingWallRoofRepairs[roomKey] == pending
+                            and pending.returnArrived then
+                            local completedCallOk, completed, detail = pcall(
+                                server.completeRoofRepairRelocation, player,
+                                pending.returnToken)
+                            if completedCallOk and completed == true then
+                                pending.relocationPhase = "complete"
+                                pendingWallRoofRepairs[roomKey] = nil
+                                print("[RailroaderRVTest] roof repair transaction complete room="
+                                    .. roomKey .. " repair=applied return=acknowledged")
+                            elseif not completedCallOk or completed ~= true then
+                                print("[RailroaderRVTest] roof repair return wait room="
+                                    .. roomKey .. " detail=" .. tostring(detail
+                                        or completed))
+                            end
+                        end
+                    else
+                        cancelPendingWallRoofRepair(roomKey, pending,
+                            "unknown roof repair transaction phase")
+                    end
+                end
+            end
+        end
     end
 end
 
 function Adapter.OnTick()
     Adapter._ticks = (Adapter._ticks or 0) + 1
+    processPendingWallRoofRepairs()
     if Adapter._ticks % 30 ~= 0 then return end
-    local ok, map = pcall(mapData)
-    if not ok or type(map) ~= "table" then return end
+    local ok, mapOrReason = pcall(mapData)
+    if not ok or type(mapOrReason) ~= "table" then
+        if not Adapter._schemaWarning then
+            print("[RailroaderRVTest] " .. tostring(mapOrReason
+                or C.SAVE_REBUILD_REQUIRED))
+            Adapter._schemaWarning = true
+        end
+        clearRoofRepairRuntimeState()
+        return
+    end
+    Adapter._schemaWarning = nil
+    local map = mapOrReason
     local changed = false
     for _, record in pairs(map.locomotives or {}) do
         if type(record) == "table" and record.locoId ~= nil then
@@ -1300,6 +2055,14 @@ if Events and Events.OnClientCommand and type(Events.OnClientCommand.Add) == "fu
 end
 if Events and Events.OnTick and type(Events.OnTick.Add) == "function" then
     Events.OnTick.Add(Adapter.OnTick)
+end
+if Events and Events.OnObjectAboutToBeRemoved
+    and type(Events.OnObjectAboutToBeRemoved.Add) == "function" then
+    Events.OnObjectAboutToBeRemoved.Add(Adapter.onObjectAboutToBeRemoved)
+end
+if Events and Events.OnDestroyIsoThumpable
+    and type(Events.OnDestroyIsoThumpable.Add) == "function" then
+    Events.OnDestroyIsoThumpable.Add(Adapter.onDestroyIsoThumpable)
 end
 
 return Adapter

@@ -20,20 +20,22 @@ tag 与 shell ledger identity；`OnDestroyIsoThumpable` 只作为直接 thumpabl
 `getRoom()/getRoomDef()` 作支持状态，只在当前 RV scope 内检测到 inside→outside transition
 时安排修复。
 
-拆墙修复是一个边界 lease 保护下的有限状态机，不是永久无脑刷新：`queued` → `temporary`
-→ `repairing` → `returning` → `complete`。服务端复用 `Relocate`/严格 token-only
-`RelocateAck`，从当前 boundary bitmap 的 100×100 managed scope 派生中心，并使用固定实验层
-`ROOF_REPAIR_TEMP_Z=-15`，验证当前位置已离开房间 geometry 且 repair 目标、
-墙和屋顶方格已加载后，按到达时刻后的 5/10/15 server ticks（约 0.5/1.0/1.5 秒、运行时约
-10 Hz）调用 `RV_RoofRepair`。临时阶段向客户端发送展示用“正在刷新房间”头顶提示；客户端只
-执行服务端坐标和回执，不提交坐标/世界状态。修复后仅在完整 identity、权威 relation 和玩家
-状态仍匹配时返回事件前服务端捕获的合法 RV 位置并释放 correction lease。断线、死亡、
-schema/identity 变化、加载超时或 ACK/阶段不匹配会取消并尝试权威回滚，不改持久化数据；
-服务端只记录 add/remove 已应用，不能据此宣称客户端视觉成功。
+拆墙修复是一个边界 lease 保护下的有限多玩家状态机，不是永久无脑刷新：`queued` →
+`temporary` → `repairing` → `returning` → `complete`。服务端枚举当前 RV scope 的全部
+在线玩家，逐人捕获服务端原始 `x/y/z`、identity 和当前 schema 关系；复用
+`Relocate`/严格 token-only `RelocateAck`，将所有成员送到当前 bitmap 中心减去刷新向量
+`(18000,0,15)` 的远端点（当前布局为 `(2050,2050,-15)`），跨 tick 确认全部成员到达后才
+允许继续。临时阶段向客户端发送严格 marker，客户端只显示本地 ASCII 提示并执行服务端坐标
+和回执，不提交坐标/世界状态；远端层可能没有 `GridSquare`，所以服务端以重新读取的权威
+玩家坐标作为到达条件，并保留有界跨 tick 等待；远端等待用于强制 RV 区块卸载/重载。
 
-当前实现只覆盖同 scope 的第一阶段。相同 x/y 只改 z 不触发客户端 chunk unload/reload，
-所以不把普通外移写成 chunk cycle；若运行时仍无法刷新屋顶，下一轮才按实际客户端
-chunk-grid streaming 半径设计跨 chunk 卸载/重载实验，并且没有可观测 ACK 前不得伪造成功。
+所有成员先完成服务端权威回传，再由适配层按既有进入 RV 的 `repairRoofVisuals`/geometry 路径逐人执行一次修复，
+修复/刷新异常在逐人隔离的 `pcall` 内转为明确失败，不得阻断其余成员的回传；
+再在完整 identity、权威 relation 和玩家状态仍匹配时回到每人事件前服务端捕获的合法 RV
+方格并释放 correction lease。任何中间异常、断线、死亡、对象失效、schema/identity 变化、
+加载超时或 ACK/阶段不匹配都会尝试最终逐人回传；回传失败会在 current schema/
+identity/active-square 门内进行有限服务端重试并明确提示，不改持久化数据。服务端只记录
+add/remove 已应用，不能据此宣称客户端视觉成功。
 
 职责：严格处理 `OnClientCommand`；普通 `Generate` 只接受有效玩家和空 args，Railroader `EnterRV` 只接受服务端生成的机车 id 提示，`ExitRV` 不接受可信坐标；对其他模组的共享命令直接忽略，避免把外部流量记录成 RV 拒绝。适配器通过 `installTransactionHooks()` 与 `RV_Server` 连接，以适应 B42 按文件名先加载适配器、后加载事务入口的顺序。服务端固定生成 anchor 为共享目标 `(20050,2050,0)`，并以 `isValidSquare` 预检后优先选择清场矩形正上方居中的 `(anchorX, clearMinY-1)` staging 格，位于当前 generation bounds 与新 bounds 外，再以有界搜索兜底；不得在初次传送前读取或要求远端方格已加载。B42 服务端按 64×64 cell 和 online chunk-grid width 的一半加载相关区域；客户端与服务端到达并确认 staging 安全后，在硬超时内等待完整半开 `100×100` base footprint 已加载，再清理已加载的有效 `z` 层。缺失方格在轮询中返回可重试状态而不抛 Kahlua 异常；若加载范围始终不足则硬取消且不发生部分清场。清理通过快照和服务端网络移除覆盖僵尸、石块、地表装饰、树木、杂草、灌木、地板等对象；清场成功后才进入完整房间/对象生成。若清场失败，必须短路 `buildGeneration`；若任一生成阶段失败，必须沿既有 generation 回滚路径移除本代对象。生成前仍先预检 `100×100` 底层/墙体已加载、屋顶 6×40 的世界坐标及 `z+1` 合法。跳过 `PLAYER_METAL_FLOOR`/整片金属地板阶段，仅生成房屋内部 6×40 的 `floors_interior_carpet_01_5` 地板；直墙为 `walls_interior_house_03_20`/WallN 配对 `..._21`，NW/SE 单角条为 `..._22`/`..._23`。`ROOF_FLOOR` 阶段按官方玩家建造路径，在已预检的目标范围内用 `IsoGridSquare.new` + `ConnectNewSquare(..., false)` 创建缺失的上层方格（保留运行时 API 的必要探测），校验连接结果后再 `addFloor`；已有方格直接复用。
 

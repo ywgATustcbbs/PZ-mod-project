@@ -22,6 +22,7 @@ local MENU_KEY = "ContextMenu_RailroaderRVTest_Generate"
 local COMMAND_RELOCATE = "Relocate"
 local COMMAND_RELOCATE_ACK = "RelocateAck"
 local COMMAND_FINAL_RELOCATE = C.COMMAND_FINAL_RELOCATE or "FinalRelocate"
+local ROOF_REPAIR_HALO_TEXT = "Refreshing room"
 local COMMAND_REFRESH_ROOM_OWNERSHIP = C.COMMAND_REFRESH_ROOM_OWNERSHIP
     or "RefreshRoomOwnership"
 local pendingRelocation = nil
@@ -473,10 +474,12 @@ function Client.onServerCommand(module, command, args)
     end
     if roofRepairTransition and roofRepairPhase == "temporary"
         and type(playerObj.setHaloNote) == "function" then
-        -- The text is display-only server data.  It does not grant authority,
-        -- supply a coordinate, or participate in the token acknowledgement.
+        -- The server haloText is a strict current-schema marker only.  Do not
+        -- pass a network-serialized non-ASCII value into the game renderer;
+        -- the local ASCII label avoids control-string/encoding leakage while
+        -- retaining server authority over the relocation itself.
         pcall(function()
-            playerObj:setHaloNote(args.haloText, 255, 255, 255, 1500)
+            playerObj:setHaloNote(ROOF_REPAIR_HALO_TEXT, 255, 255, 255, 1500)
         end)
     end
     -- Railroader generation removes the official seat before this staging
@@ -520,6 +523,8 @@ function Client.onServerCommand(module, command, args)
         x = x,
         y = y,
         z = z,
+        roofRepairTransition = roofRepairTransition,
+        roofRepairPhase = roofRepairPhase,
         ticks = 0,
     }
 end
@@ -549,8 +554,30 @@ function Client.onTick()
         return
     end
     local current = playerObj:getCurrentSquare()
-    if not current or current:getX() ~= pending.x or current:getY() ~= pending.y
-        or current:getZ() ~= pending.z then
+    local currentMatches = current
+        and current:getX() == pending.x and current:getY() == pending.y
+        and current:getZ() == pending.z
+    if not currentMatches and pending.roofRepairTransition
+        and pending.roofRepairPhase == "temporary"
+        and pending.ticks >= 3 then
+        -- The deliberate remote target can be a valid server coordinate with
+        -- no client GridSquare (for example the unloaded/empty -15 layer).
+        -- This acknowledgement only reports that the server command was
+        -- applied; the server still re-reads its authoritative player x/y/z
+        -- and schema context before marking the phase arrived.
+        local xOk, currentX = pcall(function() return playerObj:getX() end)
+        local yOk, currentY = pcall(function() return playerObj:getY() end)
+        local zOk, currentZ = pcall(function() return playerObj:getZ() end)
+        local numericX = finiteNumber(currentX)
+        local numericY = finiteNumber(currentY)
+        local numericZ = finiteNumber(currentZ)
+        currentMatches = xOk and yOk and zOk
+            and numericX ~= nil and numericY ~= nil and numericZ ~= nil
+            and math.floor(numericX) == pending.x
+            and math.floor(numericY) == pending.y
+            and math.floor(numericZ) == pending.z
+    end
+    if not currentMatches then
         return
     end
     -- The destination is intentionally cleaned of floors by the server, so a

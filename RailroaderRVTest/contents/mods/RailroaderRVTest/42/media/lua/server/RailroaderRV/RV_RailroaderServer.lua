@@ -46,11 +46,14 @@ local roomTransitionStates = {}
 local ROOF_REPAIR_DELAY_TICKS = 5
 local ROOF_REPAIR_ATTEMPTS = 3
 local ROOF_REPAIR_DELAY_REASON = "wall-removal-delayed"
+local ROOF_REPAIR_RETURN_TIMEOUT_TICKS = 600
 local transitionSequence = 0
 local validateMapSchema
 local recordForLoco
 local insidePlayerForRecord
+local insidePlayersForRecord
 local scheduleRoofRepair
+local beginRoofRepairPhase
 local observeRoomTransitions
 
 local function number(value)
@@ -1581,32 +1584,21 @@ scheduleRoofRepair = function(map, record, source)
     if type(map) ~= "table" or not validRecord(record) then return false end
     local roomKey = roofRepairRoomKey(record)
     if not roomKey then return false end
-    local player = insidePlayerForRecord and insidePlayerForRecord(map, record)
-        or nil
-    if not player then return false end
     if pendingWallRoofRepairs[roomKey] then return true end
-
-    local sourcePosition = playerPosition(player)
-    if not sourcePosition then return false end
-    local name = playerName(player)
-    local relation = name and map.players and map.players[name] or nil
-    local rider = name and record.players and record.players[name] or nil
-    if type(relation) ~= "table" or relation.inside ~= true
-        or tostring(relation.locoId) ~= tostring(record.locoId)
-        or type(rider) ~= "table"
-        or integer(relation.onlineId) ~= integer(rider.onlineId) then
-        return false
-    end
+    local players = insidePlayersForRecord
+        and insidePlayersForRecord(map, record) or {}
+    if #players == 0 then return false end
 
     local now = Adapter._ticks or 0
     pendingWallRoofRepairs[roomKey] = {
         roomKey = roomKey,
-        player = player,
+        player = players[1].player,
+        players = players,
         rvId = tostring(record.rvId),
         generation = integer(record.generation),
         bitmapVersion = integer(record.bitmapVersion),
-        identityKey = tostring(relation.onlineId) .. ":" .. tostring(name),
-        returnPosition = sourcePosition,
+        identityKey = players[1].identityKey,
+        returnPosition = players[1].originalPosition,
         startTick = now + 1,
         dueTicks = nil,
         nextAttempt = 1,
@@ -1686,6 +1678,43 @@ function Adapter.onDestroyIsoThumpable(object, _playerObj)
     queueWallRoofRepairForObject(object, "destroy-iso-thumpable")
 end
 
+-- Capture every live, current-schema player in the RV managed region before a
+-- wall-removal refresh.  Coordinates and identity are read from the server;
+-- the adapter passes only object references to RV_Server, which revalidates
+-- each member before arming the remote relocation.
+insidePlayersForRecord = function(map, record)
+    local result = {}
+    if type(map) ~= "table" or type(record) ~= "table"
+        or type(record.players) ~= "table" then return result end
+    local wanted = tostring(record.rvId or record.locoId)
+    local players = onlinePlayersSnapshot()
+    for i = 1, #players do
+        local player = players[i]
+        local name = playerName(player)
+        local relation = name and map.players[name] or nil
+        local rider = name and record.players[name] or nil
+        local position = playerPosition(player)
+        local currentOnlineId = playerId(player)
+        if not playerDead(player)
+            and type(relation) == "table" and relation.inside == true
+            and type(rider) == "table" and rider.inside == true
+            and tostring(relation.locoId) == wanted
+            and integer(relation.onlineId) == integer(rider.onlineId)
+            and position and inRegion(position, record.region)
+            and (currentOnlineId == nil
+                or integer(relation.onlineId) == currentOnlineId)
+            and (currentOnlineId == nil
+                or integer(rider.onlineId) == currentOnlineId) then
+            result[#result + 1] = {
+                player = player,
+                identityKey = tostring(relation.onlineId) .. ":" .. tostring(name),
+                originalPosition = copyPosition(position),
+            }
+        end
+    end
+    return result
+end
+
 insidePlayerForRecord = function(map, record, relocation)
     if type(map) ~= "table" or type(record) ~= "table"
         or type(record.players) ~= "table" then return nil end
@@ -1708,6 +1737,31 @@ insidePlayerForRecord = function(map, record, relocation)
             and position
             and (inRegion(position, record.region)
                 or (relocationActive and relocation.player == player))
+            and (currentOnlineId == nil
+                or integer(relation.onlineId) == currentOnlineId)
+            and (currentOnlineId == nil
+                or integer(rider.onlineId) == currentOnlineId) then
+            return player
+        end
+    end
+    -- The temporary roof transaction is already bound to this exact server
+    -- player and identity.  Keep that authoritative reference usable while
+    -- the player is outside the RV scope; the normal online-player snapshot
+    -- can briefly omit a freshly streamed staging square.  Disconnect,
+    -- death, relation and online-ID checks remain fail-closed.
+    if relocationActive and relocation.player then
+        local player = relocation.player
+        local name = playerName(player)
+        local relation = name and map.players[name] or nil
+        local rider = name and record.players[name] or nil
+        local position = playerPosition(player)
+        local currentOnlineId = playerId(player)
+        if not playerDead(player)
+            and type(relation) == "table" and type(rider) == "table"
+            and relation.inside == true and rider.inside == true
+            and tostring(relation.locoId) == wanted
+            and integer(relation.onlineId) == integer(rider.onlineId)
+            and position
             and (currentOnlineId == nil
                 or integer(relation.onlineId) == currentOnlineId)
             and (currentOnlineId == nil
@@ -1802,9 +1856,237 @@ local function cancelPendingWallRoofRepair(roomKey, pending, reason)
         .. tostring(roomKey) .. " reason=" .. tostring(reason))
 end
 
-local function beginRoofRepairPhase(player, pending, phase)
+local function processPendingWallRoofRepairGroup(map, pending, record, server,
+    now)
+    if type(pending.players) ~= "table" or #pending.players < 1 then
+        cancelPendingWallRoofRepair(pending.roomKey, pending,
+            "roof repair group has no saved authoritative players")
+        return
+    end
+    if pending.relocationPhase == "queued" then
+        if now >= (pending.startTick or now + 1) then
+            local started, detail = beginRoofRepairPhase(nil, pending,
+                "temporary")
+            if not started then
+                cancelPendingWallRoofRepair(pending.roomKey, pending, detail)
+            else
+                pending.relocationStarted = true
+                pending.relocationPhase = "temporary"
+                pending.relocationToken = detail
+                print("[RailroaderRVTest] roof repair group temporary relocation started room="
+                    .. pending.roomKey .. " members="
+                    .. tostring(#pending.players) .. " token=" .. tostring(detail))
+            end
+        end
+        return
+    end
+    if pending.relocationPhase == "temporary" then
+        local readyFn = type(server.roofRepairRelocationGroupReady) == "function"
+            and server.roofRepairRelocationGroupReady
+        local ready = readyFn and readyFn(pending.rvId, pending.generation,
+            pending.bitmapVersion) or false
+        if not ready then return end
+        for i = 1, #pending.players do
+            local saved = pending.players[i]
+            local arrival = server.consumeRoofRepairRelocationArrival(
+                saved.player)
+            if not arrival then return end
+            saved.player = arrival.player or saved.player
+            saved.remoteArrived = true
+        end
+        pending.relocationPhase = "repairing"
+        pending.repairStartTick = now
+        pending.dueTicks = {}
+        pending.nextAttempt = 1
+        for attempt = 1, ROOF_REPAIR_ATTEMPTS do
+            pending.dueTicks[attempt] = now
+                + attempt * ROOF_REPAIR_DELAY_TICKS
+        end
+        print("[RailroaderRVTest] roof repair group remote relocation ready room="
+            .. pending.roomKey .. " members=" .. tostring(#pending.players)
+            .. " target=rv-center-minus-offset dueTicks="
+            .. table.concat(pending.dueTicks, ","))
+        return
+    end
+    if pending.relocationPhase == "repairing" then
+        local attempt = integer(pending.nextAttempt)
+        local dueTick = attempt and pending.dueTicks
+            and integer(pending.dueTicks[attempt]) or nil
+        if not attempt or attempt < 1 or attempt > ROOF_REPAIR_ATTEMPTS
+            or not dueTick then
+            cancelPendingWallRoofRepair(pending.roomKey, pending,
+                "malformed roof repair group remote wait schedule")
+            return
+        end
+        if now < dueTick then return end
+        -- Keep the complete group remote for the requested cross-tick cycle;
+        -- repair is intentionally invoked only after every member returns.
+        print("[RailroaderRVTest] roof repair group remote wait room="
+            .. pending.roomKey .. " attempt=" .. tostring(attempt) .. "/"
+            .. tostring(ROOF_REPAIR_ATTEMPTS) .. " result=deferred")
+        pending.nextAttempt = attempt + 1
+        if attempt >= ROOF_REPAIR_ATTEMPTS then
+            local started, detail = beginRoofRepairPhase(nil, pending, "return")
+            if not started then
+                cancelPendingWallRoofRepair(pending.roomKey, pending, detail)
+            else
+                pending.relocationPhase = "returning"
+                pending.returnToken = detail
+                pending.returnArrived = false
+                pending.returnRepairAttempted = {}
+                pending.returnCompleted = {}
+                pending.returnRepairDeadline = now
+                    + ROOF_REPAIR_RETURN_TIMEOUT_TICKS
+                print("[RailroaderRVTest] roof repair group return relocation started room="
+                    .. pending.roomKey .. " members="
+                    .. tostring(#pending.players) .. " token=" .. tostring(detail))
+            end
+        end
+        return
+    end
+    if pending.relocationPhase == "returning" then
+        for i = 1, #pending.players do
+            local saved = pending.players[i]
+            if not saved.returnArrived then
+                local arrival = server.consumeRoofRepairRelocationArrival(
+                    saved.player)
+                if arrival then
+                    saved.player = arrival.player or saved.player
+                    saved.returnArrived = true
+                end
+            end
+        end
+        local allArrived = true
+        for i = 1, #pending.players do
+            if not pending.players[i].returnArrived then
+                allArrived = false
+                break
+            end
+        end
+        if not allArrived then return end
+
+        -- Complete the authoritative return for every member before invoking
+        -- any repair/refresh callback.  A repair exception or a temporarily
+        -- unavailable chunk must never strand a player in the remote target.
+        for i = 1, #pending.players do
+            local saved = pending.players[i]
+            if not pending.returnCompleted[i] then
+                local completeCallOk, completed, detail = pcall(
+                    server.completeRoofRepairRelocation, saved.player,
+                    pending.returnToken)
+                if completeCallOk and completed == true then
+                    pending.returnCompleted[i] = true
+                elseif completeCallOk then
+                    print("[RailroaderRVTest] roof repair group return wait player="
+                        .. tostring(saved.identityKey) .. " detail="
+                        .. tostring(detail or completed))
+                else
+                    print("[RailroaderRVTest] roof repair group return error player="
+                        .. tostring(saved.identityKey) .. " detail="
+                        .. tostring(completed))
+                end
+            end
+        end
+
+        -- This is the same server-authoritative roof/geometry repair path used
+        -- by existing RV entry. It runs only after the physical return has
+        -- been observed; every callback is bounded/isolated so it cannot
+        -- interrupt the remaining members' return handling.
+        for i = 1, #pending.players do
+            local saved = pending.players[i]
+            if not pending.returnRepairAttempted[i] then
+                local loaded, loadedDetail = false,
+                    "roof repair squares are not loaded after return"
+                local loadedCallOk, loadedResult, loadedReason = pcall(
+                    server.roofRepairSquaresLoaded, saved.player, record)
+                if loadedCallOk then
+                    loaded, loadedDetail = loadedResult, loadedReason
+                else
+                    loadedDetail = tostring(loadedResult)
+                end
+                if loaded == true then
+                    local repairCallOk, repaired, detail = pcall(
+                        repairRoofForPlayer, saved.player, record, true,
+                        "remote-reload-return")
+                    if not repairCallOk then
+                        detail = tostring(repaired)
+                        repaired = false
+                    end
+                    print("[RailroaderRVTest] roof repair returned player="
+                        .. tostring(saved.identityKey) .. " result="
+                        .. (repaired and "applied" or "deferred") .. " detail="
+                        .. tostring(detail or "unknown"))
+                    if repaired ~= true then
+                        sendResult(saved.player, false,
+                            detail or "roof repair after remote reload was deferred")
+                    end
+                    pending.returnRepairAttempted[i] = true
+                elseif now > (pending.returnRepairDeadline or now + 1) then
+                    sendResult(saved.player, false,
+                        loadedDetail or "roof repair squares are not loaded after return")
+                    pending.returnRepairAttempted[i] = true
+                    print("[RailroaderRVTest] roof repair after return exhausted player="
+                        .. tostring(saved.identityKey) .. " detail="
+                        .. tostring(loadedDetail or "roof repair squares are not loaded after return"))
+                end
+            end
+        end
+        local allCompleted = true
+        local allRepairAttempted = true
+        for i = 1, #pending.players do
+            if not pending.returnCompleted[i] then
+                allCompleted = false
+            end
+            if not pending.returnRepairAttempted[i] then
+                allRepairAttempted = false
+            end
+        end
+        if allCompleted and allRepairAttempted then
+            pending.relocationPhase = "complete"
+            pendingWallRoofRepairs[pending.roomKey] = nil
+            print("[RailroaderRVTest] roof repair group transaction complete room="
+                .. pending.roomKey .. " members=" .. tostring(#pending.players)
+                .. " repair=applied return=acknowledged")
+        end
+        return
+    end
+    cancelPendingWallRoofRepair(pending.roomKey, pending,
+        "unknown roof repair group transaction phase")
+end
+
+beginRoofRepairPhase = function(player, pending, phase)
     local server = RailroaderRV and RailroaderRV.Server
-    if not server or type(server.beginRoofRepairRelocation) ~= "function" then
+    if not server then
+        return false, "roof repair relocation service is unavailable"
+    end
+    if type(pending.players) == "table" then
+        if type(server.beginRoofRepairRelocationGroup) ~= "function" then
+            return false, "roof repair group relocation service is unavailable"
+        end
+        local descriptors = {}
+        for i = 1, #pending.players do
+            local saved = pending.players[i]
+            descriptors[#descriptors + 1] = {
+                player = saved.player,
+                identityKey = saved.identityKey,
+            }
+        end
+        local ok, started, detail = pcall(
+            server.beginRoofRepairRelocationGroup, {
+                roomKey = pending.roomKey,
+                rvId = pending.rvId,
+                generation = pending.generation,
+                bitmapVersion = pending.bitmapVersion,
+                phase = phase,
+                players = phase == "temporary" and descriptors or nil,
+            })
+        if not ok then return false, tostring(started) end
+        if started ~= true then
+            return false, detail or "roof repair group relocation was rejected"
+        end
+        return true, detail
+    end
+    if type(server.beginRoofRepairRelocation) ~= "function" then
         return false, "roof repair relocation service is unavailable"
     end
     local ok, started, detail = pcall(server.beginRoofRepairRelocation, player, {
@@ -1860,11 +2142,15 @@ local function processPendingWallRoofRepairs()
                     cancelPendingWallRoofRepair(roomKey, pending,
                         "identity-mismatch")
                 else
-                    local player = insidePlayerForRecord(map, record, pending)
-                    if not player then
+                    if type(pending.players) == "table" then
+                        processPendingWallRoofRepairGroup(map, pending, record,
+                            server, now)
+                    else
+                        local player = insidePlayerForRecord(map, record, pending)
+                        if not player then
                         cancelPendingWallRoofRepair(roomKey, pending,
                             "no-authoritative-inside-player")
-                    elseif pending.relocationPhase == "queued" then
+                        elseif pending.relocationPhase == "queued" then
                         if now >= (pending.startTick or now + 1) then
                             local started, detail = beginRoofRepairPhase(player,
                                 pending, "temporary")
@@ -1896,7 +2182,7 @@ local function processPendingWallRoofRepairs()
                                         + attempt * ROOF_REPAIR_DELAY_TICKS
                                 end
                                 print("[RailroaderRVTest] roof repair temporary relocation ready room="
-                                    .. roomKey .. " target=managed-center-tempZ(-15)"
+                                    .. roomKey .. " target=server-selected-staging"
                                     .. " dueTicks="
                                     .. table.concat(pending.dueTicks, ","))
                             end
@@ -1983,9 +2269,10 @@ local function processPendingWallRoofRepairs()
                                         or completed))
                             end
                         end
-                    else
-                        cancelPendingWallRoofRepair(roomKey, pending,
-                            "unknown roof repair transaction phase")
+                        else
+                            cancelPendingWallRoofRepair(roomKey, pending,
+                                "unknown roof repair transaction phase")
+                        end
                     end
                 end
             end

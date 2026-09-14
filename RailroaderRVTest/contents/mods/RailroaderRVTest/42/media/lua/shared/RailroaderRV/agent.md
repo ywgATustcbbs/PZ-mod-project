@@ -14,11 +14,11 @@ edgeKey 表示，不能按 inactive anchor cell 删除。
 bitmap 快照和 shell edge ledger 的持久化 identity 均要求正整数
 `bitmapVersion`，与 `rvId/generation` 一起参与边界缓存、对象标签和 stale
 数据拒绝；不完整 identity 不得被当作当前 RV 的几何证据。
-roof-refresh 的临时传送点 XY 必须由当前 boundary bitmap/manifest 的
-`originX + floor(width/2)`、`originY + floor(height/2)` 派生；Z 使用服务端固定实验常量
-`ROOF_REPAIR_TEMP_Z=-15`，不读取建筑 `minZ`、旧 bounds 或客户端坐标。该同 scope、同 x/y
-的外移不宣称会触发
-客户端 chunk unload/reload；若第一阶段运行时失败，跨 chunk 方案另行设计。
+roof-refresh 的远端传送点必须由当前 boundary bitmap/manifest 的
+`originX + floor(width/2)`、`originY + floor(height/2)`、`minZ` 派生，再动态减去当前刷新
+向量 `(18000,0,15)`；不得使用绝对远端坐标、旧 bounds 或客户端坐标。当前布局结果为
+`(2050,2050,-15)`，用于跨 chunk unload/reload；所有 RV scope 内玩家必须逐人记录并最终
+回传，回传后复用既有 repair/geometry 路径。
 `COMMAND_REFRESH_ROOM_OWNERSHIP` 固定声明服务端向所有客户端广播 stale-room guard 的共享命令名；边界内容仍只能由服务端 manifest 与布局产生。
 
 schema 只支持当前版本：manifest、bitmap、shell ledger、RV mapping 和异步身份的

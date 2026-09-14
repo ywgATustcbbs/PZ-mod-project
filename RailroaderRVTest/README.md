@@ -22,26 +22,20 @@ Railroader RV 的程序化生成技术验证包。RailroaderMP 的功能已合�
 30-tick current map/presence 流程会读取 authoritative player square 的 `isInARoom()`（并采样
 `getRoom()/getRoomDef()`），只在当前 RV scope 内观察到 inside→outside transition 时安排修复。
 
-每个命中事件都启动一个短时、服务端权威的 roof-refresh 事务：先复用现有 `Relocate`/严格
-token-only `RelocateAck`，把玩家移到当前 boundary bitmap 声明的 100×100 managed scope 中心
-与固定的实验层 `ROOF_REPAIR_TEMP_Z=-15`，等待当前位置脱离有效房间 geometry
-且临时方格/相关墙屋顶方格已加载，再在到达后的 5/10/15 server ticks（约
-0.5/1.0/1.5 秒，运行时约 10 Hz）各执行一次既有木地板 add/remove 修复。临时传送期间服务端
-发送仅用于展示的中文头顶提示“正在刷新房间”；客户端不提交坐标或世界状态。修复完成后，
-只有完整 `rvId:generation:bitmapVersion` identity、关系和当前位置仍匹配时，才把玩家送回
-事件前服务端捕获的合法 RV 位置并释放 boundary correction lease。断线、死亡、身份/schema
-变化、加载超时或阶段/ACK 不匹配会安全取消并尝试回滚，不修改存档；服务端日志只报告已应用
-的权威 add/remove，不能把它冒充为客户端视觉成功。
+每个命中事件都启动一个短时、服务端权威的 roof-refresh 事务：枚举当前 RV scope 内全部
+在线玩家，逐人记录服务端权威的原始 `x/y/z` 与 identity，再复用现有 `Relocate`/严格
+token-only `RelocateAck` 将所有成员送到当前 bitmap 中心减去刷新向量 `(18000,0,15)` 的
+远端点（当前布局为 `(2050,2050,-15)`）。远端移动必须跨 tick 完成并等待所有成员到达，
+以强制 RV 区块卸载/重载；远端合法坐标可能暂时没有客户端 `GridSquare`，服务端仍以重新
+读取的权威玩家坐标推进阶段，等待期间不运行局部 repair。服务端只接受当前 schema/manifest/
+bitmap 身份，不读取客户端坐标或旧 bounds。
 
-临时点的 XY 只由当前 100×100 scope 的 `originX + floor(width/2)`、
-`originY + floor(height/2)` 在服务端计算；Z 使用上述显式 `-15` 实验常量，不读取
-bitmap/manifest 的建筑 `minZ`，也不探查或猜测引擎全局最低层。若运行时证据表明该层不适合，
-后续只在用户指定的 `-10..-20` 范围内逐次调整这一常量。
-
-当前只实现上述同 scope 临时外移阶段；同 x/y 只改 z 不会触发客户端 chunk unload/reload，
-因此不宣称已完成 chunk cycle。若第一阶段运行时仍不能刷新屋顶，下一轮实验再根据实际
-client chunk-grid streaming 半径选择足够远的其他 chunk，观测卸载/重载后再修复；当前不跨
-chunk 强制传送，也不伪造 unload/reload ACK。
+所有成员先远移返回并释放各自的 boundary correction lease，随后服务端按进入已有 RV 的同一
+`repairRoofVisuals`/roof geometry 路径对每个仍在线成员执行一次修复；修复/刷新异常被逐人
+隔离并转为明确失败，不能阻断其余成员的回传。任何中间异常、断线、死亡、对象失效、身份/schema 变化、加载
+超时或阶段/ACK 不匹配都会进入最终逐人回传；首选回传失败时仅在 current-schema/
+identity/active-square 门内进行有限服务端重试，并明确失败提示，不修改存档。服务端日志只
+报告权威 add/remove 应用，不能把它冒充为客户端视觉成功。
 
 每个已生成 RV 的记录带有独立 `rvId + generation + bitmapVersion`。`RV_Bitmap.lua` 保存每个管理 z 层的两个 100×100 packed bitset：`walkBits` 是 active/inactive 移动几何，`buildBits` 是可建造几何；bitmap 的 cell 结果是最终判定，AABB 只用于遍历和粗筛。半开 scope 为 `[originX,originX+100)`、`[originY,originY+100)`、`[minZ,maxZ)`，所有新增边界入口先经同一 scope resolver，当前位置在 scope 外一律不拦截、不传送，cleanup 也不会访问 scope 外方格。
 

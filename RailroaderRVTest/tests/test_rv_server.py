@@ -630,7 +630,7 @@ def main() -> int:
                     token in scheduled_roof
                     for token in (
                         "validRecord(record)",
-                        "insidePlayerForRecord(map, record)",
+                        "insidePlayersForRecord(map, record)",
                         "pendingWallRoofRepairs[roomKey]",
                         "dueTicks",
                         "nextAttempt",
@@ -746,12 +746,15 @@ def main() -> int:
             and "Bitmap.decode(manifest.boundary.bitmap)" in roof_relocation
             and "originX + math.floor(width / 2)" in roof_relocation
             and "originY + math.floor(height / 2)" in roof_relocation
-            and "local ROOF_REPAIR_TEMP_Z = -15" in server
-            and "z = ROOF_REPAIR_TEMP_Z" in roof_relocation
+            and "ROOF_REPAIR_REMOTE_OFFSET_X" in roof_relocation
+            and "ROOF_REPAIR_REMOTE_OFFSET_Y" in roof_relocation
+            and "ROOF_REPAIR_REMOTE_OFFSET_Z" in roof_relocation
+            and "centerZ - ROOF_REPAIR_REMOTE_OFFSET_Z" in roof_relocation
+            and "targetKind=rv-center-minus-offset" in server
             and "roofRepairTemporarySquareSafe" in roof_relocation
             and "roof repair temporary destination is still room geometry"
             in roof_relocation,
-            "roof relocation does not derive the current bitmap center/fixed temp layer or leave room geometry",
+            "roof relocation does not derive a current-schema remote center-minus-offset target",
         )
         roof_relocation_service = section(
             server,
@@ -781,6 +784,13 @@ def main() -> int:
             "roof relocation server tick does not wait for authoritative arrival/readiness",
         )
         checks.true(
+            "allowMissingSquare" in roof_relocation
+            and "type(allowedPlayers) == \"table\"" in roof_relocation
+            and "pending.roofRepairTransition" in client
+            and "pending.roofRepairPhase == \"temporary\"" in client,
+            "remote roof relocation cannot acknowledge a valid unloaded target across ticks",
+        )
+        checks.true(
             all(token in client for token in (
                 "roofRepairTransition", "roofRepairPhase",
                 'args.haloText ~= "正在刷新房间"',
@@ -793,9 +803,25 @@ def main() -> int:
             and "roofRepairSquaresLoaded" in railroader_server
             and "pending.dueTicks[attempt] = now" in railroader_server
             and "attempt * ROOF_REPAIR_DELAY_TICKS" in railroader_server
-            and "returnPosition = sourcePosition" in railroader_server
+            and "originalPosition = copyPosition(position)" in railroader_server
+            and "beginRoofRepairRelocationGroup" in railroader_server
+            and "remote-reload-return" in railroader_server
             and "relocation.relocationStarted == true" in railroader_server,
-            "Railroader adapter does not implement delayed loaded-square repair and captured-position return",
+            "Railroader adapter does not implement grouped remote reload, repair and captured-position return",
+        )
+        group_flow = section(
+            railroader_server,
+            r"local function processPendingWallRoofRepairGroup",
+            r"beginRoofRepairPhase = function",
+        )
+        checks.true(
+            group_flow is not None
+            and "server.completeRoofRepairRelocation" in group_flow
+            and "pcall(\n                        repairRoofForPlayer" in group_flow
+            and "allRepairAttempted" in group_flow
+            and group_flow.find("server.completeRoofRepairRelocation")
+                < group_flow.find("server.roofRepairSquaresLoaded"),
+            "group return does not complete per-player return before isolating repair callbacks",
         )
         checks.true(
             "Events.OnObjectAboutToBeRemoved.Add(Adapter.onObjectAboutToBeRemoved)"
@@ -2700,10 +2726,11 @@ def main() -> int:
             "README still documents the retired vanilla lamp or Facing=E assumption",
         )
         checks.true(
-            "当前只实现上述同 scope 临时外移阶段" in readme
-            and "chunk unload/reload" in readme
-            and "第一阶段运行时仍不能刷新屋顶" in readme,
-            "README does not distinguish the first roof relocation phase from deferred chunk-cycle work",
+            "全部" in readme
+            and "(18000,0,15)" in readme
+            and "chunk" in readme
+            and "逐人回传" in readme,
+            "README does not document the grouped remote chunk-cycle roof refresh",
         )
 
     checks.true(runner_path.is_file(), f"one-click test runner is missing: {runner_path}")

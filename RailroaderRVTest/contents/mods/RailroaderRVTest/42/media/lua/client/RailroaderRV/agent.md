@@ -55,12 +55,14 @@ room ID 不得被修改，也不得调用 `setRoom(nil)`、`ResetIsoWorldRegion`
 `dirtyRecalcGridStack` 等字段（Kahlua 会报 `attempted index of non-table`）。屋顶视觉
 修复以服务端在房车西北墙角西侧临时添加并删除木地板的事务为事实源，客户端刷新不替代
 该事务。拆墙后的第一阶段 roof-refresh 复用同一 `Relocate`/严格 token-only `RelocateAck`：
-服务端把玩家移到当前 boundary bitmap 声明的 100×100 scope 中心与固定实验层
-`ROOF_REPAIR_TEMP_Z=-15`，客户端只执行服务端坐标并回执 token；临时阶段以
-`setHaloNote("正在刷新房间",255,255,255,1500)`
-显示中文提示。客户端不提交目标坐标、回程位置、加载状态或地板动作，服务端在到达后的
-5/10/15 tick 完成权威修复后另发回程命令。同 x/y 改 z 不构成 chunk unload/reload；跨 chunk
-方案留待第一阶段运行时失败后设计。
+服务端枚举 RV scope 内全部玩家，将每个客户端送到当前 bitmap 中心减去 `(18000,0,15)` 的远端
+点，客户端只执行服务端坐标并回执 token；临时阶段只校验网络 marker，并以本地 ASCII
+`setHaloNote("Refreshing room",255,255,255,1500)`
+显示提示，避免网络非 ASCII 字符串泄漏到渲染器。客户端不提交目标坐标、回程位置、加载状态或地板动作；
+远端合法坐标可能暂时没有客户端 `GridSquare`，此时客户端只在有界 tick 后按本地传送坐标回执，
+服务端仍必须重新读取权威玩家坐标、身份和当前 schema 才能推进阶段；
+服务端等待所有成员完成远端跨 tick 后逐人回传，并复用进入 RV 的 repair/geometry 路径。失败时
+服务端负责最终逐人回传与有限重试。
 
 房车内部退出入口同时注册在 `OnPreFillWorldObjectContextMenu` 和
 `OnFillWorldObjectContextMenu`：官方后一个事件在右键目标没有可抓取世界对象时会被

@@ -5,7 +5,12 @@
 
 职责：发送无坐标、空参数的生成意图；接受初次 `Relocate` 后将服务端选定的 current-schema
 managed scope 中心 `z=-15` staging 坐标应用到匹配本地玩家，并只回传无坐标 token；该阶段
-以严格 `generationTransition=true`/`generationPhase=temporary` 标记显示本地常量“正在生成房车”。
+以严格 `generationTransition=true`/`generationPhase=temporary` 标记显示本地语义常量“正在生成房车”；
+B42 渲染器不稳定显示非 ASCII halo 文本，因此实际 `setHaloNote` 使用本地 ASCII
+`"Generating RV"`，不读取或传输网络提示正文。
+服务端 current-schema gate 失败时只发送稳定原因码 `SAVE_REBUILD_REQUIRED`；客户端仅匹配该
+本地原因常量，并用 ASCII `setHaloNote("Delete this test save and rebuild it",...)` 明确提示删除该测试存档并重建。
+网络原因正文不作为 UI 渲染，也不触发旧存档传送、迁移或兼容；其他失败仍保留原有诊断行为。
 建造完成后
 接受独立 `FinalRelocate` 入室命令，在处理器内同步清理 `room!=nil && RoomDef==nil`
 引用后，将服务端选定的 `(20050.5,2050.5,0)` 应用到本地玩家，不发送 ack，也不把

@@ -1,6 +1,8 @@
 # tests
 
-结构：`test_rv_server.py` 为标准库 Python 静态与纯契约测试；Lua 语法检查使用项目内
+结构：`test_rv_server.py` 为标准库 Python 静态与纯契约测试；服务端 facade 的
+`RV_ServerUtil.lua`、`RV_ServerWorld.lua`、`RV_ServerSchema.lua` 与
+`RV_Server.lua` 按独立 require chunk 检查；Lua 语法检查使用项目内
 `.rv-lua-parse/node_modules/.bin/luaparse.cmd`，不依赖游戏运行时；项目禁用 PowerShell 测试脚本。
 
 职责：快速检查当前房间/对象生成阶段的固定 `(20050,2050,0)` anchor、由当前 layout/bitmap 管理 scope 中心计算且固定为 `z=-15` 的首次 generation staging 传送（不再使用边缘点）、服务端与客户端使用相同 staging 坐标、传送前仅用 `isValidSquare` 的目标/footprint 合法性预检及其先于 Relocate/`teleportTo` 的顺序、严格半开区间 `x=[20000,20100)`、
@@ -35,7 +37,8 @@ entry 与 presence/reconnect 还必须由服务端按当前 manifest/mapping ide
 重连回传；服务器重启不恢复该事务。玩家仍在 `z=-15` 时不得清理上下文或以 repair
 成功掩盖回传失败，回传重试不设耗尽清理；并断言 return-before-repair 门、稳定 follow-up
 墙事件队列、无状态 `z=-15` 哨兵以及 current-only exact-field 验证；
-并回归验证 RelocateAck 后服务端位置首次不匹配只等待、不生成且不取消，精确到达后才生成，
+并回归验证 FinalRelocateAck 到达时服务端位置若暂时不匹配只允许一次服务端目标重断言，
+仍不匹配则不生成且不取消，精确到达后才生成，
 以及等待期间的超时、断线、身份变化、存活和权限检查仍安全取消；
 房间/对象生成调用必须在清场成功门控之后启用；不应有 `PLAYER_METAL_FLOOR`/整片金属地板阶段，
 但仍应生成 6×40 `floors_interior_carpet_01_5` 地板、7×41 墙环和对象；测试应锁定
@@ -44,6 +47,10 @@ entry 与 presence/reconnect 还必须由服务端按当前 manifest/mapping ide
 `FinalRelocate` 到 `(20050.5,2050.5,0)`，最终命令不进入初次 token-only ack。测试精确断言清场失败会短路、生成或最终传送失败进入既有 generation 回滚路径。最终运行时联机验证仍由游戏环境完成。
 
 运行：`python RailroaderRVTest/tests/test_rv_server.py`。
+
+测试还用本地 luaparse AST 统计每个服务端 require chunk 的主作用域局部变量；
+`RV_Server.lua` 目标保持在 200 限制以下（当前实现约 149），并检查 Util/World/Schema
+及 Railroader adapter 各自独立留有余量。
 
 兼容性：测试脚本只使用 Python 标准库；读取仓库文本时接受 UTF-8 与 UTF-8 BOM，且不启动
 服务器或游戏。后续新增静态断言应保持无运行时副作用。

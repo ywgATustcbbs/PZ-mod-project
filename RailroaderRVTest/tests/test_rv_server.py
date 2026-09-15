@@ -77,10 +77,51 @@ def run_lua_syntax_checks(root: Path, checks: Checks) -> None:
         )
 
 
+def lua_top_level_local_count(root: Path, lua_file: Path) -> int | None:
+    """Count the locals active in a Lua chunk's main function.
+
+    Kahlua's 200-local limit applies to the chunk scope, so nested function
+    locals are intentionally not included.  Use the same local luaparse
+    dependency as the syntax check instead of a regex that would count every
+    nested helper variable.
+    """
+
+    module_root = root / ".rv-lua-parse" / "node_modules"
+    script = (
+        "const fs=require('fs'),p=require('luaparse');"
+        "const a=p.parse(fs.readFileSync(process.argv[1],'utf8'));"
+        "let n=0;for(const s of a.body){"
+        "if(s.type==='LocalStatement')n+=s.variables.length;"
+        "else if(s.type==='FunctionDeclaration'&&s.isLocal)n++;}"
+        "process.stdout.write(String(n));"
+    )
+    try:
+        result = subprocess.run(
+            ["node", "-e", script, str(lua_file)],
+            cwd=module_root,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return None
+
+
 def main() -> int:
     root = Path(__file__).resolve().parents[2]
     package_root = root / "RailroaderRVTest" / "contents" / "mods" / MOD_ID / "42"
     server_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server.lua"
+    server_util_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_ServerUtil.lua"
+    server_world_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_ServerWorld.lua"
+    server_schema_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_ServerSchema.lua"
     client_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_ContextMenu.lua"
     railroader_server_path = (
         package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_RailroaderServer.lua"
@@ -106,6 +147,9 @@ def main() -> int:
         "PowerShell test files are disabled; use the Python test instead",
     )
     checks.true(server_path.is_file(), f"server Lua is missing: {server_path}")
+    checks.true(server_util_path.is_file(), f"server utility Lua is missing: {server_util_path}")
+    checks.true(server_world_path.is_file(), f"server world Lua is missing: {server_world_path}")
+    checks.true(server_schema_path.is_file(), f"server schema Lua is missing: {server_schema_path}")
     checks.true(client_path.is_file(), f"client Lua is missing: {client_path}")
     checks.true(
         railroader_server_path.is_file(),
@@ -128,7 +172,17 @@ def main() -> int:
     checks.true(start_bat_path.is_file(), f"server launcher batch is missing: {start_bat_path}")
 
     if server_path.is_file() and client_path.is_file():
-        server = read_utf8(server_path)
+        server_facade = read_utf8(server_path)
+        server_util = read_utf8(server_util_path) if server_util_path.is_file() else ""
+        server_world = read_utf8(server_world_path) if server_world_path.is_file() else ""
+        server_schema = read_utf8(server_schema_path) if server_schema_path.is_file() else ""
+        # Existing contract checks intentionally inspect one logical server
+        # surface.  Include each require chunk, then normalize only the
+        # private module qualifier so assertions continue to cover helpers
+        # after the split.  Dedicated checks below still verify the facade's
+        # imports and per-chunk local budgets.
+        server = "\n".join((server_util, server_world, server_schema, server_facade))
+        server = re.sub(r"\bServer(?:Util|World|Schema)\.", "", server)
         client = read_utf8(client_path)
         railroader_server = (
             read_utf8(railroader_server_path)
@@ -147,6 +201,26 @@ def main() -> int:
         boundary_client = (
             read_utf8(boundary_client_path) if boundary_client_path.is_file() else ""
         )
+
+        checks.true(
+            'require("RailroaderRV/RV_ServerUtil")' in server_facade
+            and 'require("RailroaderRV/RV_ServerWorld")' in server_facade
+            and 'require("RailroaderRV/RV_ServerSchema")' in server_facade,
+            "RV_Server facade does not load the split utility/world/schema modules",
+        )
+        local_budgets = (
+            ("RV_Server.lua", server_path),
+            ("RV_ServerUtil.lua", server_util_path),
+            ("RV_ServerWorld.lua", server_world_path),
+            ("RV_ServerSchema.lua", server_schema_path),
+            ("RV_RailroaderServer.lua", railroader_server_path),
+        )
+        for label, lua_file in local_budgets:
+            local_count = lua_top_level_local_count(root, lua_file)
+            checks.true(
+                local_count is not None and local_count < 200,
+                f"{label} exceeds or cannot prove the Kahlua main-chunk local budget: {local_count}",
+            )
 
         checks.true(
             all(token in bitmap for token in (
@@ -185,6 +259,13 @@ def main() -> int:
             and "if not ok or current == nil then return false end" in boundary_server
             and "if not sq then return end" in boundary_server,
             "server boundary state advances across unloaded squares",
+        )
+        checks.true(
+            "authoritative object is intentionally in a different chunk" in boundary_server
+            and "processing resumes after completeTransition" in boundary_server
+            and "local state = stateFor(player)" in boundary_server
+            and "if not state or not transitionActive(state) then" in boundary_server,
+            "boundary OnTick still scans RV geometry through a remote roof-relocation cell",
         )
         checks.true(
             all(token in boundary_server for token in (
@@ -872,10 +953,20 @@ def main() -> int:
             "roof relocation server tick does not wait for authoritative arrival/readiness",
         )
         checks.true(
+            roof_server_tick is not None
+            and "applyRoofRepairTeleport" in roof_server_tick
+            and "return target wait" in roof_server_tick
+            and "returnTargetLogTick" in roof_server_tick,
+            "roof return does not reassert server float coordinates or expose target proof waits",
+        )
+        checks.true(
             "allowMissingSquare" in roof_relocation
             and "type(allowedPlayers) == \"table\"" in roof_relocation
             and "pending.roofRepairTransition" in client
-            and "pending.roofRepairPhase == \"temporary\"" in client,
+            and "pending.roofRepairPhase == \"temporary\"" in client
+            and "pending.roofRepairPhase == \"return\"" in client
+            and "completeRoofRepairRelocation" in server
+            and "roofRepairSquaresLoaded" in server,
             "remote roof relocation cannot acknowledge a valid unloaded target across ticks",
         )
         checks.true(
@@ -1015,6 +1106,18 @@ def main() -> int:
                 )
             ),
                 "all-player Enter/Exit paths do not honor the current RV roof transaction mutex",
+        )
+        roof_owner = section(
+            railroader_server,
+            r"roofRepairOwnsPlayer = function",
+            r"serverTransactionMutexStatus = function",
+        )
+        checks.true(
+            roof_owner is not None
+            and "queuedRoofRepairClaims(identityKey)" in roof_owner
+            and "isRoofRepairTransactionActive" in roof_owner
+            and "roofActive ~= true" in roof_owner,
+            "adapter roof-owner gate confuses a generation claim with roof repair",
         )
         checks.true(
             "local function currentGeometryGate" in railroader_server
@@ -1925,6 +2028,32 @@ def main() -> int:
                 "final relocation is not fixed to the house interior center",
             )
 
+        final_ack = section(
+            server,
+            r"local function acknowledgeFinalRelocation",
+            r"local function rollbackPendingGenerationWorld",
+        )
+        checks.true(
+            final_ack is not None
+            and "finalRelocationReasserted" in final_ack
+            and "callSucceeded(livePlayerOrReason" in final_ack
+            and "final relocation target proof mismatch" in final_ack,
+            "final relocation ACK does not perform one bounded server-target reassertion",
+        )
+        final_generation = section(
+            server,
+            r"local function finalizeGenerationAfterRelocate",
+            r"local function queueGeneration",
+        )
+        checks.true(
+            final_generation is not None
+            and "final relocation authoritative target is still synchronizing" in final_generation
+            and "final relocation target pending" in final_generation
+            and 'callSucceeded(player' in final_generation
+            and '"teleportTo", target.x, target.y, target.z' in final_generation,
+            "generation finalization does not wait for a post-update authoritative target proof",
+        )
+
         tick = section(
             server,
             r"function RV\.Server\.OnTick\(\)",
@@ -1958,6 +2087,11 @@ def main() -> int:
             checks.true(
                 "pendingGeneration = nil" in tick,
                 "pending generation is not cleared after completion/failure",
+            )
+            checks.true(
+                "final relocation target synchronization timed out" in tick
+                and "final relocation authoritative target is still synchronizing" in tick,
+                "generation OnTick treats stale final-relocation coordinates as an immediate hard failure",
             )
             server_teleport_pos = server.find('callSucceeded(player, "teleportTo"')
             wait_call_pos = server.find("local targetLoaded, targetLoadReason")
@@ -2239,6 +2373,13 @@ def main() -> int:
             checks.true(
                 "roomOwnershipGuards[finished[i]] = nil" in server_guard_tick,
                 "server stale-room guard is not cleaned after completion/timeout",
+            )
+            checks.true(
+                "roofRepairRelocationGroup ~= nil or roofRepairGroupFinalReturn ~= nil"
+                in server_guard_tick
+                and "pause only this non-transactional cleanup until the member returns"
+                in server_guard_tick,
+                "server room-ownership guard still scans remote cells during roof relocation",
             )
 
         client_room_clear = section(

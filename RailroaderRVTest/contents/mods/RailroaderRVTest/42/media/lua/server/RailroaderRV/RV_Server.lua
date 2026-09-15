@@ -16,7 +16,6 @@ local COMMAND_RV_ENTER = "EnterRV"
 local COMMAND_RV_EXIT = "ExitRV"
 local COMMAND_RV_TELEPORT = "RVTeleport"
 local MANIFEST_KEY = "RailroaderRVTest.Manifest"
-local unpackFn = (table and table.unpack) or unpack
 
 -- Railroader entry/exit is implemented by RV_RailroaderServer.lua.  These
 -- callbacks keep the long-running generation transaction authoritative without
@@ -49,7 +48,6 @@ end
 -- RV_Layout.lua and the vanilla RainBarrel scripts).  Keep the global fallback
 -- only for a debugger reload; normal loading must return the actual tables.
 local Constants = loadModule("RailroaderRV/RV_Constants", "RV_Constants")
-local LayoutContract = loadModule("RailroaderRV/RV_Layout", "RV_Layout")
 local boundaryLoaded, Boundary = pcall(require, "RailroaderRV/RV_BoundaryServer")
 if not boundaryLoaded or type(Boundary) ~= "table" then
     Boundary = nil
@@ -69,6 +67,14 @@ end
 local RV = rawget(_G, "RailroaderRV") or {}
 rawset(_G, "RailroaderRV", RV)
 RV.Server = RV.Server or {}
+
+-- Generic invocation, numeric validation, and shared layout checks live in a
+-- separate require chunk.  Keeping this facade focused on the transaction and
+-- event lifecycle avoids Kahlua's 200-local limit without changing the public
+-- RV.Server API.
+local ServerUtil = require("RailroaderRV/RV_ServerUtil")
+local ServerWorld = require("RailroaderRV/RV_ServerWorld")
+local ServerSchema = require("RailroaderRV/RV_ServerSchema")
 
 local transactionBusy = false
 local transactionPlayer = nil
@@ -113,1238 +119,21 @@ local ROOM_OWNERSHIP_MAX_TICKS = 7200
 local WORLD_MIN_Z = -32
 local WORLD_MAX_Z = 31
 
-local function invoke(target, name, ...)
-    if target == nil then
-        return false, nil
-    end
-    local method = target[name]
-    if type(method) ~= "function" then
-        return false, nil
-    end
-    local ok, a, b, c, d = pcall(method, target, ...)
-    if not ok then
-        return false, a
-    end
-    return true, a, b, c, d
-end
-
--- A Java void method returns nil, while a failed boolean API returns false.
--- Keep both cases distinct so critical creation/synchronisation calls cannot
--- silently accept an explicit false result.
-local function callSucceeded(target, name, ...)
-    local ok, result = invoke(target, name, ...)
-    return ok and result ~= false
-end
-
-local function invokeClass(class, signatures)
-    if class == nil or type(class.new) ~= "function" then
-        return false, nil
-    end
-    for i = 1, #signatures do
-        local args = signatures[i]
-        local ok, value = pcall(class.new, unpackFn(args))
-        if ok and value ~= nil then
-            return true, value
-        end
-    end
-    return false, nil
-end
-
-local function callGlobal(name, ...)
-    local fn = rawget(_G, name)
-    if type(fn) ~= "function" then
-        return false, nil
-    end
-    local ok, a, b, c = pcall(fn, ...)
-    if not ok then
-        return false, a
-    end
-    return true, a, b, c
-end
-
-local function callGlobalSucceeded(name, ...)
-    local ok, result = callGlobal(name, ...)
-    return ok and result ~= false
-end
-
 local function notifyFailure(player, reason)
     if not player then return end
-    callGlobal("sendServerCommand", player, COMMAND_MODULE,
+    ServerUtil.callGlobal("sendServerCommand", player, COMMAND_MODULE,
         COMMAND_RV_TELEPORT, { ok = false, reason = tostring(reason) })
-end
-
-local function classInstance(obj, className)
-    local checker = rawget(_G, "instanceof")
-    if type(checker) ~= "function" then
-        return false
-    end
-    local ok, result = pcall(checker, obj, className)
-    return ok and result == true
-end
-
--- Kahlua represents Java primitive numeric returns as Double.  Those values
--- are already Lua numbers and must not be passed through tonumber when they
--- arrive from a Java getter.  In particular, a final-position select() call
--- can expand extra return values and send tonumber down its radix/String
--- branch, which rejects a Java Double.  Keep string parsing for Lua data and
--- use a guarded arithmetic fallback for other numeric userdata.
-local function toNumber(value)
-    local valueType = type(value)
-    if valueType == "number" then
-        return value
-    end
-    if valueType == "string" then
-        return tonumber(value)
-    end
-    if value == nil then
-        return nil
-    end
-    local ok, numeric = pcall(function()
-        return value + 0
-    end)
-    if ok and type(numeric) == "number" then
-        return numeric
-    end
-    return nil
-end
-
--- Schema and identity gates use nil for malformed values so callers can
--- reject current-only data without raising a Kahlua error.  Keep this
--- conversion local to the server transaction; requiredInteger remains the
--- throwing helper for trusted layout values.
-local function isFiniteNumber(value)
-    return type(value) == "number" and value == value
-        and value ~= math.huge and value ~= -math.huge
-end
-
-local function integer(value)
-    local numeric = toNumber(value)
-    if not isFiniteNumber(numeric) or math.floor(numeric) ~= numeric then
-        return nil
-    end
-    return numeric
-end
-
-local function tableIsEmpty(value)
-    if type(value) ~= "table" then
-        return false
-    end
-    -- Kahlua's server environment does not expose Lua's global `next`.
-    for _ in pairs(value) do
-        return false
-    end
-    return true
-end
-
-local function isEmptyCommandArgs(args)
-    -- GameServer.receiveClientCommand passes nil when the wire packet has no
-    -- args table.  This is the canonical representation for this command.
-    if args == nil then
-        return true
-    end
-    -- The current empty-payload contract also accepts the B42 network table
-    -- representation; every non-empty or unrelated value remains rejected.
-    if type(args) == "table" then
-        return tableIsEmpty(args)
-    end
-    if not classInstance(args, "PZNetKahluaTableImpl") then
-        return false
-    end
-    local ok, size = invoke(args, "size")
-    return ok and toNumber(size) == 0
-end
-
-local function requiredNumber(value, label)
-    local number = toNumber(value)
-    if not isFiniteNumber(number) then
-        error("RailroaderRVTest: " .. tostring(label) .. " is not a finite number")
-    end
-    return number
-end
-
-local function requiredInteger(value, label)
-    local number = requiredNumber(value, label)
-    local integer = math.floor(number)
-    if integer ~= number then
-        error("RailroaderRVTest: " .. tostring(label) .. " must be an integer")
-    end
-    return integer
-end
-
-local function floorInt(value)
-    return math.floor(toNumber(value) or 0)
-end
-
-local function copyPoint(value, label)
-    if type(value) ~= "table" then
-        error("RailroaderRVTest: " .. tostring(label) .. " is missing")
-    end
-    return {
-        x = requiredInteger(value.x, tostring(label) .. ".x"),
-        y = requiredInteger(value.y, tostring(label) .. ".y"),
-        z = requiredInteger(value.z, tostring(label) .. ".z"),
-    }
-end
-
-local function makeLayout(x, y, z)
-    local planner = LayoutContract.make
-    if type(planner) ~= "function" then
-        error("RailroaderRVTest: shared RV_Layout planner is unavailable")
-    end
-    local ok, planned = pcall(planner, x, y, z)
-    if not ok then
-        local textOk, text = pcall(tostring, planned)
-        error("RailroaderRVTest: shared RV_Layout planning failed: "
-            .. (textOk and text or "<error formatting failed>"))
-    end
-    if type(planned) ~= "table" then
-        error("RailroaderRVTest: shared RV_Layout planner returned no plan")
-    end
-
-    if requiredInteger(planned.schemaVersion, "shared layout schemaVersion")
-        ~= Constants.LAYOUT_SCHEMA_VERSION then
-        error(Constants.SAVE_REBUILD_REQUIRED)
-    end
-    local requiredTables = { "anchor", "clear", "managed", "bitmap", "shellEdges",
-        "room", "wall", "roof", "wallCoordinates" }
-    for i = 1, #requiredTables do
-        local field = requiredTables[i]
-        if type(planned[field]) ~= "table" then
-            error("RailroaderRVTest: shared RV_Layout contract missing " .. field)
-        end
-    end
-    if not Bitmap or not Bitmap.validate(planned.bitmap) then
-        error("RailroaderRVTest: shared RV_Layout bitmap is invalid")
-    end
-    local managed = planned.managed
-    if requiredInteger(managed.originX, "shared managed.originX") == nil
-        or requiredInteger(managed.originY, "shared managed.originY") == nil
-        or requiredInteger(managed.width, "shared managed.width") ~= 100
-        or requiredInteger(managed.height, "shared managed.height") ~= 100
-        or requiredInteger(managed.minZ, "shared managed.minZ") == nil
-        or requiredInteger(managed.maxZ, "shared managed.maxZ") == nil
-        or requiredInteger(managed.maxZ, "shared managed.maxZ")
-            <= requiredInteger(managed.minZ, "shared managed.minZ") then
-        error("RailroaderRVTest: shared managed scope is not 100x100xZ")
-    end
-    local requiredPoints = { "light", "generator", "barrel", "counter", "sink" }
-    for i = 1, #requiredPoints do
-        local field = requiredPoints[i]
-        local point = planned[field]
-        if type(point) ~= "table" or point.x == nil or point.y == nil or point.z == nil then
-            error("RailroaderRVTest: shared RV_Layout contract missing point " .. field)
-        end
-        requiredInteger(point.x, "shared layout " .. field .. ".x")
-        requiredInteger(point.y, "shared layout " .. field .. ".y")
-        requiredInteger(point.z, "shared layout " .. field .. ".z")
-        if not Bitmap.containsScope(planned.bitmap, point.x, point.y, point.z) then
-            error("RailroaderRVTest: shared layout point " .. field
-                .. " is outside the bitmap scope")
-        end
-    end
-    local anchor = planned.anchor
-    requiredInteger(anchor.x, "shared layout anchor.x")
-    requiredInteger(anchor.y, "shared layout anchor.y")
-    requiredInteger(anchor.z, "shared layout anchor.z")
-    return planned
-end
-
-local function getCellForPlayer(player)
-    local ok, cell = invoke(player, "getCell")
-    if ok and cell then
-        return cell
-    end
-    local okGlobal, globalCell = callGlobal("getCell")
-    if okGlobal and globalCell then
-        return globalCell
-    end
-    error("RailroaderRVTest: no IsoCell available")
-end
-
-local function getSquare(cell, x, y, z)
-    local ok, square = invoke(cell, "getGridSquare", x, y, z)
-    if ok and square then
-        return square
-    end
-    return nil
-end
-
-local function collectionSnapshot(collection)
-    local result = {}
-    if collection == nil then
-        return result
-    end
-    local okSize, size = invoke(collection, "size")
-    local sizeNumber = toNumber(size)
-    if okSize and sizeNumber then
-        for i = 0, sizeNumber - 1 do
-            local okItem, item = invoke(collection, "get", i)
-            if okItem and item then
-                result[#result + 1] = item
-            end
-        end
-        return result
-    end
-    if type(collection) == "table" then
-        for _, item in pairs(collection) do
-            if item then
-                result[#result + 1] = item
-            end
-        end
-    end
-    return result
-end
-
-local function appendUnique(result, seen, object)
-    if object ~= nil and not seen[object] then
-        seen[object] = true
-        result[#result + 1] = object
-    end
-end
-
-local function squareSnapshot(square)
-    local result, seen = {}, {}
-    local listNames = {
-        "getObjects", "getSpecialObjects", "getStaticMovingObjects",
-        "getMovingObjects", "getWorldObjects", "getDeadBodys", "getCorpses",
-    }
-    for i = 1, #listNames do
-        local ok, collection = invoke(square, listNames[i])
-        if ok then
-            local snapshot = collectionSnapshot(collection)
-            for j = 1, #snapshot do
-                appendUnique(result, seen, snapshot[j])
-            end
-        end
-    end
-    local okFloor, floor = invoke(square, "getFloor")
-    if okFloor and floor then
-        appendUnique(result, seen, floor)
-    end
-    local corpseMethods = { "getCorpse", "getDeadBody" }
-    for i = 1, #corpseMethods do
-        local ok, corpse = invoke(square, corpseMethods[i])
-        if ok and corpse then
-            appendUnique(result, seen, corpse)
-        end
-    end
-    -- Vehicles live in the chunk vehicle list rather than square:getObjects();
-    -- getVehicleContainer() is the B42.20 bridge needed for permanent removal.
-    local okVehicle, vehicle = invoke(square, "getVehicleContainer")
-    if okVehicle and vehicle then
-        appendUnique(result, seen, vehicle)
-    end
-    return result
-end
-
-local function objectModData(object)
-    local ok, data = invoke(object, "getModData")
-    if ok and type(data) == "table" then
-        return data
-    end
-    return nil
-end
-
-local function tagObject(object, generation, role, extraData)
-    local data = objectModData(object)
-    if not data then
-        error("RailroaderRVTest: generated object has no modData for role " .. tostring(role))
-    end
-    local generationNumber = toNumber(generation)
-    if generationNumber == nil or math.floor(generationNumber) ~= generationNumber
-        or generationNumber < 1 or role == nil then
-        error("RailroaderRVTest: generated object tag is incomplete")
-    end
-    generation = generationNumber
-    local rvId = extraData and extraData.rvId
-    local bitmapVersion = extraData and toNumber(extraData.bitmapVersion)
-    if rvId == nil or tostring(rvId) == ""
-        or bitmapVersion ~= Constants.BITMAP_VERSION then
-        error("RailroaderRVTest: generated object boundary identity is incomplete")
-    end
-    data.owner = OWNER
-    data.rvId = tostring(rvId)
-    data.generation = generation
-    data.bitmapVersion = bitmapVersion
-    data.role = role
-    if data.RailroaderRVTest ~= nil and type(data.RailroaderRVTest) ~= "table" then
-        error("RailroaderRVTest: generated object tag namespace is not a table")
-    end
-    data.RailroaderRVTest = data.RailroaderRVTest or {}
-    data.RailroaderRVTest.owner = OWNER
-    data.RailroaderRVTest.rvId = tostring(rvId)
-    data.RailroaderRVTest.generation = generation
-    data.RailroaderRVTest.bitmapVersion = bitmapVersion
-    data.RailroaderRVTest.role = role
-    if type(extraData) == "table" then
-        for key, value in pairs(extraData) do
-            data.RailroaderRVTest[key] = value
-        end
-    end
-    -- Re-assert all ownership identity after copying optional metadata.
-    -- `extraData` is only descriptive (edge/sprite state), never authority.
-    data.RailroaderRVTest.owner = OWNER
-    data.RailroaderRVTest.rvId = tostring(rvId)
-    data.RailroaderRVTest.generation = generation
-    data.RailroaderRVTest.bitmapVersion = bitmapVersion
-    data.RailroaderRVTest.role = role
-    -- New objects are not on the client yet.  Do not transmit an object-index
-    -- modData delta here: the creator sends one complete object packet after
-    -- attachment and all object-specific state is final.  Existing objects
-    -- (notably replaced floors) explicitly send their deltas in createFloor.
-    local verify = objectModData(object)
-    if not verify or verify.owner ~= OWNER
-        or tostring(verify.rvId) ~= tostring(rvId)
-        or verify.role ~= role
-        or toNumber(verify.generation) ~= toNumber(generation)
-        or toNumber(verify.bitmapVersion) ~= bitmapVersion then
-        error("RailroaderRVTest: generated object tag verification failed for role " .. tostring(role))
-    end
-end
-
-local function withTagIdentity(extraData, tagContext)
-    local bitmapVersion = type(tagContext) == "table"
-        and toNumber(tagContext.bitmapVersion) or nil
-    if type(tagContext) ~= "table" or tagContext.rvId == nil
-        or tostring(tagContext.rvId) == ""
-        or bitmapVersion ~= Constants.BITMAP_VERSION then
-        error("RailroaderRVTest: boundary tag identity is incomplete")
-    end
-    local result = {}
-    if type(extraData) == "table" then
-        for key, value in pairs(extraData) do result[key] = value end
-    end
-    -- Context identity is authoritative; per-object metadata must not be
-    -- able to overwrite the RV/generation snapshot tokens.
-    result.rvId = tostring(tagContext.rvId)
-    result.bitmapVersion = bitmapVersion
-    return result
-end
-
-local function isTaggedForGeneration(object, generation, rvId, bitmapVersion)
-    if generation == nil or rvId == nil or bitmapVersion == nil then
-        return false
-    end
-    local data = objectModData(object)
-    if not data then
-        return false
-    end
-    local function matches(tag)
-        if type(tag) ~= "table" or tag.owner ~= OWNER
-            or toNumber(tag.generation) ~= toNumber(generation) then
-            return false
-        end
-        return tostring(tag.rvId) == tostring(rvId)
-            and toNumber(tag.bitmapVersion) == toNumber(bitmapVersion)
-    end
-    if matches(data) then
-        return true
-    end
-    local nested = data.RailroaderRVTest
-    return matches(nested)
-end
-
-local function isPlayerObject(object)
-    if classInstance(object, "IsoPlayer") then
-        return true
-    end
-    local ok, result = invoke(object, "isPlayer")
-    return ok and result == true
-end
-
-local function isVehicleObject(object)
-    if classInstance(object, "BaseVehicle") or classInstance(object, "IsoVehicle") then
-        return true
-    end
-    local ok, result = invoke(object, "isVehicle")
-    return ok and result == true
-end
-
-local function isOwnedRainBarrel(object)
-    local data = objectModData(object)
-    if type(data) ~= "table" then
-        return false
-    end
-    if data.owner == OWNER and data.role == "rain_barrel" then
-        return true
-    end
-    local nested = data.RailroaderRVTest
-    return type(nested) == "table" and nested.owner == OWNER
-        and nested.role == "rain_barrel"
-end
-
-local function getRainBarrelSystem()
-    local class = rawget(_G, "SRainBarrelSystem")
-    local instance = type(class) == "table" and class.instance or nil
-    if instance then
-        return instance
-    end
-    return nil
-end
-
-local function unregisterRainBarrelGlobalObject(object)
-    -- B42.20's vanilla SRainBarrelSystem:isValidIsoObject() is deliberately
-    -- `false`, so OnObjectAboutToBeRemoved cannot unregister this mod's barrel.
-    -- Remove the public global-object entry explicitly while the IsoObject is
-    -- still attached to its square; this is the inverse of newLuaObjectOnSquare.
-    if not isOwnedRainBarrel(object) then
-        return
-    end
-    local system = getRainBarrelSystem()
-    if not system or not system.system then
-        error("RailroaderRVTest: SRainBarrelSystem is unavailable while removing a rain barrel")
-    end
-    local square = select(2, invoke(object, "getSquare"))
-    if not square then
-        return
-    end
-    local x = floorInt(select(2, invoke(square, "getX")))
-    local y = floorInt(select(2, invoke(square, "getY")))
-    local z = floorInt(select(2, invoke(square, "getZ")))
-    local globalObject = select(2, invoke(system.system, "getObjectAt", x, y, z))
-    if not globalObject then
-        return
-    end
-    local okLua, luaObject = invoke(system, "newLuaObject", globalObject)
-    if not okLua or not luaObject then
-        error("RailroaderRVTest: unable to wrap rain barrel global object for removal")
-    end
-    local removed = callSucceeded(system, "removeLuaObject", luaObject)
-    if not removed then
-        error("RailroaderRVTest: unable to unregister rain barrel global object")
-    end
-end
-
-local function deregisterSpecialSystems(object)
-    -- Explicitly unregister our barrel while it is still attached.  Vanilla's
-    -- event bridge cannot see it because SRainBarrelSystem:isValidIsoObject()
-    -- is false in B42.20.  The normal OnObjectAboutToBeRemoved event is owned
-    -- by transmitRemoveItemFromSquare and must not be triggered here as well.
-    unregisterRainBarrelGlobalObject(object)
-end
-
-local function removeCorpse(square, corpse)
-    -- B42.20's signature is removeCorpse(IsoDeadBody, boolean).  Passing
-    -- false lets the server emit RemoveCorpseFromMap; the old one-argument
-    -- probe failed and the true (remote) fallback suppressed that packet.
-    local ok = invoke(square, "removeCorpse", corpse, false)
-    if not ok then
-        error("RailroaderRVTest: B42.20 removeCorpse API is unavailable")
-    end
-end
-
-local function removeZombie(square, zombie)
-    -- IsoGameCharacter.dieNetwork(killer, weapon, gory, listener) is the
-    -- dedicated-server death API.  Calling it with no arguments (the old
-    -- implementation) never matched the B42.20 method and left clients with
-    -- live zombies.
-    local networkDied, body = invoke(zombie, "dieNetwork", nil, nil, true, nil)
-    if not networkDied then
-        invoke(zombie, "setHealth", 0)
-        networkDied, body = invoke(zombie, "dieNetwork", nil, nil, true, nil)
-    end
-    if networkDied then
-        if body then
-            removeCorpse(square, body)
-        end
-        return
-    end
-    -- Single-player/debug fallback.  die() creates the corpse locally; the
-    -- next square rebuild will include it in getDeadBodys if the engine keeps
-    -- one, while these calls ensure the zombie itself is gone.
-    invoke(zombie, "die")
-    invoke(zombie, "removeFromWorld")
-    invoke(zombie, "removeFromSquare")
-end
-
-local function removeAnimal(animal)
-    -- IsoAnimal:delete() is the B42 removal entry point; no list mutation is
-    -- performed directly, so the moving-object systems retain their invariants.
-    invoke(animal, "delete")
-    invoke(animal, "removeFromWorld")
-    invoke(animal, "removeFromSquare")
-end
-
-local function removeVehicleSafely(vehicle)
-    -- Do not guess at a vehicle removal path.  B42.20's permanent removal
-    -- method performs the server-side persistence and network deletion.
-    local ok = callSucceeded(vehicle, "permanentlyRemove")
-    if not ok then
-        error("RailroaderRVTest: vehicle present but B42.20 permanentlyRemove is unavailable")
-    end
-end
-
-local function validateVehiclePath(vehicle)
-    if type(vehicle.permanentlyRemove) ~= "function" then
-        error("RailroaderRVTest: vehicle present but B42.20 permanentlyRemove is unavailable")
-    end
-end
-
-local function getSpriteName(object)
-    local spriteOk, sprite = invoke(object, "getSprite")
-    if not spriteOk or not sprite then
-        return nil
-    end
-    local nameOk, name = invoke(sprite, "getName")
-    if not nameOk or name == nil then
-        return nil
-    end
-    return tostring(name)
-end
-
-local function clearGenerationTag(object)
-    local data = objectModData(object)
-    if not data then
-        error("RailroaderRVTest: generated object has no modData while clearing tag")
-    end
-    if data.owner == OWNER then
-        data.owner = nil
-        data.rvId = nil
-        data.generation = nil
-        data.bitmapVersion = nil
-        data.role = nil
-    end
-    local nested = data.RailroaderRVTest
-    if type(nested) == "table" and nested.owner == OWNER then
-        nested.owner = nil
-        nested.rvId = nil
-        nested.generation = nil
-        nested.bitmapVersion = nil
-        nested.role = nil
-        nested.previousSprite = nil
-        nested.createdByGeneration = nil
-        -- Keep the namespace itself.  The dedicated-server Kahlua runtime does
-        -- not provide Lua's `next` primitive, and an empty namespace is safe;
-        -- retaining it also avoids touching unrelated modData keys.
-    end
-    if not callSucceeded(object, "transmitModData") then
-        error("RailroaderRVTest: generated object tag removal transmission failed")
-    end
-end
-
-local function squareContainsObject(square, object)
-    local objectsOk, objects = invoke(square, "getObjects")
-    if not objectsOk or not objects then
-        return nil
-    end
-    local sizeOk, size = invoke(objects, "size")
-    local sizeNumber = toNumber(size)
-    if not sizeOk or not sizeNumber then
-        return nil
-    end
-    for i = 0, sizeNumber - 1 do
-        local itemOk, item = invoke(objects, "get", i)
-        if not itemOk then
-            return nil
-        end
-        if item == object then
-            return true
-        end
-    end
-    return false
-end
-
-local function restoreTaggedFloor(square, object)
-    local data = objectModData(object)
-    local nested = data and data.RailroaderRVTest or nil
-    if type(nested) ~= "table" or nested.owner ~= OWNER
-        or nested.createdByGeneration ~= false or not nested.previousSprite then
-        return false
-    end
-
-    local previousSprite = tostring(nested.previousSprite)
-    local currentSprite = getSpriteName(object)
-    if not currentSprite then
-        error("RailroaderRVTest: tagged floor has no current sprite during rollback")
-    end
-    if currentSprite ~= previousSprite then
-        local spriteOk, spriteObject = callGlobal("getSprite", previousSprite)
-        if not spriteOk or not spriteObject then
-            error("RailroaderRVTest: previous floor sprite is unavailable: " .. previousSprite)
-        end
-        if not callSucceeded(object, "setSprite", spriteObject)
-            or not callSucceeded(object, "transmitUpdatedSpriteToClients") then
-            error("RailroaderRVTest: previous floor sprite restoration failed")
-        end
-    end
-    clearGenerationTag(object)
-    return true
-end
-
-local function removeGenericObject(square, object, restoreTaggedFloors)
-    local floor = select(2, invoke(square, "getFloor"))
-    if restoreTaggedFloors and floor == object and restoreTaggedFloor(square, object) then
-        return
-    end
-    deregisterSpecialSystems(object)
-    local removeOk, removeIndex = invoke(square, "transmitRemoveItemFromSquare", object)
-    local indexNumber = toNumber(removeIndex)
-    if not removeOk or not indexNumber or indexNumber < 0 then
-        error("RailroaderRVTest: object removal transmission failed")
-    end
-    -- On the B42 server this call delegates to GameServer.RemoveItemFromMap,
-    -- which emits the packet, fires OnObjectAboutToBeRemoved, detaches the
-    -- object from world/square, and recalculates neighbours.  Calling any of
-    -- those steps again risks a double event or a second list mutation.
-    local stillPresent = squareContainsObject(square, object)
-    if stillPresent ~= false then
-        error("RailroaderRVTest: object removal was not observable")
-    end
-end
-
-local function removeObject(square, object, restoreTaggedFloors)
-    if isPlayerObject(object) then
-        return
-    end
-    if isVehicleObject(object) then
-        removeVehicleSafely(object)
-        return
-    end
-    if classInstance(object, "IsoZombie") then
-        removeZombie(square, object)
-        return
-    end
-    if classInstance(object, "IsoAnimal") then
-        removeAnimal(object)
-        return
-    end
-    if classInstance(object, "IsoDeadBody") then
-        removeCorpse(square, object)
-        return
-    end
-    removeGenericObject(square, object, restoreTaggedFloors)
-end
-
-local function recalcSquare(square)
-    invoke(square, "RecalcProperties")
-    -- B42.20 exposes the Java method as RecalcAllWithNeighbours(boolean).
-    -- The lower-case spellings are not engine methods and silently made the
-    -- old implementation leave collision/room caches stale.
-    invoke(square, "RecalcAllWithNeighbours", true)
-end
-
-local function clearSquare(square, onlyGeneration, rvId, bitmapVersion)
-    local objects = squareSnapshot(square)
-    -- Validate all vehicles before removing any object on this square.  This
-    -- makes an unknown vehicle API a clean transaction failure, not data loss.
-    for i = 1, #objects do
-        if isVehicleObject(objects[i]) and (not onlyGeneration
-            or isTaggedForGeneration(objects[i], onlyGeneration, rvId,
-                bitmapVersion)) then
-            validateVehiclePath(objects[i])
-        end
-    end
-    for i = 1, #objects do
-        local object = objects[i]
-        if not onlyGeneration or isTaggedForGeneration(object, onlyGeneration,
-            rvId, bitmapVersion) then
-            -- Generation rollback restores a tagged pre-existing floor, while
-            -- the cleanup-only pass must remove every floor, including one
-            -- left tagged by an earlier generation.
-            removeObject(square, object, onlyGeneration ~= nil)
-        end
-    end
-    recalcSquare(square)
-end
-
-local function boundsFor(layout)
-    if type(layout) ~= "table" then
-        error("RailroaderRVTest: layout plan is not a table")
-    end
-    local clear = layout.clear
-    local managed = layout.managed
-    local bitmap = layout.bitmap
-    local shellEdges = layout.shellEdges
-    local room = layout.room
-    local wall = layout.wall
-    local roof = layout.roof
-    local anchor = layout.anchor
-    if type(clear) ~= "table" or type(managed) ~= "table"
-        or type(bitmap) ~= "table" or type(shellEdges) ~= "table"
-        or type(room) ~= "table" or type(wall) ~= "table"
-        or type(roof) ~= "table" or type(anchor) ~= "table" then
-        error("RailroaderRVTest: layout bounds contract is incomplete")
-    end
-    local function field(source, label, name)
-        local value = source[name]
-        if value == nil then
-            error("RailroaderRVTest: layout contract missing " .. label)
-        end
-        return requiredInteger(value, label)
-    end
-    local ax = requiredInteger(anchor.x, "layout anchor.x")
-    local ay = requiredInteger(anchor.y, "layout anchor.y")
-    local az = requiredInteger(anchor.z, "layout anchor.z")
-    local clearMinZ = field(clear, "layout clear.minZ", "minZ")
-    local clearMaxZ = field(clear, "layout clear.maxZ", "maxZ")
-    local clearMinX = field(clear, "layout clear.minX", "minX")
-    local clearMaxX = field(clear, "layout clear.maxX", "maxX")
-    local clearMinY = field(clear, "layout clear.minY", "minY")
-    local clearMaxY = field(clear, "layout clear.maxY", "maxY")
-    local roomMinX = field(room, "layout room.minX", "minX")
-    local roomMaxX = field(room, "layout room.maxX", "maxX")
-    local roomMinY = field(room, "layout room.minY", "minY")
-    local roomMaxY = field(room, "layout room.maxY", "maxY")
-    local roomZ = field(room, "layout room.z", "z")
-    local wallMinX = field(wall, "layout wall.minX", "minX")
-    local wallMaxX = field(wall, "layout wall.maxX", "maxX")
-    local wallMinY = field(wall, "layout wall.minY", "minY")
-    local wallMaxY = field(wall, "layout wall.maxY", "maxY")
-    local wallZ = field(wall, "layout wall.z", "z")
-    local roofMinX = field(roof, "layout roof.minX", "minX")
-    local roofMaxX = field(roof, "layout roof.maxX", "maxX")
-    local roofMinY = field(roof, "layout roof.minY", "minY")
-    local roofMaxY = field(roof, "layout roof.maxY", "maxY")
-    local roofZ = requiredInteger(roof.z, "layout roof.z")
-    if type(layout.wallCoordinates) ~= "table" then
-        error("RailroaderRVTest: layout wallCoordinates is missing")
-    end
-    local wallObjectCount = requiredInteger(layout.wallObjectCount, "layout wallObjectCount")
-    local wallCoordinateCount = requiredInteger(layout.wallCoordinateCount, "layout wallCoordinateCount")
-    local wallEdgeCounts = layout.wallEdgeCounts
-    if type(wallEdgeCounts) ~= "table" then
-        error("RailroaderRVTest: layout wallEdgeCounts is missing")
-    end
-    local northEdges = requiredInteger(wallEdgeCounts.north, "layout wallEdgeCounts.north")
-    local westEdges = requiredInteger(wallEdgeCounts.west, "layout wallEdgeCounts.west")
-    local wallCornerCount = requiredInteger(layout.wallCornerCount, "layout wallCornerCount")
-    local managedMinZ = field(managed, "layout managed.minZ", "minZ")
-    local managedMaxZ = field(managed, "layout managed.maxZ", "maxZ")
-    local managedOriginX = field(managed, "layout managed.originX", "originX")
-    local managedOriginY = field(managed, "layout managed.originY", "originY")
-    local managedWidth = field(managed, "layout managed.width", "width")
-    local managedHeight = field(managed, "layout managed.height", "height")
-    if managedWidth ~= 100 or managedHeight ~= 100
-        or managedMaxZ <= managedMinZ
-        or managedOriginX ~= requiredInteger(bitmap.originX,
-            "layout bitmap.originX")
-        or managedOriginY ~= requiredInteger(bitmap.originY,
-            "layout bitmap.originY")
-        or managedWidth ~= requiredInteger(bitmap.width,
-            "layout bitmap.width")
-        or managedHeight ~= requiredInteger(bitmap.height,
-            "layout bitmap.height")
-        or managedMinZ ~= requiredInteger(bitmap.minZ,
-            "layout bitmap.minZ")
-        or managedMaxZ ~= requiredInteger(bitmap.maxZ,
-            "layout bitmap.maxZ")
-        or clear.minX ~= managedOriginX or clear.minY ~= managedOriginY
-        or clear.maxX ~= managedOriginX + managedWidth
-        or clear.maxY ~= managedOriginY + managedHeight
-        or clearMinZ ~= managedMinZ or clearMaxZ ~= managedMaxZ
-        or clear.halfOpen ~= true then
-        error("RailroaderRVTest: managed scope must be half-open 100x100xZ")
-    end
-    if not Bitmap or not Bitmap.validate(bitmap) then
-        error("RailroaderRVTest: layout bitmap failed validation")
-    end
-    local scopeMinX, scopeMinY = managedOriginX, managedOriginY
-    local scopeMaxX = managedOriginX + managedWidth
-    local scopeMaxY = managedOriginY + managedHeight
-    local function rectInside(minX, maxX, minY, maxY, z, label)
-        if minX > maxX or minY > maxY
-            or minX < scopeMinX or maxX >= scopeMaxX
-            or minY < scopeMinY or maxY >= scopeMaxY
-            or z < managedMinZ or z >= managedMaxZ then
-            error("RailroaderRVTest: " .. tostring(label)
-                .. " is outside the bitmap scope")
-        end
-    end
-    if roomZ ~= az or wallZ ~= az or roofZ < managedMinZ
-        or roofZ >= managedMaxZ then
-        error("RailroaderRVTest: layout structure z is outside the bitmap scope")
-    end
-    rectInside(roomMinX, roomMaxX, roomMinY, roomMaxY, roomZ, "room")
-    rectInside(wallMinX, wallMaxX, wallMinY, wallMaxY, wallZ, "wall")
-    rectInside(roofMinX, roofMaxX, roofMinY, roofMaxY, roofZ, "roof")
-    for i = 1, #layout.wallCoordinates do
-        local entry = layout.wallCoordinates[i]
-        if type(entry) ~= "table"
-            or not Bitmap.containsScope(bitmap, entry.x, entry.y, entry.z) then
-            error("RailroaderRVTest: wall object host is outside bitmap scope")
-        end
-    end
-    return {
-        schemaVersion = Constants.LAYOUT_SCHEMA_VERSION,
-        clearMinX = clearMinX, clearMaxX = clearMaxX,
-        clearMinY = clearMinY, clearMaxY = clearMaxY,
-        clearMinZ = clearMinZ, clearMaxZ = clearMaxZ,
-        managedOriginX = managedOriginX, managedOriginY = managedOriginY,
-        managedWidth = managedWidth, managedHeight = managedHeight,
-        managedMinZ = managedMinZ, managedMaxZ = managedMaxZ,
-        bitmap = bitmap, shellEdges = shellEdges,
-        roomMinX = roomMinX, roomMaxX = roomMaxX,
-        roomMinY = roomMinY, roomMaxY = roomMaxY, roomZ = roomZ,
-        wallMinX = wallMinX, wallMaxX = wallMaxX,
-        wallMinY = wallMinY, wallMaxY = wallMaxY, wallZ = wallZ,
-        wallCoordinates = layout.wallCoordinates,
-        wallObjectCount = wallObjectCount,
-        wallCoordinateCount = wallCoordinateCount,
-        wallEdgeCounts = layout.wallEdgeCounts,
-        wallCornerCount = wallCornerCount,
-        northEdges = northEdges, westEdges = westEdges,
-        roofMinX = roofMinX, roofMaxX = roofMaxX,
-        roofMinY = roofMinY, roofMaxY = roofMaxY,
-        z = az,
-        roofZ = roofZ,
-    }
-end
-
-local function walkBounds(cell, bounds, fn)
-    for z = bounds.clearMinZ, bounds.clearMaxZ - 1 do
-        for x = bounds.clearMinX, bounds.clearMaxX - 1 do
-            for y = bounds.clearMinY, bounds.clearMaxY - 1 do
-                local square = getSquare(cell, x, y, z)
-                if square then
-                    fn(square, x, y, z)
-                end
-            end
-        end
-    end
-end
-
-local function validateWallContract(bounds)
-    if type(bounds.wallCoordinates) ~= "table" or #bounds.wallCoordinates ~= 92
-        or bounds.wallObjectCount ~= 92 or bounds.wallCoordinateCount ~= 92
-        or bounds.northEdges ~= 12 or bounds.westEdges ~= 80
-        or bounds.wallCornerCount ~= 2 then
-        error("RailroaderRVTest: wall layout contract is invalid")
-    end
-    local coordinates, orientations, exact, both = {}, {}, {}, {}
-    local uniqueCoordinates, northEdges, westEdges, corners = 0, 0, 0, 0
-    local nwKey = tostring(bounds.wallMinX) .. ":" .. tostring(bounds.wallMinY)
-        .. ":" .. tostring(bounds.z)
-    local seKey = tostring(bounds.wallMaxX) .. ":" .. tostring(bounds.wallMaxY)
-        .. ":" .. tostring(bounds.z)
-    for i = 1, #bounds.wallCoordinates do
-        local entry = bounds.wallCoordinates[i]
-        if type(entry) ~= "table" or type(entry.x) ~= "number"
-            or type(entry.y) ~= "number" or type(entry.z) ~= "number"
-            or type(entry.north) ~= "boolean" or type(entry.role) ~= "string"
-            or type(entry.sprite) ~= "string" or type(entry.corner) ~= "boolean" then
-            error("RailroaderRVTest: malformed wall entry at index " .. tostring(i))
-        end
-        local x = requiredInteger(entry.x, "wall[" .. tostring(i) .. "].x")
-        local y = requiredInteger(entry.y, "wall[" .. tostring(i) .. "].y")
-        local z = requiredInteger(entry.z, "wall[" .. tostring(i) .. "].z")
-        if x < bounds.wallMinX or x > bounds.wallMaxX
-            or y < bounds.wallMinY or y > bounds.wallMaxY or z ~= bounds.z then
-            error("RailroaderRVTest: wall entry is outside the wall bounds")
-        end
-        local coordinateKey = tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
-        local orientation = entry.north and "north" or "west"
-        local orientationKey = coordinateKey .. ":" .. orientation
-        local exactKey = orientationKey .. ":" .. entry.role
-        if exact[exactKey] or orientations[orientationKey] then
-            error("RailroaderRVTest: duplicate wall coordinate/orientation")
-        end
-        exact[exactKey] = true
-        orientations[orientationKey] = true
-        if not coordinates[coordinateKey] then
-            coordinates[coordinateKey] = true
-            uniqueCoordinates = uniqueCoordinates + 1
-        end
-        both[coordinateKey] = both[coordinateKey] or {}
-        both[coordinateKey][orientation] = true
-        local expectedRole = "wall-" .. orientation
-        local expectedSprite = entry.north
-            and Constants.SPRITES.wall.northSprite
-            or Constants.SPRITES.wall.sprite
-        if entry.corner then
-            if coordinateKey == nwKey then
-                expectedRole = "corner-nw"
-                expectedSprite = Constants.SPRITES.wallNW.sprite
-            elseif coordinateKey == seKey then
-                expectedRole = "corner-se"
-                expectedSprite = Constants.SPRITES.wallSE.sprite
-            else
-                error("RailroaderRVTest: corner wall is not at NW or SE")
-            end
-        end
-        if entry.role ~= expectedRole or entry.sprite ~= expectedSprite then
-            error("RailroaderRVTest: wall role/sprite does not match orientation")
-        end
-        if entry.north then northEdges = northEdges + 1 else westEdges = westEdges + 1 end
-        if entry.corner == true then corners = corners + 1 end
-    end
-    for coordinateKey, orientationSet in pairs(both) do
-        if orientationSet.north and orientationSet.west then
-            error("RailroaderRVTest: wall ring cannot duplicate an orientation at " .. coordinateKey)
-        end
-    end
-    if uniqueCoordinates ~= 92 or northEdges ~= 12 or westEdges ~= 80 or corners ~= 2 then
-        error("RailroaderRVTest: wall contract must contain 92 coordinates/objects, north12/west80/corner2")
-    end
-end
-
--- Shell ownership is a separate persisted ledger, not a deduction from the
--- wall object's inactive host cell.  Validate the generated identity here so
--- a malformed plan cannot enter the destructive generation transaction.
-local function validateShellEdgeContract(bounds)
-    if type(bounds.shellEdges) ~= "table" then
-        error("RailroaderRVTest: shell edge ledger is missing")
-    end
-    local seen = {}
-    for i = 1, #bounds.wallCoordinates do
-        local entry = bounds.wallCoordinates[i]
-        local key = entry.edgeKey
-        if type(key) ~= "string" or seen[key] then
-            error("RailroaderRVTest: shell edge key is missing or duplicated")
-        end
-        local axis, edgeX, edgeY, edgeZ = string.match(
-            key, "^([NW]):(-?%d+):(-?%d+):(-?%d+)$")
-        edgeX, edgeY, edgeZ = tonumber(edgeX), tonumber(edgeY), tonumber(edgeZ)
-        if not axis or edgeX == nil or edgeY == nil or edgeZ == nil
-            or entry.axis ~= axis then
-            error("RailroaderRVTest: shell edge is not canonical N/W")
-        end
-        local ledger = bounds.shellEdges[key]
-        if type(ledger) ~= "table"
-            or ledger.edgeKey ~= key
-            or requiredInteger(ledger.hostX, "shell edge hostX") ~= edgeX
-            or requiredInteger(ledger.hostY, "shell edge hostY") ~= edgeY
-            or requiredInteger(ledger.z, "shell edge z") ~= edgeZ
-            or requiredInteger(ledger.objectX, "shell edge objectX") ~= entry.x
-            or requiredInteger(ledger.objectY, "shell edge objectY") ~= entry.y
-            or requiredInteger(ledger.objectZ, "shell edge objectZ") ~= entry.z
-            or ledger.replacementAllowed ~= true then
-            error("RailroaderRVTest: shell edge ledger identity is inconsistent")
-        end
-        seen[key] = true
-    end
-end
-
--- Validate only the fixed target contract and world coordinates.  This helper
--- deliberately never reads an IsoGridSquare: queueGeneration must be able to
--- reject an impossible destination before sending Relocate, while the
--- post-teleport preflight below remains responsible for waiting on loaded
--- squares.
-local function validateTargetCoordinates(bounds, destination)
-    if type(bounds) ~= "table" then
-        error("RailroaderRVTest: target bounds are not a table")
-    end
-    if type(destination) ~= "table" then
-        error("RailroaderRVTest: relocation destination is not a table")
-    end
-
-    local targetX = requiredInteger(destination.x, "relocation target x")
-    local targetY = requiredInteger(destination.y, "relocation target y")
-    local targetZ = requiredInteger(destination.z, "relocation target z")
-    local expectedX = requiredInteger(Constants.TELEPORT_X,
-        "shared teleport target x")
-    local expectedY = requiredInteger(Constants.TELEPORT_Y,
-        "shared teleport target y")
-    local expectedZ = requiredInteger(Constants.TELEPORT_Z,
-        "shared teleport target z")
-    if targetX ~= expectedX or targetY ~= expectedY or targetZ ~= expectedZ then
-        error("RailroaderRVTest: relocation target is not the fixed shared destination")
-    end
-
-    if targetZ < WORLD_MIN_Z or targetZ > WORLD_MAX_Z
-        or bounds.clearMinZ < WORLD_MIN_Z or bounds.clearMaxZ - 1 > WORLD_MAX_Z
-        or bounds.clearMinZ >= bounds.clearMaxZ
-        or bounds.z < WORLD_MIN_Z or bounds.z > WORLD_MAX_Z
-        or bounds.roofZ < WORLD_MIN_Z or bounds.roofZ > WORLD_MAX_Z then
-        error("RailroaderRVTest: layout z bounds are outside the legal world")
-    end
-    -- The managed footprint is strictly half-open x=[20000,20100),
-    -- y=[2000,2100) for the fixed (20050,2050) destination.
-    if bounds.clearMinX ~= targetX - 50 or bounds.clearMaxX ~= targetX - 50 + 100
-        or bounds.clearMinY ~= targetY - 50 or bounds.clearMaxY ~= targetY - 50 + 100
-        or bounds.z ~= targetZ or bounds.clearMinZ ~= bounds.managedMinZ
-        or bounds.clearMaxZ ~= bounds.managedMaxZ then
-        error("RailroaderRVTest: clear footprint does not match the fixed target")
-    end
-    if bounds.clearMaxX - bounds.clearMinX ~= 100
-        or bounds.clearMaxY - bounds.clearMinY ~= 100 then
-        error("RailroaderRVTest: managed footprint must be exactly half-open 100x100")
-    end
-    if bounds.roomMaxX - bounds.roomMinX + 1 ~= 6
-        or bounds.roomMaxY - bounds.roomMinY + 1 ~= 40 then
-        error("RailroaderRVTest: room footprint must be exactly 6x40")
-    end
-    if bounds.wallMaxX - bounds.wallMinX + 1 ~= 7
-        or bounds.wallMaxY - bounds.wallMinY + 1 ~= 41 then
-        error("RailroaderRVTest: wall footprint must be exactly 7x41")
-    end
-    if bounds.roofMaxX - bounds.roofMinX + 1 ~= 6
-        or bounds.roofMaxY - bounds.roofMinY + 1 ~= 40 then
-        error("RailroaderRVTest: roof footprint must be exactly 6x40")
-    end
-    if targetX < bounds.roomMinX or targetX > bounds.roomMaxX
-        or targetY < bounds.roomMinY or targetY > bounds.roomMaxY then
-        error("RailroaderRVTest: final relocation center is outside the interior")
-    end
-    if bounds.roofZ ~= bounds.z + 1 then
-        error("RailroaderRVTest: roof must be exactly one level above the base")
-    end
-    validateWallContract(bounds)
-    validateShellEdgeContract(bounds)
-
-    local worldOk, world = callGlobal("getWorld")
-    if not worldOk or not world then
-        error("RailroaderRVTest: getWorld is unavailable for coordinate validation")
-    end
-    local function validWorldCoordinate(x, y, z, role)
-        if z < WORLD_MIN_Z or z > WORLD_MAX_Z then
-            error("RailroaderRVTest: " .. tostring(role) .. " is outside legal z range")
-        end
-        local validOk, valid = invoke(world, "isValidSquare", x, y, z)
-        if not validOk or valid ~= true then
-            error("RailroaderRVTest: " .. tostring(role) .. " is outside the legal world")
-        end
-    end
-
-    validWorldCoordinate(targetX, targetY, targetZ, "relocation target")
-    -- Validate the entire required 100x100 base footprint without requiring any
-    -- of those remote squares to be loaded yet.
-    for y = bounds.clearMinY, bounds.clearMaxY - 1 do
-        for x = bounds.clearMinX, bounds.clearMaxX - 1 do
-            validWorldCoordinate(x, y, bounds.z, "base")
-        end
-    end
-    for i = 1, #bounds.wallCoordinates do
-        local entry = bounds.wallCoordinates[i]
-        local x = requiredInteger(entry.x, "wall[" .. tostring(i) .. "].x")
-        local y = requiredInteger(entry.y, "wall[" .. tostring(i) .. "].y")
-        local z = requiredInteger(entry.z, "wall[" .. tostring(i) .. "].z")
-        if z ~= bounds.z then
-            error("RailroaderRVTest: wall entry is not on the base z level")
-        end
-        validWorldCoordinate(x, y, z, "wall")
-    end
-    -- The upper footprint must be legal, but its squares may remain nil until
-    -- the player-building phase creates them.
-    for y = bounds.roofMinY, bounds.roofMaxY do
-        for x = bounds.roofMinX, bounds.roofMaxX do
-            validWorldCoordinate(x, y, bounds.roofZ, "roof")
-        end
-    end
-end
-
-local function preflightLoaded(cell, bounds, allowIncomplete)
-    if not cell then
-        error("RailroaderRVTest: preflight has no IsoCell")
-    end
-    validateTargetCoordinates(bounds, {
-        x = Constants.TELEPORT_X,
-        y = Constants.TELEPORT_Y,
-        z = Constants.TELEPORT_Z,
-    })
-    local function requiredLoaded(x, y, z, role)
-        local square = getSquare(cell, x, y, z)
-        if not square then
-            local message = "RailroaderRVTest: required " .. tostring(role)
-                .. " square is not loaded at " .. tostring(x) .. ","
-                .. tostring(y) .. "," .. tostring(z)
-            -- A missing square is the normal result while the remote
-            -- teleport is still streaming its target cells.  The polling
-            -- caller must receive a status instead of raising a Kahlua
-            -- exception on every OnTick; strict callers still fail closed.
-            if allowIncomplete then
-                return nil, message
-            end
-            error(message)
-        end
-        return square
-    end
-
-    -- All 10000 base squares in the half-open 100x100 scope must already
-    -- exist before any clear/remove pass.
-    for y = bounds.clearMinY, bounds.clearMaxY - 1 do
-        for x = bounds.clearMinX, bounds.clearMaxX - 1 do
-            local square, reason = requiredLoaded(x, y, bounds.z, "base")
-            if not square then
-                return false, reason
-            end
-        end
-    end
-    -- The explicit oriented wall list is part of the same loaded base layer.
-    for i = 1, #bounds.wallCoordinates do
-        local entry = bounds.wallCoordinates[i]
-        local x = requiredInteger(entry.x, "wall[" .. tostring(i) .. "].x")
-        local y = requiredInteger(entry.y, "wall[" .. tostring(i) .. "].y")
-        local z = requiredInteger(entry.z, "wall[" .. tostring(i) .. "].z")
-        if z ~= bounds.z then
-            error("RailroaderRVTest: wall entry is not on the base z level")
-        end
-        local square, reason = requiredLoaded(x, y, z, "wall")
-        if not square then
-            return false, reason
-        end
-    end
-    return true
-end
-
--- A remote teleport is also the engine's chunk-streaming trigger.  The target
--- may therefore be unloaded when queueGeneration sends the relocation command.
--- Retry only the two expected loading failures here; malformed contracts or
--- other engine failures cancel the request before any world mutation.
-local function targetAreaLoadStatus(player, bounds)
-    local cellOk, cellOrError = pcall(getCellForPlayer, player)
-    if not cellOk then
-        local message = safeErrorText(cellOrError)
-        if string.find(message, "no IsoCell available", 1, true) then
-            return false, message
-        end
-        return nil, message
-    end
-    local preflightOk, loaded, preflightError = pcall(preflightLoaded,
-        cellOrError, bounds, true)
-    if not preflightOk then
-        -- Unexpected contract/engine errors remain a hard cancellation; only
-        -- the explicit incomplete-footprint status is retryable.
-        return nil, safeErrorText(loaded)
-    end
-    if loaded == true then
-        return true
-    end
-    if loaded == false then
-        return false, safeErrorText(preflightError)
-    end
-    return nil, "RailroaderRVTest: loaded-area preflight returned no status"
 end
 
 local function removeOldGeneration(cell, manifest)
     requireCurrentManifest(manifest, true)
     if manifest.generation == nil then return end
-    local generation = requiredInteger(manifest.generation, "manifest generation")
+    local generation = ServerUtil.requiredInteger(manifest.generation, "manifest generation")
     local oldBounds = manifest.bounds
     local rvId, bitmapVersion = manifest.rvId, manifest.bitmapVersion
-    walkBounds(cell, oldBounds, function(square)
-        clearSquare(square, generation, rvId, bitmapVersion)
+    ServerSchema.walkBounds(cell, oldBounds, function(square)
+        ServerWorld.clearSquare(square, generation, rvId, bitmapVersion)
     end)
-end
-
-local function eachStructureSquare(cell, bounds, callback)
-    if type(bounds) ~= "table" then
-        return
-    end
-    local function visit(x, y, z)
-        local square = getSquare(cell, x, y, z)
-        if square then
-            callback(square, x, y, z)
-        end
-    end
-    local baseZ = requiredInteger(bounds.z, "saved bounds z")
-    for x = requiredInteger(bounds.wallMinX, "saved bounds wallMinX"),
-        requiredInteger(bounds.wallMaxX, "saved bounds wallMaxX") do
-        for y = requiredInteger(bounds.wallMinY, "saved bounds wallMinY"),
-            requiredInteger(bounds.wallMaxY, "saved bounds wallMaxY") do
-            visit(x, y, baseZ)
-        end
-    end
-    -- The complete 7x41 wall rectangle already contains the 6x40 interior.
-    -- Do not add a second room loop: it only revisits the same base squares and
-    -- can hide an incomplete wall scan behind a de-duplication table.
-    local roofZ = requiredInteger(bounds.roofZ, "saved bounds roofZ")
-    for x = requiredInteger(bounds.roofMinX, "saved bounds roofMinX"),
-        requiredInteger(bounds.roofMaxX, "saved bounds roofMaxX") do
-        for y = requiredInteger(bounds.roofMinY, "saved bounds roofMinY"),
-            requiredInteger(bounds.roofMaxY, "saved bounds roofMaxY") do
-            visit(x, y, roofZ)
-        end
-    end
 end
 
 local function clearInvalidRoomOwnershipReferences(cell, oldBounds, newBounds)
@@ -1356,11 +145,11 @@ local function clearInvalidRoomOwnershipReferences(cell, oldBounds, newBounds)
             return
         end
         seen[key] = true
-        local roomOk, room = invoke(square, "getRoom")
+        local roomOk, room = ServerUtil.invoke(square, "getRoom")
         if not roomOk or room == nil then
             return
         end
-        local roomDefOk, roomDef = invoke(square, "getRoomDef")
+        local roomDefOk, roomDef = ServerUtil.invoke(square, "getRoomDef")
         if not roomDefOk then
             error("RailroaderRVTest: room definition inspection failed")
         end
@@ -1369,18 +158,18 @@ local function clearInvalidRoomOwnershipReferences(cell, oldBounds, newBounds)
         -- invalid reference is corrected. Valid old/new rooms, including an
         -- overlapping replacement, are never modified.
         if roomDef == nil then
-            if not callSucceeded(square, "setRoomID", -1) then
+            if not ServerUtil.callSucceeded(square, "setRoomID", -1) then
                 error("RailroaderRVTest: invalid room ownership reset failed")
             end
-            local verifyOk, verifyRoom = invoke(square, "getRoom")
+            local verifyOk, verifyRoom = ServerUtil.invoke(square, "getRoom")
             if not verifyOk or verifyRoom ~= nil then
                 error("RailroaderRVTest: invalid room ownership reset did not take effect")
             end
             cleared = cleared + 1
         end
     end
-    eachStructureSquare(cell, oldBounds, inspect)
-    eachStructureSquare(cell, newBounds, inspect)
+    ServerSchema.eachStructureSquare(cell, oldBounds, inspect)
+    ServerSchema.eachStructureSquare(cell, newBounds, inspect)
     return cleared
 end
 
@@ -1394,12 +183,12 @@ local function registerServerRoomOwnershipGuard(generation, player, oldBounds,
     if rvId == nil or tostring(rvId) == "" then
         error("RailroaderRVTest: room ownership RV identity is incomplete")
     end
-    local generationNumber = requiredInteger(generation,
+    local generationNumber = ServerUtil.requiredInteger(generation,
         "room ownership generation")
     if generationNumber < 1 then
         error("RailroaderRVTest: room ownership generation is invalid")
     end
-    local version = requiredInteger(bitmapVersion,
+    local version = ServerUtil.requiredInteger(bitmapVersion,
         "room ownership bitmapVersion")
     if version < 1 then
         error("RailroaderRVTest: room ownership bitmapVersion is invalid")
@@ -1421,7 +210,7 @@ local function registerServerRoomOwnershipGuard(generation, player, oldBounds,
 end
 
 local function refreshServerRoomOwnershipGuard(guard, phase)
-    local cleared = clearInvalidRoomOwnershipReferences(getCellForPlayer(guard.player),
+    local cleared = clearInvalidRoomOwnershipReferences(ServerWorld.getCellForPlayer(guard.player),
         guard.oldBounds, guard.newBounds)
     guard.totalCleared = guard.totalCleared + cleared
     if cleared > 0 or phase ~= nil then
@@ -1433,6 +222,16 @@ local function refreshServerRoomOwnershipGuard(guard, phase)
 end
 
 local function processServerRoomOwnershipGuards()
+    -- A roof-refresh relocation deliberately moves the authoritative player
+    -- far outside the RV scope.  The guard's bounds are still the RV's
+    -- current geometry, so running the normal scan through that player's
+    -- remote cell can make IsoCell resolve repeated cross-chunk lookups on
+    -- the same tick that must advance the relocation.  The roof service
+    -- already owns the boundary lease and keeps the player out of the room;
+    -- pause only this non-transactional cleanup until the member returns.
+    if roofRepairRelocationGroup ~= nil or roofRepairGroupFinalReturn ~= nil then
+        return
+    end
     local finished = {}
     for generation, guard in pairs(roomOwnershipGuards) do
         guard.ticks = guard.ticks + 1
@@ -1472,7 +271,7 @@ local function copyRoomRefreshBounds(target, prefix, bounds)
     }
     for i = 1, #fields do
         local field = fields[i]
-        target[prefix .. field] = requiredInteger(bounds[field],
+        target[prefix .. field] = ServerUtil.requiredInteger(bounds[field],
             "room refresh " .. prefix .. field)
     end
 end
@@ -1482,7 +281,7 @@ local function armClientRoomOwnershipGuard(generation, oldBounds, newBounds,
     local payload = {
         generation = generation,
         rvId = tostring(rvId),
-        bitmapVersion = requiredInteger(bitmapVersion,
+        bitmapVersion = ServerUtil.requiredInteger(bitmapVersion,
             "client room ownership bitmapVersion"),
         hasOld = type(oldBounds) == "table",
     }
@@ -1492,7 +291,7 @@ local function armClientRoomOwnershipGuard(generation, oldBounds, newBounds,
     copyRoomRefreshBounds(payload, "new", newBounds)
     -- The no-player overload broadcasts to every connected client. A player
     -- other than the requester may later walk through the retired footprint.
-    if not callGlobalSucceeded("sendServerCommand", COMMAND_MODULE,
+    if not ServerUtil.callGlobalSucceeded("sendServerCommand", COMMAND_MODULE,
         COMMAND_REFRESH_ROOM_OWNERSHIP, payload) then
         error("RailroaderRVTest: client room ownership guards could not be armed")
     end
@@ -1505,19 +304,19 @@ local function removeGeneration(cell, bounds, generation, rvId, bitmapVersion)
     -- Failed builds are rolled back by the same owner+generation tag used by
     -- repeat generation.  This includes roof floors, generators, barrels and
     -- the final light, even when the failure occurs in the last phase.
-    walkBounds(cell, bounds, function(square)
-        clearSquare(square, generation, rvId, bitmapVersion)
+    ServerSchema.walkBounds(cell, bounds, function(square)
+        ServerWorld.clearSquare(square, generation, rvId, bitmapVersion)
     end)
 
-    -- A successful pcall around clearSquare is not enough on a dedicated
+    -- A successful pcall around ServerWorld.clearSquare is not enough on a dedicated
     -- server: transmitRemoveItemFromSquare owns the packet, event, local
     -- detach, and neighbour recalculation.  Verify the authoritative cell has
     -- no tagged object left before reporting rollback=COMPLETE.
     local remaining = 0
-    walkBounds(cell, bounds, function(square)
-        local objects = squareSnapshot(square)
+    ServerSchema.walkBounds(cell, bounds, function(square)
+        local objects = ServerWorld.squareSnapshot(square)
         for i = 1, #objects do
-            if isTaggedForGeneration(objects[i], generation, rvId,
+            if ServerWorld.isTaggedForGeneration(objects[i], generation, rvId,
                 bitmapVersion) then
                 remaining = remaining + 1
             end
@@ -1539,7 +338,7 @@ local function armTargetedClientRoomOwnershipGuard(player, generation, newBounds
     if player == nil then
         error("RailroaderRVTest: targeted room ownership player is unavailable")
     end
-    local generationNumber = requiredInteger(generation,
+    local generationNumber = ServerUtil.requiredInteger(generation,
         "targeted room ownership generation")
     if generationNumber < 1 then
         error("RailroaderRVTest: targeted room ownership generation is invalid")
@@ -1547,7 +346,7 @@ local function armTargetedClientRoomOwnershipGuard(player, generation, newBounds
     if rvId == nil or tostring(rvId) == "" then
         error("RailroaderRVTest: targeted room ownership RV identity is incomplete")
     end
-    local version = requiredInteger(bitmapVersion,
+    local version = ServerUtil.requiredInteger(bitmapVersion,
         "targeted room ownership bitmapVersion")
     if version ~= Constants.BITMAP_VERSION then
         error("RailroaderRVTest: targeted room ownership bitmapVersion is invalid")
@@ -1559,7 +358,7 @@ local function armTargetedClientRoomOwnershipGuard(player, generation, newBounds
         hasOld = false,
     }
     copyRoomRefreshBounds(payload, "new", newBounds)
-    if not callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
+    if not ServerUtil.callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
         COMMAND_REFRESH_ROOM_OWNERSHIP, payload) then
         error("RailroaderRVTest: targeted room ownership guard could not be armed")
     end
@@ -1571,32 +370,32 @@ local function ensureRoofSquare(cell, x, y, z)
     -- operation idempotent so a retry reuses an existing square (including a
     -- square left empty after a failed addFloor) instead of creating a
     -- duplicate/unconnected object.
-    local square = getSquare(cell, x, y, z)
+    local square = ServerWorld.getSquare(cell, x, y, z)
     if square then
         return square
     end
 
     local cls = rawget(_G, "IsoGridSquare")
-    local constructed, created = invokeClass(cls, {
+    local constructed, created = ServerUtil.invokeClass(cls, {
         -- Match official BuildRecipeCode/buildRecipeCode.lua exactly:
         -- IsoGridSquare.new(cell, nil, x, y, z), followed by ConnectNewSquare.
         { cell, nil, x, y, z },
     })
     if constructed then
-        if not callSucceeded(cell, "ConnectNewSquare", created, false) then
+        if not ServerUtil.callSucceeded(cell, "ConnectNewSquare", created, false) then
             error("RailroaderRVTest: unable to connect roof square")
         end
     else
         -- Keep the official DebugIsoRegionsEdit construction API as a narrow
         -- Alternate runtime API path for bindings that do not expose the class.
         -- constructor.  This method connects the square itself.
-        local createdOk, fallback = invoke(cell, "createNewGridSquare", x, y, z, true)
+        local createdOk, fallback = ServerUtil.invoke(cell, "createNewGridSquare", x, y, z, true)
         if not createdOk or not fallback then
             error("RailroaderRVTest: unable to construct roof square")
         end
     end
 
-    local connected = getSquare(cell, x, y, z)
+    local connected = ServerWorld.getSquare(cell, x, y, z)
     if not connected then
         error("RailroaderRVTest: roof square construction was not observable")
     end
@@ -1607,41 +406,41 @@ local function createFloor(square, sprite, generation, role, tagContext)
     if not sprite then
         error("RailroaderRVTest: floor sprite is not configured")
     end
-    local ok, floor = invoke(square, "getFloor")
+    local ok, floor = ServerUtil.invoke(square, "getFloor")
     local hadFloor = ok and floor ~= nil
     local previousSprite
     local createdByGeneration = not hadFloor
     if hadFloor then
-        previousSprite = getSpriteName(floor)
+        previousSprite = ServerWorld.getSpriteName(floor)
         if not previousSprite then
             error("RailroaderRVTest: existing floor has no sprite")
         end
         -- Metal and wood are two phases over the same object.  Keep the first
         -- pre-generation sprite so rollback can restore the original floor;
         -- the wood/roof stages never overwrite this initial snapshot.
-        local existingData = objectModData(floor)
+        local existingData = ServerWorld.objectModData(floor)
         local existingTag = existingData and existingData.RailroaderRVTest or nil
         if type(existingTag) == "table" and existingTag.owner == OWNER
             and existingTag.previousSprite
-            and toNumber(existingTag.generation) == toNumber(generation) then
+            and ServerUtil.toNumber(existingTag.generation) == ServerUtil.toNumber(generation) then
             previousSprite = tostring(existingTag.previousSprite)
             createdByGeneration = existingTag.createdByGeneration == true
         end
     end
     if not ok or not floor then
-        local added = callSucceeded(square, "addFloor", sprite)
+        local added = ServerUtil.callSucceeded(square, "addFloor", sprite)
         if not added then
             error("RailroaderRVTest: addFloor failed")
         end
-        ok, floor = invoke(square, "getFloor")
+        ok, floor = ServerUtil.invoke(square, "getFloor")
     else
-        local spriteObject = select(2, callGlobal("getSprite", sprite))
+        local spriteObject = select(2, ServerUtil.callGlobal("getSprite", sprite))
         if spriteObject then
-            if not callSucceeded(floor, "setSprite", spriteObject) then
+            if not ServerUtil.callSucceeded(floor, "setSprite", spriteObject) then
                 error("RailroaderRVTest: floor sprite update failed")
             end
         else
-            if not callSucceeded(floor, "setSprite", sprite) then
+            if not ServerUtil.callSucceeded(floor, "setSprite", sprite) then
                 error("RailroaderRVTest: floor sprite update failed")
             end
         end
@@ -1649,13 +448,13 @@ local function createFloor(square, sprite, generation, role, tagContext)
     if not floor then
         error("RailroaderRVTest: floor object was not created")
     end
-    local tagged, tagError = pcall(tagObject, floor, generation, role,
-        withTagIdentity({
+    local tagged, tagError = pcall(ServerWorld.tagObject, floor, generation, role,
+        ServerWorld.withTagIdentity({
         previousSprite = previousSprite,
         createdByGeneration = createdByGeneration,
         }, tagContext))
     if not tagged then
-        local removed, removeError = pcall(removeGenericObject, square, floor)
+        local removed, removeError = pcall(ServerWorld.removeGenericObject, square, floor)
         if not removed then
             error(tostring(tagError) .. " (untagged floor cleanup failed: "
                 .. tostring(removeError) .. ")")
@@ -1666,68 +465,68 @@ local function createFloor(square, sprite, generation, role, tagContext)
         -- This floor is already present in the client object map.  Send the
         -- two independent deltas explicitly: the replacement sprite and the
         -- generation snapshot/tag.  Neither delta is valid for a new object.
-        if not callSucceeded(floor, "transmitUpdatedSpriteToClients") then
+        if not ServerUtil.callSucceeded(floor, "transmitUpdatedSpriteToClients") then
             error("RailroaderRVTest: existing floor sprite transmission failed")
         end
-        if not callSucceeded(floor, "transmitModData") then
+        if not ServerUtil.callSucceeded(floor, "transmitModData") then
             error("RailroaderRVTest: existing floor modData transmission failed")
         end
     else
         -- A newly-added floor is absent from the client object map, so its
         -- complete packet is the sole initial object broadcast.
-        if not callSucceeded(floor, "transmitCompleteItemToClients") then
+        if not ServerUtil.callSucceeded(floor, "transmitCompleteItemToClients") then
             error("RailroaderRVTest: new floor client transmission failed")
         end
     end
-    recalcSquare(square)
+    ServerWorld.recalcSquare(square)
     return floor
 end
 
 local function addSpecialObject(square, object)
     -- IsoGenerator's B42.20 constructor already calls AddSpecialObject.  Do
     -- not insert it a second time; all other constructors arrive unattached.
-    local indexOk, index = invoke(object, "getObjectIndex")
-    local indexNumber = toNumber(index)
+    local indexOk, index = ServerUtil.invoke(object, "getObjectIndex")
+    local indexNumber = ServerUtil.toNumber(index)
     local attached = indexOk and indexNumber and indexNumber >= 0
     local ok = attached
     if not attached then
-        ok = callSucceeded(square, "AddSpecialObject", object)
+        ok = ServerUtil.callSucceeded(square, "AddSpecialObject", object)
     end
     if not ok then
         error("RailroaderRVTest: unable to attach object to square")
     end
-    local indexOk, attachedIndex = invoke(object, "getObjectIndex")
-    local attachedNumber = toNumber(attachedIndex)
+    local indexOk, attachedIndex = ServerUtil.invoke(object, "getObjectIndex")
+    local attachedNumber = ServerUtil.toNumber(attachedIndex)
     if not indexOk or not attachedNumber or attachedNumber < 0 then
         error("RailroaderRVTest: object attachment was not observable")
     end
     -- The caller must transmit exactly once, after all object-specific state is
     -- final.  Sending here made the subsequent light/generator/barrel sync send
     -- a second AddItemToMap for the same object index.
-    recalcSquare(square)
+    ServerWorld.recalcSquare(square)
 end
 
 local function addNormalObject(square, object)
     -- B42.20 has AddTileObject for ordinary IsoObject instances; AddObject
     -- and addObject are not IsoGridSquare methods.  Counters/sinks must remain
     -- tile objects so their sprite/entity behavior is preserved.
-    local ok = callSucceeded(square, "AddTileObject", object)
+    local ok = ServerUtil.callSucceeded(square, "AddTileObject", object)
     if not ok then
         error("RailroaderRVTest: unable to attach normal object to square")
     end
-    local indexOk, attachedIndex = invoke(object, "getObjectIndex")
-    local attachedNumber = toNumber(attachedIndex)
+    local indexOk, attachedIndex = ServerUtil.invoke(object, "getObjectIndex")
+    local attachedNumber = ServerUtil.toNumber(attachedIndex)
     if not indexOk or not attachedNumber or attachedNumber < 0 then
         error("RailroaderRVTest: normal object attachment was not observable")
     end
     -- The creator owns the one final full-object packet so plumbing/entity
     -- state can be completed before it is sent.
-    recalcSquare(square)
+    ServerWorld.recalcSquare(square)
 end
 
 local function hasEntityComponent(object, componentName)
     if componentName == "FluidContainer" then
-        local containerOk, container = invoke(object, "getFluidContainer")
+        local containerOk, container = ServerUtil.invoke(object, "getFluidContainer")
         return containerOk and container ~= nil
     end
     local componentTypes = rawget(_G, "ComponentType")
@@ -1735,11 +534,11 @@ local function hasEntityComponent(object, componentName)
     if not componentType then
         return false
     end
-    local hasOk, has = invoke(object, "hasComponent", componentType)
+    local hasOk, has = ServerUtil.invoke(object, "hasComponent", componentType)
     if hasOk and has == true then
         return true
     end
-    local componentOk, component = invoke(object, "getComponent", componentType)
+    local componentOk, component = ServerUtil.invoke(object, "getComponent", componentType)
     return componentOk and component ~= nil
 end
 
@@ -1776,7 +575,7 @@ local function createEntityFromSprite(object, sprite, requiredComponent)
     end
     -- The factory catches its own Java exceptions, so also require the script
     -- component to be observable on the same IsoObject after the call.
-    local attachedScriptOk, attachedScript = invoke(object, "getEntityScript")
+    local attachedScriptOk, attachedScript = ServerUtil.invoke(object, "getEntityScript")
     if not attachedScriptOk or not attachedScript then
         return false
     end
@@ -1789,7 +588,7 @@ end
 local function createWall(cell, square, sprite, north, generation, role, extraData,
     tagContext)
     local cls = rawget(_G, "IsoThumpable")
-    local ok, wall = invokeClass(cls, {
+    local ok, wall = ServerUtil.invokeClass(cls, {
         -- B42.20: IsoThumpable(IsoCell, IsoGridSquare, String, boolean,
         -- KahluaTable).  nil is the ordinary no-build-info table.
         { cell, square, sprite, north, nil },
@@ -1797,12 +596,12 @@ local function createWall(cell, square, sprite, north, generation, role, extraDa
     if not ok then
         error("RailroaderRVTest: IsoThumpable construction failed")
     end
-    if not callSucceeded(wall, "setIsThumpable", true) then
+    if not ServerUtil.callSucceeded(wall, "setIsThumpable", true) then
         error("RailroaderRVTest: wall initial state failed")
     end
-    tagObject(wall, generation, role, withTagIdentity(extraData, tagContext))
+    ServerWorld.tagObject(wall, generation, role, ServerWorld.withTagIdentity(extraData, tagContext))
     addSpecialObject(square, wall)
-    if not callSucceeded(wall, "transmitCompleteItemToClients") then
+    if not ServerUtil.callSucceeded(wall, "transmitCompleteItemToClients") then
         error("RailroaderRVTest: wall client transmission failed")
     end
     return wall
@@ -1817,7 +616,7 @@ local function validatePlayerLightSprite(spriteObject, spriteName)
     if not spriteObject then
         error("RailroaderRVTest: light sprite is unavailable: " .. tostring(spriteName))
     end
-    local propertiesOk, properties = invoke(spriteObject, "getProperties")
+    local propertiesOk, properties = ServerUtil.invoke(spriteObject, "getProperties")
     if not propertiesOk or not properties then
         error("RailroaderRVTest: light sprite has no property container: " .. tostring(spriteName))
     end
@@ -1840,7 +639,7 @@ local function validatePlayerLightSprite(spriteObject, spriteName)
         error("RailroaderRVTest: IsoFlagType is unavailable for player light flag "
             .. tostring(lightProperties.attachedFlag))
     end
-    local attachedOk, hasAttached = invoke(properties, "has", attachedFlag)
+    local attachedOk, hasAttached = ServerUtil.invoke(properties, "has", attachedFlag)
     if not attachedOk or hasAttached ~= true then
         error("RailroaderRVTest: player light sprite " .. tostring(spriteName)
             .. " is missing flag " .. tostring(lightProperties.attachedFlag))
@@ -1855,7 +654,7 @@ local function validatePlayerLightSprite(spriteObject, spriteName)
         error("RailroaderRVTest: IsoObjectType is unavailable for player light type "
             .. tostring(lightProperties.objectType))
     end
-    local typeOk, spriteType = invoke(spriteObject, "getType")
+    local typeOk, spriteType = ServerUtil.invoke(spriteObject, "getType")
     if not typeOk or spriteType ~= expectedType then
         error("RailroaderRVTest: player light sprite " .. tostring(spriteName)
             .. " is not IsoObjectType." .. tostring(lightProperties.objectType))
@@ -1870,7 +669,7 @@ local function validatePlayerLightSprite(spriteObject, spriteName)
     }
     for i = 1, #required do
         local propertyName = required[i]
-        local hasOk, hasProperty = invoke(properties, "has", propertyName)
+        local hasOk, hasProperty = ServerUtil.invoke(properties, "has", propertyName)
         if not hasOk or hasProperty ~= true then
             error("RailroaderRVTest: player light sprite " .. tostring(spriteName)
                 .. " is missing property " .. tostring(propertyName))
@@ -1884,7 +683,7 @@ local function validatePlayerLightSprite(spriteObject, spriteName)
     }
     for i = 1, #expectedMetadata do
         local propertyName, expectedValue = expectedMetadata[i][1], expectedMetadata[i][2]
-        local valueOk, value = invoke(properties, "get", propertyName)
+        local valueOk, value = ServerUtil.invoke(properties, "get", propertyName)
         if not valueOk or tostring(value) ~= tostring(expectedValue) then
             error("RailroaderRVTest: player light sprite " .. tostring(spriteName)
                 .. " has unexpected " .. tostring(propertyName) .. " (expected "
@@ -1893,8 +692,8 @@ local function validatePlayerLightSprite(spriteObject, spriteName)
     end
     for _, propertyName in ipairs({ lightProperties.radius, lightProperties.red,
         lightProperties.green, lightProperties.blue }) do
-        local valueOk, value = invoke(properties, "get", propertyName)
-        local numeric = toNumber(value)
+        local valueOk, value = ServerUtil.invoke(properties, "get", propertyName)
+        local numeric = ServerUtil.toNumber(value)
         if not valueOk or not numeric then
             error("RailroaderRVTest: player light property is not numeric: "
                 .. tostring(propertyName))
@@ -1905,17 +704,17 @@ end
 
 local function createLight(cell, square, sprite, generation, tagContext)
     local cls = rawget(_G, "IsoLightSwitch")
-    local spriteOk, spriteObject = callGlobal("getSprite", sprite)
+    local spriteOk, spriteObject = ServerUtil.callGlobal("getSprite", sprite)
     if not spriteOk then
         error("RailroaderRVTest: getSprite failed for player light")
     end
     validatePlayerLightSprite(spriteObject, sprite)
-    local roomOk, roomId = invoke(square, "getRoomID")
+    local roomOk, roomId = ServerUtil.invoke(square, "getRoomID")
     if not roomOk or roomId == nil then
         roomId = -1
     end
-    roomId = toNumber(roomId) or -1
-    local ok, light = invokeClass(cls, {
+    roomId = ServerUtil.toNumber(roomId) or -1
+    local ok, light = ServerUtil.invokeClass(cls, {
         -- B42.20: IsoLightSwitch(IsoCell, IsoGridSquare, IsoSprite, long).
         { cell, square, spriteObject, roomId },
     })
@@ -1927,25 +726,25 @@ local function createLight(cell, square, sprite, generation, tagContext)
     -- to square -> recalc -> activate/sync only after getObjectIndex exists.
     -- No hand-built independent light fallback is used; the sprite's RGB/radius
     -- properties are the single source of truth and avoid duplicate lights.
-    local lightData = objectModData(light)
+    local lightData = ServerWorld.objectModData(light)
     if not lightData then
         error("RailroaderRVTest: player light has no modData")
     end
     lightData.IsLighting = true
-    tagObject(light, generation, "light", withTagIdentity(nil, tagContext))
-    if not callSucceeded(light, "setPower", 2) then
+    ServerWorld.tagObject(light, generation, "light", ServerWorld.withTagIdentity(nil, tagContext))
+    if not ServerUtil.callSucceeded(light, "setPower", 2) then
         error("RailroaderRVTest: player light initial state failed")
     end
-    local addedLightOk = callSucceeded(light, "addLightSourceFromSprite")
+    local addedLightOk = ServerUtil.callSucceeded(light, "addLightSourceFromSprite")
     if not addedLightOk then
         error("RailroaderRVTest: addLightSourceFromSprite failed")
     end
-    local lightsOk, lights = invoke(light, "getLights")
-    local lightsSizeOk, lightsSize = invoke(lights, "size")
-    if not lightsOk or not lights or not lightsSizeOk or (toNumber(lightsSize) or 0) < 1 then
+    local lightsOk, lights = ServerUtil.invoke(light, "getLights")
+    local lightsSizeOk, lightsSize = ServerUtil.invoke(lights, "size")
+    if not lightsOk or not lights or not lightsSizeOk or (ServerUtil.toNumber(lightsSize) or 0) < 1 then
         error("RailroaderRVTest: player light sprite produced no light source")
     end
-    if not callSucceeded(light, "update") then
+    if not ServerUtil.callSucceeded(light, "update") then
         error("RailroaderRVTest: player light update failed")
     end
     addSpecialObject(square, light)
@@ -1953,17 +752,17 @@ local function createLight(cell, square, sprite, generation, tagContext)
     -- index/electricity checks.  `ignoreSwitchCheck` is intentional for the
     -- technical test: the roof generator is built first, but its vertical
     -- power bridge is not an IsoRoom yet.
-    if not callSucceeded(light, "setActivated", true) then
+    if not ServerUtil.callSucceeded(light, "setActivated", true) then
         error("RailroaderRVTest: player light activation failed")
     end
-    local activeOk, active = invoke(light, "setActive", true, false, true)
+    local activeOk, active = ServerUtil.invoke(light, "setActive", true, false, true)
     if not activeOk or active ~= true then
-        if not callSucceeded(light, "switchLight", true) then
+        if not ServerUtil.callSucceeded(light, "switchLight", true) then
             error("RailroaderRVTest: player light switch failed")
         end
     end
-    if not callSucceeded(light, "update")
-        or not callSucceeded(light, "transmitCompleteItemToClients") then
+    if not ServerUtil.callSucceeded(light, "update")
+        or not ServerUtil.callSucceeded(light, "transmitCompleteItemToClients") then
         error("RailroaderRVTest: player light synchronisation failed")
     end
     return light
@@ -1974,26 +773,26 @@ local function createGenerator(cell, square, sprite, generation, tagContext)
     -- B42.20's only world constructor is
     -- IsoGenerator(InventoryItem, IsoCell, IsoGridSquare).  The item carries
     -- the initial condition/fuel state and also selects the world sprite.
-    local itemOk, item = callGlobal("instanceItem", "Base.Generator")
+    local itemOk, item = ServerUtil.callGlobal("instanceItem", "Base.Generator")
     if not itemOk or not item then
         error("RailroaderRVTest: Base.Generator item is unavailable")
     end
-    invoke(item, "setCondition", 100)
-    local itemDataOk, itemData = invoke(item, "getModData")
+    ServerUtil.invoke(item, "setCondition", 100)
+    local itemDataOk, itemData = ServerUtil.invoke(item, "getModData")
     if itemDataOk and type(itemData) == "table" then
         itemData.fuel = Constants.GENERATOR_INITIAL_FUEL
     end
-    local ok, generator = invokeClass(cls, {
+    local ok, generator = ServerUtil.invokeClass(cls, {
         { item, cell, square },
     })
     if not ok then
         error("RailroaderRVTest: IsoGenerator construction failed")
     end
-    tagObject(generator, generation, "generator", withTagIdentity(nil, tagContext))
-    if not callSucceeded(generator, "setCondition", 100)
-        or not callSucceeded(generator, "setFuel", Constants.GENERATOR_INITIAL_FUEL)
-        or not callSucceeded(generator, "setConnected", true)
-        or not callSucceeded(generator, "setActivated", true) then
+    ServerWorld.tagObject(generator, generation, "generator", ServerWorld.withTagIdentity(nil, tagContext))
+    if not ServerUtil.callSucceeded(generator, "setCondition", 100)
+        or not ServerUtil.callSucceeded(generator, "setFuel", Constants.GENERATOR_INITIAL_FUEL)
+        or not ServerUtil.callSucceeded(generator, "setConnected", true)
+        or not ServerUtil.callSucceeded(generator, "setActivated", true) then
         error("RailroaderRVTest: generator initial state failed")
     end
     if type(cls.updateGenerator) == "function" then
@@ -2003,7 +802,7 @@ local function createGenerator(cell, square, sprite, generation, tagContext)
     -- explicit helper after all local/tag state is final so it only validates
     -- that attachment and recalculates the square; it emits no packet.
     addSpecialObject(square, generator)
-    if not callSucceeded(generator, "transmitCompleteItemToClients") then
+    if not ServerUtil.callSucceeded(generator, "transmitCompleteItemToClients") then
         error("RailroaderRVTest: generator client transmission failed")
     end
     return generator
@@ -2025,7 +824,7 @@ local function getRainBarrelFluidContainer(barrel)
     -- IsoObject is itself the GameEntity in B42.20; the required component is
     -- therefore exposed directly on the barrel.  Do not probe a nonexistent
     -- nested getEntity() object or treat modData as the component state.
-    local ok, container = invoke(barrel, "getFluidContainer")
+    local ok, container = ServerUtil.invoke(barrel, "getFluidContainer")
     if ok and container then
         return container
     end
@@ -2040,8 +839,8 @@ local function getRainBarrelCapacity(barrel)
     -- B42.20's FluidContainer API exposes the authoritative capacity directly.
     -- Do not fall back to a guessed constant: a wrong entity script must fail
     -- before generation is reported as successful.
-    local capacityOk, capacity = invoke(container, "getCapacity")
-    capacity = toNumber(capacity)
+    local capacityOk, capacity = ServerUtil.invoke(container, "getCapacity")
+    capacity = ServerUtil.toNumber(capacity)
     if not capacityOk or not capacity or capacity <= 0 then
         error("RailroaderRVTest: rain barrel FluidContainer capacity is unavailable"
             .. " (ok=" .. tostring(capacityOk) .. ", value=" .. tostring(capacity) .. ")")
@@ -2051,16 +850,16 @@ end
 
 local function readRainBarrelFluidState(barrel, container)
     local state = {}
-    state.amountOk, state.amount = invoke(container, "getAmount")
-    state.amount = toNumber(state.amount)
-    state.capacityOk, state.capacity = invoke(container, "getCapacity")
-    state.capacity = toNumber(state.capacity)
-    state.fullOk, state.full = invoke(container, "isFull")
-    state.objectAmountOk, state.objectAmount = invoke(barrel, "getFluidAmount")
-    state.objectAmount = toNumber(state.objectAmount)
-    state.objectCapacityOk, state.objectCapacity = invoke(barrel, "getFluidCapacity")
-    state.objectCapacity = toNumber(state.objectCapacity)
-    state.taintedOk, state.tainted = invoke(barrel, "isTaintedWater")
+    state.amountOk, state.amount = ServerUtil.invoke(container, "getAmount")
+    state.amount = ServerUtil.toNumber(state.amount)
+    state.capacityOk, state.capacity = ServerUtil.invoke(container, "getCapacity")
+    state.capacity = ServerUtil.toNumber(state.capacity)
+    state.fullOk, state.full = ServerUtil.invoke(container, "isFull")
+    state.objectAmountOk, state.objectAmount = ServerUtil.invoke(barrel, "getFluidAmount")
+    state.objectAmount = ServerUtil.toNumber(state.objectAmount)
+    state.objectCapacityOk, state.objectCapacity = ServerUtil.invoke(barrel, "getFluidCapacity")
+    state.objectCapacity = ServerUtil.toNumber(state.objectCapacity)
+    state.taintedOk, state.tainted = ServerUtil.invoke(barrel, "isTaintedWater")
     return state
 end
 
@@ -2093,14 +892,14 @@ local function refillRainBarrelFluid(container, barrel, capacity)
     if not fluidType then
         return false, "FluidType.TaintedWater and FluidType.Water are unavailable"
     end
-    local emptied = callSucceeded(container, "Empty")
+    local emptied = ServerUtil.callSucceeded(container, "Empty")
     local added = false
     if emptied then
-        added = callSucceeded(container, "addFluid", fluidType, capacity)
+        added = ServerUtil.callSucceeded(container, "addFluid", fluidType, capacity)
     end
     local synced = false
     if emptied and added then
-        synced = callSucceeded(barrel, "sync")
+        synced = ServerUtil.callSucceeded(barrel, "sync")
     end
     if not emptied or not added or not synced then
         return false, "Empty=" .. tostring(emptied)
@@ -2111,25 +910,25 @@ local function refillRainBarrelFluid(container, barrel, capacity)
 end
 
 local function ensureRainBarrelGlobalObject(barrel)
-    local system = getRainBarrelSystem()
+    local system = ServerWorld.getRainBarrelSystem()
     if not system or not system.system then
         error("RailroaderRVTest: SRainBarrelSystem is unavailable")
     end
     if not getRainBarrelGlobalClass() then
         error("RailroaderRVTest: SRainBarrelGlobalObject is unavailable")
     end
-    local square = select(2, invoke(barrel, "getSquare"))
+    local square = select(2, ServerUtil.invoke(barrel, "getSquare"))
     if not square then
         error("RailroaderRVTest: rain barrel has no square")
     end
-    local x = floorInt(select(2, invoke(square, "getX")))
-    local y = floorInt(select(2, invoke(square, "getY")))
-    local z = floorInt(select(2, invoke(square, "getZ")))
-    local globalObject = select(2, invoke(system.system, "getObjectAt", x, y, z))
+    local x = ServerUtil.floorInt(select(2, ServerUtil.invoke(square, "getX")))
+    local y = ServerUtil.floorInt(select(2, ServerUtil.invoke(square, "getY")))
+    local z = ServerUtil.floorInt(select(2, ServerUtil.invoke(square, "getZ")))
+    local globalObject = select(2, ServerUtil.invoke(system.system, "getObjectAt", x, y, z))
     local luaObject
     if globalObject then
         -- Loading is explicit because vanilla isValidIsoObject() is false.
-        local wrapped, existing = invoke(system, "newLuaObject", globalObject)
+        local wrapped, existing = ServerUtil.invoke(system, "newLuaObject", globalObject)
         if not wrapped or not existing then
             error("RailroaderRVTest: unable to load rain barrel global object")
         end
@@ -2137,19 +936,19 @@ local function ensureRainBarrelGlobalObject(barrel)
     else
         -- This is the public SGlobalObjectSystem creation API.  It calls
         -- SRainBarrelGlobalObject:new() and publishes the object to clients.
-        local created, fresh = invoke(system, "newLuaObjectOnSquare", square)
+        local created, fresh = ServerUtil.invoke(system, "newLuaObjectOnSquare", square)
         if not created or not fresh then
             error("RailroaderRVTest: unable to create rain barrel global object")
         end
         luaObject = fresh
-        local initialized = callSucceeded(luaObject, "initNew")
+        local initialized = ServerUtil.callSucceeded(luaObject, "initNew")
         if not initialized then
             error("RailroaderRVTest: unable to initialize rain barrel global object")
         end
     end
 
     local capacity, fluidContainer = getRainBarrelCapacity(barrel)
-    local outsideOk, outside = invoke(square, "isOutside")
+    local outsideOk, outside = ServerUtil.invoke(square, "isOutside")
     outside = outsideOk and outside == true or false
     luaObject.waterMax = capacity
     luaObject.waterAmount = capacity
@@ -2159,7 +958,7 @@ local function ensureRainBarrelGlobalObject(barrel)
     -- Use the official global-object state bridge.  It writes the four
     -- SRainBarrelGlobalObject fields, fills the entity FluidContainer with
     -- tainted water, sets waterMax on IsoObject modData, and transmits it.
-    local stateOk = callSucceeded(luaObject, "stateToIsoObject", barrel)
+    local stateOk = ServerUtil.callSucceeded(luaObject, "stateToIsoObject", barrel)
     if not stateOk then
         error("RailroaderRVTest: rain barrel stateToIsoObject failed")
     end
@@ -2194,19 +993,19 @@ local function ensureRainBarrelGlobalObject(barrel)
     luaObject.waterMax = fluidState.capacity
     luaObject.waterAmount = fluidState.amount
     luaObject.taintedWater = true
-    local data = objectModData(barrel)
+    local data = ServerWorld.objectModData(barrel)
     if data then
         data.waterMax = fluidState.capacity
         data.waterAmount = fluidState.amount
         data.exterior = outside
         data.taintedWater = true
     end
-    if not callSucceeded(barrel, "transmitModData") then
+    if not ServerUtil.callSucceeded(barrel, "transmitModData") then
         error("RailroaderRVTest: rain barrel modData synchronisation failed")
     end
-    local synced = callSucceeded(luaObject, "updateOnClient")
+    local synced = ServerUtil.callSucceeded(luaObject, "updateOnClient")
     if not synced then
-        local fallbackSync = callSucceeded(system, "updateLuaObjectOnClient", luaObject)
+        local fallbackSync = ServerUtil.callSucceeded(system, "updateLuaObjectOnClient", luaObject)
         if not fallbackSync then
             error("RailroaderRVTest: rain barrel global object sync failed")
         end
@@ -2216,7 +1015,7 @@ end
 
 local function createRainBarrel(cell, square, sprite, generation, tagContext)
     local cls = rawget(_G, "IsoThumpable")
-    local ok, barrel = invokeClass(cls, {
+    local ok, barrel = ServerUtil.invokeClass(cls, {
         -- Match vanilla MORainCollectorBarrel: a large full collector is a
         -- thumpable with its entity script supplying the FluidContainer.
         { cell, square, sprite, false, nil },
@@ -2224,23 +1023,23 @@ local function createRainBarrel(cell, square, sprite, generation, tagContext)
     if not ok then
         error("RailroaderRVTest: rain barrel construction failed")
     end
-    if not callSucceeded(barrel, "setName", "Rain Collector Barrel")
-        or not callSucceeded(barrel, "setCanPassThrough", false)
-        or not callSucceeded(barrel, "setCanBarricade", false)
-        or not callSucceeded(barrel, "setBlockAllTheSquare", true)
-        or not callSucceeded(barrel, "setIsThumpable", true) then
+    if not ServerUtil.callSucceeded(barrel, "setName", "Rain Collector Barrel")
+        or not ServerUtil.callSucceeded(barrel, "setCanPassThrough", false)
+        or not ServerUtil.callSucceeded(barrel, "setCanBarricade", false)
+        or not ServerUtil.callSucceeded(barrel, "setBlockAllTheSquare", true)
+        or not ServerUtil.callSucceeded(barrel, "setIsThumpable", true) then
         error("RailroaderRVTest: rain barrel initial state failed")
     end
     if not createEntityFromSprite(barrel, sprite, "FluidContainer") then
         error("RailroaderRVTest: rain barrel entity script is unavailable")
     end
-    tagObject(barrel, generation, "rain_barrel", withTagIdentity(nil, tagContext))
+    ServerWorld.tagObject(barrel, generation, "rain_barrel", ServerWorld.withTagIdentity(nil, tagContext))
     addSpecialObject(square, barrel)
     -- The global-object bridge below emits object-index deltas (`sync`,
     -- `transmitModData`, and updateOnClient).  Publish the newly attached
     -- IsoObject exactly once before entering that bridge, so every later
     -- incremental update targets an object the client already knows.
-    if not callSucceeded(barrel, "transmitCompleteItemToClients") then
+    if not ServerUtil.callSucceeded(barrel, "transmitCompleteItemToClients") then
         error("RailroaderRVTest: rain barrel client transmission failed")
     end
     -- Do not rely on OnObjectAdded: B42.20's vanilla validity callback is
@@ -2251,7 +1050,7 @@ end
 
 local function createFurniture(cell, square, sprite, generation, role, tagContext)
     local cls = rawget(_G, "IsoObject")
-    local ok, object = invokeClass(cls, {
+    local ok, object = ServerUtil.invokeClass(cls, {
         { cell, square, sprite },
         { square, sprite },
     })
@@ -2264,7 +1063,7 @@ local function createFurniture(cell, square, sprite, generation, role, tagContex
     if entityCreated == false then
         error("RailroaderRVTest: furniture entity creation failed for " .. tostring(role))
     end
-    tagObject(object, generation, role, withTagIdentity(nil, tagContext))
+    ServerWorld.tagObject(object, generation, role, ServerWorld.withTagIdentity(nil, tagContext))
     addNormalObject(square, object)
     -- Counter and sink callers own the complete packet.  The sink publishes
     -- its initial object here at the call site, then sends plumbing deltas
@@ -2295,7 +1094,7 @@ end
 
 local function setManifestState(manifest, state, reason)
     manifest.state = state
-    manifest.updatedAt = os.time()
+    manifest.updatedAt = math.floor(os.time())
     if reason then
         manifest.lastError = safeErrorText(reason)
     end
@@ -2319,7 +1118,7 @@ local function setGenerationPhase(manifest, generation, phase)
     if manifest then
         manifest.phase = phase
         manifest.phaseGeneration = generation
-        manifest.phaseUpdatedAt = os.time()
+        manifest.phaseUpdatedAt = math.floor(os.time())
         if ModData and type(ModData.transmit) == "function" then
             pcall(ModData.transmit, MANIFEST_KEY)
         end
@@ -2332,14 +1131,14 @@ local function recalcAndCheckStructure(cell, bounds)
     local seen = {}
     local checked = 0
     local function recalcAt(x, y, z)
-            local square = getSquare(cell, x, y, z)
+            local square = ServerWorld.getSquare(cell, x, y, z)
         if not square then
             error("RailroaderRVTest: structure square is not loaded")
         end
         local key = tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
         if not seen[key] then
             seen[key] = true
-            recalcSquare(square)
+            ServerWorld.recalcSquare(square)
             checked = checked + 1
         end
         return square
@@ -2356,7 +1155,7 @@ local function recalcAndCheckStructure(cell, bounds)
     for x = bounds.roofMinX, bounds.roofMaxX do
         for y = bounds.roofMinY, bounds.roofMaxY do
             local roofSquare = recalcAt(x, y, bounds.roofZ)
-            local floorOk, floor = invoke(roofSquare, "getFloor")
+            local floorOk, floor = ServerUtil.invoke(roofSquare, "getFloor")
             if not floorOk or not floor then
                 error("RailroaderRVTest: roof floor missing after structure recalc")
             end
@@ -2371,11 +1170,11 @@ local function recalcAndCheckStructure(cell, bounds)
     -- nil room is expected in this technical phase (IsoRoom registration is
     -- deferred), but probing it here keeps the phase observable and ensures
     -- the methods themselves are safe on the generated squares.
-        local probe = getSquare(cell, bounds.roomMinX, bounds.roomMinY, bounds.z)
+        local probe = ServerWorld.getSquare(cell, bounds.roomMinX, bounds.roomMinY, bounds.z)
     if probe then
-        invoke(probe, "getRoom")
-        invoke(probe, "getRoomID")
-        invoke(probe, "getRoofHideBuilding")
+        ServerUtil.invoke(probe, "getRoom")
+        ServerUtil.invoke(probe, "getRoomID")
+        ServerUtil.invoke(probe, "getRoofHideBuilding")
     end
     return checked
 end
@@ -2386,13 +1185,13 @@ local function clearGenerationArea(cell, bounds, generation, manifest)
     -- snapshot/removal path handles zombies, corpses, trees, vegetation,
     -- rocks, decorative objects, and floors while emitting server-authoritative
     -- removal packets for every object it removes.
-    walkBounds(cell, bounds, function(square)
-        clearSquare(square, nil)
+    ServerSchema.walkBounds(cell, bounds, function(square)
+        ServerWorld.clearSquare(square, nil)
     end)
 end
 
 local function buildGeneration(player, layout, bounds, generation, manifest)
-    local cell = getCellForPlayer(player)
+    local cell = ServerWorld.getCellForPlayer(player)
     local sprites = Constants.SPRITES
     local woodSprite = sprites and sprites.woodFloor and sprites.woodFloor.sprite
     local northWallSprite = sprites and sprites.wall and sprites.wall.northSprite
@@ -2414,24 +1213,24 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
 
     -- Every feature point is part of the current shared layout contract.
     local anchor = layout.anchor
-    local anchorX = requiredInteger(anchor.x, "layout anchor.x")
-    local anchorY = requiredInteger(anchor.y, "layout anchor.y")
-    local anchorZ = requiredInteger(anchor.z, "layout anchor.z")
+    local anchorX = ServerUtil.requiredInteger(anchor.x, "layout anchor.x")
+    local anchorY = ServerUtil.requiredInteger(anchor.y, "layout anchor.y")
+    local anchorZ = ServerUtil.requiredInteger(anchor.z, "layout anchor.z")
     local tagContext = {
         rvId = manifest and manifest.rvId,
         bitmapVersion = manifest and manifest.bitmapVersion,
     }
     if tagContext.rvId == nil or tostring(tagContext.rvId) == ""
-        or toNumber(tagContext.bitmapVersion) == nil then
+        or ServerUtil.toNumber(tagContext.bitmapVersion) == nil then
         error("RailroaderRVTest: generation boundary identity is incomplete")
     end
-    local lightPoint = copyPoint(layout.light, "layout.light")
+    local lightPoint = ServerUtil.copyPoint(layout.light, "layout.light")
 
     setGenerationPhase(manifest, generation, "WOOD_FLOOR")
     -- Interior floor: exactly 6x40, using the shared carpet sprite.
     for x = bounds.roomMinX, bounds.roomMaxX do
         for y = bounds.roomMinY, bounds.roomMaxY do
-            local square = getSquare(cell, x, y, bounds.z)
+            local square = ServerWorld.getSquare(cell, x, y, bounds.z)
             if not square then
                 error("RailroaderRVTest: interior square is not loaded")
             end
@@ -2526,7 +1325,7 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
         else
             sprite = westWallSprite
         end
-        local square = getSquare(cell, x, y, bounds.z)
+        local square = ServerWorld.getSquare(cell, x, y, bounds.z)
         if not square then
             error("RailroaderRVTest: wall square is not loaded")
         end
@@ -2554,16 +1353,16 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
     recalcAndCheckStructure(cell, bounds)
 
     setGenerationPhase(manifest, generation, "GENERATOR")
-    local generatorPoint = copyPoint(layout.generator, "layout.generator")
-    local generatorSquare = getSquare(cell, generatorPoint.x, generatorPoint.y, bounds.roofZ)
+    local generatorPoint = ServerUtil.copyPoint(layout.generator, "layout.generator")
+    local generatorSquare = ServerWorld.getSquare(cell, generatorPoint.x, generatorPoint.y, bounds.roofZ)
     if not generatorSquare then
         error("RailroaderRVTest: generator square is not loaded")
     end
     createGenerator(cell, generatorSquare, generatorSprite, generation, tagContext)
 
     setGenerationPhase(manifest, generation, "RAIN_BARREL")
-    local barrelPoint = copyPoint(layout.barrel, "layout.barrel")
-    local barrelSquare = getSquare(cell, barrelPoint.x, barrelPoint.y, bounds.roofZ)
+    local barrelPoint = ServerUtil.copyPoint(layout.barrel, "layout.barrel")
+    local barrelSquare = ServerWorld.getSquare(cell, barrelPoint.x, barrelPoint.y, bounds.roofZ)
     if not barrelSquare then
         error("RailroaderRVTest: rain barrel square is not loaded")
     end
@@ -2572,21 +1371,21 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
     setGenerationPhase(manifest, generation, "COUNTER_SINK")
     -- The counter and sink are directly below the barrel's roof square.  The
     -- sink may share the counter square because it is placed on the counter.
-    local counterPoint = copyPoint(layout.counter, "layout.counter")
-    local sinkPoint = copyPoint(layout.sink, "layout.sink")
+    local counterPoint = ServerUtil.copyPoint(layout.counter, "layout.counter")
+    local sinkPoint = ServerUtil.copyPoint(layout.sink, "layout.sink")
     counterPoint.x, counterPoint.y, counterPoint.z = barrelPoint.x, barrelPoint.y, bounds.z
     sinkPoint.x, sinkPoint.y, sinkPoint.z = barrelPoint.x, barrelPoint.y, bounds.z
     if sinkPoint.x == lightPoint.x and sinkPoint.y == lightPoint.y and sinkPoint.z == lightPoint.z then
         error("RailroaderRVTest: sink/light placement collides")
     end
-    local counterSquare = getSquare(cell, counterPoint.x, counterPoint.y, bounds.z)
-    local sinkSquare = getSquare(cell, sinkPoint.x, sinkPoint.y, bounds.z)
+    local counterSquare = ServerWorld.getSquare(cell, counterPoint.x, counterPoint.y, bounds.z)
+    local sinkSquare = ServerWorld.getSquare(cell, sinkPoint.x, sinkPoint.y, bounds.z)
     if not counterSquare or not sinkSquare then
         error("RailroaderRVTest: counter or sink square is not loaded")
     end
     local counter = createFurniture(cell, counterSquare, counterSprite, generation,
         "counter", tagContext)
-    if not callSucceeded(counter, "transmitCompleteItemToClients") then
+    if not ServerUtil.callSucceeded(counter, "transmitCompleteItemToClients") then
         error("RailroaderRVTest: counter client transmission failed")
     end
     local sink = createFurniture(cell, sinkSquare, sinkSprite, generation, "sink",
@@ -2595,25 +1394,25 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
     -- plumbing APIs below: setUsesExternalWaterSource/doFindExternalWaterSource
     -- and their official deltas address an object index that must exist on the
     -- client first.  Rollback removes this broadcast object if plumbing fails.
-    if not callSucceeded(sink, "transmitCompleteItemToClients") then
+    if not ServerUtil.callSucceeded(sink, "transmitCompleteItemToClients") then
         error("RailroaderRVTest: sink client transmission failed")
     end
     -- IsoObject's B42.20 plumbing flag is setUsesExternalWaterSource; the
     -- setHasExternalWaterSource/setExternalWaterSource names do not exist.
-    if not callSucceeded(sink, "setUsesExternalWaterSource", true)
-        or not callSucceeded(sink, "doFindExternalWaterSource")
-        or not callSucceeded(sink, "transmitModData") then
+    if not ServerUtil.callSucceeded(sink, "setUsesExternalWaterSource", true)
+        or not ServerUtil.callSucceeded(sink, "doFindExternalWaterSource")
+        or not ServerUtil.callSucceeded(sink, "transmitModData") then
         error("RailroaderRVTest: sink water-source synchronisation failed")
     end
     -- IsoObject.sendObjectChange resolves the B42.20 enum, not an arbitrary
     -- string.  The official plumbing action uses this exact constant.
     if not IsoObjectChange or not IsoObjectChange.USES_EXTERNAL_WATER_SOURCE
-        or not callSucceeded(sink, "sendObjectChange",
+        or not ServerUtil.callSucceeded(sink, "sendObjectChange",
             IsoObjectChange.USES_EXTERNAL_WATER_SOURCE, { value = true }) then
         error("RailroaderRVTest: sink object-change synchronisation failed")
     end
 
-    local lightSquare = getSquare(cell, lightPoint.x, lightPoint.y, lightPoint.z)
+    local lightSquare = ServerWorld.getSquare(cell, lightPoint.x, lightPoint.y, lightPoint.z)
     if not lightSquare then
         error("RailroaderRVTest: light square is not loaded")
     end
@@ -2650,7 +1449,7 @@ local function markGenerationFailed(manifest, errorText)
         manifest.phase = "FAILED"
         manifest.state = "FAILED"
         manifest.lastError = errorText
-        manifest.updatedAt = os.time()
+        manifest.updatedAt = math.floor(os.time())
     end)
     if fallbackOk then
         return false, safeErrorText(failure)
@@ -2698,11 +1497,11 @@ end
 -- intermediate relocation record is read from or written to ModData.
 local relocationServices = (function()
 local function readPlayerCoordinate(player, methodName, label)
-    local ok, value = invoke(player, methodName)
+    local ok, value = ServerUtil.invoke(player, methodName)
     if not ok then
         error("RailroaderRVTest: authoritative player " .. tostring(label) .. " is unavailable")
     end
-    local number = requiredNumber(value, "authoritative player " .. tostring(label))
+    local number = ServerUtil.requiredNumber(value, "authoritative player " .. tostring(label))
     if methodName == "getZ" and (number < WORLD_MIN_Z or number > WORLD_MAX_Z) then
         error("RailroaderRVTest: authoritative player z is outside legal world range")
     end
@@ -2710,21 +1509,21 @@ local function readPlayerCoordinate(player, methodName, label)
 end
 
 local function validateAuthoritativePlayer(player)
-    if not player or not classInstance(player, "IsoPlayer") then
+    if not player or not ServerUtil.classInstance(player, "IsoPlayer") then
         return false, "sender is not a valid IsoPlayer"
     end
-    local deadOk, dead = invoke(player, "isDead")
+    local deadOk, dead = ServerUtil.invoke(player, "isDead")
     if not deadOk or dead ~= false then
         return false, "sender is dead or has no authoritative death state"
     end
     local px = readPlayerCoordinate(player, "getX", "x")
     local py = readPlayerCoordinate(player, "getY", "y")
     local pz = readPlayerCoordinate(player, "getZ", "z")
-    local worldOk, world = callGlobal("getWorld")
+    local worldOk, world = ServerUtil.callGlobal("getWorld")
     if not worldOk or not world then
         return false, "getWorld is unavailable"
     end
-    local validOk, valid = invoke(world, "isValidSquare", math.floor(px), math.floor(py), math.floor(pz))
+    local validOk, valid = ServerUtil.invoke(world, "isValidSquare", math.floor(px), math.floor(py), math.floor(pz))
     if not validOk or valid ~= true then
         return false, "authoritative player coordinate is outside the legal world"
     end
@@ -2738,21 +1537,21 @@ end
 -- teleportTo.  The ordinary validator intentionally returns floor squares for
 -- the raw authoritative coordinates instead of inventing a square center.
 local function authoritativePlayerPosition(player)
-    if not player or not classInstance(player, "IsoPlayer") then
+    if not player or not ServerUtil.classInstance(player, "IsoPlayer") then
         return false, "sender is not a valid IsoPlayer"
     end
-    local deadOk, dead = invoke(player, "isDead")
+    local deadOk, dead = ServerUtil.invoke(player, "isDead")
     if not deadOk or dead ~= false then
         return false, "sender is dead or has no authoritative death state"
     end
     local px = readPlayerCoordinate(player, "getX", "x")
     local py = readPlayerCoordinate(player, "getY", "y")
     local pz = readPlayerCoordinate(player, "getZ", "z")
-    local worldOk, world = callGlobal("getWorld")
+    local worldOk, world = ServerUtil.callGlobal("getWorld")
     if not worldOk or not world then
         return false, "getWorld is unavailable"
     end
-    local validOk, valid = invoke(world, "isValidSquare", math.floor(px),
+    local validOk, valid = ServerUtil.invoke(world, "isValidSquare", math.floor(px),
         math.floor(py), math.floor(pz))
     if not validOk or valid ~= true then
         return false, "authoritative player coordinate is outside the legal world"
@@ -2766,11 +1565,11 @@ local function validateGenerationPermission(player)
     if requiredCapability == nil then
         return false, "UseDebugContextMenu capability is unavailable"
     end
-    local roleOk, role = invoke(player, "getRole")
+    local roleOk, role = ServerUtil.invoke(player, "getRole")
     if not roleOk or role == nil then
         return false, "sender role is unavailable"
     end
-    local capabilityOk, allowed = invoke(role, "hasCapability", requiredCapability)
+    local capabilityOk, allowed = ServerUtil.invoke(role, "hasCapability", requiredCapability)
     if not capabilityOk or allowed ~= true then
         return false, "sender lacks UseDebugContextMenu capability"
     end
@@ -2778,12 +1577,12 @@ local function validateGenerationPermission(player)
 end
 
 local function playerIdentity(player)
-    local idOk, onlineId = invoke(player, "getOnlineID")
-    onlineId = idOk and toNumber(onlineId) or nil
-    if not isFiniteNumber(onlineId) or math.floor(onlineId) ~= onlineId or onlineId < 0 then
+    local idOk, onlineId = ServerUtil.invoke(player, "getOnlineID")
+    onlineId = idOk and ServerUtil.toNumber(onlineId) or nil
+    if not ServerUtil.isFiniteNumber(onlineId) or math.floor(onlineId) ~= onlineId or onlineId < 0 then
         return false, "sender has no stable online ID"
     end
-    local usernameOk, username = invoke(player, "getUsername")
+    local usernameOk, username = ServerUtil.invoke(player, "getUsername")
     if not usernameOk or type(username) ~= "string" or username == "" then
         return false, "sender has no stable username"
     end
@@ -2796,10 +1595,10 @@ end
 
 local function resolvePendingPlayer(pending)
     if type(pending) ~= "table" or type(pending.identity) ~= "table"
-        or not isFiniteNumber(pending.identity.onlineId) then
+        or not ServerUtil.isFiniteNumber(pending.identity.onlineId) then
         return false, "relocation player identity is unavailable"
     end
-    local foundOk, current = callGlobal("getPlayerByOnlineID", pending.identity.onlineId)
+    local foundOk, current = ServerUtil.callGlobal("getPlayerByOnlineID", pending.identity.onlineId)
     if not foundOk or current == nil then
         return false, "requesting player disconnected or was replaced"
     end
@@ -2846,6 +1645,17 @@ local validateGenerationPermission = relocationServices.validateGenerationPermis
 local playerIdentity = relocationServices.playerIdentity
 local resolvePendingPlayer = relocationServices.resolvePendingPlayer
 local relocationPositionsEqual = relocationServices.relocationPositionsEqual
+
+-- pcall prepends its own success flag to every return value.  Normalize the
+-- two-result authoritative position helper once so relocation paths never
+-- mistake the pcall flag for the helper's `{ x, y, z }` position table.
+local function tryAuthoritativePlayerPosition(player)
+    local callOk, positionOk, positionOrReason = pcall(
+        authoritativePlayerPosition, player)
+    if not callOk then return false, positionOk end
+    if positionOk ~= true then return false, positionOrReason end
+    return true, positionOrReason
+end
 
 local function generationDisconnected(reason)
     return reason == "requesting player disconnected or was replaced"
@@ -2930,10 +1740,21 @@ local function resendGenerationPhase(pending, player, phase)
             payload.role = pending.railroader.sourceRole
             payload.seat = pending.railroader.sourceSeat
         end
-        if not callGlobalSucceeded("sendServerCommand", player,
-            COMMAND_MODULE, COMMAND_FINAL_RELOCATE, payload)
-            or not callSucceeded(player, "teleportTo", target.x, target.y,
-                target.z) then
+        if not ServerUtil.callGlobalSucceeded("sendServerCommand", player,
+            COMMAND_MODULE, COMMAND_FINAL_RELOCATE, payload) then
+            return false
+        end
+        -- B42.20's float teleport overload floors x/y.  Restore the
+        -- server-selected half-cell center through the official setters so
+        -- the authoritative proof and the client ACK compare the same exact
+        -- destination.  Keep the movement history coherent with the move.
+        if not ServerUtil.callSucceeded(player, "teleportTo", target.x, target.y,
+            target.z)
+            or not ServerUtil.callSucceeded(player, "setX", target.x)
+            or not ServerUtil.callSucceeded(player, "setY", target.y)
+            or not ServerUtil.callSucceeded(player, "setZ", target.z)
+            or not ServerUtil.callSucceeded(player, "setLastX", target.x)
+            or not ServerUtil.callSucceeded(player, "setLastY", target.y) then
             return false
         end
         if pending.finalRelocationDeadlineTick == nil then
@@ -2973,9 +1794,9 @@ local function resendGenerationPhase(pending, player, phase)
     end
     local teleportX = phase == "rollback" and target.x or target.x + 0.5
     local teleportY = phase == "rollback" and target.y or target.y + 0.5
-    if not callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
+    if not ServerUtil.callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
         COMMAND_RELOCATE, payload)
-        or not callSucceeded(player, "teleportTo", teleportX, teleportY,
+        or not ServerUtil.callSucceeded(player, "teleportTo", teleportX, teleportY,
             target.z) then
         return false
     end
@@ -3064,7 +1885,7 @@ local function currentBoundsValid(bounds, managed, bitmap)
     if type(bounds) ~= "table" or type(managed) ~= "table"
         or type(bitmap) ~= "table"
         or not onlyKeys(bounds, boundKeys)
-        or requiredInteger(bounds.schemaVersion, "manifest bounds schemaVersion")
+        or ServerUtil.requiredInteger(bounds.schemaVersion, "manifest bounds schemaVersion")
             ~= Constants.LAYOUT_SCHEMA_VERSION then
         return false
     end
@@ -3081,17 +1902,17 @@ local function currentBoundsValid(bounds, managed, bitmap)
     local values = {}
     for i = 1, #fields do
         local field = fields[i]
-        values[field] = requiredInteger(bounds[field], "manifest bounds " .. field)
+        values[field] = ServerUtil.requiredInteger(bounds[field], "manifest bounds " .. field)
     end
     if values.managedWidth ~= Constants.RV_MANAGED_WIDTH
         or values.managedHeight ~= Constants.RV_MANAGED_HEIGHT
-        or values.managedOriginX ~= requiredInteger(managed.originX,
+        or values.managedOriginX ~= ServerUtil.requiredInteger(managed.originX,
             "manifest managed.originX")
-        or values.managedOriginY ~= requiredInteger(managed.originY,
+        or values.managedOriginY ~= ServerUtil.requiredInteger(managed.originY,
             "manifest managed.originY")
-        or values.managedMinZ ~= requiredInteger(managed.minZ,
+        or values.managedMinZ ~= ServerUtil.requiredInteger(managed.minZ,
             "manifest managed.minZ")
-        or values.managedMaxZ ~= requiredInteger(managed.maxZ,
+        or values.managedMaxZ ~= ServerUtil.requiredInteger(managed.maxZ,
             "manifest managed.maxZ")
         or values.clearMinX ~= values.managedOriginX
         or values.clearMaxX ~= values.managedOriginX + values.managedWidth
@@ -3162,16 +1983,16 @@ local function currentBoundsValid(bounds, managed, bitmap)
         or #bounds.wallCoordinates ~= values.wallCoordinateCount
         or type(bounds.wallEdgeCounts) ~= "table"
         or not onlyKeys(bounds.wallEdgeCounts, { "north", "west" })
-        or requiredInteger(bounds.wallEdgeCounts.north,
+        or ServerUtil.requiredInteger(bounds.wallEdgeCounts.north,
             "manifest bounds wallEdgeCounts.north") ~= values.northEdges
-        or requiredInteger(bounds.wallEdgeCounts.west,
+        or ServerUtil.requiredInteger(bounds.wallEdgeCounts.west,
             "manifest bounds wallEdgeCounts.west") ~= values.westEdges
         or type(bounds.shellEdges) ~= "table" then
         return false
     end
     local wallCoordinateKeys = 0
     for key in pairs(bounds.wallCoordinates) do
-        if type(key) ~= "number" or not isFiniteNumber(key)
+        if type(key) ~= "number" or not ServerUtil.isFiniteNumber(key)
             or math.floor(key) ~= key or key < 1
             or key > values.wallCoordinateCount then
             return false
@@ -3223,16 +2044,16 @@ local function currentBoundsValid(bounds, managed, bitmap)
             or entry.edgeNorth == entry.edgeWest
             or type(entry.edgeKey) ~= "string"
             or entry.edgeKey == ""
-            or requiredInteger(entry.x, "manifest wall coordinate x") == nil
-            or requiredInteger(entry.y, "manifest wall coordinate y") == nil
-            or requiredInteger(entry.z, "manifest wall coordinate z") == nil
-            or requiredInteger(entry.edgeCellX,
+            or ServerUtil.requiredInteger(entry.x, "manifest wall coordinate x") == nil
+            or ServerUtil.requiredInteger(entry.y, "manifest wall coordinate y") == nil
+            or ServerUtil.requiredInteger(entry.z, "manifest wall coordinate z") == nil
+            or ServerUtil.requiredInteger(entry.edgeCellX,
                 "manifest wall coordinate edgeCellX") == nil
-            or requiredInteger(entry.edgeCellY,
+            or ServerUtil.requiredInteger(entry.edgeCellY,
                 "manifest wall coordinate edgeCellY") == nil
-            or requiredInteger(entry.edgeHostX,
+            or ServerUtil.requiredInteger(entry.edgeHostX,
                 "manifest wall coordinate edgeHostX") == nil
-            or requiredInteger(entry.edgeHostY,
+            or ServerUtil.requiredInteger(entry.edgeHostY,
                 "manifest wall coordinate edgeHostY") == nil
             or type(entry.sprite) ~= "string"
             or type(entry.role) ~= "string"
@@ -3273,13 +2094,13 @@ local function currentBoundsValid(bounds, managed, bitmap)
             or entry.edgeNorth ~= (expectedAxis == "N")
             or entry.edgeWest ~= (expectedAxis == "W")
             or entry.edgeSide ~= expectedSide
-            or requiredInteger(entry.edgeCellX,
+            or ServerUtil.requiredInteger(entry.edgeCellX,
                 "manifest wall coordinate edgeCellX") ~= expectedCellX
-            or requiredInteger(entry.edgeCellY,
+            or ServerUtil.requiredInteger(entry.edgeCellY,
                 "manifest wall coordinate edgeCellY") ~= expectedCellY
-            or requiredInteger(entry.edgeHostX,
+            or ServerUtil.requiredInteger(entry.edgeHostX,
                 "manifest wall coordinate edgeHostX") ~= entry.x
-            or requiredInteger(entry.edgeHostY,
+            or ServerUtil.requiredInteger(entry.edgeHostY,
                 "manifest wall coordinate edgeHostY") ~= entry.y
             or entry.edgeKey ~= expectedEdgeKey
             or entry.role ~= expectedRole
@@ -3295,12 +2116,12 @@ local function currentBoundsValid(bounds, managed, bitmap)
             or edge.edgeKey ~= key
             or edge.rvId ~= nil
             or edge.generation ~= nil
-            or requiredInteger(edge.hostX, "manifest shell edge hostX") == nil
-            or requiredInteger(edge.hostY, "manifest shell edge hostY") == nil
-            or requiredInteger(edge.z, "manifest shell edge z") == nil
-            or requiredInteger(edge.objectX, "manifest shell edge objectX") == nil
-            or requiredInteger(edge.objectY, "manifest shell edge objectY") == nil
-            or requiredInteger(edge.objectZ, "manifest shell edge objectZ") == nil
+            or ServerUtil.requiredInteger(edge.hostX, "manifest shell edge hostX") == nil
+            or ServerUtil.requiredInteger(edge.hostY, "manifest shell edge hostY") == nil
+            or ServerUtil.requiredInteger(edge.z, "manifest shell edge z") == nil
+            or ServerUtil.requiredInteger(edge.objectX, "manifest shell edge objectX") == nil
+            or ServerUtil.requiredInteger(edge.objectY, "manifest shell edge objectY") == nil
+            or ServerUtil.requiredInteger(edge.objectZ, "manifest shell edge objectZ") == nil
             or type(edge.axis) ~= "string"
             or type(edge.side) ~= "string"
             or type(edge.role) ~= "string"
@@ -3356,33 +2177,33 @@ local function currentManifestValid(manifest, allowEmpty)
     end
     if manifest.version ~= nil or manifest.managed ~= nil
         or manifest.bitmap ~= nil or manifest.shellEdges ~= nil
-        or requiredInteger(manifest.schemaVersion, "manifest schemaVersion")
+        or ServerUtil.requiredInteger(manifest.schemaVersion, "manifest schemaVersion")
         ~= Constants.MANIFEST_SCHEMA_VERSION
         or manifest.techVersion ~= Constants.TECH_VERSION
         or manifest.owner ~= OWNER
         or type(manifest.state) ~= "string"
         or (manifest.state ~= "RUNNING" and manifest.state ~= "READY"
             and manifest.state ~= "FAILED")
-        or requiredInteger(manifest.generation, "manifest generation") < 1
+        or ServerUtil.requiredInteger(manifest.generation, "manifest generation") < 1
         or type(manifest.rvId) ~= "string" or manifest.rvId == ""
-        or requiredInteger(manifest.bitmapVersion, "manifest bitmapVersion")
+        or ServerUtil.requiredInteger(manifest.bitmapVersion, "manifest bitmapVersion")
             ~= Constants.BITMAP_VERSION
-        or requiredInteger(manifest.boundarySchemaVersion,
+        or ServerUtil.requiredInteger(manifest.boundarySchemaVersion,
             "manifest boundarySchemaVersion") ~= Constants.BOUNDARY_SCHEMA_VERSION
         or type(manifest.anchor) ~= "table"
-        or requiredInteger(manifest.anchor.x, "manifest anchor.x") == nil
-        or requiredInteger(manifest.anchor.y, "manifest anchor.y") == nil
-        or requiredInteger(manifest.anchor.z, "manifest anchor.z") == nil
+        or ServerUtil.requiredInteger(manifest.anchor.x, "manifest anchor.x") == nil
+        or ServerUtil.requiredInteger(manifest.anchor.y, "manifest anchor.y") == nil
+        or ServerUtil.requiredInteger(manifest.anchor.z, "manifest anchor.z") == nil
         or type(manifest.bounds) ~= "table"
         or type(manifest.boundary) ~= "table"
-        or requiredInteger(manifest.boundary.schemaVersion,
+        or ServerUtil.requiredInteger(manifest.boundary.schemaVersion,
             "manifest boundary schemaVersion") ~= Constants.BOUNDARY_SCHEMA_VERSION
         or tostring(manifest.boundary.rvId) ~= tostring(manifest.rvId)
-        or requiredInteger(manifest.boundary.generation,
-            "manifest boundary generation") ~= requiredInteger(manifest.generation,
+        or ServerUtil.requiredInteger(manifest.boundary.generation,
+            "manifest boundary generation") ~= ServerUtil.requiredInteger(manifest.generation,
             "manifest generation")
-        or requiredInteger(manifest.boundary.bitmapVersion,
-            "manifest boundary bitmapVersion") ~= requiredInteger(manifest.bitmapVersion,
+        or ServerUtil.requiredInteger(manifest.boundary.bitmapVersion,
+            "manifest boundary bitmapVersion") ~= ServerUtil.requiredInteger(manifest.bitmapVersion,
             "manifest bitmapVersion")
         or type(manifest.boundary.managed) ~= "table"
         or type(manifest.boundary.bitmap) ~= "table"
@@ -3399,13 +2220,13 @@ local function currentManifestValid(manifest, allowEmpty)
             manifest.boundary.managed, boundaryBitmap) then
         return false
     end
-    local startedAt = requiredInteger(manifest.startedAt, "manifest startedAt")
-    local updatedAt = requiredInteger(manifest.updatedAt, "manifest updatedAt")
-    local phaseGeneration = requiredInteger(manifest.phaseGeneration,
+    local startedAt = ServerUtil.requiredInteger(manifest.startedAt, "manifest startedAt")
+    local updatedAt = ServerUtil.requiredInteger(manifest.updatedAt, "manifest updatedAt")
+    local phaseGeneration = ServerUtil.requiredInteger(manifest.phaseGeneration,
         "manifest phaseGeneration")
-    local phaseUpdatedAt = requiredInteger(manifest.phaseUpdatedAt,
+    local phaseUpdatedAt = ServerUtil.requiredInteger(manifest.phaseUpdatedAt,
         "manifest phaseUpdatedAt")
-    local generation = requiredInteger(manifest.generation, "manifest generation")
+    local generation = ServerUtil.requiredInteger(manifest.generation, "manifest generation")
     if type(manifest.phase) ~= "string"
         or (manifest.phase ~= "RUNNING"
             and manifest.phase ~= "CLEARING"
@@ -3428,10 +2249,10 @@ local function currentManifestValid(manifest, allowEmpty)
             and manifest.rollback ~= "FAILED"
         or manifest.lastError ~= nil and type(manifest.lastError) ~= "string"
         or manifest.completedAt ~= nil
-            and requiredInteger(manifest.completedAt, "manifest completedAt") < 1
+            and ServerUtil.requiredInteger(manifest.completedAt, "manifest completedAt") < 1
         or (manifest.state == "READY"
             and (manifest.phase ~= "COMMITTED"
-                or requiredInteger(manifest.completedAt,
+                or ServerUtil.requiredInteger(manifest.completedAt,
                     "manifest completedAt") == nil)) then
         return false
     end
@@ -3471,29 +2292,29 @@ local function squareIsSafeForRelocation(square, countCharacters)
     if square == nil then
         return false
     end
-    local floorOk, floor = invoke(square, "getFloor")
-    local solidOk, solid = invoke(square, "TreatAsSolidFloor")
-    local freeOk, free = invoke(square, "isFree", countCharacters ~= false)
+    local floorOk, floor = ServerUtil.invoke(square, "getFloor")
+    local solidOk, solid = ServerUtil.invoke(square, "TreatAsSolidFloor")
+    local freeOk, free = ServerUtil.invoke(square, "isFree", countCharacters ~= false)
     if not floorOk or floor == nil or not solidOk or solid ~= true
         or not freeOk or free ~= true then
         return false
     end
-    local roomOk, room = invoke(square, "getRoom")
-    local roomIdOk, roomId = invoke(square, "getRoomID")
-    if not roomOk or room ~= nil or not roomIdOk or toNumber(roomId) ~= -1 then
+    local roomOk, room = ServerUtil.invoke(square, "getRoom")
+    local roomIdOk, roomId = ServerUtil.invoke(square, "getRoomID")
+    if not roomOk or room ~= nil or not roomIdOk or ServerUtil.toNumber(roomId) ~= -1 then
         return false
     end
-    local regionOk, region = invoke(square, "getIsoWorldRegion")
+    local regionOk, region = ServerUtil.invoke(square, "getIsoWorldRegion")
     if not regionOk then
         return false
     end
     if region ~= nil then
-        local playerRoomOk, playerRoom = invoke(region, "isPlayerRoom")
+        local playerRoomOk, playerRoom = ServerUtil.invoke(region, "isPlayerRoom")
         if not playerRoomOk or playerRoom == true then
             return false
         end
     end
-    local vehicleOk, vehicle = invoke(square, "getVehicleContainer")
+    local vehicleOk, vehicle = ServerUtil.invoke(square, "getVehicleContainer")
     if not vehicleOk or vehicle ~= nil then
         return false
     end
@@ -3507,10 +2328,10 @@ local function squareHasRoofRepairOccupant(square, allowedPlayers)
         "getMovingObjects", "getWorldObjects", "getDeadBodys", "getCorpses",
     }
     for i = 1, #collections do
-        local collectionOk, collection = invoke(square, collections[i])
+        local collectionOk, collection = ServerUtil.invoke(square, collections[i])
         if collectionOk and collection ~= nil then
-            local sizeOk, size = invoke(collection, "size")
-            local numericSize = toNumber(size)
+            local sizeOk, size = ServerUtil.invoke(collection, "size")
+            local numericSize = ServerUtil.toNumber(size)
             if sizeOk and numericSize ~= nil and numericSize > 0 then
                 if collections[i] ~= "getMovingObjects"
                     or type(allowedPlayers) ~= "table" then
@@ -3518,7 +2339,7 @@ local function squareHasRoofRepairOccupant(square, allowedPlayers)
                 end
                 local foreign = false
                 for index = 0, numericSize - 1 do
-                    local itemOk, item = invoke(collection, "get", index)
+                    local itemOk, item = ServerUtil.invoke(collection, "get", index)
                     if not itemOk or item ~= nil and not allowedPlayers[item] then
                         foreign = true
                         break
@@ -3537,7 +2358,7 @@ local function squareHasRoofRepairOccupant(square, allowedPlayers)
             end
         end
     end
-    local vehicleOk, vehicle = invoke(square, "getVehicleContainer")
+    local vehicleOk, vehicle = ServerUtil.invoke(square, "getVehicleContainer")
     return vehicleOk and vehicle ~= nil
 end
 
@@ -3549,15 +2370,15 @@ local function roofRepairTemporarySquareSafe(square, allowedPlayers)
     if not square or squareHasRoofRepairOccupant(square, allowedPlayers) then
         return false
     end
-    local roomOk, room = invoke(square, "getRoom")
-    local roomIdOk, roomId = invoke(square, "getRoomID")
-    if not roomOk or room ~= nil or not roomIdOk or toNumber(roomId) ~= -1 then
+    local roomOk, room = ServerUtil.invoke(square, "getRoom")
+    local roomIdOk, roomId = ServerUtil.invoke(square, "getRoomID")
+    if not roomOk or room ~= nil or not roomIdOk or ServerUtil.toNumber(roomId) ~= -1 then
         return false
     end
-    local regionOk, region = invoke(square, "getIsoWorldRegion")
+    local regionOk, region = ServerUtil.invoke(square, "getIsoWorldRegion")
     if not regionOk then return false end
     if region ~= nil then
-        local playerRoomOk, playerRoom = invoke(region, "isPlayerRoom")
+        local playerRoomOk, playerRoom = ServerUtil.invoke(region, "isPlayerRoom")
         if not playerRoomOk or playerRoom == true then return false end
     end
     return true
@@ -3573,20 +2394,20 @@ local function selectGenerationStagingDestination(layout, bounds)
         or type(layout.bitmap) ~= "table" then
         error("RailroaderRVTest: generation staging contract is incomplete")
     end
-    local originX = requiredInteger(bounds.managedOriginX,
+    local originX = ServerUtil.requiredInteger(bounds.managedOriginX,
         "generation managed origin x")
-    local originY = requiredInteger(bounds.managedOriginY,
+    local originY = ServerUtil.requiredInteger(bounds.managedOriginY,
         "generation managed origin y")
-    local width = requiredInteger(bounds.managedWidth,
+    local width = ServerUtil.requiredInteger(bounds.managedWidth,
         "generation managed width")
-    local height = requiredInteger(bounds.managedHeight,
+    local height = ServerUtil.requiredInteger(bounds.managedHeight,
         "generation managed height")
-    if width ~= requiredInteger(layout.bitmap.width, "generation bitmap width")
-        or height ~= requiredInteger(layout.bitmap.height,
+    if width ~= ServerUtil.requiredInteger(layout.bitmap.width, "generation bitmap width")
+        or height ~= ServerUtil.requiredInteger(layout.bitmap.height,
             "generation bitmap height")
-        or originX ~= requiredInteger(layout.bitmap.originX,
+        or originX ~= ServerUtil.requiredInteger(layout.bitmap.originX,
             "generation bitmap origin x")
-        or originY ~= requiredInteger(layout.bitmap.originY,
+        or originY ~= ServerUtil.requiredInteger(layout.bitmap.originY,
             "generation bitmap origin y")
         or width <= 0 or height <= 0 then
         error("RailroaderRVTest: generation staging bitmap identity is stale")
@@ -3597,11 +2418,11 @@ local function selectGenerationStagingDestination(layout, bounds)
         z = GENERATION_STAGING_Z,
         purpose = "generation-center",
     }
-    local worldOk, world = callGlobal("getWorld")
+    local worldOk, world = ServerUtil.callGlobal("getWorld")
     if not worldOk or world == nil then
         error("RailroaderRVTest: getWorld is unavailable for generation staging")
     end
-    local validOk, valid = invoke(world, "isValidSquare", destination.x,
+    local validOk, valid = ServerUtil.invoke(world, "isValidSquare", destination.x,
         destination.y, destination.z)
     if not validOk or valid ~= true then
         error("RailroaderRVTest: generation center staging coordinate is illegal")
@@ -3647,9 +2468,9 @@ local function roofRepairPosition(position, label)
         error("RailroaderRVTest: roof repair " .. tostring(label)
             .. " position is unavailable")
     end
-    local x = requiredNumber(position.x, "roof repair " .. tostring(label) .. " x")
-    local y = requiredNumber(position.y, "roof repair " .. tostring(label) .. " y")
-    local z = requiredNumber(position.z, "roof repair " .. tostring(label) .. " z")
+    local x = ServerUtil.requiredNumber(position.x, "roof repair " .. tostring(label) .. " x")
+    local y = ServerUtil.requiredNumber(position.y, "roof repair " .. tostring(label) .. " y")
+    local z = ServerUtil.requiredNumber(position.z, "roof repair " .. tostring(label) .. " z")
     if z < WORLD_MIN_Z or z > WORLD_MAX_Z then
         error("RailroaderRVTest: roof repair " .. tostring(label)
             .. " z is outside the legal world range")
@@ -3661,11 +2482,11 @@ local function roofRepairPosition(position, label)
 end
 
 local function roofRepairWorldCoordinateValid(destination)
-    local worldOk, world = callGlobal("getWorld")
+    local worldOk, world = ServerUtil.callGlobal("getWorld")
     if not worldOk or not world then
         return false, "roof repair world is unavailable"
     end
-    local validOk, valid = invoke(world, "isValidSquare",
+    local validOk, valid = ServerUtil.invoke(world, "isValidSquare",
         math.floor(destination.x), math.floor(destination.y),
         math.floor(destination.z))
     if not validOk or valid ~= true then
@@ -3681,9 +2502,9 @@ end
 -- the wall event and the next server tick.
 local function currentRoofRepairContext(player, request)
     local requestGeneration = type(request) == "table"
-        and integer(request.generation) or nil
+        and ServerUtil.integer(request.generation) or nil
     local requestBitmapVersion = type(request) == "table"
-        and integer(request.bitmapVersion) or nil
+        and ServerUtil.integer(request.bitmapVersion) or nil
     if type(request) ~= "table"
         or tostring(request.rvId or "") == ""
         or requestGeneration == nil or requestGeneration < 1
@@ -3701,8 +2522,8 @@ local function currentRoofRepairContext(player, request)
         return false, Constants.SAVE_REBUILD_REQUIRED
     end
     if tostring(boundary.rvId) ~= tostring(request.rvId)
-        or integer(boundary.generation) ~= requestGeneration
-        or integer(boundary.bitmapVersion) ~= requestBitmapVersion
+        or ServerUtil.integer(boundary.generation) ~= requestGeneration
+        or ServerUtil.integer(boundary.bitmapVersion) ~= requestBitmapVersion
         or relation.inside ~= true
         or tostring(boundaryIdentity.key) ~= tostring(request.identityKey) then
         return false, Constants.SAVE_REBUILD_REQUIRED
@@ -3710,8 +2531,8 @@ local function currentRoofRepairContext(player, request)
     local name = boundaryIdentity.username
     local rider = type(record.players) == "table" and record.players[name] or nil
     if type(rider) ~= "table" or rider.inside ~= true
-        or integer(rider.onlineId) ~= integer(relation.onlineId)
-        or integer(rider.onlineId) ~= integer(boundaryIdentity.onlineId) then
+        or ServerUtil.integer(rider.onlineId) ~= ServerUtil.integer(relation.onlineId)
+        or ServerUtil.integer(rider.onlineId) ~= ServerUtil.integer(boundaryIdentity.onlineId) then
         return false, Constants.SAVE_REBUILD_REQUIRED
     end
 
@@ -3722,12 +2543,12 @@ local function currentRoofRepairContext(player, request)
     local manifest = manifestOrError
     local schemaOk = pcall(requireCurrentManifest, manifest, false)
     if not schemaOk or tostring(manifest.rvId) ~= tostring(request.rvId)
-        or integer(manifest.generation) ~= requestGeneration
-        or integer(manifest.bitmapVersion) ~= requestBitmapVersion
+        or ServerUtil.integer(manifest.generation) ~= requestGeneration
+        or ServerUtil.integer(manifest.bitmapVersion) ~= requestBitmapVersion
         or type(manifest.boundary) ~= "table"
         or tostring(manifest.boundary.rvId) ~= tostring(request.rvId)
-        or integer(manifest.boundary.generation) ~= integer(request.generation)
-        or integer(manifest.boundary.bitmapVersion) ~= integer(request.bitmapVersion) then
+        or ServerUtil.integer(manifest.boundary.generation) ~= ServerUtil.integer(request.generation)
+        or ServerUtil.integer(manifest.boundary.bitmapVersion) ~= ServerUtil.integer(request.bitmapVersion) then
         return false, Constants.SAVE_REBUILD_REQUIRED
     end
     -- All consumers share one cross-object geometry proof.  Keeping this
@@ -3769,15 +2590,15 @@ local function roofRepairDestination(context, request)
     end
     local phase = tostring(request.phase or "")
     if phase == "temporary" then
-        local width = requiredInteger(bitmap.width, "roof repair bitmap width")
-        local height = requiredInteger(bitmap.height, "roof repair bitmap height")
-        local originX = requiredInteger(bitmap.originX, "roof repair bitmap originX")
-        local originY = requiredInteger(bitmap.originY, "roof repair bitmap originY")
+        local width = ServerUtil.requiredInteger(bitmap.width, "roof repair bitmap width")
+        local height = ServerUtil.requiredInteger(bitmap.height, "roof repair bitmap height")
+        local originX = ServerUtil.requiredInteger(bitmap.originX, "roof repair bitmap originX")
+        local originY = ServerUtil.requiredInteger(bitmap.originY, "roof repair bitmap originY")
         if width ~= Constants.RV_MANAGED_WIDTH
             or height ~= Constants.RV_MANAGED_HEIGHT then
             return false, Constants.SAVE_REBUILD_REQUIRED
         end
-        local centerZ = requiredInteger(bitmap.minZ,
+        local centerZ = ServerUtil.requiredInteger(bitmap.minZ,
             "roof repair bitmap center z")
         if centerZ < WORLD_MIN_Z or centerZ > WORLD_MAX_Z then
             return false, Constants.SAVE_REBUILD_REQUIRED
@@ -3823,27 +2644,54 @@ local function playerAtRoofRepairDestination(player, destination,
         or math.floor(positionOrReason.z) ~= math.floor(destination.z) then
         return false, "server player has not reached the roof repair destination"
     end
-    local squareOk, current = invoke(player, "getCurrentSquare")
+    local squareOk, current = ServerUtil.invoke(player, "getCurrentSquare")
     if not squareOk or current == nil then
         if allowMissingSquare then return true end
         return false, "server player has no current square after roof repair relocation"
     end
-    local xOk, x = invoke(current, "getX")
-    local yOk, y = invoke(current, "getY")
-    local zOk, z = invoke(current, "getZ")
+    local xOk, x = ServerUtil.invoke(current, "getX")
+    local yOk, y = ServerUtil.invoke(current, "getY")
+    local zOk, z = ServerUtil.invoke(current, "getZ")
     if not xOk or not yOk or not zOk
-        or toNumber(x) ~= math.floor(destination.x)
-        or toNumber(y) ~= math.floor(destination.y)
-        or toNumber(z) ~= math.floor(destination.z) then
+        or ServerUtil.toNumber(x) ~= math.floor(destination.x)
+        or ServerUtil.toNumber(y) ~= math.floor(destination.y)
+        or ServerUtil.toNumber(z) ~= math.floor(destination.z) then
         return false,
             "server player current square does not match roof repair destination"
     end
     return true, current
 end
 
+-- B42.20's server-side IsoPlayer network update can floor a float teleport
+-- back to the containing square on the next packet.  Roof members retain the
+-- exact server-captured return coordinate, so reassert the same authoritative
+-- values through the official setters after every grouped move.  The client
+-- ACK remains token-only; these setters are server-owned and are followed by
+-- the normal position/current-square proof.
+local function applyRoofRepairTeleport(player, target, temporary)
+    if type(target) ~= "table"
+        or type(target.x) ~= "number" or type(target.y) ~= "number"
+        or type(target.z) ~= "number" then
+        return false
+    end
+    local x = temporary and target.x + 0.5 or target.x
+    local y = temporary and target.y + 0.5 or target.y
+    return ServerUtil.callSucceeded(player, "teleportTo", x, y, target.z)
+        and ServerUtil.callSucceeded(player, "setX", x)
+        and ServerUtil.callSucceeded(player, "setY", y)
+        and ServerUtil.callSucceeded(player, "setZ", target.z)
+        and ServerUtil.callSucceeded(player, "setLastX", x)
+        and ServerUtil.callSucceeded(player, "setLastY", y)
+end
+
 local function roofRepairTargetReady(player, destination, phase, allowedPlayers)
-    local allowMissingSquare = phase == "temporary"
-        and type(allowedPlayers) == "table"
+    -- Both grouped phases can cross a chunk boundary.  On the return hop the
+    -- original RV chunk may still be streaming, so the server may have the
+    -- exact authoritative x/y/z and a valid token ACK before its current
+    -- square is rebound.  Keep the group lease in force; the later
+    -- completeRoofRepairRelocation/roofRepairSquaresLoaded gates still require
+    -- the normal loaded-square proof before repair is released.
+    local allowMissingSquare = type(allowedPlayers) == "table"
     local atDestination, destinationReason = playerAtRoofRepairDestination(
         player, destination, allowMissingSquare)
     if not atDestination then return false, destinationReason end
@@ -3854,9 +2702,9 @@ local function roofRepairTargetReady(player, destination, phase, allowedPlayers)
     -- authoritative teleport failed.  The bounded adapter wait still keeps
     -- this phase across multiple ticks before return is armed.
     if allowMissingSquare then
-        local cellOk, cell = pcall(getCellForPlayer, player)
+        local cellOk, cell = pcall(ServerWorld.getCellForPlayer, player)
         if not cellOk or not cell then return true end
-        local square = getSquare(cell, math.floor(destination.x),
+        local square = ServerWorld.getSquare(cell, math.floor(destination.x),
             math.floor(destination.y), math.floor(destination.z))
         if not square then return true end
         if not roofRepairTemporarySquareSafe(square, allowedPlayers) then
@@ -3864,11 +2712,11 @@ local function roofRepairTargetReady(player, destination, phase, allowedPlayers)
         end
         return true
     end
-    local cellOk, cell = pcall(getCellForPlayer, player)
+    local cellOk, cell = pcall(ServerWorld.getCellForPlayer, player)
     if not cellOk or not cell then
         return false, "roof repair temporary destination cell is not loaded"
     end
-    local square = getSquare(cell, math.floor(destination.x),
+    local square = ServerWorld.getSquare(cell, math.floor(destination.x),
         math.floor(destination.y), math.floor(destination.z))
     if not square then
         return false, "roof repair temporary destination square is not loaded"
@@ -3885,10 +2733,10 @@ end
 
 local function copyRoofRepairPosition(position)
     if type(position) ~= "table" then return nil end
-    local x, y, z = toNumber(position.x), toNumber(position.y),
-        toNumber(position.z)
-    if not isFiniteNumber(x) or not isFiniteNumber(y)
-        or not isFiniteNumber(z) then return nil end
+    local x, y, z = ServerUtil.toNumber(position.x), ServerUtil.toNumber(position.y),
+        ServerUtil.toNumber(position.z)
+    if not ServerUtil.isFiniteNumber(x) or not ServerUtil.isFiniteNumber(y)
+        or not ServerUtil.isFiniteNumber(z) then return nil end
     if z < WORLD_MIN_Z or z > WORLD_MAX_Z then return nil end
     return { x = x, y = y, z = z }
 end
@@ -3952,10 +2800,10 @@ local function rollbackRoofRepairRelocation(pending)
     if not player then return false, Constants.SAVE_REBUILD_REQUIRED end
     local returnPosition = targetOrReason.position
     local identity = targetOrReason.identity
-    local liveCallOk, livePosition, liveReason = pcall(
-        authoritativePlayerPosition, player)
-    if not liveCallOk or type(livePosition) ~= "table" then
-        local reason = liveCallOk and liveReason or livePosition
+    local liveCallOk, livePositionOrReason =
+        tryAuthoritativePlayerPosition(player)
+    if not liveCallOk or type(livePositionOrReason) ~= "table" then
+        local reason = livePositionOrReason
         print("[RailroaderRVTest] roof repair rollback refused room="
             .. tostring(pending.roomKey or "unknown") .. " reason="
             .. safeErrorText(reason) .. " return="
@@ -3979,16 +2827,15 @@ local function rollbackRoofRepairRelocation(pending)
         token = pending.token,
         onlineId = identity.onlineId,
         rvId = tostring(pending.rvId),
-        generation = integer(pending.generation),
-        bitmapVersion = integer(pending.bitmapVersion),
+        generation = ServerUtil.integer(pending.generation),
+        bitmapVersion = ServerUtil.integer(pending.bitmapVersion),
         x = returnPosition.x, y = returnPosition.y, z = returnPosition.z,
         roofRepairTransition = true,
         roofRepairPhase = "return",
     }
-    local sentOk = callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
+    local sentOk = ServerUtil.callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
         COMMAND_RELOCATE, payload)
-    local moved = callSucceeded(player, "teleportTo", returnPosition.x,
-        returnPosition.y, returnPosition.z)
+    local moved = applyRoofRepairTeleport(player, returnPosition, false)
     -- A successful teleport call is not enough: the authoritative object must
     -- have actually left the remote z=-15 target and be back on the exact
     -- server-captured active square before the lease/context may be retired.
@@ -4014,8 +2861,8 @@ local function rollbackRoofRepairRelocation(pending)
     print("[RailroaderRVTest] roof repair rollback room="
         .. tostring(pending.roomKey or "unknown") .. " result="
         .. (rolledBack and "complete" or "failed") .. " current="
-        .. tostring(livePosition.x) .. "," .. tostring(livePosition.y) .. ","
-        .. tostring(livePosition.z) .. " return=" .. tostring(returnPosition.x)
+        .. tostring(livePositionOrReason.x) .. "," .. tostring(livePositionOrReason.y) .. ","
+        .. tostring(livePositionOrReason.z) .. " return=" .. tostring(returnPosition.x)
         .. "," .. tostring(returnPosition.y) .. ","
         .. tostring(returnPosition.z))
     if rolledBack then return true end
@@ -4034,8 +2881,8 @@ end
 local function roofRepairGroupMatches(group, rvId, generation, bitmapVersion)
     return type(group) == "table"
         and tostring(group.rvId) == tostring(rvId)
-        and integer(group.generation) == integer(generation)
-        and integer(group.bitmapVersion) == integer(bitmapVersion)
+        and ServerUtil.integer(group.generation) == ServerUtil.integer(generation)
+        and ServerUtil.integer(group.bitmapVersion) == ServerUtil.integer(bitmapVersion)
 end
 
 local function roofRepairGroupMember(group, player, token)
@@ -4075,7 +2922,7 @@ end
 
 -- The group fail-safe never trusts a position supplied by the adapter.  Each
 -- member's exact original position is captured from the authoritative server
--- object before the first remote command; returnPosition is only the integer
+-- object before the first remote command; returnPosition is only the ServerUtil.integer
 -- square required by the token-only client bridge.
 local function failRoofRepairRelocationGroup(reason)
     local group = roofRepairRelocationGroup
@@ -4134,7 +2981,7 @@ local function processRoofRepairGroupFinalReturn()
                 group, member)
             local positionOk, position = false, nil
             if resolved then
-                positionOk, position = pcall(authoritativePlayerPosition,
+                positionOk, position = tryAuthoritativePlayerPosition(
                     playerOrReason)
             end
             local original = member.originalPosition or member.returnPosition
@@ -4194,8 +3041,8 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
             return false, "roof repair group relocation request is malformed"
         end
         local rvId = tostring(request.rvId or "")
-        local generation = integer(request.generation)
-        local bitmapVersion = integer(request.bitmapVersion)
+        local generation = ServerUtil.integer(request.generation)
+        local bitmapVersion = ServerUtil.integer(request.bitmapVersion)
         local roomKey = tostring(request.roomKey or "")
         if rvId == "" or generation == nil or generation < 1
             or bitmapVersion ~= Constants.BITMAP_VERSION
@@ -4282,10 +3129,10 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
                     failRoofRepairRelocationGroup(playerOrReason)
                     return false, playerOrReason
                 end
-                local sentOk = callGlobalSucceeded("sendServerCommand", playerOrReason,
+                local sentOk = ServerUtil.callGlobalSucceeded("sendServerCommand", playerOrReason,
                     COMMAND_MODULE, COMMAND_RELOCATE, member.returnPayload)
-                if not sentOk or not callSucceeded(playerOrReason, "teleportTo",
-                    member.target.x, member.target.y, member.target.z) then
+                if not sentOk or not applyRoofRepairTeleport(playerOrReason,
+                    member.target, false) then
                     local failure = "roof repair group return relocation failed"
                     failRoofRepairRelocationGroup(failure)
                     return false, failure
@@ -4383,7 +3230,7 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
             bitmapVersion = bitmapVersion, phase = "temporary", token = token,
             target = copyRoofRepairPosition(destination), members = members,
             allowedPlayers = {},
-            startedAt = os.time(),
+            startedAt = math.floor(os.time()),
             queuedAtTick = serverTick,
             deadlineTick = serverTick + RELOCATION_TIMEOUT_TICKS,
             disconnectStartedTick = nil,
@@ -4415,10 +3262,12 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
                 x = group.target.x, y = group.target.y, z = group.target.z,
                 roofRepairTransition = true, roofRepairPhase = "temporary",
             }
-            local sentOk = callGlobalSucceeded("sendServerCommand", member.player,
+            -- applyRoofRepairTeleport wraps teleportTo and the authoritative
+            -- setter sequence so a stale client packet cannot floor this move.
+            local sentOk = ServerUtil.callGlobalSucceeded("sendServerCommand", member.player,
                 COMMAND_MODULE, COMMAND_RELOCATE, payload)
-            if not sentOk or not callSucceeded(member.player, "teleportTo",
-                group.target.x + 0.5, group.target.y + 0.5, group.target.z) then
+            if not sentOk or not applyRoofRepairTeleport(member.player,
+                group.target, true) then
                 local failure = "roof repair group temporary relocation failed"
                 failRoofRepairRelocationGroup(failure)
                 return false, failure
@@ -4509,12 +3358,9 @@ local function resendRoofRepairMemberPhase(group, member)
         or type(target.z) ~= "number" then
         return false
     end
-    local sentOk = callGlobalSucceeded("sendServerCommand", member.player,
+    local sentOk = ServerUtil.callGlobalSucceeded("sendServerCommand", member.player,
         COMMAND_MODULE, COMMAND_RELOCATE, payload)
-    local teleportX = exactReturn and target.x or target.x + 0.5
-    local teleportY = exactReturn and target.y or target.y + 0.5
-    local moved = callSucceeded(member.player, "teleportTo", teleportX,
-        teleportY, target.z)
+    local moved = applyRoofRepairTeleport(member.player, target, not exactReturn)
     if not sentOk or not moved then return false end
     member.relocationNeedsResend = false
     member.relocationRetryAtTick = serverTick
@@ -4796,11 +3642,34 @@ function RV.Server.completeRoofRepairRelocation(player, token)
                 bitmapVersion = member.bitmapVersion,
                 identityKey = member.identityKey })
         if not contextOk then return false, contextOrReason end
+        -- The client ACK is deliberately coordinate-free.  B42.20 may have
+        -- normalized the server object to the containing square after the
+        -- return command, even though the floor/z destination is correct;
+        -- restore the captured float before requiring the normal GridSquare
+        -- proof and releasing this member's lease.
+        local authoritativeOk, authoritativePosition =
+            authoritativePlayerPosition(livePlayer)
+        if not authoritativeOk then return false, authoritativePosition end
+        if authoritativePosition.z == ROOF_REPAIR_TEMP_Z
+            or math.floor(authoritativePosition.x) ~= math.floor(member.target.x)
+            or math.floor(authoritativePosition.y) ~= math.floor(member.target.y)
+            or math.floor(authoritativePosition.z) ~= math.floor(member.target.z) then
+            member.completed = false
+            member.arrived = false
+            member.arrivalConsumed = false
+            return false, "roof repair group player has not reached captured return position"
+        end
+        if authoritativePosition.x ~= member.target.x
+            or authoritativePosition.y ~= member.target.y
+            or authoritativePosition.z ~= member.target.z then
+            if not applyRoofRepairTeleport(livePlayer, member.target, false) then
+                return false, "roof repair group authoritative return reassertion failed"
+            end
+        end
         local atTarget, targetReason = playerAtRoofRepairDestination(livePlayer,
             member.target)
         if not atTarget then return false, targetReason end
-        local authoritativeOk, authoritativePosition =
-            authoritativePlayerPosition(livePlayer)
+        authoritativeOk, authoritativePosition = authoritativePlayerPosition(livePlayer)
         if not authoritativeOk then return false, authoritativePosition end
         if authoritativePosition.z == ROOF_REPAIR_TEMP_Z
             or authoritativePosition.x ~= member.target.x
@@ -4910,8 +3779,8 @@ function RV.Server.roofRepairSquaresLoaded(player, record)
     if not contextOk then return false, contextOrReason end
     if type(record) == "table"
         and (tostring(record.rvId) ~= tostring(contextOrReason.boundary.rvId)
-            or integer(record.generation) ~= contextOrReason.boundary.generation
-            or integer(record.bitmapVersion)
+            or ServerUtil.integer(record.generation) ~= contextOrReason.boundary.generation
+            or ServerUtil.integer(record.bitmapVersion)
                 ~= contextOrReason.boundary.bitmapVersion) then
         return false, Constants.SAVE_REBUILD_REQUIRED
     end
@@ -4928,7 +3797,7 @@ local function validateRequest(module, command, player, args)
     if command ~= COMMAND then
         return false, "invalid command"
     end
-    if not isEmptyCommandArgs(args) then
+    if not ServerUtil.isEmptyCommandArgs(args) then
         return false, "command args must be nil or an empty table"
     end
     local ok, positionOrReason = validateAuthoritativePlayer(player)
@@ -4951,21 +3820,21 @@ local function relocatePlayerIntoHouse(player, prepared)
     if type(destination) ~= "table" or type(anchor) ~= "table" then
         error("RailroaderRVTest: final relocation contract is incomplete")
     end
-    local x = requiredNumber(destination.x, "final relocation x")
-    local y = requiredNumber(destination.y, "final relocation y")
-    local z = requiredNumber(destination.z, "final relocation z")
-    local anchorX = requiredInteger(anchor.x, "final relocation anchor x")
-    local anchorY = requiredInteger(anchor.y, "final relocation anchor y")
-    local anchorZ = requiredInteger(anchor.z, "final relocation anchor z")
+    local x = ServerUtil.requiredNumber(destination.x, "final relocation x")
+    local y = ServerUtil.requiredNumber(destination.y, "final relocation y")
+    local z = ServerUtil.requiredNumber(destination.z, "final relocation z")
+    local anchorX = ServerUtil.requiredInteger(anchor.x, "final relocation anchor x")
+    local anchorY = ServerUtil.requiredInteger(anchor.y, "final relocation anchor y")
+    local anchorZ = ServerUtil.requiredInteger(anchor.z, "final relocation anchor z")
     if x ~= anchorX + 0.5 or y ~= anchorY + 0.5 or z ~= anchorZ then
         error("RailroaderRVTest: final relocation is not the house interior center")
     end
     local finalPayload = {
             token = prepared.token,
-            generation = requiredInteger(prepared.generation,
+            generation = ServerUtil.requiredInteger(prepared.generation,
                 "final relocation generation"),
             rvId = tostring(prepared.rvId),
-            bitmapVersion = requiredInteger(prepared.boundary
+            bitmapVersion = ServerUtil.requiredInteger(prepared.boundary
                 and prepared.boundary.bitmapVersion,
                 "final relocation bitmapVersion"),
             onlineId = prepared.identity.onlineId,
@@ -4984,12 +3853,17 @@ local function relocatePlayerIntoHouse(player, prepared)
         finalPayload.role = prepared.railroader.sourceRole
         finalPayload.seat = prepared.railroader.sourceSeat
     end
-    local sentOk = callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
+    local sentOk = ServerUtil.callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
         COMMAND_FINAL_RELOCATE, finalPayload)
     if not sentOk then
         error("RailroaderRVTest: final server-to-client relocation command failed")
     end
-    if not callSucceeded(player, "teleportTo", x, y, z) then
+    if not ServerUtil.callSucceeded(player, "teleportTo", x, y, z)
+        or not ServerUtil.callSucceeded(player, "setX", x)
+        or not ServerUtil.callSucceeded(player, "setY", y)
+        or not ServerUtil.callSucceeded(player, "setZ", z)
+        or not ServerUtil.callSucceeded(player, "setLastX", x)
+        or not ServerUtil.callSucceeded(player, "setLastY", y) then
         error("RailroaderRVTest: final authoritative server relocation failed")
     end
     -- Do not advance the manifest here. The client must complete its guard/
@@ -5081,7 +3955,7 @@ local function generateForPlayer(player, prepared)
         local layout = prepared.layout
         local bounds = prepared.bounds
         local anchor = prepared.anchor
-        local cell = getCellForPlayer(player)
+        local cell = ServerWorld.getCellForPlayer(player)
         local oldBounds = prepared.oldBounds
         local atStaging, stagingReason = playerIsAtStagingDestination(player,
             prepared.stagingDestination, bounds, oldBounds)
@@ -5091,9 +3965,9 @@ local function generateForPlayer(player, prepared)
         -- No object/system mutation is allowed before this complete loaded
         -- region check.  In particular, an old generation is not removed
         -- until the new half-open 100x100 bitmap/base/wall/roof contract is ready.
-        preflightLoaded(cell, bounds)
+        ServerSchema.preflightLoaded(cell, bounds)
         local generation = (manifest.generation == nil and 1
-            or requiredInteger(manifest.generation, "manifest generation") + 1)
+            or ServerUtil.requiredInteger(manifest.generation, "manifest generation") + 1)
         if not Boundary then
             error("RailroaderRVTest: RV boundary service is unavailable")
         end
@@ -5131,7 +4005,7 @@ local function generateForPlayer(player, prepared)
         manifest.boundarySchemaVersion = boundaryOrReason.schemaVersion
         manifest.bitmapVersion = boundaryOrReason.bitmapVersion
         manifest.boundary = boundaryOrReason
-        manifest.startedAt = os.time()
+        manifest.startedAt = math.floor(os.time())
         manifest.rollback = nil
         manifest.completedAt = nil
         manifest.lastError = nil
@@ -5218,9 +4092,57 @@ local function finalizeGenerationAfterRelocate(player, prepared)
     end
     local ok, result = pcall(function()
         local positionOk, position = authoritativePlayerPosition(player)
-        if not positionOk or not relocationPositionsEqual(position,
-            prepared.finalDestination) then
-            error("final relocation authoritative target proof failed")
+        -- B42.20's IsoPlayer network path can normalize a half-cell
+        -- teleport back to the containing square before the token-only final
+        -- ACK reaches the server. Keep exact proof first; if only that
+        -- documented normalization differs, prove the same selected cell and
+        -- exact z. A different cell still fails closed.
+        local finalPositionOk = positionOk
+            and relocationPositionsEqual(position, prepared.finalDestination)
+        if not finalPositionOk and positionOk
+            and type(position) == "table"
+            and type(prepared.finalDestination) == "table"
+            and position.x ~= nil and position.y ~= nil
+            and position.z ~= nil
+            and prepared.finalDestination.x ~= nil
+            and prepared.finalDestination.y ~= nil
+            and prepared.finalDestination.z ~= nil
+            and math.floor(prepared.finalDestination.x)
+                ~= prepared.finalDestination.x
+            and math.floor(prepared.finalDestination.y)
+                ~= prepared.finalDestination.y
+            and position.z == prepared.finalDestination.z
+            and math.floor(position.x)
+                == math.floor(prepared.finalDestination.x)
+            and math.floor(position.y)
+                == math.floor(prepared.finalDestination.y) then
+            finalPositionOk = true
+        end
+        if not finalPositionOk then
+            -- IsoPlayer.updateRemotePlayer runs immediately before OnTick and
+            -- applies the last client PlayerPacket through realx/realy/realz.
+            -- The final command can therefore be overwritten once by the
+            -- stale staging packet even though the client has already sent a
+            -- valid token-only ACK.  Reassert only the server-selected target
+            -- and wait for the next post-update proof; accepting this same
+            -- tick would release the lease while the engine could still snap
+            -- the player back to staging on the following update.
+            local target = prepared.finalDestination
+            local reasserted = ServerUtil.callSucceeded(player,
+                "teleportTo", target.x, target.y, target.z)
+                and ServerUtil.callSucceeded(player, "setX", target.x)
+                and ServerUtil.callSucceeded(player, "setY", target.y)
+                and ServerUtil.callSucceeded(player, "setZ", target.z)
+                and ServerUtil.callSucceeded(player, "setLastX", target.x)
+                and ServerUtil.callSucceeded(player, "setLastY", target.y)
+            local stateText = positionOk and type(position) == "table"
+                and (tostring(position.x) .. "," .. tostring(position.y)
+                    .. "," .. tostring(position.z)) or safeErrorText(position)
+            print("[RailroaderRVTest] final relocation target pending target="
+                .. tostring(target.x) .. "," .. tostring(target.y) .. ","
+                .. tostring(target.z) .. " state=" .. stateText
+                .. " reasserted=" .. tostring(reasserted))
+            error("final relocation authoritative target is still synchronizing")
         end
         local manifest = prepared.manifest
         if type(manifest) ~= "table" then manifest = manifestTable() end
@@ -5228,14 +4150,14 @@ local function finalizeGenerationAfterRelocate(player, prepared)
         if not schemaOk or manifest.state ~= "RUNNING"
             or manifest.phase ~= "FINAL_RELOCATE"
             or tostring(manifest.rvId) ~= tostring(prepared.rvId)
-            or integer(manifest.generation) ~= prepared.generation
-            or integer(manifest.bitmapVersion) ~= prepared.bitmapVersion then
+            or ServerUtil.integer(manifest.generation) ~= prepared.generation
+            or ServerUtil.integer(manifest.bitmapVersion) ~= prepared.bitmapVersion then
             error(Constants.SAVE_REBUILD_REQUIRED)
         end
         local anchor = manifest.anchor
-        local anchorX = requiredInteger(anchor.x, "final manifest anchor x")
-        local anchorY = requiredInteger(anchor.y, "final manifest anchor y")
-        local anchorZ = requiredInteger(anchor.z, "final manifest anchor z")
+        local anchorX = ServerUtil.requiredInteger(anchor.x, "final manifest anchor x")
+        local anchorY = ServerUtil.requiredInteger(anchor.y, "final manifest anchor y")
+        local anchorZ = ServerUtil.requiredInteger(anchor.z, "final manifest anchor z")
         if prepared.finalDestination.x ~= anchorX + 0.5
             or prepared.finalDestination.y ~= anchorY + 0.5
             or prepared.finalDestination.z ~= anchorZ then
@@ -5262,7 +4184,7 @@ local function finalizeGenerationAfterRelocate(player, prepared)
             error("generation boundary transition could not be completed")
         end
         setGenerationPhase(manifest, prepared.generation, "COMMITTED")
-        manifest.completedAt = os.time()
+        manifest.completedAt = math.floor(os.time())
         setManifestState(manifest, "READY")
         if guard then refreshServerRoomOwnershipGuard(guard, "after-commit") end
         local readySchemaOk = pcall(requireCurrentManifest, manifest, false)
@@ -5317,14 +4239,14 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     -- recomputed from the client, and the client contributes no coordinates.
     local planOk, layoutOrError, bounds, destination, finalDestination,
         stagingDestination, oldBounds = pcall(function()
-        local targetX = requiredInteger(Constants.TELEPORT_X,
+        local targetX = ServerUtil.requiredInteger(Constants.TELEPORT_X,
             "shared teleport target x")
-        local targetY = requiredInteger(Constants.TELEPORT_Y,
+        local targetY = ServerUtil.requiredInteger(Constants.TELEPORT_Y,
             "shared teleport target y")
-        local targetZ = requiredInteger(Constants.TELEPORT_Z,
+        local targetZ = ServerUtil.requiredInteger(Constants.TELEPORT_Z,
             "shared teleport target z")
-        local layout = makeLayout(targetX, targetY, targetZ)
-        local plannedBounds = boundsFor(layout)
+        local layout = ServerUtil.makeLayout(targetX, targetY, targetZ)
+        local plannedBounds = ServerSchema.boundsFor(layout)
         local destination = { x = targetX, y = targetY, z = targetZ }
         local finalDestination = {
             x = targetX + 0.5,
@@ -5334,7 +4256,7 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         -- This is a pure world-coordinate legality check.  It must precede
         -- both network relocation and the authoritative server teleport; it
         -- intentionally does not inspect loaded target squares.
-        validateTargetCoordinates(plannedBounds, destination)
+        ServerSchema.validateTargetCoordinates(plannedBounds, destination)
         local oldBounds = manifest.generation ~= nil and manifest.bounds or nil
         local stagingDestination = selectGenerationStagingDestination(layout,
             plannedBounds)
@@ -5351,8 +4273,8 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     local transitionRvId = railroaderData and railroaderData.locoId
         or ("technical:" .. tostring(destination.x) .. ":" .. tostring(destination.y))
     local transitionGeneration = (manifest.generation == nil and 1
-        or requiredInteger(manifest.generation, "manifest generation") + 1)
-    local transitionBitmapVersion = requiredInteger(
+        or ServerUtil.requiredInteger(manifest.generation, "manifest generation") + 1)
+    local transitionBitmapVersion = ServerUtil.requiredInteger(
         layoutOrError.bitmap and layoutOrError.bitmap.bitmapVersion,
         "planned generation bitmapVersion")
     pendingGeneration = {
@@ -5450,7 +4372,7 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         relocatePayload.role = railroaderData.sourceRole
         relocatePayload.seat = railroaderData.sourceSeat
     end
-    local sentOk = callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
+    local sentOk = ServerUtil.callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
         COMMAND_RELOCATE, relocatePayload)
     if not sentOk then
         if Boundary and type(Boundary.clearPlayer) == "function" then
@@ -5459,7 +4381,7 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         pendingGeneration = nil
         return false, "server-to-client relocation command failed"
     end
-    if not callSucceeded(player, "teleportTo", stagingDestination.x + 0.5,
+    if not ServerUtil.callSucceeded(player, "teleportTo", stagingDestination.x + 0.5,
         stagingDestination.y + 0.5, stagingDestination.z) then
         if Boundary and type(Boundary.clearPlayer) == "function" then
             pcall(Boundary.clearPlayer, player)
@@ -5512,12 +4434,12 @@ function RV.Server.currentRVManifestForRelocation(rvId, generation,
     local schemaOk = pcall(requireCurrentManifest, manifest, false)
     if not schemaOk or manifest.state ~= "READY"
         or tostring(manifest.rvId) ~= tostring(rvId)
-        or integer(manifest.generation) ~= integer(generation)
-        or integer(manifest.bitmapVersion) ~= integer(bitmapVersion)
+        or ServerUtil.integer(manifest.generation) ~= ServerUtil.integer(generation)
+        or ServerUtil.integer(manifest.bitmapVersion) ~= ServerUtil.integer(bitmapVersion)
         or type(manifest.boundary) ~= "table"
         or tostring(manifest.boundary.rvId) ~= tostring(rvId)
-        or integer(manifest.boundary.generation) ~= integer(generation)
-        or integer(manifest.boundary.bitmapVersion) ~= integer(bitmapVersion) then
+        or ServerUtil.integer(manifest.boundary.generation) ~= ServerUtil.integer(generation)
+        or ServerUtil.integer(manifest.boundary.bitmapVersion) ~= ServerUtil.integer(bitmapVersion) then
         return false, Constants.SAVE_REBUILD_REQUIRED
     end
     return true, manifest
@@ -5537,8 +4459,8 @@ function RV.Server.currentRVManifestForBoundary(rvId, generation,
     if not schemaOk
         or (manifest.state ~= "RUNNING" and manifest.state ~= "READY")
         or tostring(manifest.rvId) ~= tostring(rvId)
-        or integer(manifest.generation) ~= integer(generation)
-        or integer(manifest.bitmapVersion) ~= integer(bitmapVersion) then
+        or ServerUtil.integer(manifest.generation) ~= ServerUtil.integer(generation)
+        or ServerUtil.integer(manifest.bitmapVersion) ~= ServerUtil.integer(bitmapVersion) then
         return false, Constants.SAVE_REBUILD_REQUIRED
     end
     return true, manifest
@@ -5569,7 +4491,7 @@ function RV.Server.currentRVRecordGeometryConsistent(record, manifest)
             return false
         end
         for i = 1, #fields do
-            if integer(left[fields[i]]) ~= integer(right[fields[i]]) then
+            if ServerUtil.integer(left[fields[i]]) ~= ServerUtil.integer(right[fields[i]]) then
                 return false
             end
         end
@@ -5579,7 +4501,7 @@ function RV.Server.currentRVRecordGeometryConsistent(record, manifest)
     local function integerFieldsMatch(left, right, fields)
         if type(left) ~= "table" or type(right) ~= "table" then return false end
         for i = 1, #fields do
-            if integer(left[fields[i]]) ~= integer(right[fields[i]]) then
+            if ServerUtil.integer(left[fields[i]]) ~= ServerUtil.integer(right[fields[i]]) then
                 return false
             end
         end
@@ -5607,10 +4529,10 @@ function RV.Server.currentRVRecordGeometryConsistent(record, manifest)
         or type(manifest.anchor) ~= "table" then
         return false
     end
-    local recordGeneration, manifestGeneration = integer(record.generation),
-        integer(manifest.generation)
-    local recordBitmapVersion, manifestBitmapVersion = integer(record.bitmapVersion),
-        integer(manifest.bitmapVersion)
+    local recordGeneration, manifestGeneration = ServerUtil.integer(record.generation),
+        ServerUtil.integer(manifest.generation)
+    local recordBitmapVersion, manifestBitmapVersion = ServerUtil.integer(record.bitmapVersion),
+        ServerUtil.integer(manifest.bitmapVersion)
     if type(record.rvId) ~= "string" or record.rvId == ""
         or tostring(record.locoId) ~= record.rvId
         or tostring(manifest.rvId) ~= record.rvId
@@ -5618,22 +4540,22 @@ function RV.Server.currentRVRecordGeometryConsistent(record, manifest)
         or recordGeneration ~= manifestGeneration
         or recordBitmapVersion ~= Constants.BITMAP_VERSION
         or manifestBitmapVersion ~= recordBitmapVersion
-        or integer(record.schemaVersion) ~= Constants.RV_RECORD_SCHEMA_VERSION
-        or integer(record.boundarySchemaVersion) ~= Constants.BOUNDARY_SCHEMA_VERSION
-        or integer(manifest.schemaVersion) ~= Constants.MANIFEST_SCHEMA_VERSION
+        or ServerUtil.integer(record.schemaVersion) ~= Constants.RV_RECORD_SCHEMA_VERSION
+        or ServerUtil.integer(record.boundarySchemaVersion) ~= Constants.BOUNDARY_SCHEMA_VERSION
+        or ServerUtil.integer(manifest.schemaVersion) ~= Constants.MANIFEST_SCHEMA_VERSION
         or manifest.techVersion ~= Constants.TECH_VERSION
-        or integer(manifest.boundarySchemaVersion)
+        or ServerUtil.integer(manifest.boundarySchemaVersion)
             ~= Constants.BOUNDARY_SCHEMA_VERSION
-        or integer(record.boundary.schemaVersion)
+        or ServerUtil.integer(record.boundary.schemaVersion)
             ~= Constants.BOUNDARY_SCHEMA_VERSION
-        or integer(manifest.boundary.schemaVersion)
+        or ServerUtil.integer(manifest.boundary.schemaVersion)
             ~= Constants.BOUNDARY_SCHEMA_VERSION
         or tostring(record.boundary.rvId) ~= record.rvId
         or tostring(manifest.boundary.rvId) ~= record.rvId
-        or integer(record.boundary.generation) ~= recordGeneration
-        or integer(manifest.boundary.generation) ~= recordGeneration
-        or integer(record.boundary.bitmapVersion) ~= recordBitmapVersion
-        or integer(manifest.boundary.bitmapVersion) ~= recordBitmapVersion
+        or ServerUtil.integer(record.boundary.generation) ~= recordGeneration
+        or ServerUtil.integer(manifest.boundary.generation) ~= recordGeneration
+        or ServerUtil.integer(record.boundary.bitmapVersion) ~= recordBitmapVersion
+        or ServerUtil.integer(manifest.boundary.bitmapVersion) ~= recordBitmapVersion
         or not exactKeys(record.boundary, boundaryFields)
         or not exactKeys(manifest.boundary, boundaryFields) then
         return false
@@ -5657,7 +4579,7 @@ function RV.Server.currentRVRecordGeometryConsistent(record, manifest)
 
     local function bitmapsEqual(left, right)
         if not integerFieldsMatch(left, right, managedFields)
-            or integer(left.bitmapVersion) ~= integer(right.bitmapVersion) then
+            or ServerUtil.integer(left.bitmapVersion) ~= ServerUtil.integer(right.bitmapVersion) then
             return false
         end
         for z = left.minZ, left.maxZ - 1 do
@@ -5754,37 +4676,37 @@ function RV.Server.currentRVRecordGeometryConsistent(record, manifest)
 
     local anchor = manifest.anchor
     if not exactKeys(anchor, { "x", "y", "z" })
-        or integer(anchor.x) == nil or integer(anchor.y) == nil
-        or integer(anchor.z) == nil then
+        or ServerUtil.integer(anchor.x) == nil or ServerUtil.integer(anchor.y) == nil
+        or ServerUtil.integer(anchor.z) == nil then
         return false
     end
-    local anchorX, anchorY, anchorZ = integer(anchor.x), integer(anchor.y),
-        integer(anchor.z)
+    local anchorX, anchorY, anchorZ = ServerUtil.integer(anchor.x), ServerUtil.integer(anchor.y),
+        ServerUtil.integer(anchor.z)
     local boundsManaged = {
-        originX = integer(bounds.managedOriginX),
-        originY = integer(bounds.managedOriginY),
-        width = integer(bounds.managedWidth),
-        height = integer(bounds.managedHeight),
-        minZ = integer(bounds.managedMinZ),
-        maxZ = integer(bounds.managedMaxZ),
+        originX = ServerUtil.integer(bounds.managedOriginX),
+        originY = ServerUtil.integer(bounds.managedOriginY),
+        width = ServerUtil.integer(bounds.managedWidth),
+        height = ServerUtil.integer(bounds.managedHeight),
+        minZ = ServerUtil.integer(bounds.managedMinZ),
+        maxZ = ServerUtil.integer(bounds.managedMaxZ),
     }
     if not integerFieldsEqual(boundsManaged, record.managed, managedFields)
         or anchorX ~= boundsManaged.originX + math.floor(boundsManaged.width / 2)
         or anchorY ~= boundsManaged.originY + math.floor(boundsManaged.height / 2)
-        or anchorZ ~= integer(bounds.z)
+        or anchorZ ~= ServerUtil.integer(bounds.z)
         or type(record.rvPosition) ~= "table"
         or not exactKeys(record.rvPosition, { "x", "y", "z" })
-        or toNumber(record.rvPosition.x) ~= anchorX + 0.5
-        or toNumber(record.rvPosition.y) ~= anchorY + 0.5
-        or toNumber(record.rvPosition.z) ~= anchorZ then
+        or ServerUtil.toNumber(record.rvPosition.x) ~= anchorX + 0.5
+        or ServerUtil.toNumber(record.rvPosition.y) ~= anchorY + 0.5
+        or ServerUtil.toNumber(record.rvPosition.z) ~= anchorZ then
         return false
     end
 
-    local regionSize = integer(Constants.RV_REGION_SIZE)
-    local regionMinXOffset = integer(Constants.RV_REGION_MIN_OFFSET_X)
-    local regionMinYOffset = integer(Constants.RV_REGION_MIN_OFFSET_Y)
-    local managedMinZOffset = integer(Constants.RV_MANAGED_MIN_Z_OFFSET)
-    local managedMaxZOffset = integer(Constants.RV_MANAGED_MAX_Z_OFFSET)
+    local regionSize = ServerUtil.integer(Constants.RV_REGION_SIZE)
+    local regionMinXOffset = ServerUtil.integer(Constants.RV_REGION_MIN_OFFSET_X)
+    local regionMinYOffset = ServerUtil.integer(Constants.RV_REGION_MIN_OFFSET_Y)
+    local managedMinZOffset = ServerUtil.integer(Constants.RV_MANAGED_MIN_Z_OFFSET)
+    local managedMaxZOffset = ServerUtil.integer(Constants.RV_MANAGED_MAX_Z_OFFSET)
     if not regionSize or not regionMinXOffset or not regionMinYOffset
         or not managedMinZOffset or not managedMaxZOffset then
         return false
@@ -5882,22 +4804,22 @@ function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
         or type(record.boundary.shellEdges) ~= "table" then
         return false, Constants.SAVE_REBUILD_REQUIRED
     end
-    local recordSchemaVersion = toNumber(record.schemaVersion)
-    local recordBoundarySchemaVersion = toNumber(record.boundarySchemaVersion)
-    local boundarySchemaVersion = toNumber(record.boundary.schemaVersion)
+    local recordSchemaVersion = ServerUtil.toNumber(record.schemaVersion)
+    local recordBoundarySchemaVersion = ServerUtil.toNumber(record.boundarySchemaVersion)
+    local boundarySchemaVersion = ServerUtil.toNumber(record.boundary.schemaVersion)
     if recordSchemaVersion ~= Constants.RV_RECORD_SCHEMA_VERSION
         or recordBoundarySchemaVersion ~= Constants.BOUNDARY_SCHEMA_VERSION
         or boundarySchemaVersion ~= Constants.BOUNDARY_SCHEMA_VERSION then
         return false, Constants.SAVE_REBUILD_REQUIRED
     end
-    local recordGeneration = toNumber(record.generation)
-    if not isFiniteNumber(recordGeneration) or math.floor(recordGeneration)
+    local recordGeneration = ServerUtil.toNumber(record.generation)
+    if not ServerUtil.isFiniteNumber(recordGeneration) or math.floor(recordGeneration)
         ~= recordGeneration or recordGeneration < 1 then
         return false, Constants.SAVE_REBUILD_REQUIRED
     end
-    local recordBitmapVersion = toNumber(record.bitmapVersion)
-    local boundaryGeneration = toNumber(record.boundary.generation)
-    local boundaryBitmapVersion = toNumber(record.boundary.bitmapVersion)
+    local recordBitmapVersion = ServerUtil.toNumber(record.bitmapVersion)
+    local boundaryGeneration = ServerUtil.toNumber(record.boundary.generation)
+    local boundaryBitmapVersion = ServerUtil.toNumber(record.boundary.bitmapVersion)
     if recordBitmapVersion ~= Constants.BITMAP_VERSION
         or tostring(record.boundary.rvId) ~= tostring(record.rvId)
         or boundaryGeneration ~= recordGeneration
@@ -5919,14 +4841,14 @@ function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
     if manifest.state ~= "READY" then
         return false, "RV manifest is not READY"
     end
-    local manifestGeneration = toNumber(manifest.generation)
-    local manifestBitmapVersion = toNumber(manifest.bitmapVersion)
+    local manifestGeneration = ServerUtil.toNumber(manifest.generation)
+    local manifestBitmapVersion = ServerUtil.toNumber(manifest.bitmapVersion)
     if tostring(manifest.rvId) ~= tostring(record.rvId)
         or manifestGeneration ~= recordGeneration
         or manifestBitmapVersion ~= recordBitmapVersion
         or tostring(manifest.boundary.rvId) ~= tostring(record.rvId)
-        or toNumber(manifest.boundary.generation) ~= recordGeneration
-        or toNumber(manifest.boundary.bitmapVersion) ~= recordBitmapVersion then
+        or ServerUtil.toNumber(manifest.boundary.generation) ~= recordGeneration
+        or ServerUtil.toNumber(manifest.boundary.bitmapVersion) ~= recordBitmapVersion then
         return false, Constants.SAVE_REBUILD_REQUIRED
     end
 
@@ -5961,11 +4883,11 @@ local function ackPayloadToken(args)
         end
         return count == 1 and token or nil
     end
-    if not classInstance(args, "PZNetKahluaTableImpl") then
+    if not ServerUtil.classInstance(args, "PZNetKahluaTableImpl") then
         return nil
     end
-    local sizeOk, size = invoke(args, "size")
-    if not sizeOk or toNumber(size) ~= 1 then
+    local sizeOk, size = ServerUtil.invoke(args, "size")
+    if not sizeOk or ServerUtil.toNumber(size) ~= 1 then
         return nil
     end
     return token
@@ -6038,17 +4960,17 @@ local function acknowledgeFinalRelocation(player, args)
     if not schemaOk or manifest.state ~= "RUNNING"
         or manifest.phase ~= "FINAL_RELOCATE"
         or tostring(manifest.rvId) ~= tostring(pending.rvId)
-        or integer(manifest.generation) ~= pending.generation
-        or integer(manifest.bitmapVersion) ~= pending.bitmapVersion then
+        or ServerUtil.integer(manifest.generation) ~= pending.generation
+        or ServerUtil.integer(manifest.bitmapVersion) ~= pending.bitmapVersion then
         return false, Constants.SAVE_REBUILD_REQUIRED
     end
     local anchor = manifest.anchor
     local anchorX = type(anchor) == "table"
-        and requiredInteger(anchor.x, "final acknowledgement anchor x") or nil
+        and ServerUtil.requiredInteger(anchor.x, "final acknowledgement anchor x") or nil
     local anchorY = type(anchor) == "table"
-        and requiredInteger(anchor.y, "final acknowledgement anchor y") or nil
+        and ServerUtil.requiredInteger(anchor.y, "final acknowledgement anchor y") or nil
     local anchorZ = type(anchor) == "table"
-        and requiredInteger(anchor.z, "final acknowledgement anchor z") or nil
+        and ServerUtil.requiredInteger(anchor.z, "final acknowledgement anchor z") or nil
     local target = pending.finalDestination
     if anchorX == nil or anchorY == nil or anchorZ == nil
         or type(target) ~= "table"
@@ -6057,8 +4979,67 @@ local function acknowledgeFinalRelocation(player, args)
         return false, Constants.SAVE_REBUILD_REQUIRED
     end
     local stateOk, state = authoritativePlayerPosition(livePlayerOrReason)
-    if not stateOk or not relocationPositionsEqual(state, target) then
+    local finalPositionOk = stateOk and relocationPositionsEqual(state, target)
+    local finalPositionMatch = finalPositionOk and "exact" or "mismatch"
+    -- The client ACK is sent only after its own room/guard proof, but the
+    -- server's IsoPlayer can still expose the pre-teleport position for one
+    -- network tick (or be normalized by the movement update).  Re-assert the
+    -- server-selected target once before rejecting the token.  No coordinate
+    -- from the client is used here; a second proof read remains mandatory.
+    if not finalPositionOk and stateOk
+        and pending.finalRelocationReasserted ~= true then
+        pending.finalRelocationReasserted = true
+        local targetReasserted = ServerUtil.callSucceeded(livePlayerOrReason,
+            "teleportTo", target.x, target.y, target.z)
+            and ServerUtil.callSucceeded(livePlayerOrReason, "setX", target.x)
+            and ServerUtil.callSucceeded(livePlayerOrReason, "setY", target.y)
+            and ServerUtil.callSucceeded(livePlayerOrReason, "setZ", target.z)
+            and ServerUtil.callSucceeded(livePlayerOrReason, "setLastX", target.x)
+            and ServerUtil.callSucceeded(livePlayerOrReason, "setLastY", target.y)
+        if targetReasserted then
+            stateOk, state = authoritativePlayerPosition(livePlayerOrReason)
+            finalPositionOk = stateOk and relocationPositionsEqual(state, target)
+            finalPositionMatch = finalPositionOk and "reasserted" or "mismatch"
+            if not finalPositionOk and stateOk
+                and type(state) == "table"
+                and state.x ~= nil and state.y ~= nil and state.z ~= nil
+                and target.x ~= nil and target.y ~= nil and target.z ~= nil
+                and math.floor(target.x) ~= target.x
+                and math.floor(target.y) ~= target.y
+                and state.z == target.z
+                and math.floor(state.x) == math.floor(target.x)
+                and math.floor(state.y) == math.floor(target.y) then
+                finalPositionOk = true
+                finalPositionMatch = "target-cell"
+            end
+        end
+    end
+    if not finalPositionOk and stateOk
+        and type(state) == "table"
+        and state.x ~= nil and state.y ~= nil and state.z ~= nil
+        and target.x ~= nil and target.y ~= nil and target.z ~= nil
+        and math.floor(target.x) ~= target.x
+        and math.floor(target.y) ~= target.y
+        and state.z == target.z
+        and math.floor(state.x) == math.floor(target.x)
+        and math.floor(state.y) == math.floor(target.y) then
+        finalPositionOk = true
+        finalPositionMatch = "target-cell"
+    end
+    if not finalPositionOk then
+        local stateText = stateOk and type(state) == "table"
+            and (tostring(state.x) .. "," .. tostring(state.y) .. ","
+                .. tostring(state.z)) or safeErrorText(state)
+        print("[RailroaderRVTest] final relocation target proof mismatch target="
+            .. tostring(target.x) .. "," .. tostring(target.y) .. ","
+            .. tostring(target.z) .. " state=" .. stateText)
         return false, "final relocation acknowledgement has no authoritative target proof"
+    end
+    if finalPositionMatch == "target-cell" then
+        print("[RailroaderRVTest] final relocation proof accepted target cell="
+            .. tostring(math.floor(target.x)) .. ","
+            .. tostring(math.floor(target.y)) .. ","
+            .. tostring(target.z) .. " after B42 half-cell normalization")
     end
     pending.finalRelocationAcked = true
     pending.finalRelocationAckAtTick = serverTick
@@ -6086,7 +5067,7 @@ local function rollbackPendingGenerationWorld(pending, reason)
     end
     local cell = pending.generationCell
     if not cell then
-        local cellOk, cellOrReason = pcall(getCellForPlayer, pending.player)
+        local cellOk, cellOrReason = pcall(ServerWorld.getCellForPlayer, pending.player)
         if not cellOk or not cellOrReason then
             print("[RailroaderRVTest] final relocation rollback deferred reason="
                 .. safeErrorText(cellOrReason))
@@ -6275,45 +5256,84 @@ local function processRoofRepairRelocationGroup()
             local target = group.phase == "temporary"
                 and group.target or member.target
             if group.phase == "return" then
-                local exactCallOk, exactPosition = pcall(
-                    authoritativePlayerPosition, playerOrReason)
+                local exactCallOk, exactPosition =
+                    tryAuthoritativePlayerPosition(playerOrReason)
+                -- The client ACK plus floor/z proof is enough to stop a
+                -- duplicate return packet.  If the engine normalized a
+                -- fractional x/y, completeRoofRepairRelocation reasserts the
+                -- captured float before it releases the lease.
                 local atTarget = exactCallOk and type(exactPosition) == "table"
-                    and exactPosition.x == target.x
-                    and exactPosition.y == target.y
-                    and exactPosition.z == target.z
+                    and math.floor(exactPosition.x) == math.floor(target.x)
+                    and math.floor(exactPosition.y) == math.floor(target.y)
+                    and math.floor(exactPosition.z) == math.floor(target.z)
                     and exactPosition.z ~= ROOF_REPAIR_TEMP_Z
                 if not atTarget then
-                    -- A stale/fallen member needs the same return command again,
-                    -- but never once per tick.  Clear any old ACK first so a
-                    -- delayed packet cannot complete a command that has just
-                    -- been reissued.
-                    member.acknowledged = false
-                    member.arrivalConsumed = false
-                    member.completed = false
-                    member.arrived = false
-                    member.relocationNeedsResend = true
-                    if serverTick < (member.relocationRetryAtTick or 0) then
-                        -- Wait for the bounded retry cadence below.
-                    elseif type(member.returnPayload) ~= "table" then
-                        failRoofRepairRelocationGroup(
-                            "roof repair group return payload is unavailable")
-                        return
+                    local waitLogTick = member.returnTargetLogTick or -math.huge
+                    if serverTick - waitLogTick >= 30 then
+                        local positionText = exactCallOk
+                            and type(exactPosition) == "table"
+                            and (tostring(exactPosition.x) .. ","
+                                .. tostring(exactPosition.y) .. ","
+                                .. tostring(exactPosition.z))
+                            or safeErrorText(exactPosition)
+                        print("[RailroaderRVTest] roof repair group return target wait room="
+                            .. tostring(group.roomKey or "unknown") .. " player="
+                            .. tostring(member.identityKey) .. " position="
+                            .. positionText .. " target=" .. tostring(target.x) .. ","
+                            .. tostring(target.y) .. "," .. tostring(target.z))
+                        member.returnTargetLogTick = serverTick
+                    end
+                    if member.acknowledged == true then
+                        -- The client has already proved that it applied this
+                        -- token.  Do not clear that ACK and send an endless
+                        -- stream of return commands just because a stale
+                        -- PlayerPacket briefly put the server object back at
+                        -- the remote point.  Reassert server coordinates only;
+                        -- the normal target/current-square proof below still
+                        -- gates arrival and lease release.
+                        local moved = applyRoofRepairTeleport(playerOrReason,
+                            target, false)
+                        member.relocationNeedsResend = not moved
+                        if moved then
+                            exactCallOk, exactPosition =
+                                tryAuthoritativePlayerPosition(playerOrReason)
+                            atTarget = exactCallOk
+                                and type(exactPosition) == "table"
+                                and math.floor(exactPosition.x) == math.floor(target.x)
+                                and math.floor(exactPosition.y) == math.floor(target.y)
+                                and math.floor(exactPosition.z) == math.floor(target.z)
+                                and exactPosition.z ~= ROOF_REPAIR_TEMP_Z
+                        end
                     else
-                        local sentOk = callGlobalSucceeded("sendServerCommand",
-                            playerOrReason, COMMAND_MODULE, COMMAND_RELOCATE,
-                            member.returnPayload)
-                        local moved = callSucceeded(playerOrReason, "teleportTo",
-                            target.x, target.y, target.z)
-                        member.relocationLastSentTick = serverTick
-                        member.relocationRetryAtTick = serverTick
-                            + ROOF_RELOCATION_RETRY_TICKS
-                        if not sentOk or not moved then
-                            -- A transient send/teleport failure is retried with
-                            -- this token; the transaction timeout remains the
-                            -- final bounded failure path.
-                            member.relocationNeedsResend = true
+                        -- A stale/fallen member without an ACK needs the same
+                        -- return command again, but never once per tick.
+                        member.arrivalConsumed = false
+                        member.completed = false
+                        member.arrived = false
+                        member.relocationNeedsResend = true
+                        if serverTick < (member.relocationRetryAtTick or 0) then
+                            -- Wait for the bounded retry cadence below.
+                        elseif type(member.returnPayload) ~= "table" then
+                            failRoofRepairRelocationGroup(
+                                "roof repair group return payload is unavailable")
+                            return
                         else
-                            member.relocationNeedsResend = false
+                            local sentOk = ServerUtil.callGlobalSucceeded("sendServerCommand",
+                                playerOrReason, COMMAND_MODULE, COMMAND_RELOCATE,
+                                member.returnPayload)
+                            local moved = applyRoofRepairTeleport(playerOrReason,
+                                target, false)
+                            member.relocationLastSentTick = serverTick
+                            member.relocationRetryAtTick = serverTick
+                                + ROOF_RELOCATION_RETRY_TICKS
+                            if not sentOk or not moved then
+                                -- A transient send/teleport failure is retried
+                                -- with this token; the transaction timeout is
+                                -- still the final bounded failure path.
+                                member.relocationNeedsResend = true
+                            else
+                                member.relocationNeedsResend = false
+                            end
                         end
                     end
                 end
@@ -6425,11 +5445,20 @@ function RV.Server.OnTick()
             end
             return
         end
+        if serverTick > (pending.finalRelocationDeadlineTick or serverTick) then
+            cancelPending("final relocation target synchronization timed out")
+            return
+        end
         local finalOk, finalReason = finalizeGenerationAfterRelocate(
             playerOrReason, pending)
         if finalOk then
             pendingGeneration = nil
             print("[RailroaderRVTest] generation committed READY")
+        elseif finalReason == "final relocation authoritative target is still synchronizing" then
+            -- The server object may still carry the previous staging packet;
+            -- finalizeGenerationAfterRelocate has reasserted the fixed target
+            -- and will require a fresh post-update proof on the next tick.
+            return
         else
             pending.failureReason = finalReason
             pending.cancelled = true
@@ -6456,8 +5485,8 @@ function RV.Server.OnTick()
     -- The relocation itself is what streams the remote target.  Wait until
     -- every base square in the exact 100x100 footprint is present; no cleanup
     -- or other world mutation is allowed while this preflight is incomplete.
-    local targetLoaded, targetLoadReason = targetAreaLoadStatus(playerOrReason,
-        pending.bounds)
+    local targetLoaded, targetLoadReason = ServerSchema.targetAreaLoadStatus(playerOrReason,
+        pending.bounds, safeErrorText)
     if targetLoaded == nil then
         cancelPending(targetLoadReason)
         return
@@ -6564,8 +5593,7 @@ if not railroaderAdapterOk then
         .. safeErrorText(railroaderAdapterOrError))
 elseif type(railroaderAdapterOrError) == "table"
     and type(railroaderAdapterOrError.installTransactionHooks) == "function" then
-    local hooksInstalled = railroaderAdapterOrError.installTransactionHooks()
-    if hooksInstalled then
+    if railroaderAdapterOrError.installTransactionHooks() then
         print("[RailroaderRVTest] Railroader RV transaction hooks installed.")
     else
         print("[RailroaderRVTest] Railroader RV transaction hooks unavailable.")

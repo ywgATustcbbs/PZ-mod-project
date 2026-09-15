@@ -18,8 +18,9 @@ RV_RailroaderContextMenu.lua 负责识别官方 rr_loco、提交进入/退出意
 
 职责：客户端表现与请求；生成/清理请求始终为空 payload，生成 anchor 与传送坐标由服务端
 固定选择。首次 generation staging 只接受服务端按 current-schema managed scope 中心计算的
-`z=-15` 目标，并在严格 `generationTransition/generationPhase` 标记下显示本地常量“正在生成房车”；
-临时 pending 期间按固定 tick 刷新该本地提示，收到结束/失败或超时后停止刷新。
+`z=-15` 目标，并在严格 `generationTransition/generationPhase` 标记下使用本地语义常量“正在生成房车”；
+B42 渲染器对非 ASCII halo 可能显示替换字符，所以实际 `setHaloNote` 使用本地 ASCII
+`"Generating RV"`，临时 pending 期间按固定 tick 刷新该本地提示，收到结束/失败或超时后停止刷新。
 当前 roof-refresh 只接受服务端给匹配本地 online ID 的中心减 `(18000,0,15)` 远点，完成本地
 `teleportTo` 后回传无坐标 token；不得在
 传送前要求目标 `getGridSquare` 存在。位置、权限、到达复核、传送后加载等待和世界变更仍
@@ -37,7 +38,8 @@ position/next/last 状态；没有快照或当前位置已经在 scope 外时保
 guard；已有 RV entry 或 reconnect/presence 则由服务端用同一命令定向对应客户端。完整
 7x41 墙矩形已经包含 6x40 室内，扫描不再重复追加 room loop。客户端只在
 方格仍返回 `IsoRoom`、但该方格的 `RoomDef` 已为 `nil` 时执行 `setRoomID(-1)`；最终
-`FinalRelocate` 处理器会在本地 `teleportTo` 前同步执行同一 guard 扫描；有效的新房或旧房
+`FinalRelocate` 处理器会在本地 `teleportTo` 后通过官方 `setX/setY/setZ` 与
+`setLastX/setLastY` 恢复服务端选定的半格中心，再执行同一 guard 扫描；有效的新房或旧房
 room ID 不得被修改，也不得调用 `setRoom(nil)`、`ResetIsoWorldRegion` 或额外重算。由于没有
 公开的 region rebuild 完成事件，generation guard 在初始稳定尾部后不会释放，而是作为当前
 `rvId:generation:bitmapVersion` 的持续 footprint monitor 每个 `OnTick` 扫描。`OnTick` 位于
@@ -75,6 +77,10 @@ room ID 不得被修改，也不得调用 `setRoom(nil)`、`ResetIsoWorldRegion`
 固定 100x100 RV 区块添加 `Exit RV`，不依赖 locomotive 实体、room 或 ModData 已经
 在客户端恢复；服务器收到退出意图后再按当前 schema 持久化区块映射反查机车；mapping
 不完整时拒绝操作，提示删除测试存档并重建，且不执行默认全局退出传送。
+
+`RVTeleport` 失败返回 `SAVE_REBUILD_REQUIRED` 时，客户端只匹配本地稳定原因码，并用 ASCII
+`setHaloNote("Delete this test save and rebuild it",...)` 明确提示删除该测试存档并重建；不得把
+任意网络 reason 正文渲染为 UI，也不得对旧 schema 传送、迁移或兼容。
 
 Railroader 2.1 的 `RVTeleport` 处理还必须经过 `RR.Ride`：进入和生成失败先调用官方
 `dismount(true)`，让 `RR_MPClient` 的 `_dismountAt` stale-seat grace 先于坐标写入；生成失败

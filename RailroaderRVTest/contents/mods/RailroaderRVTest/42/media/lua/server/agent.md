@@ -1,6 +1,8 @@
 # server
 
-结构：`RailroaderRV/` 服务端命令入口与生成事务；`RV_Server.lua` 前置声明后文的当前
+结构：`RailroaderRV/` 服务端命令入口与生成事务；其中 `RV_Server.lua` 是 facade/bootstrap
+与事件唯一所有者，`RV_ServerUtil.lua`、`RV_ServerWorld.lua`、`RV_ServerSchema.lua` 分别
+承载纯工具、世界对象原语和当前 schema/加载预检；`RV_Server.lua` 前置声明后文的当前
 manifest gate，使 generation 清理调用到当前 schema 校验而非未定义全局。
 
 职责：权威校验、固定生成 anchor 与 staging 分离传送；首次 generation staging 严格由当前
@@ -14,7 +16,9 @@ managedOriginY+floor(height/2), -15)`，不再选择房车边界附近的格；r
 才进入完整房间/对象生成；生成成功后、提交 `READY` 前，服务端通过独立
 `FinalRelocate` 命令并同步服务端玩家对象，把请求玩家送到 `(20050.5,2050.5,0)`；
 客户端 guard/room-scan/实际坐标均成功后只回传严格 token-only `FinalRelocateAck`，服务端重读
-current manifest/权威坐标后才提交 `READY`；缺失 ACK 或 600 tick 超时走原始坐标回滚，
+current manifest/权威坐标；若 B42 网络 tick 暂时暴露旧位置，服务端最多一次用自身目标坐标
+重断言并再次读取，仍不能证明目标则拒绝 ACK，之后才提交 `READY`；缺失 ACK 或 600 tick
+超时走原始坐标回滚，
 该命令不走初次 `RelocateAck`。B42 服务端按 64×64 cell 和 online chunk-grid width
 加载相关区域；不完整 footprint 只返回可重试状态，硬超时在任何清场前取消，禁止以部分加载范围继续。RV 边界
 服务仅接受当前玩家映射的 `rvId/generation`，在该 RV 的 100×100×Z scope 内使用 bitmap；scope 外
@@ -54,6 +58,15 @@ authoritative player square 的 `isInARoom()`，以 `getRoom()/getRoomDef()` 作
 继续精确回传；服务器进程崩溃、关闭或重启时内存事务丢失，不恢复原坐标、repair、phase 或
 `READY`。服务端日志只表示权威 add/remove 已应用，不表示客户端视觉已成功。
 
+远端 relocation 持有 Boundary correction lease；`RV_Server.OnTick` 先续租再推进组状态，
+lease 存续期间跳过 Boundary 普通 geometry/cleanup 扫描及服务端 stale-room ownership
+扫描，避免用远端玩家 cell 解析原 RV footprint；全员权威回传并完成后才释放 lease、恢复
+普通监测。
+
+跨 chunk 回传可先以服务端目标坐标完成 token-only ACK，而等待原 RV `GridSquare`
+重新绑定；服务端仍以权威位置、身份和 current-schema context 复核，并保持 lease，
+直到 `completeRoofRepairRelocation` 与 `roofRepairSquaresLoaded` 证明加载完成。
+
 当前只实现同 scope 第一阶段；同 x/y 改 z 不等于客户端 chunk unload/reload。若运行时仍
 无法刷新屋顶，下一轮才按实际 client chunk-grid streaming 半径开展跨 chunk 卸载/重载实验，
 没有可靠 ACK 时不得伪造完成。每次尝试都重验 current map/record/relation/identity 与
@@ -75,5 +88,7 @@ mapping record 与 current manifest/boundary identity，再以 manifest 的当�
 
 开发期存档只接受当前 manifest、bitmap、shell ledger、mapping 和异步身份 schema；临时传送
 状态只存在当前服务进程内存。
+manifest 与 mapping 中的 epoch 时间字段写入整秒（`math.floor(os.time())`），并继续由当前
+schema 的整数 gate 严格校验；Kahlua 的 `os.time()` 小数返回值不得直接持久化。
 缺失或不匹配时服务端必须拒绝操作并提示删除测试存档后重建；不得迁移、转换、使用
 旧 bounds、清理对象、传送玩家或运行 boundary guard。空的新容器才可按当前 schema 初始化。

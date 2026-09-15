@@ -1571,7 +1571,7 @@ local function commitGeneration(player, data, prepared)
         prepared.boundary, record) then
         return false, "RV boundary manifest registration failed"
     end
-    record.updatedAt = os.time()
+    record.updatedAt = math.floor(os.time())
     markPlayerInside(map, record, key, player,
         data.entryPosition, data.sourceRole, data.sourceSeat)
     -- RV_Server owns the transition close after FinalRelocateAck and the
@@ -1717,7 +1717,11 @@ end
 function Adapter.OnClientCommand(module, command, player, args)
     if module ~= C.MOD_ID then return end
     if command ~= C.COMMAND_RV_ENTER and command ~= C.COMMAND_RV_EXIT then return end
-    local ok, result, reason
+    -- The roof/generation identity gate may reject before pcall is entered.
+    -- Treat that branch as an intentional handled result; otherwise the
+    -- uninitialised `ok` below overwrites its real reason with `false`, which
+    -- renders as the misleading "unknown reason" to the client.
+    local ok, result, reason = true, nil, nil
     if roofRepairOwnsPlayer(player) then
         result, reason = false, "roof repair refresh is in progress"
     elseif command == C.COMMAND_RV_ENTER then
@@ -1827,6 +1831,20 @@ end
 roofRepairOwnsPlayer = function(player)
     local identityKey = sentinelIdentity(player)
     if not identityKey then return false end
+    -- isRelocationIdentityClaimed also reports the generation owner.  That
+    -- shared claim must not be labelled as a roof repair: the actual mutex
+    -- check below will return the generation-specific rejection reason.
+    if not queuedRoofRepairClaims(identityKey) then
+        local server = RailroaderRV and RailroaderRV.Server
+        if not server or type(server.isRoofRepairTransactionActive) ~= "function" then
+            return false
+        end
+        local roofCallOk, roofActive = pcall(
+            server.isRoofRepairTransactionActive, nil)
+        if not roofCallOk or roofActive ~= true then
+            return false
+        end
+    end
     local server = RailroaderRV and RailroaderRV.Server
     return sentinelClaimState(server, identityKey) == true
 end
@@ -3514,7 +3532,7 @@ function Adapter.OnTick()
                 if not old or old.x ~= position.x or old.y ~= position.y
                     or old.z ~= position.z then
                     record.locoPosition = position
-                    record.updatedAt = os.time()
+                    record.updatedAt = math.floor(os.time())
                     changed = true
                 end
             end

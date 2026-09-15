@@ -1355,10 +1355,22 @@ function Boundary.onTick()
         local player = players[i]
         local id = identity(player)
         if id then
-            updatePlayer(player)
-            local boundary = Boundary.boundaryForPlayer(player)
-            if boundary then
-                activeBoundaries[boundaryKey(boundary)] = { boundary = boundary, player = player }
+            local state = stateFor(player)
+            -- Roof relocation owns the player's boundary lease while the
+            -- authoritative object is intentionally in a different chunk.
+            -- Do not revalidate RV geometry or run cleanup through the remote
+            -- player's cell; those scans can stall the server tick before the
+            -- grouped roof state machine reaches its due ticks.  The lease is
+            -- extended by RV_Server before this callback and normal boundary
+            -- processing resumes after completeTransition.
+            if not state or not transitionActive(state) then
+                updatePlayer(player)
+                local boundary = Boundary.boundaryForPlayer(player)
+                if boundary then
+                    activeBoundaries[boundaryKey(boundary)] = {
+                        boundary = boundary, player = player,
+                    }
+                end
             end
         end
     end

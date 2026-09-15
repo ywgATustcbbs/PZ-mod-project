@@ -40,6 +40,17 @@ bitmap 身份，不读取客户端坐标或旧 bounds。
 明确取消并提示重建存档，不静默丢弃事件。
 一次事务的失败状态绑定到唯一 relocation token；正在回传的原事务继续消费该状态，尚未启动的后续独立墙体操作不会被旧失败记录吞掉，而会在当前事务空闲后重新排程。
 
+远端阶段拥有 Boundary correction lease；`RV_Server.OnTick` 先续租，再推进远端组状态。
+在该 lease 存续期间，Boundary 的普通 geometry/cleanup 扫描和服务端 stale-room
+ownership 扫描均暂停，避免用玩家已位于远端 chunk 的 cell 去遍历 RV 原始 100×100
+footprint。所有成员完成权威回传并释放 lease 后，正常 Boundary 与 room monitor 才恢复；
+这不会改变 current-schema gate、对象修复或失败回滚路径。
+
+跨 chunk 回传允许客户端在目标坐标已由服务端命令应用、但原 RV `GridSquare` 尚未
+重新绑定时发送 token-only ACK；服务端仍以权威 x/y/z、identity 和 current-schema
+context 复核推进，并继续持有 lease，直到 `completeRoofRepairRelocation` 与
+`roofRepairSquaresLoaded` 的加载证明成立。ACK 不携带或信任客户端坐标。
+
 所有成员先远移返回并释放各自的 boundary correction lease，随后服务端按进入已有 RV 的同一
 `repairRoofVisuals`/roof geometry 路径对该房间执行一次修复（多成员只选一个有效权威上下文，不重复 force 世界变更）；修复/刷新异常被
 隔离并转为明确失败，不能阻断其余成员的回传。任何中间异常、断线、死亡、对象失效、身份/schema 变化、加载
@@ -85,7 +96,10 @@ mapping record 与完整 `rvId:generation:bitmapVersion`，再用当前 manifest
 contents/mods/RailroaderRVTest/42/
   media/lua/client/RailroaderRV/RV_ContextMenu.lua       菜单与意图请求
   media/lua/client/RailroaderRV/RV_BoundaryClient.lua    bitmap 预测与修正反馈
-  media/lua/server/RailroaderRV/RV_Server.lua            权威验证、生成、同步、回滚
+  media/lua/server/RailroaderRV/RV_Server.lua            facade、权威事务与事件注册
+  media/lua/server/RailroaderRV/RV_ServerUtil.lua        纯调用/数值/空 payload 工具
+  media/lua/server/RailroaderRV/RV_ServerWorld.lua       方格、对象快照/标签、清理与回滚原语
+  media/lua/server/RailroaderRV/RV_ServerSchema.lua      current-schema 几何与加载预检
   media/lua/server/RailroaderRV/RV_BoundaryServer.lua    边界 guard、建造审计、周期清理
   media/lua/server/RailroaderRV/RV_RailroaderServer.lua  RV↔玩家↔机车适配、无状态哨兵
   media/lua/shared/RailroaderRV/RV_Constants.lua          共享常量契约

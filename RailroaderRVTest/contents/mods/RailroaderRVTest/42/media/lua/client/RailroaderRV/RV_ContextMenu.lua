@@ -26,6 +26,10 @@ local COMMAND_FINAL_RELOCATE_ACK = C.COMMAND_FINAL_RELOCATE_ACK
     or "FinalRelocateAck"
 local ROOF_REPAIR_HALO_TEXT = "Refreshing room"
 local GENERATION_HALO_TEXT = "正在生成房车"
+-- The current B42 renderer displays non-ASCII halo text as replacement
+-- characters. Keep the local Chinese semantic label above for the client
+-- contract, but render the equivalent ASCII label that the engine can show.
+local GENERATION_HALO_RENDER_TEXT = "Generating RV"
 local COMMAND_REFRESH_ROOM_OWNERSHIP = C.COMMAND_REFRESH_ROOM_OWNERSHIP
     or "RefreshRoomOwnership"
 local pendingRelocation = nil
@@ -398,6 +402,18 @@ local function tryApplyFinalRelocation(args)
         playerObj:teleportTo(x, y, z)
     end)
     if not teleported or teleportResult == false then return false end
+    -- IsoGameCharacter:teleportTo(float,float,int) floors x/y in B42.20.
+    -- Restore the server-selected half-cell center with the official setters;
+    -- otherwise the exact-coordinate proof below can never pass and no final
+    -- token ACK can be sent.
+    local exactCallOk = pcall(function()
+        playerObj:setX(x)
+        playerObj:setY(y)
+        playerObj:setZ(z)
+        playerObj:setLastX(x)
+        playerObj:setLastY(y)
+    end)
+    if not exactCallOk then return false end
     if type(playerObj.setCurrentSquareFromPosition) == "function" then
         -- teleportTo updates coordinates only. Use the official three-argument
         -- IsoMovingObject overload to refresh the client cache.  Do not write
@@ -481,6 +497,11 @@ function Client.onServerCommand(module, command, args)
         return
     end
     if command ~= COMMAND_RELOCATE then return end
+    print("[RailroaderRVTest] client relocation command received phase="
+        .. tostring(args.roofRepairPhase or args.generationPhase or "none")
+        .. " onlineId=" .. tostring(args.onlineId)
+        .. " target=" .. tostring(args.x) .. "," .. tostring(args.y)
+        .. "," .. tostring(args.z))
     local token = args.token
     local onlineId = finiteInteger(args.onlineId)
     -- Staging targets are integer contract points, but a grouped return must
@@ -520,6 +541,7 @@ function Client.onServerCommand(module, command, args)
     end
     local playerObj = localPlayerByOnlineId(onlineId)
     if not playerObj or playerObj:isDead() then
+        print("[RailroaderRVTest] client relocation command ignored: local player unavailable")
         return
     end
     if roofRepairTransition and roofRepairPhase == "temporary"
@@ -534,7 +556,8 @@ function Client.onServerCommand(module, command, args)
         -- the strict phase marker, so network encoding cannot become rendered
         -- UI text and cannot be spoofed by an arbitrary payload.
         pcall(function()
-            playerObj:setHaloNote(GENERATION_HALO_TEXT, 255, 255, 255, 1500)
+            playerObj:setHaloNote(GENERATION_HALO_RENDER_TEXT,
+                255, 255, 255, 1500)
         end)
     end
     -- Railroader generation removes the official seat before this staging
@@ -567,6 +590,8 @@ function Client.onServerCommand(module, command, args)
         playerObj:teleportTo(teleportX, teleportY, z)
     end)
     if not relocated then
+        print("[RailroaderRVTest] client relocation teleport failed phase="
+            .. tostring(roofRepairPhase or generationPhase or "none"))
         return
     end
     -- teleportTo updates coordinates immediately, while IsoMovingObject's
@@ -587,7 +612,11 @@ function Client.onServerCommand(module, command, args)
         generationTransition = generationTransition,
         generationPhase = generationPhase,
         ticks = 0,
+        ackAttemptLogged = false,
     }
+    print("[RailroaderRVTest] client relocation staged phase="
+        .. tostring(roofRepairPhase or generationPhase or "none")
+        .. " target=" .. tostring(x) .. "," .. tostring(y) .. "," .. tostring(z))
 end
 
 function Client.onTick()
@@ -634,7 +663,8 @@ function Client.onTick()
         -- temporary phase, including a reconnect/rebound command.  The
         -- server payload contains only the phase marker, never UI text.
         pcall(function()
-            playerObj:setHaloNote(GENERATION_HALO_TEXT, 255, 255, 255, 1500)
+            playerObj:setHaloNote(GENERATION_HALO_RENDER_TEXT,
+                255, 255, 255, 1500)
         end)
     end
     local current = playerObj:getCurrentSquare()
@@ -645,13 +675,15 @@ function Client.onTick()
     if not currentMatches
         and (pending.roofRepairTransition or pending.generationTransition)
         and (pending.roofRepairPhase == "temporary"
-            or pending.generationPhase == "temporary")
+            or pending.roofRepairPhase == "return"
+            or pending.generationPhase == "temporary"
+            or pending.generationPhase == "return")
         and pending.ticks >= 3 then
-        -- The deliberate remote target can be a valid server coordinate with
-        -- no client GridSquare (for example the unloaded/empty -15 layer).
-        -- This acknowledgement only reports that the server command was
-        -- applied; the server still re-reads its authoritative player x/y/z
-        -- and schema context before marking the phase arrived.
+        -- A cross-chunk return can be visible at the exact server-selected
+        -- coordinate before the original chunk's client GridSquare is
+        -- rebound.  This acknowledgement only reports that the server
+        -- command was applied; the server still re-reads authoritative
+        -- x/y/z, identity and schema context before advancing the phase.
         local xOk, currentX = pcall(function() return playerObj:getX() end)
         local yOk, currentY = pcall(function() return playerObj:getY() end)
         local zOk, currentZ = pcall(function() return playerObj:getZ() end)
@@ -669,9 +701,23 @@ function Client.onTick()
     end
     -- The destination is intentionally cleaned of floors by the server, so a
     -- missing floor is not a client-side reason to discard the relocation ack.
-    sendClientCommand(playerObj, C.MOD_ID, COMMAND_RELOCATE_ACK,
-        { token = pending.token })
-    pendingRelocation = nil
+    if pending.ackAttemptLogged ~= true then
+        print("[RailroaderRVTest] client relocation ACK sending phase="
+            .. tostring(pending.roofRepairPhase or pending.generationPhase or "none")
+            .. " target=" .. tostring(pending.x) .. "," .. tostring(pending.y)
+            .. "," .. tostring(pending.z) .. " coordinateProof="
+            .. tostring(currentMatches))
+        pending.ackAttemptLogged = true
+    end
+    local ackOk = pcall(function()
+        sendClientCommand(playerObj, C.MOD_ID, COMMAND_RELOCATE_ACK,
+            { token = pending.token })
+    end)
+    if ackOk then
+        print("[RailroaderRVTest] client relocation ACK sent phase="
+            .. tostring(pending.roofRepairPhase or pending.generationPhase or "none"))
+        pendingRelocation = nil
+    end
 end
 
 Events.OnServerCommand.Add(Client.onServerCommand)

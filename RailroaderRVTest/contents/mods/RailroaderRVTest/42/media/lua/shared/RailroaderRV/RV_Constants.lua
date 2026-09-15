@@ -15,6 +15,7 @@ C.MOD_ID = "RailroaderRVTest"
 C.NAMESPACE = "RailroaderRV"
 C.COMMAND_GENERATE = "Generate"
 C.COMMAND_FINAL_RELOCATE = "FinalRelocate"
+C.COMMAND_FINAL_RELOCATE_ACK = "FinalRelocateAck"
 C.COMMAND_REFRESH_ROOM_OWNERSHIP = "RefreshRoomOwnership"
 C.COMMAND_RV_ENTER = "EnterRV"
 C.COMMAND_RV_EXIT = "ExitRV"
@@ -72,6 +73,16 @@ C.BOUNDARY_RECOVERY_COOLDOWN_TICKS = 8
 C.BOUNDARY_TRANSITION_TIMEOUT_TICKS = 120
 C.BOUNDARY_SNAPSHOT_TIMEOUT_TICKS = 120
 C.BOUNDARY_SNAPSHOT_REFRESH_TICKS = 60
+
+-- Process-local relocation sentinel contract.  Both temporary destinations are
+-- derived from the current RV managed-bitmap center; these values describe only
+-- the staging layer and the roof refresh center-offset vector.
+C.RELOCATION_SENTINEL_Z = -15
+C.ROOF_REPAIR_REMOTE_OFFSET_X = 18000
+C.ROOF_REPAIR_REMOTE_OFFSET_Y = 0
+C.ROOF_REPAIR_REMOTE_OFFSET_Z = 15
+C.RELOCATION_SENTINEL_INTERVAL_TICKS = 5
+C.RELOCATION_SENTINEL_RETRY_COOLDOWN_TICKS = 10
 
 -- The generated cabin has a six-cell east/west interior and a forty-cell
 -- north/south interior.  The one-cell wall ring therefore spans 7 x 41

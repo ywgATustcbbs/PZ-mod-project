@@ -16,10 +16,15 @@ bitmap 快照和 shell edge ledger 的持久化 identity 均要求正整数
 数据拒绝；不完整 identity 不得被当作当前 RV 的几何证据。
 roof-refresh 的远端传送点必须由当前 boundary bitmap/manifest 的
 `originX + floor(width/2)`、`originY + floor(height/2)`、`minZ` 派生，再动态减去当前刷新
-向量 `(18000,0,15)`；不得使用绝对远端坐标、旧 bounds 或客户端坐标。当前布局结果为
-`(2050,2050,-15)`，用于跨 chunk unload/reload；所有 RV scope 内玩家必须逐人记录并最终
+向量 `(18000,0,15)`；不得使用绝对远端坐标、旧 bounds 或客户端坐标。该派生点用于跨
+chunk unload/reload；所有 RV scope 内玩家必须逐人记录并最终
 回传，回传后复用既有 repair/geometry 路径。
 `COMMAND_REFRESH_ROOM_OWNERSHIP` 固定声明服务端向所有客户端广播 stale-room guard 的共享命令名；边界内容仍只能由服务端 manifest 与布局产生。
+
+共享常量还声明首次 generation 的 `z=-15` staging 与 roof-refresh 的中心远点向量；这些
+常量只用于当前 layout/bitmap 的服务端计算。generation/roof 临时传送的 token、稳定异步
+identity、精确原坐标和阶段只保存在服务进程内存，客户端不解释或提交坐标，也不提供中间
+传送记录的 schema、字段 alias 或 migration。
 
 schema 只支持当前版本：manifest、bitmap、shell ledger、RV mapping 和异步身份的
 缺失/不匹配必须 fail-closed，由服务端提示删除测试存档并重建。共享模块 MUST NOT

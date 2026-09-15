@@ -49,6 +49,17 @@ local function integer(value)
     return number
 end
 
+local function exactKeys(value, expected)
+    if type(value) ~= "table" then return false end
+    local allowed, count = {}, 0
+    for i = 1, #expected do allowed[expected[i]] = true end
+    for key in pairs(value) do
+        if not allowed[key] then return false end
+        count = count + 1
+    end
+    return count == #expected
+end
+
 local function dimensions(width, height)
     width = integer(width) or Bitmap.DEFAULT_WIDTH
     height = integer(height) or Bitmap.DEFAULT_HEIGHT
@@ -314,6 +325,9 @@ end
 
 function Bitmap.decode(encoded)
     if type(encoded) ~= "table" then return nil end
+    if not exactKeys(encoded, { "schemaVersion", "bitmapVersion", "originX",
+        "originY", "width", "height", "minZ", "maxZ", "layers",
+        "encoding" }) then return nil end
     if encoded.version ~= nil then return nil end
     if encoded.encoding ~= "hex" then return nil end
     local schemaVersion = integer(encoded.schemaVersion)
@@ -332,7 +346,11 @@ function Bitmap.decode(encoded)
         layers = {}, encoding = "bytes",
     }
     for z = scope.minZ, scope.maxZ - 1 do
-        local layer = Bitmap.decodeLayer(Bitmap.layer(encoded, z),
+        local encodedLayer = Bitmap.layer(encoded, z)
+        if not exactKeys(encodedLayer, { "walkBits", "buildBits", "encoding" }) then
+            return nil
+        end
+        local layer = Bitmap.decodeLayer(encodedLayer,
             scope.width, scope.height)
         if not layer then return nil end
         result.layers[z] = layer
@@ -342,7 +360,10 @@ end
 
 function Bitmap.validate(bitmap, allowEncoded)
     if type(bitmap) ~= "table" then return false end
-    if bitmap.version ~= nil then return false end
+    local expectedKeys = { "schemaVersion", "bitmapVersion", "originX",
+        "originY", "width", "height", "minZ", "maxZ", "layers",
+        "encoding" }
+    if not exactKeys(bitmap, expectedKeys) then return false end
     local schema = integer(bitmap.schemaVersion)
     local width, height = integer(bitmap.width), integer(bitmap.height)
     local originX, originY = integer(bitmap.originX), integer(bitmap.originY)
@@ -357,9 +378,20 @@ function Bitmap.validate(bitmap, allowEncoded)
         or (not allowEncoded and bitmap.encoding ~= "bytes") then
         return false
     end
+    local layerCount = 0
+    for key in pairs(bitmap.layers) do
+        if type(key) ~= "number" or not finiteNumber(key)
+            or math.floor(key) ~= key or key < minZ or key >= maxZ then
+            return false
+        end
+        layerCount = layerCount + 1
+    end
+    if layerCount ~= maxZ - minZ then return false end
     for z = minZ, maxZ - 1 do
         local layer = Bitmap.layer(bitmap, z)
-        if type(layer) ~= "table" then return false end
+        if not exactKeys(layer, { "walkBits", "buildBits", "encoding" }) then
+            return false
+        end
         local expected = byteLength(width, height)
         local walk, build = layer.walkBits, layer.buildBits
         if allowEncoded and layer.encoding == "hex" then

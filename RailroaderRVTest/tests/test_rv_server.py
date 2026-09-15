@@ -595,7 +595,7 @@ def main() -> int:
         wall_removal = section(
             railroader_server,
             r"local function queueWallRoofRepairForObject",
-            r"insidePlayerForRecord = function",
+            r"insidePlayersForRecord = function",
         )
         checks.true(
             wall_removal is not None,
@@ -615,6 +615,23 @@ def main() -> int:
                 ),
                 "wall-removal matcher does not use server identity and room-key debounce",
             )
+            checks.true(
+                "seenWallRemovalEvents" in wall_removal
+                and "wallRemovalEventKey" in wall_removal
+                and "coordinateKey" in wall_removal
+                and "fallback-wall" in railroader_server
+                and "WALL_REMOVAL_EVENT_DEDUPE_TICKS" in wall_removal
+                and "WALL_REMOVAL_FOLLOWUP_MAX" in railroader_server
+                and "wall removal event suppressed" in wall_removal,
+                "duplicate wall-removal callbacks are not suppressed per object/cycle",
+            )
+            checks.true(
+                "token = group.token" in server
+                and "roofRepairGroupFailure.token == token" in server
+                and "pending.relocationToken or pending.returnToken" in railroader_server
+                and "another RV relocation or generation is in progress" in railroader_server,
+                "failed roof cycles are not token-scoped for in-memory return and queued independent operations",
+            )
         scheduled_roof = section(
             railroader_server,
             r"scheduleRoofRepair = function",
@@ -632,6 +649,8 @@ def main() -> int:
                         "validRecord(record)",
                         "insidePlayersForRecord(map, record)",
                         "pendingWallRoofRepairs[roomKey]",
+                        "ROOF_REPAIR_QUEUED_DEADLINE_TICKS",
+                        "queuedDeadlineTick",
                         "dueTicks",
                         "nextAttempt",
                         "ROOF_REPAIR_DELAY_TICKS",
@@ -643,9 +662,10 @@ def main() -> int:
             checks.true(
                 "ROOF_REPAIR_DELAY_TICKS = 5" in railroader_server
                 and "ROOF_REPAIR_ATTEMPTS = 3" in railroader_server
-                and "pending.dueTicks[attempt] = now"
+                and "ROOF_REPAIR_QUEUED_DEADLINE_TICKS = 600" in railroader_server
+                and "queued roof repair member rebind deadline expired"
                 in railroader_server
-                and 'ROOF_REPAIR_DELAY_REASON = "wall-removal-delayed"'
+                and "pending.dueTicks[attempt] = now"
                 in railroader_server,
                 "wall-removal repair schedule does not define the bounded 5/10/15-tick contract",
             )
@@ -679,8 +699,9 @@ def main() -> int:
             runtime_clear is not None
             and "roomTransitionStates = {}" in runtime_clear
             and "pendingWallRoofRepairs[roomKey] = nil" in runtime_clear
-            and "clearRoofRepairRuntimeState()" in tick_repair,
-            "schema failure does not clear transient roof-repair state",
+            and "clearRoofRepairRuntimeState(true)" in tick_repair
+            and "followUpWallRemovalEvents = {}" in runtime_clear,
+            "schema failure rejects queued roof state while transient reads retain it",
         )
         room_transition = section(
             railroader_server,
@@ -715,10 +736,18 @@ def main() -> int:
             and "previous.inRoom == true" in transition_monitor
             and 'scheduleRoofRepair(map, observed.record, "room-transition")'
             in transition_monitor
+            and "consumeSuppressedRoomTransition(roomKey)" in transition_monitor
+            and "suppressed=" in transition_monitor
             and "observed.roomStateAvailable" in transition_monitor
             and "roomTransitionStates[roomKey] = nil" in transition_monitor
-            and "reason=presence-lost" in transition_monitor,
-            "room transition monitor does not schedule once per current identity or clear stale presence",
+                and "reason=presence-lost" in transition_monitor,
+                "room transition monitor does not schedule once per current identity or clear stale presence",
+            )
+        checks.true(
+            "markSuppressedRoomTransition" in railroader_server
+            and "consumeSuppressedRoomTransition(roomKey)" in transition_monitor
+            and "reason=wall-removal-relocation" in railroader_server,
+            "self-generated room transition is not consumed after the unique wall cycle",
         )
         delayed_attempts = section(
             railroader_server,
@@ -727,13 +756,72 @@ def main() -> int:
         )
         checks.true(
             delayed_attempts is not None
-            and "insidePlayerForRecord(map, record, pending)" in delayed_attempts
-            and "repairRoofForPlayer(player," in delayed_attempts
-            and "ROOF_REPAIR_DELAY_REASON" in delayed_attempts
-            and "attempt=" in delayed_attempts
+            and "processPendingWallRoofRepairGroup(map, pending," in delayed_attempts
             and "identity-mismatch" in delayed_attempts
-            and "no-authoritative-inside-player" in delayed_attempts,
-            "delayed roof attempts do not revalidate current identity and authoritative inside player",
+            and "no grouped authoritative players" in delayed_attempts,
+            "delayed roof attempts do not remain on the grouped authoritative path",
+        )
+        checks.true(
+            delayed_attempts is not None
+            and "isGenerationTransactionActive" in delayed_attempts
+            and "expireQueuedWallRoofRepairs(now)" in delayed_attempts
+            and "waitingForGeneration" in delayed_attempts
+            and "local queuedDeadline = integer(pending.queuedDeadlineTick)" in delayed_attempts
+            and "now >= queuedDeadline" in delayed_attempts
+            and "pending.waitingForGeneration ~= true" in delayed_attempts
+            and "malformed queued roof repair deadline" in delayed_attempts
+            and "revalidateQueuedRoofRepairAfterGeneration" in railroader_server
+            and "revalidateUntilTick" in railroader_server
+            and "pending.revalidateUntilTick = now" in delayed_attempts
+            and "pending.queuedDeadlineTick = now" in railroader_server
+            and "roof repair queue revalidated after generation room=" in railroader_server
+            and "currentRoomKey ~= roomKey" in railroader_server
+            and "followUpWallRemovalEvents[currentRoomKey]" in railroader_server
+            and "event.roomKey = currentRoomKey" in railroader_server,
+            "queued wall follow-ups are not held through generation and revalidated against the new current record",
+        )
+        follow_up_wait = section(
+            railroader_server,
+            r"local function promoteFollowUpWallRemoval",
+            r"local function revalidateQueuedRoofRepairAfterGeneration",
+        )
+        checks.true(
+            follow_up_wait is not None
+            and "event.waitingForGeneration ~= true" in follow_up_wait
+            and "event.expiresAtTick = now" in follow_up_wait
+            and "ROOF_REPAIR_QUEUED_DEADLINE_TICKS" in follow_up_wait
+            and "wall removal follow-up cancelled room=" in follow_up_wait,
+            "generation-held wall follow-ups do not pause, revalidate, and renew their bounded lease",
+        )
+        follow_up_prune = section(
+            railroader_server,
+            r"local function pruneRoofRepairDedupeState",
+            r"local function wallRemovalEventKey",
+        )
+        checks.true(
+            follow_up_prune is not None
+            and "generationBusy" in follow_up_prune
+            and "event.waitingForGeneration == true" in follow_up_prune
+            and "elseif now > expiresAt" in follow_up_prune
+            and "event.waitingForGeneration = true" in follow_up_prune,
+            "follow-up pruning does not preserve accepted events across generation ownership",
+        )
+        queued_disconnect = section(
+            railroader_server,
+            r"local function processPendingWallRoofRepairGroup",
+            r"if pending.relocationPhase == \"temporary\"",
+        )
+        checks.true(
+            queued_disconnect is not None
+            and "queuedDeadlineTick" in queued_disconnect
+            and "relocationStarted ~= true" in queued_disconnect
+            and "pending.relocationToken == nil" in queued_disconnect
+            and "pending.returnToken == nil" in queued_disconnect
+            and "cancelPendingWallRoofRepair(pending.roomKey, pending," in queued_disconnect
+            and "queued roof repair member rebind deadline expired" in queued_disconnect
+            and "for i = 1, #pending.players do" in queued_disconnect
+            and "resolveSavedPlayer(pending.players[i])" in queued_disconnect,
+            "queued roof refresh has no bounded offline rebind cancellation before relocation",
         )
         roof_relocation = section(
             server,
@@ -742,8 +830,7 @@ def main() -> int:
         )
         checks.true(
             roof_relocation is not None
-            and "Bitmap.validate(bitmap)" in roof_relocation
-            and "Bitmap.decode(manifest.boundary.bitmap)" in roof_relocation
+            and "currentRVRecordGeometryConsistent" in roof_relocation
             and "originX + math.floor(width / 2)" in roof_relocation
             and "originY + math.floor(height / 2)" in roof_relocation
             and "ROOF_REPAIR_REMOTE_OFFSET_X" in roof_relocation
@@ -758,29 +845,30 @@ def main() -> int:
         )
         roof_relocation_service = section(
             server,
-            r"function RV.Server.beginRoofRepairRelocation",
+            r"function RV.Server.beginRoofRepairRelocationGroup",
             r"function RV.Server.consumeRoofRepairRelocationArrival",
         )
         checks.true(
             roof_relocation_service is not None
             and "Boundary.beginTransition" in roof_relocation_service
-            and "COMMAND_RELOCATE, relocatePayload" in roof_relocation_service
+            and "COMMAND_RELOCATE, member.returnPayload" in roof_relocation_service
             and "roofRepairTransition = true" in roof_relocation_service
-            and 'relocatePayload.haloText = "正在刷新房间"' in roof_relocation_service
+            and 'relocatePayload.haloText = "正在刷新房间"' not in roof_relocation_service
             and "teleportTo" in roof_relocation_service
-            and "request.returnPosition" in roof_relocation_service,
-            "roof relocation service does not keep authority/identity/visual marker on the existing bridge",
+            and "request.players" in roof_relocation_service
+            and "originalPosition = exactOrReason" in roof_relocation_service,
+            "grouped roof relocation service does not keep authority/identity/visual marker on the existing bridge",
         )
         roof_server_tick = section(
             server,
-            r"local function processPendingRoofRepairRelocation",
+            r"local function processRoofRepairRelocationGroup",
             r"function RV.Server.OnTick",
         )
         checks.true(
             roof_server_tick is not None
             and "roofRepairTargetReady" in roof_server_tick
             and "RelocateAck" not in roof_server_tick
-            and "roofRepairRelocationArrival" in roof_server_tick,
+            and "roofRepairRelocationGroup" in roof_server_tick,
             "roof relocation server tick does not wait for authoritative arrival/readiness",
         )
         checks.true(
@@ -793,10 +881,272 @@ def main() -> int:
         checks.true(
             all(token in client for token in (
                 "roofRepairTransition", "roofRepairPhase",
-                'args.haloText ~= "正在刷新房间"',
+                "generationTransition", "generationPhase",
+                "GENERATION_HALO_TEXT", "ROOF_REPAIR_HALO_TEXT",
                 "setHaloNote", "RelocateAck",
             )),
             "client roof relocation handler lacks display-only halo and token ACK contract",
+        )
+        checks.true(
+            "if not roofRepairTransition and roofRepairPhase ~= nil then" in client
+            and "if not generationTransition and generationPhase ~= nil then" in client
+            and "or roofRepairTransition) then" in client,
+            "client does not fail closed on mixed relocation phase markers",
+        )
+        relocation_services = section(
+            server,
+            r"local relocationServices = \(function\(\)",
+            r"local function currentBoundsValid",
+        )
+        checks.true(
+            relocation_services is not None
+            and "Relocation state is process-local" in server
+            and "playerIdentity = playerIdentity" in server
+            and "resolvePendingPlayer = resolvePendingPlayer" in server
+            and "relocationPositionsEqual = relocationPositionsEqual" in server
+            and "ModData" not in relocation_services,
+            "relocation state still depends on a persisted intermediate ledger",
+        )
+        generation_rebind = section(
+            server,
+            r"local function generationDisconnected",
+            r"local function currentBoundsValid",
+        )
+        checks.true(
+            generation_rebind is not None
+            and "resolvePendingPlayer" in generation_rebind
+            and "relocationNeedsResend" in generation_rebind
+            and "disconnectStartedTick" in generation_rebind
+            and "resumeGenerationAfterDisconnect" in generation_rebind
+            and "resendGenerationPhase" in generation_rebind
+            and "Boundary.extendTransition" in generation_rebind
+            and "GENERATION_RELOCATION_RETRY_TICKS" in generation_rebind,
+            "generation relocation does not rebind stable identities and renew/retry the same token",
+        )
+        roof_rebind = section(
+            server,
+            r"local function resendRoofRepairMemberPhase",
+            r"function RV.Server.consumeRoofRepairRelocationArrival",
+        )
+        checks.true(
+            roof_rebind is not None
+            and "disconnectStartedTick" in roof_rebind
+            and "ROOF_RELOCATION_RETRY_TICKS" in roof_rebind
+            and "member.relocationNeedsResend" in roof_rebind
+            and "member.arrived == true or member.completed == true" in roof_rebind,
+            "roof relocation does not pause/rebind/retry one token across a live reconnect",
+        )
+        geometry_gate = section(
+            server,
+            r"function RV.Server.currentRVRecordGeometryConsistent",
+            r"-- Re-run the official add-floor/remove-floor",
+        )
+        checks.true(
+            geometry_gate is not None
+            and "currentManifestValid" in geometry_gate
+            and "record.region" in geometry_gate
+            and "record.rvPosition" in geometry_gate
+            and "bounds.shellEdges" in geometry_gate
+            and "record.boundary.shellEdges" in geometry_gate
+            and "Boundary.registerGeneration" in geometry_gate,
+            "current RV geometry gate does not compare record/manifest bitmap, walls, shell and region identity",
+        )
+        bounds_bitmap_gate = section(
+            server,
+            r"local function currentBoundsValid",
+            r"local function currentManifestValid",
+        )
+        checks.true(
+            bounds_bitmap_gate is not None
+            and all(
+                token in bounds_bitmap_gate
+                for token in (
+                    "type(bounds.bitmap) ~= \"table\"",
+                    "Bitmap.validate",
+                    "bounds.bitmap[field] ~= bitmap[field]",
+                    "boundsLayer.walkBits ~= boundaryLayer.walkBits",
+                    "boundsLayer.buildBits ~= boundaryLayer.buildBits",
+                )
+            )
+            and "manifest.bounds.bitmap" in server,
+            "current bounds gate does not validate/compare manifest.bounds.bitmap layer bits",
+        )
+        mutex_gate = section(
+            server,
+            r"function RV.Server.beginRoofRepairRelocationGroup",
+            r"function RV.Server.isRelocationIdentityClaimed",
+        )
+        checks.true(
+            mutex_gate is not None
+            and "transactionBusy" in mutex_gate
+            and "pendingGeneration ~= nil" in mutex_gate
+            and "roofRepairRelocationGroup ~= nil" in mutex_gate
+            and "roofRepairGroupFinalReturn ~= nil" in mutex_gate,
+            "roof/generation relocation service does not enforce the server-side bidirectional mutex",
+        )
+        checks.true(
+            "function RV.Server.isGenerationTransactionActive" in server
+            and "function RV.Server.isRoofRepairTransactionActive" in server
+            and "function RV.Server.validateCurrentRVRecord" in server
+            and "function RV.Server.isRoofRepairTransactionActive(_rvId)" in server
+            and "active roof transaction must never be bypassed" in server
+            and "roof repair refresh is in progress" in server
+            and "another RV relocation or generation is in progress" in server,
+            "server transaction mutex does not expose active roof/generation state and explicit rejection reasons",
+        )
+        adapter_mutex = section(
+            railroader_server,
+            r"(?:local function serverTransactionMutexStatus|serverTransactionMutexStatus = function)",
+            r"local function sentinelWarn",
+        )
+        checks.true(
+            adapter_mutex is not None
+            and "serverTransactionMutexStatus" in adapter_mutex
+            and "isGenerationTransactionActive" in adapter_mutex
+            and "isRoofRepairTransactionActive" in adapter_mutex
+            and "isRoofRepairTransactionActive, nil" in adapter_mutex
+            and "pendingWallRoofRepairs" in adapter_mutex
+            and "SAVE_REBUILD_REQUIRED" in adapter_mutex
+            and all(
+                token in railroader_server
+                for token in (
+                    "local roofBlocked, roofReason = roofRepairTransactionBlocks(record.rvId)",
+                    "local roofBlocked, roofReason = roofRepairTransactionBlocks(locoId)",
+                )
+            ),
+                "all-player Enter/Exit paths do not honor the current RV roof transaction mutex",
+        )
+        checks.true(
+            "local function currentGeometryGate" in railroader_server
+            or "currentGeometryGate = function" in railroader_server,
+            "adapter does not expose a narrow current geometry gate for Enter/Exit",
+        )
+        existing_entry = section(
+            railroader_server,
+            r"local function enterExisting",
+            r"local function enterPlayer",
+        )
+        checks.true(
+            existing_entry is not None
+            and "currentGeometryGate(record)" in existing_entry
+            and existing_entry.find("currentGeometryGate(record)")
+            < existing_entry.find("local armed = Boundary.beginTransition")
+            and existing_entry.find("currentGeometryGate(record)")
+            < existing_entry.find("armRoomOwnershipMonitor"),
+            "existing RV entry does not gate current geometry before mutation",
+        )
+        exit_entry = section(
+            railroader_server,
+            r"local function exitPlayer",
+            r"local function commandArgument",
+        )
+        checks.true(
+            exit_entry is not None
+            and "currentGeometryGate(record)" in exit_entry
+            and exit_entry.find("currentGeometryGate(record)")
+            < exit_entry.find("local armed = Boundary.beginTransition")
+            and exit_entry.find("currentGeometryGate(record)")
+            < exit_entry.find("markPlayerOutside"),
+            "RV exit does not gate current geometry before mutation",
+        )
+        boundary_gate = section(
+            boundary_server,
+            r"function Boundary.boundaryForPlayer",
+            r"function Boundary.managedContains",
+        )
+        checks.true(
+            boundary_gate is not None
+            and "validateCurrentBoundaryPlayer" in boundary_gate
+            and "loadedBoundary(boundary)" in boundary_gate
+            and "if not hookOk" in boundary_gate,
+            "boundary guard does not fail closed through the full current map/record validator",
+        )
+        checks.true(
+            "sameBoundaryGeometry" in boundary_server
+            and "state.boundaryReference ~= boundary" in boundary_server
+            and "currentRVManifestForBoundary" in railroader_server
+            and "currentRVRecordGeometryConsistent" in railroader_server,
+            "boundary cache/state can reuse an inconsistent geometry snapshot",
+        )
+        checks.true(
+            "function RV.Server.isRelocationIdentityClaimed" in server
+            and "function RV.Server.currentRVManifestForRelocation" in server
+            and "function processStatelessRelocationSentinel" in railroader_server
+            and "RELOCATION_SENTINEL_Z" in railroader_server
+            and "math.floor(position.z) ~= RELOCATION_SENTINEL_Z" in railroader_server
+            and "sentinelPosition" in railroader_server
+            and "player left the temporary cell" in railroader_server
+            and "sentinelRecordManifestConsistent" in railroader_server
+            and "queuedRoofRepairClaims" in railroader_server
+            and "for _, saved in pairs(pending.players or {})" in railroader_server
+            and "sentinelWarn" in railroader_server
+            and "relocation sentinel matched no current RV records" in railroader_server
+            and "relocation sentinel matched multiple RV records" in railroader_server,
+            "stateless -15 relocation sentinel is missing its identity/current-schema gates",
+        )
+        sentinel_mutex = section(
+            railroader_server,
+            r"local function processStatelessRelocationSentinel",
+            r"local function authoritativeRoomState",
+        )
+        checks.true(
+            sentinel_mutex is not None
+            and "isGenerationTransactionActive" in sentinel_mutex
+            and "isRoofRepairTransactionActive" in sentinel_mutex
+            and "if generationActive or roofActive then return end" in sentinel_mutex,
+            "stateless sentinel can race an active generation or roof transaction",
+        )
+        checks.true(
+            "recoverRelocationLedger" not in server
+            and "recoveryOnly" not in server
+            and "RECOVERY_REQUIRED" not in server
+            and "setGenerationRecoveryValidator" not in server
+            and "setRoofRepairRecoveryValidator" not in server
+            and "setRoofRepairRecoveryRepairer" not in server,
+            "server still contains the retired restart-recovery state machine",
+        )
+        checks.true(
+            "returnRepairDeadline" not in railroader_server
+            and "ROOF_REPAIR_RETURN_TIMEOUT_TICKS" not in railroader_server
+            and "repairRetryAtTick" in railroader_server
+            and "continuously required post-return step" in railroader_server,
+            "roof repair still exposes a fake return deadline instead of a retry cadence",
+        )
+        checks.true(
+            "GENERATION_HALO_REFRESH_TICKS" in client
+            and "pending.generationTransition and pending.generationPhase == \"temporary\""
+            in client
+            and "GENERATION_HALO_TEXT" in client
+            and "server payload contains only the phase marker" in client,
+            "generation halo does not stay visible through the complete temporary phase",
+        )
+        checks.true(
+            "if string.find(detail, C.SAVE_REBUILD_REQUIRED, 1, true) then"
+            in railroader_server
+            and "already accepted follow-up" in railroader_server
+            and "expiresAtTick" in railroader_server,
+            "transient map reads can silently discard accepted bounded follow-up wall events",
+        )
+        roof_return = section(
+            server,
+            r"local function rollbackRoofRepairRelocation",
+            r"local function roofRepairGroupMatches",
+        )
+        checks.true(
+            roof_return is not None
+            and "currentPosition.z == ROOF_REPAIR_TEMP_Z" in roof_return
+            and "roof repair player remains at temporary z=-15" in roof_return
+            and "currentPosition.z ~= ROOF_REPAIR_TEMP_Z" in roof_return
+            and "token = pending.token" in roof_return,
+            "roof return does not reject an authoritative player still at z=-15",
+        )
+        checks.true(
+            "keepRoofRepairFinalReturnAlive" in server
+            and "reason=authoritative-return-required" in server
+            and "Boundary.beginTransition" in server
+            and "roof repair final return exhausted" not in server
+            and "roof repair group final return exhausted" not in server,
+            "roof return failure can exhaust and discard its context instead of continuing in-memory return",
         )
         checks.true(
             "server.completeRoofRepairRelocation" in railroader_server
@@ -806,7 +1156,7 @@ def main() -> int:
             and "originalPosition = copyPosition(position)" in railroader_server
             and "beginRoofRepairRelocationGroup" in railroader_server
             and "remote-reload-return" in railroader_server
-            and "relocation.relocationStarted == true" in railroader_server,
+            and "pending.relocationStarted" in railroader_server,
             "Railroader adapter does not implement grouped remote reload, repair and captured-position return",
         )
         group_flow = section(
@@ -817,11 +1167,19 @@ def main() -> int:
         checks.true(
             group_flow is not None
             and "server.completeRoofRepairRelocation" in group_flow
-            and "pcall(\n                        repairRoofForPlayer" in group_flow
-            and "allRepairAttempted" in group_flow
+            and "pcall(\n                    repairRoofForPlayer" in group_flow
+            and "repairWorldApplied" in group_flow
+            and "repairCompleted" in group_flow
+            and "if not allCompleted then return end" in group_flow
+            and "completeRoofRepairRepair" in group_flow
             and group_flow.find("server.completeRoofRepairRelocation")
                 < group_flow.find("server.roofRepairSquaresLoaded"),
             "group return does not complete per-player return before isolating repair callbacks",
+        )
+        checks.true(
+            "local rollbackCallOk, returned, returnReason = pcall(" in server
+            and "wallRemovalEventKey" in railroader_server,
+            "roof final-return failures are not isolated and wall dedupe retains userdata",
         )
         checks.true(
             "Events.OnObjectAboutToBeRemoved.Add(Adapter.onObjectAboutToBeRemoved)"
@@ -881,10 +1239,23 @@ def main() -> int:
                     "RV_RECORD_SCHEMA_VERSION", "RV_RELATION_SCHEMA_VERSION",
                     "BOUNDARY_SCHEMA_VERSION", "LAYOUT_SCHEMA_VERSION",
                     "BITMAP_SCHEMA_VERSION", "BITMAP_VERSION",
+                    "RELOCATION_SENTINEL_Z",
+                    "RELOCATION_SENTINEL_INTERVAL_TICKS",
+                    "RELOCATION_SENTINEL_RETRY_COOLDOWN_TICKS",
+                    "ROOF_REPAIR_REMOTE_OFFSET_X",
+                    "ROOF_REPAIR_REMOTE_OFFSET_Y",
+                    "ROOF_REPAIR_REMOTE_OFFSET_Z",
                     "SAVE_REBUILD_REQUIRED",
                 ))
                 and "delete this test save and rebuild it" in constants,
                 "current schema constants do not expose the save-rebuild failure contract",
+            )
+            checks.true(
+                "followUpWallRemovalEvents" in railroader_server
+                and "rememberFollowUpWallRemoval" in railroader_server
+                and "promoteFollowUpWallRemoval" in railroader_server
+                and "WALL_REMOVAL_FOLLOWUP_TICKS" in railroader_server,
+                "independent wall events are not retained in a bounded stable follow-up queue",
             )
             checks.true(
                 "manifest.version ~= nil" in server
@@ -1050,7 +1421,7 @@ def main() -> int:
         helper = section(
             server,
             r"local function isEmptyCommandArgs\(args\)",
-            r"local function isFiniteNumber",
+            r"local function requiredNumber",
         )
         checks.true(helper is not None, "isEmptyCommandArgs helper is missing")
         if helper is not None:
@@ -1168,7 +1539,7 @@ def main() -> int:
         relocation_safety = section(
             server,
             r"local function squareIsSafeForRelocation",
-            r"local function selectStagingDestination",
+            r"local function selectGenerationStagingDestination",
         )
         checks.true(relocation_safety is not None, "relocation square safety helper is missing")
         if relocation_safety is not None:
@@ -1188,32 +1559,54 @@ def main() -> int:
 
         relocation_search = section(
             server,
-            r"local function selectStagingDestination",
+            r"local function selectGenerationStagingDestination",
             r"local function playerIsAtStagingDestination",
         )
-        checks.true(relocation_search is not None, "safe relocation search is missing")
+        checks.true(relocation_search is not None, "center generation staging helper is missing")
         if relocation_search is not None:
             checks.true(
-                "boundsContainXY(bounds, x, y)" in relocation_search
-                and "boundsContainXY(oldBounds, x, y)" in relocation_search,
-                "safe relocation is not outside both new and saved footprints",
+                "managedOriginX" in relocation_search
+                and "managedOriginY" in relocation_search
+                and "GENERATION_STAGING_Z" in relocation_search,
+                "generation staging is not derived from the current managed center",
             )
             checks.true(
-                "SAFE_SEARCH_MAX_RADIUS" in relocation_search
-                and 'invoke(world, "isValidSquare", x, y, anchorZ)' in relocation_search
-                and "return { x = x, y = y, z = anchorZ }" in relocation_search,
-                "staging selection does not use a bounded legal-world-coordinate search",
+                "math.floor(width / 2)" in relocation_search
+                and "math.floor(height / 2)" in relocation_search
+                and 'purpose = "generation-center"' in relocation_search,
+                "generation staging does not use the center z=-15 destination",
             )
-            checks.true(
-                "preferredTop" in relocation_search
-                and re.search(
-                    r"preferredTop\s*=\s*\{\s*\{\s*x\s*=\s*anchorX,\s*"
-                    r"y\s*=\s*bounds\.clearMinY\s*-\s*1",
-                    relocation_search,
-                ) is not None
-                and "online chunk-grid width" in relocation_search,
-                "staging selection does not prioritize the centered, cell-aligned top edge",
-            )
+
+        generation_staging_server = section(
+            server,
+            r"local function selectGenerationStagingDestination",
+            r"local function playerIsAtStagingDestination",
+        )
+        checks.true(
+            generation_staging_server is not None
+            and all(
+                token in generation_staging_server
+                for token in (
+                    "layout.bitmap",
+                    "managedOriginX",
+                    "managedOriginY",
+                    "math.floor(width / 2)",
+                    "math.floor(height / 2)",
+                    "GENERATION_STAGING_Z",
+                    'purpose = "generation-center"',
+                    'isValidSquare", destination.x',
+                )
+            ),
+            "first generation staging is not the current managed-scope center at z=-15",
+        )
+        checks.true(
+            "GENERATION_STAGING_Z = Constants.RELOCATION_SENTINEL_Z" in server
+            and "RELOCATION_SENTINEL_Z = -15" in constants
+            and 'generationTransition = true' in server
+            and 'generationPhase = "temporary"' in server
+            and 'GENERATION_HALO_TEXT = "正在生成房车"' in client,
+            "generation staging phase marker or exact local Chinese halo is missing",
+        )
 
         queue = section(
             server,
@@ -1246,7 +1639,7 @@ def main() -> int:
             validation_pos = queue.find(
                 "validateTargetCoordinates(plannedBounds, destination)"
             )
-            send_pos = queue.find('callGlobal("sendServerCommand", player, COMMAND_MODULE')
+            send_pos = queue.find('callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE')
             teleport_pos = queue.find('callSucceeded(player, "teleportTo"')
             checks.true(
                 validation_pos >= 0
@@ -1255,7 +1648,7 @@ def main() -> int:
                 "target legality validation is not ordered before relocation and server teleport",
             )
             checks.true(
-                'callGlobal("sendServerCommand", player, COMMAND_MODULE' in queue
+                'callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE' in queue
                 and "COMMAND_RELOCATE" in queue
                 and 'callSucceeded(player, "teleportTo"' in queue,
                 "queue does not relocate both targeted client and authoritative server player",
@@ -1276,11 +1669,22 @@ def main() -> int:
                 "server initial teleport must use staging, never the anchor destination",
             )
             checks.true(
-                "selectStagingDestination(plannedBounds" in queue
+                "selectGenerationStagingDestination(layout,\n            plannedBounds)" in queue
                 and "x = stagingDestination.x" in queue
                 and "y = stagingDestination.y" in queue
-                and "z = stagingDestination.z" in queue,
+                and "z = stagingDestination.z" in queue
+                and "generationTransition = true" in queue
+                and "generationPhase = \"temporary\"" in queue,
                 "queue does not use the server-selected staging destination",
+            )
+            checks.true(
+                "pendingGeneration = {" in queue
+                and "identity = identityOrReason" in queue
+                and "originalPosition = {" in queue
+                and "queuedAtTick = serverTick" in queue
+                and "relocationServices.relocationLedger" not in queue
+                and "ModData" not in queue,
+                "generation staging does not retain its exact identity/position in process memory",
             )
             checks.true(
                 "preflightLoaded" not in queue
@@ -1487,6 +1891,16 @@ def main() -> int:
                 and "removeGeneration(cell, bounds, generation, manifest.rvId" in generation,
                 "final relocation failure does not enter the generation rollback path",
             )
+            phase_pos = server.find(
+                'setGenerationPhase(manifest, generation, "FINAL_RELOCATE")'
+            )
+            checks.true(
+                phase_pos >= 0
+                and "finalRelocationAcked" in server
+                and "pendingGeneration = completedPending" not in server
+                and "publishFinalRelocationLedger" not in server,
+                "generation FINAL_RELOCATE still depends on a persisted relocation ledger",
+            )
 
         final_relocation = section(
             server,
@@ -1500,7 +1914,9 @@ def main() -> int:
                 and 'x = x' in final_relocation
                 and 'y = y' in final_relocation
                 and 'z = z' in final_relocation
-                and 'callSucceeded(player, "teleportTo", x, y, z)' in final_relocation,
+                and 'callSucceeded(player, "teleportTo", x, y, z)' in final_relocation
+                and "finalRelocationSent = true" in final_relocation
+                and "finalRelocationAcked = false" in final_relocation,
                 "final relocation does not send and synchronize server-selected coordinates",
             )
             checks.true(
@@ -1608,7 +2024,7 @@ def main() -> int:
                 and generation_pos > ack_gate_pos,
                 "relocation wait does not recheck permission/liveness before the ack gate and generation",
             )
-            timeout_pos = tick.find("if elapsed > RELOCATION_TIMEOUT_TICKS")
+            timeout_pos = tick.find("elapsed > RELOCATION_TIMEOUT_TICKS")
             timeout_cancel_pos = tick.find("cancelPending(", timeout_pos)
             checks.true(
                 timeout_pos >= 0
@@ -1750,7 +2166,7 @@ def main() -> int:
         checks.true(room_guard_broadcast is not None, "client room-guard broadcast is missing")
         if room_guard_broadcast is not None:
             checks.true(
-                'callGlobal("sendServerCommand", COMMAND_MODULE,'
+                'callGlobalSucceeded("sendServerCommand", COMMAND_MODULE,'
                 in room_guard_broadcast
                 and 'callGlobal("sendServerCommand", player,'
                 not in room_guard_broadcast,
@@ -1775,7 +2191,7 @@ def main() -> int:
         )
         if targeted_room_guard is not None:
             checks.true(
-                'callGlobal("sendServerCommand", player, COMMAND_MODULE,'
+                'callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,'
                 in targeted_room_guard
                 and "hasOld = false" in targeted_room_guard
                 and 'copyRoomRefreshBounds(payload, "new", newBounds)'
@@ -2011,7 +2427,7 @@ def main() -> int:
         if final_client_relocation is not None:
             checks.true(
                 "playerObj:teleportTo(x, y, z)" in final_client_relocation
-                and "pendingRelocation = nil" in final_client_relocation,
+                and "sendFinalRelocationAck" in final_client_relocation,
                 "client final relocation does not apply the server-selected center",
             )
             cleanup_pos = final_client_relocation.find(
@@ -2026,10 +2442,10 @@ def main() -> int:
                 "client final relocation does not synchronously clear stale rooms before teleport",
             )
             checks.true(
-                "COMMAND_RELOCATE_ACK" not in final_client_relocation
-                and "sendClientCommand" not in final_client_relocation
+                "COMMAND_FINAL_RELOCATE_ACK" in final_client_relocation
+                and "sendClientCommand" in final_client_relocation
                 and "pendingRelocation = {" not in final_client_relocation,
-                "client final relocation incorrectly enters the initial ack flow",
+                "client final relocation does not use its separate strict ACK flow",
             )
         server_command_handler = section(
             client,
@@ -2732,6 +3148,16 @@ def main() -> int:
             and "逐人回传" in readme,
             "README does not document the grouped remote chunk-cycle roof refresh",
         )
+        checks.true(
+            "managedOriginX+floor(width/2)" in readme
+            and "managedOriginY+floor(height/2)" in readme
+            and "正在生成房车" in readme
+            and "进程内存" in readme
+            and "-15" in readme
+            and "无状态" in readme
+            and "不恢复原坐标" in readme,
+            "README does not document generation-center staging and the stateless -15 sentinel",
+        )
 
     checks.true(runner_path.is_file(), f"one-click test runner is missing: {runner_path}")
     if runner_path.is_file():
@@ -2799,7 +3225,7 @@ def main() -> int:
     print(
         "RV static tests passed: payload contract, UTF-8 launcher contract, "
         "relocation handshake, stale-room guard, entity/fluid component contract, rollback contract, "
-        "Railroader SP/MP adapter, hull-distance/seat transition contracts, persistence documentation, "
+        "Railroader SP/MP adapter, hull-distance/seat transition contracts, transaction/sentinel documentation, "
         "Lua syntax."
     )
     return 0

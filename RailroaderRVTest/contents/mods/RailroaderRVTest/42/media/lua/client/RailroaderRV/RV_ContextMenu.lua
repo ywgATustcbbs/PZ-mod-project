@@ -3,7 +3,7 @@
 -- The menu is intentionally ordinary (world right-click).  The client sends
 -- only the command name; the server validates the player's current state from
 -- its authoritative player object and selects both the fixed generation anchor
--- and a safe staging coordinate outside the old/new structure footprints.
+-- and the current-schema generation-center staging coordinate.
 
 require "RailroaderRV/RV_Constants"
 local boundaryClientLoaded, BoundaryClient = pcall(require,
@@ -22,13 +22,17 @@ local MENU_KEY = "ContextMenu_RailroaderRVTest_Generate"
 local COMMAND_RELOCATE = "Relocate"
 local COMMAND_RELOCATE_ACK = "RelocateAck"
 local COMMAND_FINAL_RELOCATE = C.COMMAND_FINAL_RELOCATE or "FinalRelocate"
+local COMMAND_FINAL_RELOCATE_ACK = C.COMMAND_FINAL_RELOCATE_ACK
+    or "FinalRelocateAck"
 local ROOF_REPAIR_HALO_TEXT = "Refreshing room"
+local GENERATION_HALO_TEXT = "正在生成房车"
 local COMMAND_REFRESH_ROOM_OWNERSHIP = C.COMMAND_REFRESH_ROOM_OWNERSHIP
     or "RefreshRoomOwnership"
 local pendingRelocation = nil
 local pendingFinalRelocation = nil
 local roomOwnershipGuards = {}
 local RELOCATION_TIMEOUT_TICKS = 600
+local GENERATION_HALO_REFRESH_TICKS = 10
 -- IsoRegions has no public Lua completion event.  The initial generation
 -- guard is also the only server-authoritative identity/bounds packet a client
 -- receives for this footprint, so it must remain armed after the generation
@@ -354,6 +358,7 @@ function Client.onFillWorldObjectContextMenu(playerNum, context, worldObjects, t
 end
 
 local function tryApplyFinalRelocation(args)
+    if type(args) ~= "table" then return false end
     local token = args.token
     local rvId = args.rvId
     local generation = finiteInteger(args.generation)
@@ -366,7 +371,7 @@ local function tryApplyFinalRelocation(args)
         or tostring(rvId) == "" or generation == nil or generation < 1
         or bitmapVersion ~= C.BITMAP_VERSION or onlineId == nil
         or x == nil or y == nil or z == nil or z < -32 or z > 31 then
-        return true
+        return false
     end
     local guard = roomOwnershipGuards[roomOwnershipGuardKey(
         rvId, generation, bitmapVersion)]
@@ -387,35 +392,67 @@ local function tryApplyFinalRelocation(args)
     end
     local playerObj = localPlayerByOnlineId(onlineId)
     if not playerObj or playerObj:isDead() then
-        return true
+        return false
     end
-    local teleported = pcall(function()
+    local teleported, teleportResult = pcall(function()
         playerObj:teleportTo(x, y, z)
     end)
-    if teleported and type(playerObj.setCurrentSquareFromPosition) == "function" then
+    if not teleported or teleportResult == false then return false end
+    if type(playerObj.setCurrentSquareFromPosition) == "function" then
         -- teleportTo updates coordinates only. Use the official three-argument
         -- IsoMovingObject overload to refresh the client cache.  Do not write
         -- Java IsoPlayer fields from Lua; the server's temporary west-neighbour
         -- floor transaction remains the authoritative roof repair.
         pcall(function() playerObj:setCurrentSquareFromPosition(x, y, z) end)
     end
-    return teleported
+    local xOk, currentX = pcall(function() return playerObj:getX() end)
+    local yOk, currentY = pcall(function() return playerObj:getY() end)
+    local zOk, currentZ = pcall(function() return playerObj:getZ() end)
+    if not xOk or not yOk or not zOk
+        or finiteNumber(currentX) ~= x
+        or finiteNumber(currentY) ~= y
+        or finiteNumber(currentZ) ~= z then
+        return false
+    end
+    -- Re-run the guard scan after the actual move.  This is part of the ACK
+    -- proof, so a client readiness/room-cache failure naturally reaches the
+    -- server timeout rollback rather than claiming READY.
+    local postScanOk, postScan = pcall(refreshInvalidRoomOwnership, guard)
+    if not postScanOk or postScan ~= true
+        or not finalTargetRoomIsValid(x, y, z) then
+        return false
+    end
+    return true
+end
+
+local function sendFinalRelocationAck(playerObj, token)
+    if not playerObj or type(token) ~= "string" or token == "" then
+        return false
+    end
+    local ok = pcall(sendClientCommand, playerObj, C.MOD_ID,
+        COMMAND_FINAL_RELOCATE_ACK, { token = token })
+    return ok
 end
 
 local function applyFinalRelocation(args)
-    -- This is a distinct server-selected entry command.  It intentionally has
-    -- no acknowledgement and never populates the initial relocation pending
-    -- state, so the initial token-only ack cannot be mixed into this move.
+    -- This is a distinct server-selected entry command.  Its completion uses a
+    -- separate strict token-only ACK, so the initial relocation ACK cannot be
+    -- mixed into this move.
     pendingRelocation = nil
     pendingFinalRelocation = {
         args = args,
         ticks = 0,
+        applied = false,
     }
     -- Try in the command callback itself, before the player can enter the
     -- engine update/audio path. If the guard packet has not been installed yet,
     -- OnTick retries while the player remains at staging.
     if tryApplyFinalRelocation(args) then
-        pendingFinalRelocation = nil
+        pendingFinalRelocation.applied = true
+        if sendFinalRelocationAck(localPlayerByOnlineId(
+                finiteInteger(args.onlineId)), args.token) then
+            pendingFinalRelocation = nil
+        end
     end
 end
 
@@ -446,14 +483,20 @@ function Client.onServerCommand(module, command, args)
     if command ~= COMMAND_RELOCATE then return end
     local token = args.token
     local onlineId = finiteInteger(args.onlineId)
-    local x = finiteInteger(args.x)
-    local y = finiteInteger(args.y)
-    local z = finiteInteger(args.z)
+    -- Staging targets are integer contract points, but a grouped return must
+    -- preserve the server-captured fractional x/y/z exactly.  Validate all
+    -- coordinates as finite numbers and use the phase to choose the engine
+    -- call below; never round a return coordinate on the client.
+    local x = finiteNumber(args.x)
+    local y = finiteNumber(args.y)
+    local z = finiteNumber(args.z)
     local rvId = args.rvId
     local generation = finiteInteger(args.generation)
     local bitmapVersion = finiteInteger(args.bitmapVersion)
     local roofRepairTransition = args.roofRepairTransition == true
     local roofRepairPhase = args.roofRepairPhase
+    local generationTransition = args.generationTransition == true
+    local generationPhase = args.generationPhase
     if type(token) ~= "string" or token == "" or onlineId == nil
         or rvId == nil or tostring(rvId) == "" or generation == nil
         or generation < 1 or bitmapVersion ~= C.BITMAP_VERSION
@@ -464,8 +507,15 @@ function Client.onServerCommand(module, command, args)
         and roofRepairPhase ~= "temporary" and roofRepairPhase ~= "return" then
         return
     end
-    if roofRepairTransition and roofRepairPhase == "temporary"
-        and args.haloText ~= "正在刷新房间" then
+    if not roofRepairTransition and roofRepairPhase ~= nil then
+        return
+    end
+    if generationTransition
+        and (generationPhase ~= "temporary" and generationPhase ~= "return"
+            or roofRepairTransition) then
+        return
+    end
+    if not generationTransition and generationPhase ~= nil then
         return
     end
     local playerObj = localPlayerByOnlineId(onlineId)
@@ -474,12 +524,17 @@ function Client.onServerCommand(module, command, args)
     end
     if roofRepairTransition and roofRepairPhase == "temporary"
         and type(playerObj.setHaloNote) == "function" then
-        -- The server haloText is a strict current-schema marker only.  Do not
-        -- pass a network-serialized non-ASCII value into the game renderer;
-        -- the local ASCII label avoids control-string/encoding leakage while
-        -- retaining server authority over the relocation itself.
         pcall(function()
             playerObj:setHaloNote(ROOF_REPAIR_HALO_TEXT, 255, 255, 255, 1500)
+        end)
+    end
+    if generationTransition and generationPhase == "temporary"
+        and type(playerObj.setHaloNote) == "function" then
+        -- The Chinese text is a client-local constant.  The server sends only
+        -- the strict phase marker, so network encoding cannot become rendered
+        -- UI text and cannot be spoofed by an arbitrary payload.
+        pcall(function()
+            playerObj:setHaloNote(GENERATION_HALO_TEXT, 255, 255, 255, 1500)
         end)
     end
     -- Railroader generation removes the official seat before this staging
@@ -504,8 +559,12 @@ function Client.onServerCommand(module, command, args)
     -- coordinate.  Do not inspect the target square here: teleportTo is the
     -- streaming trigger for a remote destination, and the server waits for
     -- its complete footprint before mutating the world.
+    local exactReturn = (roofRepairTransition and roofRepairPhase == "return")
+        or (generationTransition and generationPhase == "return")
+    local teleportX = exactReturn and x or x + 0.5
+    local teleportY = exactReturn and y or y + 0.5
     local relocated = pcall(function()
-        playerObj:teleportTo(x + 0.5, y + 0.5, z)
+        playerObj:teleportTo(teleportX, teleportY, z)
     end)
     if not relocated then
         return
@@ -525,6 +584,8 @@ function Client.onServerCommand(module, command, args)
         z = z,
         roofRepairTransition = roofRepairTransition,
         roofRepairPhase = roofRepairPhase,
+        generationTransition = generationTransition,
+        generationPhase = generationPhase,
         ticks = 0,
     }
 end
@@ -534,9 +595,22 @@ function Client.onTick()
     local finalPending = pendingFinalRelocation
     if finalPending ~= nil then
         finalPending.ticks = finalPending.ticks + 1
-        if finalPending.ticks > RELOCATION_TIMEOUT_TICKS
-            or tryApplyFinalRelocation(finalPending.args) then
+        if finalPending.ticks > RELOCATION_TIMEOUT_TICKS then
+            -- No failure payload is sent.  The server's current-schema token
+            -- deadline owns rollback, so a stale client cannot invent a
+            -- failure coordinate or mutate the server-owned transaction.
             pendingFinalRelocation = nil
+        else
+            if not finalPending.applied then
+                finalPending.applied = tryApplyFinalRelocation(finalPending.args)
+            end
+            if finalPending.applied then
+                local args = finalPending.args
+                local playerObj = localPlayerByOnlineId(finiteInteger(args.onlineId))
+                if sendFinalRelocationAck(playerObj, args.token) then
+                    pendingFinalRelocation = nil
+                end
+            end
         end
     end
     local pending = pendingRelocation
@@ -553,12 +627,25 @@ function Client.onTick()
         pendingRelocation = nil
         return
     end
+    if pending.generationTransition and pending.generationPhase == "temporary"
+        and type(playerObj.setHaloNote) == "function"
+        and pending.ticks % GENERATION_HALO_REFRESH_TICKS == 0 then
+        -- Keep the local-only generation status visible for the whole
+        -- temporary phase, including a reconnect/rebound command.  The
+        -- server payload contains only the phase marker, never UI text.
+        pcall(function()
+            playerObj:setHaloNote(GENERATION_HALO_TEXT, 255, 255, 255, 1500)
+        end)
+    end
     local current = playerObj:getCurrentSquare()
     local currentMatches = current
-        and current:getX() == pending.x and current:getY() == pending.y
-        and current:getZ() == pending.z
-    if not currentMatches and pending.roofRepairTransition
-        and pending.roofRepairPhase == "temporary"
+        and current:getX() == math.floor(pending.x)
+        and current:getY() == math.floor(pending.y)
+        and current:getZ() == math.floor(pending.z)
+    if not currentMatches
+        and (pending.roofRepairTransition or pending.generationTransition)
+        and (pending.roofRepairPhase == "temporary"
+            or pending.generationPhase == "temporary")
         and pending.ticks >= 3 then
         -- The deliberate remote target can be a valid server coordinate with
         -- no client GridSquare (for example the unloaded/empty -15 layer).
@@ -573,9 +660,9 @@ function Client.onTick()
         local numericZ = finiteNumber(currentZ)
         currentMatches = xOk and yOk and zOk
             and numericX ~= nil and numericY ~= nil and numericZ ~= nil
-            and math.floor(numericX) == pending.x
-            and math.floor(numericY) == pending.y
-            and math.floor(numericZ) == pending.z
+            and math.floor(numericX) == math.floor(pending.x)
+            and math.floor(numericY) == math.floor(pending.y)
+            and math.floor(numericZ) == math.floor(pending.z)
     end
     if not currentMatches then
         return

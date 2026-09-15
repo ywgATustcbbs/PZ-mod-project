@@ -20,24 +20,43 @@ tag 与 shell ledger identity；`OnDestroyIsoThumpable` 只作为直接 thumpabl
 `getRoom()/getRoomDef()` 作支持状态，只在当前 RV scope 内检测到 inside→outside transition
 时安排修复。
 
-拆墙修复是一个边界 lease 保护下的有限多玩家状态机，不是永久无脑刷新：`queued` →
+拆墙修复是一个边界 lease 保护下的多玩家状态机：`queued` →
 `temporary` → `repairing` → `returning` → `complete`。服务端枚举当前 RV scope 的全部
 在线玩家，逐人捕获服务端原始 `x/y/z`、identity 和当前 schema 关系；复用
 `Relocate`/严格 token-only `RelocateAck`，将所有成员送到当前 bitmap 中心减去刷新向量
-`(18000,0,15)` 的远端点（当前布局为 `(2050,2050,-15)`），跨 tick 确认全部成员到达后才
-允许继续。临时阶段向客户端发送严格 marker，客户端只显示本地 ASCII 提示并执行服务端坐标
+`(18000,0,15)` 的远端点，跨 tick 确认全部成员到达后才
+允许继续。`queued` 阶段在尚未建立 Boundary lease 前最多等待 600 ticks 以重绑离线成员，
+超时安全取消；进入 `temporary`/`repairing`/`returning` 后不使用该期限。临时阶段向客户端发送严格 marker，客户端只显示本地 ASCII 提示并执行服务端坐标
 和回执，不提交坐标/世界状态；远端层可能没有 `GridSquare`，所以服务端以重新读取的权威
 玩家坐标作为到达条件，并保留有界跨 tick 等待；远端等待用于强制 RV 区块卸载/重载。
+generation 占用共享 managed scope 时，已接受的 queued/follow-up 以
+`waitingForGeneration` 暂停 `queuedDeadlineTick`/`expiresAtTick`；generation 结束后先复核
+当前 `rvId:generation:bitmapVersion`，仅在完整 current record 通过时重建 600-tick 等待窗口，
+失败则明确取消并提示存档重建。
 
-所有成员先完成服务端权威回传，再由适配层按既有进入 RV 的 `repairRoofVisuals`/geometry 路径逐人执行一次修复，
-修复/刷新异常在逐人隔离的 `pcall` 内转为明确失败，不得阻断其余成员的回传；
+所有成员先完成服务端权威回传，再由适配层选择一个有效权威上下文，按既有进入 RV 的 `repairRoofVisuals`/geometry 路径对房间执行一次修复，
+修复/刷新异常在受控 `pcall` 内转为明确失败，不得阻断其余成员的回传；
 再在完整 identity、权威 relation 和玩家状态仍匹配时回到每人事件前服务端捕获的合法 RV
 方格并释放 correction lease。任何中间异常、断线、死亡、对象失效、schema/identity 变化、
-加载超时或 ACK/阶段不匹配都会尝试最终逐人回传；回传失败会在 current schema/
-identity/active-square 门内进行有限服务端重试并明确提示，不改持久化数据。服务端只记录
-add/remove 已应用，不能据此宣称客户端视觉成功。
+加载超时或 ACK/阶段不匹配都会尝试最终逐人回传；只要任何成员仍在 `z=-15`，当前进程内存中的
+回传上下文、lease 和稳定 identity 就必须保留并持续重试，不能由 repair 成功掩盖回传失败。
+玩家掉线只暂停内存事务，稳定 online ID+用户名重新上线后继续精确回传；服务器进程结束时
+事务自然丢失，不读取或写入中间传送记录，也不跨重启恢复原坐标、repair、phase 或 `READY`。
+generation 临时/最终/回滚阶段会在同一 token 上续租，并在稳定 identity 重绑后按受控间隔重发
+当前阶段命令；不因 IsoPlayer userdata 替换而重复创建事务或让 boundary lease 过期。
+服务端只记录 add/remove 已应用，不能据此宣称客户端视觉成功。
+失败状态绑定当前唯一 relocation token；原事务仍可消费自己的失败记录，后续尚未启动的独立墙体操作不被旧 token 误取消，并在前一事务释放后再尝试。
+回传完成前适配层有显式 `allCompleted` 门，任何成员未确认都不会调用 repair；回传完成后
+只在当前进程内存中将 `repairCompleted` 置位，且只执行一次世界修复。墙事件去重键带有
+坐标与 object index；活动 token 期间出现的不同稳定键进入有界 follow-up 队列，前一事务释放后
+按当前 mapping 重新校验并启动，重复键不会制造第二次传送；follow-up 有上限和过期时间，无法取得稳定键时 fail-closed。
 
-职责：严格处理 `OnClientCommand`；普通 `Generate` 只接受有效玩家和空 args，Railroader `EnterRV` 只接受服务端生成的机车 id 提示，`ExitRV` 不接受可信坐标；对其他模组的共享命令直接忽略，避免把外部流量记录成 RV 拒绝。适配器通过 `installTransactionHooks()` 与 `RV_Server` 连接，以适应 B42 按文件名先加载适配器、后加载事务入口的顺序。服务端固定生成 anchor 为共享目标 `(20050,2050,0)`，并以 `isValidSquare` 预检后优先选择清场矩形正上方居中的 `(anchorX, clearMinY-1)` staging 格，位于当前 generation bounds 与新 bounds 外，再以有界搜索兜底；不得在初次传送前读取或要求远端方格已加载。B42 服务端按 64×64 cell 和 online chunk-grid width 的一半加载相关区域；客户端与服务端到达并确认 staging 安全后，在硬超时内等待完整半开 `100×100` base footprint 已加载，再清理已加载的有效 `z` 层。缺失方格在轮询中返回可重试状态而不抛 Kahlua 异常；若加载范围始终不足则硬取消且不发生部分清场。清理通过快照和服务端网络移除覆盖僵尸、石块、地表装饰、树木、杂草、灌木、地板等对象；清场成功后才进入完整房间/对象生成。若清场失败，必须短路 `buildGeneration`；若任一生成阶段失败，必须沿既有 generation 回滚路径移除本代对象。生成前仍先预检 `100×100` 底层/墙体已加载、屋顶 6×40 的世界坐标及 `z+1` 合法。跳过 `PLAYER_METAL_FLOOR`/整片金属地板阶段，仅生成房屋内部 6×40 的 `floors_interior_carpet_01_5` 地板；直墙为 `walls_interior_house_03_20`/WallN 配对 `..._21`，NW/SE 单角条为 `..._22`/`..._23`。`ROOF_FLOOR` 阶段按官方玩家建造路径，在已预检的目标范围内用 `IsoGridSquare.new` + `ConnectNewSquare(..., false)` 创建缺失的上层方格（保留运行时 API 的必要探测），校验连接结果后再 `addFloor`；已有方格直接复用。
+BoundaryServer 仅通过适配器的完整 current map/record schema hook 取得边界，并在 cache 复用前
+比较当前 bitmap、managed scope、shell edge 与 bounds/wall geometry；缺失 hook、schema 或几何
+不一致时 fail-closed。roof/sentinel 共用 RV_Server 的 record↔manifest geometry gate，哨兵失败
+原因始终是稳定字符串，不会把表值写入诊断。
+
+职责：严格处理 `OnClientCommand`；普通 `Generate` 只接受有效玩家和空 args，Railroader `EnterRV` 只接受服务端生成的机车 id 提示，`ExitRV` 不接受可信坐标；对其他模组的共享命令直接忽略，避免把外部流量记录成 RV 拒绝。适配器通过 `installTransactionHooks()` 与 `RV_Server` 连接，以适应 B42 按文件名先加载适配器、后加载事务入口的顺序。服务端固定生成 anchor 为共享目标 `(20050,2050,0)`；首次 generation staging 只允许 current-schema layout/bitmap managed scope 中心的 `(managedOriginX+floor(width/2), managedOriginY+floor(height/2), -15)`，roof-refresh 远点才是当前 bitmap 中心减去 `(18000,0,15)`，不得在初次传送前读取或要求远端方格已加载。B42 服务端按 64×64 cell 和 online chunk-grid width 的一半加载相关区域；客户端与服务端到达并确认 staging 安全后，在硬超时内等待完整半开 `100×100` base footprint 已加载，再清理已加载的有效 `z` 层。缺失方格在轮询中返回可重试状态而不抛 Kahlua 异常；若加载范围始终不足则硬取消且不发生部分清场。清理通过快照和服务端网络移除覆盖僵尸、石块、地表装饰、树木、杂草、灌木、地板等对象；清场成功后才进入完整房间/对象生成。若清场失败，必须短路 `buildGeneration`；若任一生成阶段失败，必须沿既有 generation 回滚路径移除本代对象。生成前仍先预检 `100×100` 底层/墙体已加载、屋顶 6×40 的世界坐标及 `z+1` 合法。跳过 `PLAYER_METAL_FLOOR`/整片金属地板阶段，仅生成房屋内部 6×40 的 `floors_interior_carpet_01_5` 地板；直墙为 `walls_interior_house_03_20`/WallN 配对 `..._21`，NW/SE 单角条为 `..._22`/`..._23`。`ROOF_FLOOR` 阶段按官方玩家建造路径，在已预检的目标范围内用 `IsoGridSquare.new` + `ConnectNewSquare(..., false)` 创建缺失的上层方格（保留运行时 API 的必要探测），校验连接结果后再 `addFloor`；已有方格直接复用。
 
 地板事务会在第一次替换每个对象时记录原 sprite；室内精确 carpet→roof floor 的连续阶段保留同一份初始快照。已有地板使用 `transmitUpdatedSpriteToClients`，新建地板使用添加包。失败回滚对已有地板恢复原 sprite 并清除本模组标签，对本轮新建地板只调用 `transmitRemoveItemFromSquare`；该 B42 API 负责网络、移除事件、本地脱离和重算，随后重新扫描边界，只有服务端权威对象上不再存在该 generation 标签时才报告 `rollback=COMPLETE`。
 
@@ -60,7 +79,16 @@ add/remove 已应用，不能据此宣称客户端视觉成功。
 地板只发送一次完整对象包。回滚阶段对已存在客户端对象的标签清理和地板恢复同步仍
 保留显式增量发送。
 
-当前清场事务先由服务端通过定向 `Relocate` 命令驱动客户端 `teleportTo` 到 staging，并同时以相同的 staging 坐标更新服务端玩家对象；anchor 与 staging 坐标均只来自服务端计划，客户端只用无坐标 token 回执。客户端不得在传送前调用 `getGridSquare` 拒绝远端目标。只有回执完成、至少跨过请求后与回执后的保护 tick、服务端玩家身份、权限、staging 位置/安全性及传送后的完整 `100×100` 方格预检再次通过后，才允许清场；加载等待期间不删除任何对象。`buildGeneration` 完成后，服务端才发送独立 `FinalRelocate` 命令，把玩家送到 `(20050.5,2050.5,0)`，客户端在该命令处理器内同步刷新 stale-room guard 后再本地 teleport，并在最终命令失败时走同一回滚路径；最终命令不产生初次 ack。pending 请求按 online ID+用户名绑定，重复请求拒绝；断线、死亡、身份变化、权限丢失、超时或不可恢复的位置/加载校验失败时在任何世界修改前取消。
+当前清场事务先由服务端通过定向 `Relocate` 命令驱动客户端 `teleportTo` 到 staging，并同时以相同的 staging 坐标更新服务端玩家对象；anchor 与 staging 坐标均只来自服务端计划，客户端只用无坐标 token 回执。任何 roof-refresh/generation-staging 临时传送前，服务端先验证当前 schema 的唯一 token/phase、事务类型、RV identity、每位成员稳定异步 identity、原始坐标和服务端目标，再将这些值保存在内存事务中；写入或校验失败即禁止传送。客户端不得在传送前调用 `getGridSquare` 拒绝远端目标。只有回执完成、至少跨过请求后与回执后的保护 tick、服务端玩家身份、权限、staging 位置/安全性及传送后的完整 `100×100` 方格预检再次通过后，才允许清场；加载等待期间不删除任何对象。`buildGeneration` 完成后，服务端才发送独立 `FinalRelocate` 命令，把玩家送到 `(20050.5,2050.5,0)`，客户端在该命令处理器内同步刷新 stale-room guard 后再本地 teleport，只有 guard、room-scan 与实际坐标全部成功才发送独立严格 token-only `FinalRelocateAck`；最终命令失败或超时走同一回滚路径。pending 请求按 online ID+用户名绑定，重复请求拒绝；掉线只在同一服务进程内等待同 identity 重连，服务器进程结束则丢弃内存事务，不跨重启恢复。
+
+服务端还在普通事务处理之后按固定 tick 扫描无状态 `z=-15` 哨兵。候选玩家必须不在当前
+内存 generation/roof relocation 的稳定 identity claim 中，且 `floor(x/y)` 精确命中当前
+bitmap 派生的单个 generation 中心格或中心减 `(18000,0,15)` 的 roof 远点格。当前
+manifest、mapping、boundary、bitmap 与 map/record 双向 `inside=true` identity 关系必须
+完整，且候选 RV 恰好一个；否则 fail-closed 并提示 `SAVE_REBUILD_REQUIRED`。返回目标
+复用正常 Enter 的 `record.rvPosition` 和权威 record 契约，并验证 active bitmap/合法坐标。
+哨兵不恢复原坐标、不执行 repair、不改变 manifest phase/`READY`；busy/短 cooldown 避免
+重复发送，玩家仍在 `-15` 时继续受控重试。
 
 Railroader 生成请求的首次 `Relocate` payload 额外由服务端写入
 `railroaderTransition=true`、token/loco/seat 过渡提示；普通技术 `Generate` 不携带该字段。

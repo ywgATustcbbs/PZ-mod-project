@@ -17,8 +17,11 @@ RV_RailroaderContextMenu.lua 负责识别官方 rr_loco、提交进入/退出意
 定向的安全撤离命令。
 
 职责：客户端表现与请求；生成/清理请求始终为空 payload，生成 anchor 与传送坐标由服务端
-固定选择。当前远距清场中，客户端只接受服务端给匹配本地 online ID 的、位于旧/新
-footprint 外的 `Relocate` staging 目标，完成本地 `teleportTo` 后回传无坐标 token；不得在
+固定选择。首次 generation staging 只接受服务端按 current-schema managed scope 中心计算的
+`z=-15` 目标，并在严格 `generationTransition/generationPhase` 标记下显示本地常量“正在生成房车”；
+临时 pending 期间按固定 tick 刷新该本地提示，收到结束/失败或超时后停止刷新。
+当前 roof-refresh 只接受服务端给匹配本地 online ID 的中心减 `(18000,0,15)` 远点，完成本地
+`teleportTo` 后回传无坐标 token；不得在
 传送前要求目标 `getGridSquare` 存在。位置、权限、到达复核、传送后加载等待和世界变更仍
 由服务端决定。
 
@@ -26,7 +29,7 @@ footprint 外的 `Relocate` staging 目标，完成本地 `teleportTo` 后回传
 100×100×Z scope 内用 bitmap 预测 active→inactive 的 swept transition，并同步修正本地
 position/next/last 状态；没有快照或当前位置已经在 scope 外时保持 inert。它不创建碰撞体、
 不删除对象、不接受客户端坐标作为权限依据；Lua 被关闭、快照过期或预测失败时，服务端
-`RV_BoundaryServer` 的 recovery 仍是唯一安全边界。
+`RV_BoundaryServer` 的服务端权威校验与无状态哨兵仍是唯一安全边界。
 服务端在进出 RV、generation swap 或清理映射时发送 `RVBitmapClear`，客户端只清除匹配的
 旧反馈快照，避免退出后残留预测在非当前 RV 中生效；该消息不改变服务端关系或权限。
 
@@ -46,7 +49,9 @@ room ID 不得被修改，也不得调用 `setRoom(nil)`、`ResetIsoWorldRegion`
 `IsoMovingObject:setCurrentSquareFromPosition(float x, float y, float z)` 三参重载刷新
 玩家的 `IsoMovingObject.current` 缓存。反编译基线显示该重载只读取
 `cell.getGridSquare(x,y,z)` 并调用 `setCurrent(current)`；`teleportTo` 本身只写坐标。
-目标方格尚未流式加载时允许缓存暂为空，不能凭客户端坐标拒绝服务器传送。
+目标方格尚未流式加载时允许缓存暂为空，不能凭客户端坐标拒绝服务器传送。`FinalRelocate`
+只有 guard、room scan 和 teleport 后实际坐标均验证成功才发送独立 token-only
+`FinalRelocateAck`；失败不发送坐标或世界状态，服务端超时负责回滚。
 
 `RVTeleport` 还登记一个有界的跨 tick current-square refresh：如果传送回调发生在目标
 房间方格仍在流式同步的窗口内，会继续对同一服务端坐标调用该官方重载，直到 current
@@ -62,7 +67,7 @@ room ID 不得被修改，也不得调用 `setRoom(nil)`、`ResetIsoWorldRegion`
 远端合法坐标可能暂时没有客户端 `GridSquare`，此时客户端只在有界 tick 后按本地传送坐标回执，
 服务端仍必须重新读取权威玩家坐标、身份和当前 schema 才能推进阶段；
 服务端等待所有成员完成远端跨 tick 后逐人回传，并复用进入 RV 的 repair/geometry 路径。失败时
-服务端负责最终逐人回传与有限重试。
+服务端负责最终逐人回传与持续恢复；任何成员处于 `z=-15` 时不得清理 return context/lease。
 
 房车内部退出入口同时注册在 `OnPreFillWorldObjectContextMenu` 和
 `OnFillWorldObjectContextMenu`：官方后一个事件在右键目标没有可抓取世界对象时会被

@@ -10,6 +10,7 @@ local COMMAND = "Generate"
 local COMMAND_RELOCATE = "Relocate"
 local COMMAND_RELOCATE_ACK = "RelocateAck"
 local COMMAND_FINAL_RELOCATE = "FinalRelocate"
+local COMMAND_FINAL_RELOCATE_ACK = "FinalRelocateAck"
 local COMMAND_REFRESH_ROOM_OWNERSHIP = "RefreshRoomOwnership"
 local COMMAND_RV_ENTER = "EnterRV"
 local COMMAND_RV_EXIT = "ExitRV"
@@ -72,16 +73,6 @@ RV.Server = RV.Server or {}
 local transactionBusy = false
 local transactionPlayer = nil
 local pendingGeneration = nil
--- Roof refresh reuses the existing Relocate/RelocateAck bridge, but has its
--- own bounded pending state so it can never mix a wall-removal token with a
--- generation request.  The adapter owns the repair schedule; this layer owns
--- the authoritative move, identity checks, and boundary transition lease.
-local pendingRoofRepairRelocation = nil
-local roofRepairRelocationArrival = nil
-local roofRepairRelocationFailure = nil
-local roofRepairTransitionLease = nil
-local roofRepairFinalReturn = nil
-local roofRepairRelocationSerial = 0
 -- A wall-removal refresh relocates every authoritative player in the current
 -- RV scope as one transaction.  The target is derived from the current
 -- bitmap/layout center and offset by the current contract vector; it is not a
@@ -104,11 +95,13 @@ local RELOCATION_MIN_TICKS = 3
 local RELOCATION_POST_ACK_TICKS = 2
 local RELOCATION_TIMEOUT_TICKS = 600
 local ROOF_REPAIR_RETURN_RETRY_TICKS = 5
-local ROOF_REPAIR_RETURN_RETRY_LIMIT = 12
-local ROOF_REPAIR_REMOTE_OFFSET_X = 18000
-local ROOF_REPAIR_REMOTE_OFFSET_Y = 0
-local ROOF_REPAIR_REMOTE_OFFSET_Z = 15
-local SAFE_SEARCH_MAX_RADIUS = 80
+local ROOF_RELOCATION_RETRY_TICKS = 5
+local GENERATION_RELOCATION_RETRY_TICKS = 5
+local ROOF_REPAIR_REMOTE_OFFSET_X = Constants.ROOF_REPAIR_REMOTE_OFFSET_X
+local ROOF_REPAIR_REMOTE_OFFSET_Y = Constants.ROOF_REPAIR_REMOTE_OFFSET_Y
+local ROOF_REPAIR_REMOTE_OFFSET_Z = Constants.ROOF_REPAIR_REMOTE_OFFSET_Z
+local ROOF_REPAIR_TEMP_Z = Constants.RELOCATION_SENTINEL_Z
+local GENERATION_STAGING_Z = Constants.RELOCATION_SENTINEL_Z
 
 -- IsoRegions does not expose a Lua callback for completion of its asynchronous
 -- dynamic-room rebuild. Keep scanning the small wall+roof footprint for a
@@ -169,6 +162,11 @@ local function callGlobal(name, ...)
     return true, a, b, c
 end
 
+local function callGlobalSucceeded(name, ...)
+    local ok, result = callGlobal(name, ...)
+    return ok and result ~= false
+end
+
 local function notifyFailure(player, reason)
     if not player then return end
     callGlobal("sendServerCommand", player, COMMAND_MODULE,
@@ -214,9 +212,14 @@ end
 -- reject current-only data without raising a Kahlua error.  Keep this
 -- conversion local to the server transaction; requiredInteger remains the
 -- throwing helper for trusted layout values.
+local function isFiniteNumber(value)
+    return type(value) == "number" and value == value
+        and value ~= math.huge and value ~= -math.huge
+end
+
 local function integer(value)
     local numeric = toNumber(value)
-    if numeric == nil or math.floor(numeric) ~= numeric then
+    if not isFiniteNumber(numeric) or math.floor(numeric) ~= numeric then
         return nil
     end
     return numeric
@@ -249,11 +252,6 @@ local function isEmptyCommandArgs(args)
     end
     local ok, size = invoke(args, "size")
     return ok and toNumber(size) == 0
-end
-
-local function isFiniteNumber(value)
-    return type(value) == "number" and value == value
-        and value ~= math.huge and value ~= -math.huge
 end
 
 local function requiredNumber(value, label)
@@ -1494,7 +1492,7 @@ local function armClientRoomOwnershipGuard(generation, oldBounds, newBounds,
     copyRoomRefreshBounds(payload, "new", newBounds)
     -- The no-player overload broadcasts to every connected client. A player
     -- other than the requester may later walk through the retired footprint.
-    if not callGlobal("sendServerCommand", COMMAND_MODULE,
+    if not callGlobalSucceeded("sendServerCommand", COMMAND_MODULE,
         COMMAND_REFRESH_ROOM_OWNERSHIP, payload) then
         error("RailroaderRVTest: client room ownership guards could not be armed")
     end
@@ -1561,7 +1559,7 @@ local function armTargetedClientRoomOwnershipGuard(player, generation, newBounds
         hasOld = false,
     }
     copyRoomRefreshBounds(payload, "new", newBounds)
-    if not callGlobal("sendServerCommand", player, COMMAND_MODULE,
+    if not callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
         COMMAND_REFRESH_ROOM_OWNERSHIP, payload) then
         error("RailroaderRVTest: targeted room ownership guard could not be armed")
     end
@@ -2636,25 +2634,19 @@ local function markGenerationFailed(manifest, errorText)
         break
     end
     if empty then
-        -- A new save has no current manifest to mark.  Do not leave a partial
-        -- failure record that would look like an unsupported partial schema.
         return true, nil
     end
     local ok, failure = pcall(function()
-        manifest.recovery = "RECOVERY_REQUIRED"
         manifest.phase = "FAILED"
         setManifestState(manifest, "FAILED", errorText)
     end)
     if ok then
         return true, nil
     end
-
-    -- Preserve the persistent failure markers even if the normal state helper
-    -- itself failed (for example, a debugger-supplied ModData implementation).
-    -- Each fallback write is protected independently so cleanup can always
-    -- reach the lock release below and the original failure remains visible.
+    -- Keep a best-effort current-schema failure marker in memory/ModData.  No
+    -- relocation transaction state is written; a process restart intentionally
+    -- forgets all in-flight relocation state.
     local fallbackOk, fallbackFailure = pcall(function()
-        manifest.recovery = "RECOVERY_REQUIRED"
         manifest.phase = "FAILED"
         manifest.state = "FAILED"
         manifest.lastError = errorText
@@ -2668,9 +2660,6 @@ local function markGenerationFailed(manifest, errorText)
 end
 
 local function finalizeGeneration(manifest, ok, resultOrError)
-    -- Protect the finalizer as well as the generation body.  This keeps an
-    -- unexpected failure in diagnostics/ModData handling from bypassing the
-    -- one unconditional release below.
     local finalized, finalResult, finalReason = pcall(function()
         local finalizationFailure
         if not ok then
@@ -2680,7 +2669,6 @@ local function finalizeGeneration(manifest, ok, resultOrError)
                 finalizationFailure = markerFailure
             end
         end
-
         if not ok then
             local message = safeErrorText(resultOrError)
             if finalizationFailure then
@@ -2688,24 +2676,27 @@ local function finalizeGeneration(manifest, ok, resultOrError)
                     .. safeErrorText(finalizationFailure) .. ")"
             end
             if Boundary and type(Boundary.clearPlayer) == "function" then
-                Boundary.clearPlayer(transactionPlayer)
+                if pendingGeneration then pendingGeneration.boundaryCleared = true end
+                pcall(Boundary.clearPlayer, transactionPlayer)
             end
             return false, message
         end
         return true, resultOrError
     end)
-
-    -- This is the single lock-release point.  Keep it after all protected
-    -- manifest work so no failure in diagnostics can strand the transaction.
+    -- This remains the single lock-release point for the synchronous build
+    -- body.  An asynchronous final relocation keeps its own pending record.
     transactionBusy = false
     transactionPlayer = nil
-
     if not finalized then
         return false, safeErrorText(finalResult)
     end
     return finalResult, finalReason
 end
 
+-- Relocation state is process-local. The server keeps exact authoritative
+-- coordinates and stable identities only while this process is alive; no
+-- intermediate relocation record is read from or written to ModData.
+local relocationServices = (function()
 local function readPlayerCoordinate(player, methodName, label)
     local ok, value = invoke(player, methodName)
     if not ok then
@@ -2742,6 +2733,31 @@ local function validateAuthoritativePlayer(player)
         y = math.floor(py),
         z = math.floor(pz),
     }
+end
+
+-- teleportTo.  The ordinary validator intentionally returns floor squares for
+-- the raw authoritative coordinates instead of inventing a square center.
+local function authoritativePlayerPosition(player)
+    if not player or not classInstance(player, "IsoPlayer") then
+        return false, "sender is not a valid IsoPlayer"
+    end
+    local deadOk, dead = invoke(player, "isDead")
+    if not deadOk or dead ~= false then
+        return false, "sender is dead or has no authoritative death state"
+    end
+    local px = readPlayerCoordinate(player, "getX", "x")
+    local py = readPlayerCoordinate(player, "getY", "y")
+    local pz = readPlayerCoordinate(player, "getZ", "z")
+    local worldOk, world = callGlobal("getWorld")
+    if not worldOk or not world then
+        return false, "getWorld is unavailable"
+    end
+    local validOk, valid = invoke(world, "isValidSquare", math.floor(px),
+        math.floor(py), math.floor(pz))
+    if not validOk or valid ~= true then
+        return false, "authoritative player coordinate is outside the legal world"
+    end
+    return true, { x = px, y = py, z = pz }
 end
 
 local function validateGenerationPermission(player)
@@ -2793,34 +2809,261 @@ local function resolvePendingPlayer(pending)
     end
     -- The online ID is the stable server identity across a transient
     -- IsoPlayer object replacement.  Keep the live object on the transaction
-    -- so every later tick/phase uses the authoritative instance.
+    -- so every later tick/phase uses the authoritative instance.  A changed
+    -- userdata is also a protocol event: the client-side pending command is
+    -- gone after a reconnect, so the owner must re-arm/re-send the same phase
+    -- token before it can continue.
+    local previous = pending.player
     pending.player = current
+    if previous ~= nil and previous ~= current then
+        pending.playerReboundAtTick = serverTick
+        pending.relocationNeedsResend = true
+    end
     return true, current
 end
 
-local function boundsContainXY(bounds, x, y)
-    if bounds == nil then
+local function relocationPositionsEqual(left, right)
+    return type(left) == "table" and type(right) == "table"
+        and left.x == right.x and left.y == right.y and left.z == right.z
+end
+
+return {
+    readPlayerCoordinate = readPlayerCoordinate,
+    validateAuthoritativePlayer = validateAuthoritativePlayer,
+    authoritativePlayerPosition = authoritativePlayerPosition,
+    validateGenerationPermission = validateGenerationPermission,
+    playerIdentity = playerIdentity,
+    resolvePendingPlayer = resolvePendingPlayer,
+    relocationPositionsEqual = relocationPositionsEqual,
+}
+end)()
+
+-- These validators are shared by the rest of the server transaction code.
+local readPlayerCoordinate = relocationServices.readPlayerCoordinate
+local validateAuthoritativePlayer = relocationServices.validateAuthoritativePlayer
+local authoritativePlayerPosition = relocationServices.authoritativePlayerPosition
+local validateGenerationPermission = relocationServices.validateGenerationPermission
+local playerIdentity = relocationServices.playerIdentity
+local resolvePendingPlayer = relocationServices.resolvePendingPlayer
+local relocationPositionsEqual = relocationServices.relocationPositionsEqual
+
+local function generationDisconnected(reason)
+    return reason == "requesting player disconnected or was replaced"
+end
+
+local function pauseGenerationForDisconnect(pending)
+    if type(pending) ~= "table" then return end
+    if pending.disconnectStartedTick == nil then
+        pending.disconnectStartedTick = serverTick
+    end
+end
+
+local function resumeGenerationAfterDisconnect(pending)
+    if type(pending) ~= "table"
+        or pending.disconnectStartedTick == nil then
+        return
+    end
+    local paused = serverTick - pending.disconnectStartedTick
+    if paused > 0 then
+        -- Do not let a missing IsoPlayer consume the normal transaction
+        -- timeout.  The in-memory owner remains live until this identity
+        -- reconnects; no value here is persisted.
+        pending.queuedAtTick = (pending.queuedAtTick or serverTick) + paused
+        if pending.finalRelocationDeadlineTick ~= nil then
+            pending.finalRelocationDeadlineTick =
+                pending.finalRelocationDeadlineTick + paused
+        end
+    end
+    pending.disconnectStartedTick = nil
+    pending.relocationNeedsResend = true
+    pending.relocationRetryAtTick = serverTick
+end
+
+local function rearmGenerationTransition(pending, player, kind)
+    if type(pending) ~= "table" or pending.boundaryCleared == true
+        or not Boundary then
         return false
     end
-    if type(bounds) ~= "table" then
-        error("RailroaderRVTest: saved manifest bounds are malformed")
+    local token = pending.token
+    if type(token) ~= "string" or token == "" then return false end
+    if type(Boundary.extendTransition) == "function" then
+        local extendOk, extended = pcall(Boundary.extendTransition, player,
+            token, serverTick + RELOCATION_POST_ACK_TICKS + 2)
+        if extendOk and extended == true then return true end
     end
-    local minX = requiredInteger(bounds.clearMinX, "saved bounds clearMinX")
-    local maxX = requiredInteger(bounds.clearMaxX, "saved bounds clearMaxX")
-    local minY = requiredInteger(bounds.clearMinY, "saved bounds clearMinY")
-    local maxY = requiredInteger(bounds.clearMaxY, "saved bounds clearMaxY")
-    if minX > maxX or minY > maxY then
-        error("RailroaderRVTest: saved manifest bounds are inverted")
+    if type(Boundary.beginTransition) ~= "function" then return false end
+    local beginOk, armed = pcall(Boundary.beginTransition, player,
+        pending.rvId, pending.generation, token, kind or "generation",
+        pending.bitmapVersion)
+    if not beginOk or armed ~= true then return false end
+    if type(Boundary.extendTransition) == "function" then
+        pcall(Boundary.extendTransition, player, token,
+            serverTick + RELOCATION_POST_ACK_TICKS + 2)
     end
-    if maxX - minX ~= 100 or maxY - minY ~= 100 then
-        error("RailroaderRVTest: saved manifest bounds are not half-open 100x100")
+    return true
+end
+
+-- Reissue only the currently owned phase after a stable identity rebind.  A
+-- reconnect invalidates the client's pending command, but never changes the
+-- server token or its exact destination.  The retry tick is deliberately
+-- bounded so a transient send failure cannot flood the network every tick.
+local function resendGenerationPhase(pending, player, phase)
+    if type(pending) ~= "table" or not player then return false end
+    local identity = pending.identity
+    if type(identity) ~= "table" then return false end
+    local payload
+    if phase == "final" then
+        local target = pending.finalDestination
+        if type(target) ~= "table" then return false end
+        payload = {
+            token = pending.token,
+            onlineId = identity.onlineId,
+            rvId = tostring(pending.rvId),
+            generation = pending.generation,
+            bitmapVersion = pending.bitmapVersion,
+            x = target.x, y = target.y, z = target.z,
+        }
+        if type(pending.railroader) == "table" then
+            payload.railroaderTransition = true
+            payload.action = "enter"
+            payload.locoId = pending.railroader.locoId
+            payload.role = pending.railroader.sourceRole
+            payload.seat = pending.railroader.sourceSeat
+        end
+        if not callGlobalSucceeded("sendServerCommand", player,
+            COMMAND_MODULE, COMMAND_FINAL_RELOCATE, payload)
+            or not callSucceeded(player, "teleportTo", target.x, target.y,
+                target.z) then
+            return false
+        end
+        if pending.finalRelocationDeadlineTick == nil then
+            pending.finalRelocationDeadlineTick = serverTick
+                + RELOCATION_TIMEOUT_TICKS
+        end
+        pending.relocationLastSentTick = serverTick
+        pending.relocationRetryAtTick = serverTick
+        pending.relocationNeedsResend = false
+        return true
     end
-    return x >= minX and x < maxX and y >= minY and y < maxY
+
+    local target
+    if phase == "rollback" then
+        target = pending.originalPosition
+    else
+        target = pending.stagingDestination
+    end
+    if type(target) ~= "table" then return false end
+    payload = {
+        token = pending.token,
+        onlineId = identity.onlineId,
+        rvId = tostring(pending.rvId),
+        generation = pending.generation,
+        bitmapVersion = pending.bitmapVersion,
+        x = target.x, y = target.y, z = target.z,
+        generationTransition = true,
+        generationPhase = phase == "rollback" and "return" or "temporary",
+    }
+    if phase == "rollback" then payload.action = "cancel" end
+    if type(pending.railroader) == "table" and phase ~= "rollback" then
+        payload.railroaderTransition = true
+        payload.action = "enter"
+        payload.locoId = pending.railroader.locoId
+        payload.role = pending.railroader.sourceRole
+        payload.seat = pending.railroader.sourceSeat
+    end
+    local teleportX = phase == "rollback" and target.x or target.x + 0.5
+    local teleportY = phase == "rollback" and target.y or target.y + 0.5
+    if not callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
+        COMMAND_RELOCATE, payload)
+        or not callSucceeded(player, "teleportTo", teleportX, teleportY,
+            target.z) then
+        return false
+    end
+    pending.relocationLastSentTick = serverTick
+    pending.relocationRetryAtTick = serverTick
+    pending.relocationNeedsResend = false
+    if phase == "rollback" then
+        pending.rollbackLastSentTick = serverTick
+    else
+        pending.acknowledged = false
+        pending.acknowledgedAtTick = nil
+    end
+    return true
+end
+
+local function keepGenerationTransitionAlive()
+    local pending = pendingGeneration
+    if type(pending) ~= "table" then return true end
+    local resolved, playerOrReason = resolvePendingPlayer(pending)
+    if not resolved then
+        if generationDisconnected(playerOrReason) then
+            pauseGenerationForDisconnect(pending)
+        end
+        -- OnTick owns identity/death failure decisions.  A missing player is
+        -- intentionally non-fatal while this process waits for rebind.
+        return true
+    end
+    resumeGenerationAfterDisconnect(pending)
+    local player = playerOrReason
+    transactionPlayer = player
+    local phase = pending.cancelled and "rollback"
+        or pending.finalRelocationSent and "final" or "temporary"
+    local rearmed = rearmGenerationTransition(pending, player,
+        phase == "final" and "generation-final" or "generation")
+    if not rearmed then
+        -- Keep trying the same token; do not clear the pending transaction or
+        -- invent a new one merely because a lease API briefly failed.
+        pending.relocationNeedsResend = true
+    end
+    if pending.relocationNeedsResend and not pending.cancelled
+        and serverTick >= (pending.relocationRetryAtTick or 0) then
+        resendGenerationPhase(pending, player, phase)
+        pending.relocationRetryAtTick = serverTick
+            + GENERATION_RELOCATION_RETRY_TICKS
+    end
+    return true
+end
+
+-- A reconnect can replace the IsoPlayer userdata while the stable identity
+-- remains the same.  Keep the temporary occupancy allow-list in sync with the
+-- rebound object so a valid member is not mistaken for a foreign occupant.
+local function resolveRoofRepairGroupPlayer(group, member)
+    local previous = type(member) == "table" and member.player or nil
+    local resolved, current = resolvePendingPlayer(member)
+    if resolved and type(group) == "table"
+        and type(group.allowedPlayers) == "table" then
+        if previous ~= nil and previous ~= current then
+            group.allowedPlayers[previous] = nil
+        end
+        group.allowedPlayers[current] = true
+    end
+    return resolved, current
 end
 
 local function currentBoundsValid(bounds, managed, bitmap)
+    local function onlyKeys(value, expected)
+        if type(value) ~= "table" then return false end
+        local allowed = {}
+        for i = 1, #expected do allowed[expected[i]] = true end
+        for key in pairs(value) do
+            if not allowed[key] then return false end
+        end
+        return true
+    end
+    local boundKeys = {
+        "schemaVersion", "clearMinX", "clearMaxX", "clearMinY",
+        "clearMaxY", "clearMinZ", "clearMaxZ", "managedOriginX",
+        "managedOriginY", "managedWidth", "managedHeight", "managedMinZ",
+        "managedMaxZ", "roomMinX", "roomMaxX", "roomMinY", "roomMaxY",
+        "roomZ", "wallMinX", "wallMaxX", "wallMinY", "wallMaxY", "wallZ",
+        "wallCoordinates", "wallObjectCount", "wallCoordinateCount",
+        "wallEdgeCounts", "wallCornerCount", "northEdges", "westEdges",
+        "roofMinX", "roofMaxX", "roofMinY", "roofMaxY", "z", "roofZ",
+        "bitmap", "shellEdges",
+    }
     if type(bounds) ~= "table" or type(managed) ~= "table"
         or type(bitmap) ~= "table"
+        or not onlyKeys(bounds, boundKeys)
         or requiredInteger(bounds.schemaVersion, "manifest bounds schemaVersion")
             ~= Constants.LAYOUT_SCHEMA_VERSION then
         return false
@@ -2868,18 +3111,57 @@ local function currentBoundsValid(bounds, managed, bitmap)
         or values.wallCornerCount ~= 2 then
         return false
     end
-    if not Bitmap or not Bitmap.validate(bitmap)
-        or bitmap.originX ~= values.managedOriginX
+    -- `bounds.bitmap` is the decoded current-layout snapshot persisted inside
+    -- manifest.bounds, while the boundary copy arrives in encoded form and is
+    -- decoded by currentManifestValid before this function is called.  Both
+    -- are part of the current schema: validating only boundary.bitmap would
+    -- allow a stale/corrupt bounds snapshot to steer wall/region consumers.
+    if not Bitmap or type(bounds.bitmap) ~= "table"
+        or type(Bitmap.validate) ~= "function" then
+        return false
+    end
+    local boundsBitmapOk, boundsBitmapValid = pcall(Bitmap.validate,
+        bounds.bitmap)
+    local boundaryBitmapOk, boundaryBitmapValid = pcall(Bitmap.validate,
+        bitmap)
+    if not boundsBitmapOk or boundsBitmapValid ~= true
+        or not boundaryBitmapOk or boundaryBitmapValid ~= true then
+        return false
+    end
+    local bitmapFields = { "schemaVersion", "bitmapVersion", "originX",
+        "originY", "width", "height", "minZ", "maxZ", "encoding" }
+    for i = 1, #bitmapFields do
+        local field = bitmapFields[i]
+        if bounds.bitmap[field] ~= bitmap[field] then return false end
+    end
+    for z = bitmap.minZ, bitmap.maxZ - 1 do
+        local boundsLayer, boundaryLayer = Bitmap.layer(bounds.bitmap, z),
+            Bitmap.layer(bitmap, z)
+        if type(boundsLayer) ~= "table" or type(boundaryLayer) ~= "table"
+            or boundsLayer.walkBits ~= boundaryLayer.walkBits
+            or boundsLayer.buildBits ~= boundaryLayer.buildBits
+            or boundsLayer.encoding ~= boundaryLayer.encoding then
+            return false
+        end
+    end
+    if bitmap.originX ~= values.managedOriginX
         or bitmap.originY ~= values.managedOriginY
         or bitmap.width ~= values.managedWidth
         or bitmap.height ~= values.managedHeight
         or bitmap.minZ ~= values.managedMinZ
-        or bitmap.maxZ ~= values.managedMaxZ then
+        or bitmap.maxZ ~= values.managedMaxZ
+        or bounds.bitmap.originX ~= values.managedOriginX
+        or bounds.bitmap.originY ~= values.managedOriginY
+        or bounds.bitmap.width ~= values.managedWidth
+        or bounds.bitmap.height ~= values.managedHeight
+        or bounds.bitmap.minZ ~= values.managedMinZ
+        or bounds.bitmap.maxZ ~= values.managedMaxZ then
         return false
     end
     if type(bounds.wallCoordinates) ~= "table"
         or #bounds.wallCoordinates ~= values.wallCoordinateCount
         or type(bounds.wallEdgeCounts) ~= "table"
+        or not onlyKeys(bounds.wallEdgeCounts, { "north", "west" })
         or requiredInteger(bounds.wallEdgeCounts.north,
             "manifest bounds wallEdgeCounts.north") ~= values.northEdges
         or requiredInteger(bounds.wallEdgeCounts.west,
@@ -2887,6 +3169,22 @@ local function currentBoundsValid(bounds, managed, bitmap)
         or type(bounds.shellEdges) ~= "table" then
         return false
     end
+    local wallCoordinateKeys = 0
+    for key in pairs(bounds.wallCoordinates) do
+        if type(key) ~= "number" or not isFiniteNumber(key)
+            or math.floor(key) ~= key or key < 1
+            or key > values.wallCoordinateCount then
+            return false
+        end
+        wallCoordinateKeys = wallCoordinateKeys + 1
+    end
+    if wallCoordinateKeys ~= values.wallCoordinateCount then return false end
+    local shellEdgeKeys = 0
+    for key in pairs(bounds.shellEdges) do
+        if type(key) ~= "string" or key == "" then return false end
+        shellEdgeKeys = shellEdgeKeys + 1
+    end
+    if shellEdgeKeys ~= values.wallCoordinateCount then return false end
     local function inside(minX, maxX, minY, maxY, z)
         return minX <= maxX and minY <= maxY
             and minX >= values.managedOriginX
@@ -2903,12 +3201,136 @@ local function currentBoundsValid(bounds, managed, bitmap)
             values.roofMaxY, values.roofZ) then
         return false
     end
+    local wallEntryKeys = {
+        "x", "y", "z", "north", "sprite", "role", "corner",
+        "edgeNorth", "edgeWest", "axis", "edgeKey", "edgeSide",
+        "edgeCellX", "edgeCellY", "edgeHostX", "edgeHostY",
+    }
+    local expectedShellKeys = {}
+    local shellEntryKeys = {
+        "edgeKey", "rvId", "generation", "hostX", "hostY", "z", "axis",
+        "side", "objectX", "objectY", "objectZ", "role", "corner",
+        "replacementAllowed",
+    }
     for i = 1, #bounds.wallCoordinates do
         local entry = bounds.wallCoordinates[i]
-        if type(entry) ~= "table"
+        if not onlyKeys(entry, wallEntryKeys)
+            or type(entry) ~= "table"
+            or type(entry.north) ~= "boolean"
+            or type(entry.corner) ~= "boolean"
+            or type(entry.edgeNorth) ~= "boolean"
+            or type(entry.edgeWest) ~= "boolean"
+            or entry.edgeNorth == entry.edgeWest
+            or type(entry.edgeKey) ~= "string"
+            or entry.edgeKey == ""
+            or requiredInteger(entry.x, "manifest wall coordinate x") == nil
+            or requiredInteger(entry.y, "manifest wall coordinate y") == nil
+            or requiredInteger(entry.z, "manifest wall coordinate z") == nil
+            or requiredInteger(entry.edgeCellX,
+                "manifest wall coordinate edgeCellX") == nil
+            or requiredInteger(entry.edgeCellY,
+                "manifest wall coordinate edgeCellY") == nil
+            or requiredInteger(entry.edgeHostX,
+                "manifest wall coordinate edgeHostX") == nil
+            or requiredInteger(entry.edgeHostY,
+                "manifest wall coordinate edgeHostY") == nil
+            or type(entry.sprite) ~= "string"
+            or type(entry.role) ~= "string"
+            or type(entry.axis) ~= "string"
+            or (entry.axis ~= "N" and entry.axis ~= "W")
+            or type(entry.edgeSide) ~= "string"
             or not Bitmap.containsScope(bitmap, entry.x, entry.y, entry.z) then
             return false
         end
+        local expectedAxis = entry.north and "N" or "W"
+        local expectedSide, expectedCellX, expectedCellY
+        if entry.north then
+            expectedSide = entry.y == values.wallMaxY and "south" or "north"
+            expectedCellX = entry.x
+            expectedCellY = entry.y - (expectedSide == "south" and 1 or 0)
+        else
+            expectedSide = entry.x == values.wallMaxX and "east" or "west"
+            expectedCellX = entry.x - (expectedSide == "east" and 1 or 0)
+            expectedCellY = entry.y
+        end
+        local expectedEdgeKey = Bitmap.edgeForSide and Bitmap.edgeForSide(
+            expectedSide, expectedCellX, expectedCellY, entry.z) or nil
+        local expectedRole = entry.north and "wall-north" or "wall-west"
+        local expectedSprite = entry.north and Constants.SPRITES.wall.northSprite
+            or Constants.SPRITES.wall.sprite
+        if entry.corner then
+            if entry.x == values.wallMinX and entry.y == values.wallMinY then
+                expectedRole = "corner-nw"
+                expectedSprite = Constants.SPRITES.wallNW.sprite
+            elseif entry.x == values.wallMaxX and entry.y == values.wallMaxY then
+                expectedRole = "corner-se"
+                expectedSprite = Constants.SPRITES.wallSE.sprite
+            else
+                return false
+            end
+        end
+        if entry.axis ~= expectedAxis
+            or entry.edgeNorth ~= (expectedAxis == "N")
+            or entry.edgeWest ~= (expectedAxis == "W")
+            or entry.edgeSide ~= expectedSide
+            or requiredInteger(entry.edgeCellX,
+                "manifest wall coordinate edgeCellX") ~= expectedCellX
+            or requiredInteger(entry.edgeCellY,
+                "manifest wall coordinate edgeCellY") ~= expectedCellY
+            or requiredInteger(entry.edgeHostX,
+                "manifest wall coordinate edgeHostX") ~= entry.x
+            or requiredInteger(entry.edgeHostY,
+                "manifest wall coordinate edgeHostY") ~= entry.y
+            or entry.edgeKey ~= expectedEdgeKey
+            or entry.role ~= expectedRole
+            or entry.sprite ~= expectedSprite then
+            return false
+        end
+        expectedShellKeys[entry.edgeKey] = true
+    end
+    for key, edge in pairs(bounds.shellEdges) do
+        if not expectedShellKeys[key]
+            or type(edge) ~= "table"
+            or not onlyKeys(edge, shellEntryKeys)
+            or edge.edgeKey ~= key
+            or edge.rvId ~= nil
+            or edge.generation ~= nil
+            or requiredInteger(edge.hostX, "manifest shell edge hostX") == nil
+            or requiredInteger(edge.hostY, "manifest shell edge hostY") == nil
+            or requiredInteger(edge.z, "manifest shell edge z") == nil
+            or requiredInteger(edge.objectX, "manifest shell edge objectX") == nil
+            or requiredInteger(edge.objectY, "manifest shell edge objectY") == nil
+            or requiredInteger(edge.objectZ, "manifest shell edge objectZ") == nil
+            or type(edge.axis) ~= "string"
+            or type(edge.side) ~= "string"
+            or type(edge.role) ~= "string"
+            or type(edge.corner) ~= "boolean"
+            or edge.replacementAllowed ~= true then
+            return false
+        end
+        local wallEntry
+        for i = 1, #bounds.wallCoordinates do
+            if bounds.wallCoordinates[i].edgeKey == key then
+                wallEntry = bounds.wallCoordinates[i]
+                break
+            end
+        end
+        if not wallEntry
+            or edge.axis ~= wallEntry.axis
+            or edge.side ~= wallEntry.edgeSide
+            or edge.hostX ~= wallEntry.edgeHostX
+            or edge.hostY ~= wallEntry.edgeHostY
+            or edge.z ~= wallEntry.z
+            or edge.objectX ~= wallEntry.x
+            or edge.objectY ~= wallEntry.y
+            or edge.objectZ ~= wallEntry.z
+            or edge.role ~= wallEntry.role
+            or edge.corner ~= wallEntry.corner then
+            return false
+        end
+    end
+    for key in pairs(expectedShellKeys) do
+        if bounds.shellEdges[key] == nil then return false end
     end
     return true
 end
@@ -2921,6 +3343,17 @@ local function currentManifestValid(manifest, allowEmpty)
         break
     end
     if not hasField then return allowEmpty == true end
+    local manifestKeys = {
+        schemaVersion = true, techVersion = true, generation = true,
+        owner = true, anchor = true, bounds = true, rvId = true,
+        boundarySchemaVersion = true, bitmapVersion = true, boundary = true,
+        startedAt = true, rollback = true, state = true, updatedAt = true,
+        phase = true, phaseGeneration = true, phaseUpdatedAt = true,
+        completedAt = true, lastError = true,
+    }
+    for key in pairs(manifest) do
+        if not manifestKeys[key] then return false end
+    end
     if manifest.version ~= nil or manifest.managed ~= nil
         or manifest.bitmap ~= nil or manifest.shellEdges ~= nil
         or requiredInteger(manifest.schemaVersion, "manifest schemaVersion")
@@ -2931,7 +3364,7 @@ local function currentManifestValid(manifest, allowEmpty)
         or (manifest.state ~= "RUNNING" and manifest.state ~= "READY"
             and manifest.state ~= "FAILED")
         or requiredInteger(manifest.generation, "manifest generation") < 1
-        or manifest.rvId == nil or tostring(manifest.rvId) == ""
+        or type(manifest.rvId) ~= "string" or manifest.rvId == ""
         or requiredInteger(manifest.bitmapVersion, "manifest bitmapVersion")
             ~= Constants.BITMAP_VERSION
         or requiredInteger(manifest.boundarySchemaVersion,
@@ -2953,13 +3386,61 @@ local function currentManifestValid(manifest, allowEmpty)
             "manifest bitmapVersion")
         or type(manifest.boundary.managed) ~= "table"
         or type(manifest.boundary.bitmap) ~= "table"
-        or type(manifest.boundary.shellEdges) ~= "table"
-        or not currentBoundsValid(manifest.bounds, manifest.boundary.managed,
-            manifest.boundary.bitmap and Bitmap.decode(manifest.boundary.bitmap)) then
+        or type(manifest.boundary.shellEdges) ~= "table" then
         return false
     end
-    local bitmap = Bitmap and Bitmap.decode(manifest.boundary.bitmap)
-    if not bitmap or not Bitmap.validate(bitmap)
+    local boundaryBitmapOk, boundaryBitmap = false, nil
+    if Bitmap and type(Bitmap.decode) == "function" then
+        boundaryBitmapOk, boundaryBitmap = pcall(Bitmap.decode,
+            manifest.boundary.bitmap)
+    end
+    if not boundaryBitmapOk or type(boundaryBitmap) ~= "table"
+        or not currentBoundsValid(manifest.bounds,
+            manifest.boundary.managed, boundaryBitmap) then
+        return false
+    end
+    local startedAt = requiredInteger(manifest.startedAt, "manifest startedAt")
+    local updatedAt = requiredInteger(manifest.updatedAt, "manifest updatedAt")
+    local phaseGeneration = requiredInteger(manifest.phaseGeneration,
+        "manifest phaseGeneration")
+    local phaseUpdatedAt = requiredInteger(manifest.phaseUpdatedAt,
+        "manifest phaseUpdatedAt")
+    local generation = requiredInteger(manifest.generation, "manifest generation")
+    if type(manifest.phase) ~= "string"
+        or (manifest.phase ~= "RUNNING"
+            and manifest.phase ~= "CLEARING"
+            and manifest.phase ~= "WOOD_FLOOR"
+            and manifest.phase ~= "WALLS"
+            and manifest.phase ~= "ROOF_FLOOR"
+            and manifest.phase ~= "STRUCTURE_RECALC"
+            and manifest.phase ~= "GENERATOR"
+            and manifest.phase ~= "RAIN_BARREL"
+            and manifest.phase ~= "COUNTER_SINK"
+            and manifest.phase ~= "LIGHT"
+            and manifest.phase ~= "FINAL_RELOCATE"
+            and manifest.phase ~= "COMMITTED"
+            and manifest.phase ~= "ROLLED_BACK"
+            and manifest.phase ~= "FAILED")
+        or startedAt < 1 or updatedAt < startedAt
+        or phaseGeneration ~= generation or phaseUpdatedAt < startedAt
+        or manifest.rollback ~= nil
+            and manifest.rollback ~= "COMPLETE"
+            and manifest.rollback ~= "FAILED"
+        or manifest.lastError ~= nil and type(manifest.lastError) ~= "string"
+        or manifest.completedAt ~= nil
+            and requiredInteger(manifest.completedAt, "manifest completedAt") < 1
+        or (manifest.state == "READY"
+            and (manifest.phase ~= "COMMITTED"
+                or requiredInteger(manifest.completedAt,
+                    "manifest completedAt") == nil)) then
+        return false
+    end
+    local bitmap = boundaryBitmap
+    local bitmapValidOk, bitmapValid = false, false
+    if Bitmap and type(Bitmap.validate) == "function" then
+        bitmapValidOk, bitmapValid = pcall(Bitmap.validate, bitmap)
+    end
+    if not bitmapValidOk or bitmapValid ~= true
         or bitmap.bitmapVersion ~= Constants.BITMAP_VERSION
         or bitmap.originX ~= manifest.boundary.managed.originX
         or bitmap.originY ~= manifest.boundary.managed.originY
@@ -3082,76 +3563,53 @@ local function roofRepairTemporarySquareSafe(square, allowedPlayers)
     return true
 end
 
--- Generation still uses a server-only staging square. The roof refresh no
--- longer calls this helper; its remote destination is derived from the current
--- bitmap center and the refresh vector above. Select the first legal staging
--- coordinate on a deterministic ring outside
--- both the new destructive footprint and any saved generation footprint.  The
--- coordinate check is intentionally world-only: the remote square may be
--- unloaded before the client relocation, and the server validates its actual
--- loaded/safe square after the relocation acknowledgement.
-local function selectStagingDestination(bounds, oldBounds, anchor)
-    if type(bounds) ~= "table" or type(anchor) ~= "table" then
-        error("RailroaderRVTest: staging destination contract is incomplete")
+-- First-generation staging deliberately lands at the current managed-scope
+-- center on z=-15.  The point is computed only from the validated
+-- layout/bitmap contract; unlike roof refresh, it is not the remote
+-- center-minus-(18000,0,15) experiment and it is allowed to have no ordinary
+-- GridSquare while the destination chunk streams.
+local function selectGenerationStagingDestination(layout, bounds)
+    if type(layout) ~= "table" or type(bounds) ~= "table"
+        or type(layout.bitmap) ~= "table" then
+        error("RailroaderRVTest: generation staging contract is incomplete")
     end
-    local anchorX = requiredInteger(anchor.x, "staging anchor x")
-    local anchorY = requiredInteger(anchor.y, "staging anchor y")
-    local anchorZ = requiredInteger(anchor.z, "staging anchor z")
+    local originX = requiredInteger(bounds.managedOriginX,
+        "generation managed origin x")
+    local originY = requiredInteger(bounds.managedOriginY,
+        "generation managed origin y")
+    local width = requiredInteger(bounds.managedWidth,
+        "generation managed width")
+    local height = requiredInteger(bounds.managedHeight,
+        "generation managed height")
+    if width ~= requiredInteger(layout.bitmap.width, "generation bitmap width")
+        or height ~= requiredInteger(layout.bitmap.height,
+            "generation bitmap height")
+        or originX ~= requiredInteger(layout.bitmap.originX,
+            "generation bitmap origin x")
+        or originY ~= requiredInteger(layout.bitmap.originY,
+            "generation bitmap origin y")
+        or width <= 0 or height <= 0 then
+        error("RailroaderRVTest: generation staging bitmap identity is stale")
+    end
+    local destination = {
+        x = originX + math.floor(width / 2),
+        y = originY + math.floor(height / 2),
+        z = GENERATION_STAGING_Z,
+        purpose = "generation-center",
+    }
     local worldOk, world = callGlobal("getWorld")
     if not worldOk or world == nil then
-        error("RailroaderRVTest: getWorld is unavailable for staging validation")
+        error("RailroaderRVTest: getWorld is unavailable for generation staging")
     end
-    local function candidate(x, y)
-        if boundsContainXY(bounds, x, y) or boundsContainXY(oldBounds, x, y) then
-            return nil
-        end
-        local validOk, valid = invoke(world, "isValidSquare", x, y, anchorZ)
-        if validOk and valid == true then
-            return { x = x, y = y, z = anchorZ }
-        end
-        return nil
+    local validOk, valid = invoke(world, "isValidSquare", destination.x,
+        destination.y, destination.z)
+    if not validOk or valid ~= true then
+        error("RailroaderRVTest: generation center staging coordinate is illegal")
     end
-
-    -- ServerMap.characterIn loads whole 64x64 cells using half the player's
-    -- online chunk-grid width.  At the minimum safe width (14), the
-    -- staging point immediately above the clear rectangle keeps X centered
-    -- and its cell-aligned Y range still covers the full 100x100 footprint.
-    -- Prefer that point (and nearby points on the same safe edge) before the
-    -- generic ring: the old diagonal-first search left x=20096 outside the
-    -- loaded cells even though the player was only 51 tiles away diagonally.
-    local preferredTop = {
-        { x = anchorX, y = bounds.clearMinY - 1 },
-        { x = anchorX, y = bounds.clearMinY - 2 },
-        { x = anchorX, y = bounds.clearMinY - 3 },
-        { x = anchorX, y = bounds.clearMinY - 4 },
-    }
-    for i = 1, #preferredTop do
-        local found = candidate(preferredTop[i].x, preferredTop[i].y)
-        if found then return found end
-    end
-
-    -- Keep the bounded search as a fail-closed fallback when the preferred
-    -- edge is occupied by a saved footprint.  targetAreaLoadStatus still
-    -- requires every base square; an unsupported client grid therefore waits
-    -- and hard-cancels before any destructive mutation.
-    for radius = 51, SAFE_SEARCH_MAX_RADIUS do
-        for dx = -radius, radius do
-            local found = candidate(anchorX + dx, anchorY - radius)
-            if found then return found end
-            found = candidate(anchorX + dx, anchorY + radius)
-            if found then return found end
-        end
-        for dy = -radius + 1, radius - 1 do
-            local found = candidate(anchorX - radius, anchorY + dy)
-            if found then return found end
-            found = candidate(anchorX + radius, anchorY + dy)
-            if found then return found end
-        end
-    end
-    error("RailroaderRVTest: no legal staging destination outside saved/new footprints")
+    return destination
 end
 
-local function playerIsAtStagingDestination(player, destination, bounds, oldBounds)
+local function playerIsAtStagingDestination(player, destination, bounds, _oldBounds)
     local playerOk, positionOrReason = validateAuthoritativePlayer(player)
     if not playerOk then
         return false, positionOrReason
@@ -3160,29 +3618,18 @@ local function playerIsAtStagingDestination(player, destination, bounds, oldBoun
         or positionOrReason.z ~= destination.z then
         return false, "server player has not reached the relocation destination"
     end
-    local squareOk, square = invoke(player, "getCurrentSquare")
-    if not squareOk or square == nil then
-        return false, "server player has no current square after relocation"
+    if destination.purpose == "generation-center" then
+        local expectedX = bounds.managedOriginX
+            + math.floor(bounds.managedWidth / 2)
+        local expectedY = bounds.managedOriginY
+            + math.floor(bounds.managedHeight / 2)
+        if destination.z ~= GENERATION_STAGING_Z
+            or destination.x ~= expectedX or destination.y ~= expectedY then
+            return false, "generation staging destination identity is stale"
+        end
+        return true
     end
-    local xOk, squareX = invoke(square, "getX")
-    local yOk, squareY = invoke(square, "getY")
-    local zOk, squareZ = invoke(square, "getZ")
-    if not xOk or not yOk or not zOk
-        or toNumber(squareX) ~= destination.x or toNumber(squareY) ~= destination.y
-        or toNumber(squareZ) ~= destination.z then
-        return false, "server player current square does not match relocation destination"
-    end
-    if boundsContainXY(bounds, destination.x, destination.y)
-        or boundsContainXY(oldBounds, destination.x, destination.y) then
-        return false, "staging destination overlaps a saved or new footprint"
-    end
-    -- The staging square is the only square occupied while the old room is
-    -- removed. Require a loaded, solid, unoccupied, non-room square before any
-    -- destructive world mutation is permitted.
-    if not squareIsSafeForRelocation(square, false) then
-        return false, "staging destination is not a safe loaded square"
-    end
-    return true
+    return false, "generation staging destination identity is stale"
 end
 
 local function relocationPositionStillSyncing(reason)
@@ -3207,10 +3654,10 @@ local function roofRepairPosition(position, label)
         error("RailroaderRVTest: roof repair " .. tostring(label)
             .. " z is outside the legal world range")
     end
-    -- The client Relocate bridge accepts only integer square coordinates.  A
-    -- live player position is fractional, so bind the return transaction to
-    -- its current authoritative square before serializing the return phase.
-    return { x = math.floor(x), y = math.floor(y), z = math.floor(z) }
+    -- Keep the exact finite server position in the transaction.  Bitmap and
+    -- world safety callers floor this snapshot only for square membership;
+    -- the return payload and teleportTo use these raw coordinates verbatim.
+    return { x = x, y = y, z = z }
 end
 
 local function roofRepairWorldCoordinateValid(destination)
@@ -3242,7 +3689,7 @@ local function currentRoofRepairContext(player, request)
         or requestGeneration == nil or requestGeneration < 1
         or requestBitmapVersion ~= Constants.BITMAP_VERSION then
         return false, Constants.SAVE_REBUILD_REQUIRED
-    end
+   end
     if not Boundary or type(Boundary.boundaryForPlayer) ~= "function" then
         return false, "RV boundary service is unavailable"
     end
@@ -3283,37 +3730,27 @@ local function currentRoofRepairContext(player, request)
         or integer(manifest.boundary.bitmapVersion) ~= integer(request.bitmapVersion) then
         return false, Constants.SAVE_REBUILD_REQUIRED
     end
+    -- All consumers share one cross-object geometry proof.  Keeping this
+    -- check in RV_Server prevents the roof path, boundary guard, and
+    -- stateless sentinel from each accepting a different "current" snapshot.
+    local geometryService = RV and RV.Server
+        and RV.Server.currentRVRecordGeometryConsistent
+    if type(geometryService) ~= "function" then
+        return false, Constants.SAVE_REBUILD_REQUIRED
+    end
+    local geometryCallOk, geometryConsistent = pcall(geometryService, record,
+        manifest)
+    if not geometryCallOk or geometryConsistent ~= true then
+        return false, Constants.SAVE_REBUILD_REQUIRED
+    end
     local bitmap = boundary.bitmap
-    if type(bitmap) ~= "table" or not Bitmap or type(Bitmap.validate) ~= "function"
-        or not Bitmap.validate(bitmap) then
+    if type(bitmap) ~= "table" or not Bitmap
+        or type(Bitmap.validate) ~= "function" then
         return false, Constants.SAVE_REBUILD_REQUIRED
     end
-    local manifestBitmap = Bitmap.decode(manifest.boundary.bitmap)
-    local managed = manifest.boundary.managed
-    if not manifestBitmap or not Bitmap.validate(manifestBitmap)
-        or type(managed) ~= "table"
-        or integer(managed.originX) ~= integer(bitmap.originX)
-        or integer(managed.originY) ~= integer(bitmap.originY)
-        or integer(managed.width) ~= integer(bitmap.width)
-        or integer(managed.height) ~= integer(bitmap.height)
-        or integer(managed.minZ) ~= integer(bitmap.minZ)
-        or integer(managed.maxZ) ~= integer(bitmap.maxZ)
-        or manifestBitmap.originX ~= bitmap.originX
-        or manifestBitmap.originY ~= bitmap.originY
-        or manifestBitmap.width ~= bitmap.width
-        or manifestBitmap.height ~= bitmap.height
-        or manifestBitmap.minZ ~= bitmap.minZ
-        or manifestBitmap.maxZ ~= bitmap.maxZ then
+    local bitmapOk, bitmapValid = pcall(Bitmap.validate, bitmap)
+    if not bitmapOk or bitmapValid ~= true then
         return false, Constants.SAVE_REBUILD_REQUIRED
-    end
-    for z = bitmap.minZ, bitmap.maxZ - 1 do
-        local currentLayer = Bitmap.layer(bitmap, z)
-        local manifestLayer = Bitmap.layer(manifestBitmap, z)
-        if type(currentLayer) ~= "table" or type(manifestLayer) ~= "table"
-            or currentLayer.walkBits ~= manifestLayer.walkBits
-            or currentLayer.buildBits ~= manifestLayer.buildBits then
-            return false, Constants.SAVE_REBUILD_REQUIRED
-        end
     end
     return true, {
         boundary = boundary,
@@ -3446,20 +3883,14 @@ local function roofRepairTargetReady(player, destination, phase, allowedPlayers)
     return true
 end
 
-local function roofRepairRelocationMatches(pending, rvId, generation,
-    bitmapVersion)
-    return type(pending) == "table"
-        and tostring(pending.rvId) == tostring(rvId)
-        and integer(pending.generation) == integer(generation)
-        and integer(pending.bitmapVersion) == integer(bitmapVersion)
-end
-
 local function copyRoofRepairPosition(position)
     if type(position) ~= "table" then return nil end
     local x, y, z = toNumber(position.x), toNumber(position.y),
         toNumber(position.z)
-    if not x or not y or not z then return nil end
-    return { x = math.floor(x), y = math.floor(y), z = math.floor(z) }
+    if not isFiniteNumber(x) or not isFiniteNumber(y)
+        or not isFiniteNumber(z) then return nil end
+    if z < WORLD_MIN_Z or z > WORLD_MAX_Z then return nil end
+    return { x = x, y = y, z = z }
 end
 
 -- Validate the server-captured return square immediately before every final
@@ -3486,28 +3917,18 @@ local function validatedRoofRepairReturn(pending)
     if not contextOk then return false, contextOrReason end
     local returnPosition = copyRoofRepairPosition(pending.returnPosition)
     if not returnPosition then return false, Constants.SAVE_REBUILD_REQUIRED end
-    if not Bitmap.containsScope(contextOrReason.bitmap, returnPosition.x,
-        returnPosition.y, returnPosition.z)
-        or not Bitmap.isActive(contextOrReason.bitmap, returnPosition.x,
-            returnPosition.y, returnPosition.z) then
+    local returnX, returnY, returnZ = math.floor(returnPosition.x),
+        math.floor(returnPosition.y), math.floor(returnPosition.z)
+    if not Bitmap.containsScope(contextOrReason.bitmap, returnX, returnY,
+        returnZ)
+        or not Bitmap.isActive(contextOrReason.bitmap, returnX, returnY,
+            returnZ) then
         return false, "roof repair return position is not current active RV geometry"
     end
     return true, {
         identity = identityOrReason,
         context = contextOrReason,
         position = returnPosition,
-    }
-end
-
-local function roofRepairFailureFor(pending, reason)
-    return {
-        roomKey = pending and pending.roomKey or nil,
-        rvId = pending and pending.rvId or nil,
-        generation = pending and pending.generation or nil,
-        bitmapVersion = pending and pending.bitmapVersion or nil,
-        identityKey = pending and pending.identity
-            and pending.identity.key or nil,
-        reason = safeErrorText(reason),
     }
 end
 
@@ -3532,7 +3953,7 @@ local function rollbackRoofRepairRelocation(pending)
     local returnPosition = targetOrReason.position
     local identity = targetOrReason.identity
     local liveCallOk, livePosition, liveReason = pcall(
-        validateAuthoritativePlayer, player)
+        authoritativePlayerPosition, player)
     if not liveCallOk or type(livePosition) ~= "table" then
         local reason = liveCallOk and liveReason or livePosition
         print("[RailroaderRVTest] roof repair rollback refused room="
@@ -3555,36 +3976,41 @@ local function rollbackRoofRepairRelocation(pending)
     local payload = {
         ok = true,
         action = "roof-repair-cancel",
+        token = pending.token,
         onlineId = identity.onlineId,
         rvId = tostring(pending.rvId),
         generation = integer(pending.generation),
         bitmapVersion = integer(pending.bitmapVersion),
         x = returnPosition.x, y = returnPosition.y, z = returnPosition.z,
+        roofRepairTransition = true,
+        roofRepairPhase = "return",
     }
-    local sentOk = callGlobal("sendServerCommand", player, COMMAND_MODULE,
-        COMMAND_RV_TELEPORT, payload)
+    local sentOk = callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
+        COMMAND_RELOCATE, payload)
     local moved = callSucceeded(player, "teleportTo", returnPosition.x,
         returnPosition.y, returnPosition.z)
-    if Boundary and type(Boundary.completeTransition) == "function"
+    -- A successful teleport call is not enough: the authoritative object must
+    -- have actually left the remote z=-15 target and be back on the exact
+    -- server-captured active square before the lease/context may be retired.
+    local positionOk, currentPosition = authoritativePlayerPosition(player)
+    local atCapturedReturn = positionOk
+        and currentPosition.z ~= ROOF_REPAIR_TEMP_Z
+        and currentPosition.x == returnPosition.x
+        and currentPosition.y == returnPosition.y
+        and currentPosition.z == returnPosition.z
+    local leaseComplete = false
+    if sentOk and moved and atCapturedReturn
+        and Boundary and type(Boundary.completeTransition) == "function"
         and type(pending.token) == "string" then
-        -- A return command may have replaced the temporary token.  The
-        -- token-scoped completion intentionally fails for a stale token; the
-        -- clear below still removes any local correction state for this live
-        -- player, so rollback cannot leave the guard latched forever.
         local completeOk, completeResult = pcall(
             Boundary.completeTransition, player, pending.token)
-        if not completeOk or completeResult ~= true then
-            -- A return-phase token may have superseded the temporary token.
-            -- Never leave a stale correction lease latched after rollback.
-            if Boundary and type(Boundary.clearPlayer) == "function" then
-                pcall(Boundary.clearPlayer, player)
-            end
-        end
+        leaseComplete = completeOk and completeResult == true
     end
-    if not moved and Boundary and type(Boundary.clearPlayer) == "function" then
-        pcall(Boundary.clearPlayer, player)
-    end
-    local rolledBack = sentOk and moved
+    -- Never clear a live correction lease while the authoritative player is
+    -- still underground or the client/server return handshake is incomplete.
+    -- The bounded/async final-return owner retries this same current-schema
+    -- context instead of stranding the player after a finite retry budget.
+    local rolledBack = sentOk and moved and atCapturedReturn and leaseComplete
     print("[RailroaderRVTest] roof repair rollback room="
         .. tostring(pending.roomKey or "unknown") .. " result="
         .. (rolledBack and "complete" or "failed") .. " current="
@@ -3593,6 +4019,15 @@ local function rollbackRoofRepairRelocation(pending)
         .. "," .. tostring(returnPosition.y) .. ","
         .. tostring(returnPosition.z))
     if rolledBack then return true end
+    if currentPosition and currentPosition.z == ROOF_REPAIR_TEMP_Z then
+        return false, "roof repair player remains at temporary z=-15"
+    end
+    if not atCapturedReturn then
+        return false, "roof repair player has not reached the captured return square"
+    end
+    if not leaseComplete then
+        return false, "roof repair boundary transition could not be completed"
+    end
     return false, "roof repair return command or authoritative teleport failed"
 end
 
@@ -3635,15 +4070,7 @@ local function roofRepairGroupAll(group, field, value)
 end
 
 local function roofRepairExactPosition(player)
-    local ok, positionOrReason = validateAuthoritativePlayer(player)
-    if not ok then return false, positionOrReason end
-    local xOk, x = pcall(readPlayerCoordinate, player, "getX", "x")
-    local yOk, y = pcall(readPlayerCoordinate, player, "getY", "y")
-    local zOk, z = pcall(readPlayerCoordinate, player, "getZ", "z")
-    if not xOk or not yOk or not zOk then
-        return false, safeErrorText((not xOk and x) or (not yOk and y) or z)
-    end
-    return true, { x = x, y = y, z = z }
+    return authoritativePlayerPosition(player)
 end
 
 -- The group fail-safe never trusts a position supplied by the adapter.  Each
@@ -3659,13 +4086,19 @@ local function failRoofRepairRelocationGroup(reason)
         rvId = group.rvId,
         generation = group.generation,
         bitmapVersion = group.bitmapVersion,
+        token = group.token,
         reason = safeErrorText(reason),
     }
     local allReturned = true
     for i = 1, #group.members do
         local member = group.members[i]
         member.finalReturnReason = reason
-        local returned, returnReason = rollbackRoofRepairRelocation(member)
+        local rollbackCallOk, returned, returnReason = pcall(
+            rollbackRoofRepairRelocation, member)
+        if not rollbackCallOk then
+            returnReason = safeErrorText(returned)
+            returned = false
+        end
         member.finalReturned = returned == true
         member.finalReturnReason = returnReason or reason
         if not member.finalReturned then allReturned = false end
@@ -3676,10 +4109,8 @@ local function failRoofRepairRelocationGroup(reason)
             group = group,
             attempts = 0,
             nextTick = serverTick + 1,
-            deadlineTick = serverTick
-                + ROOF_REPAIR_RETURN_RETRY_TICKS
-                    * ROOF_REPAIR_RETURN_RETRY_LIMIT,
         }
+    else
     end
     print("[RailroaderRVTest] roof repair group cancelled room="
         .. tostring(group.roomKey or "unknown") .. " members="
@@ -3695,8 +4126,33 @@ local function processRoofRepairGroupFinalReturn()
     local allReturned = true
     for i = 1, #(group.members or {}) do
         local member = group.members[i]
+        if member.finalReturned then
+            -- A member marked returned on the previous tick is still polled
+            -- authoritatively.  Do not retire the in-memory return owner if it
+            -- drifted back to z=-15 or anywhere other than its captured RV coordinate.
+            local resolved, playerOrReason = resolveRoofRepairGroupPlayer(
+                group, member)
+            local positionOk, position = false, nil
+            if resolved then
+                positionOk, position = pcall(authoritativePlayerPosition,
+                    playerOrReason)
+            end
+            local original = member.originalPosition or member.returnPosition
+            if not positionOk or type(position) ~= "table"
+                or type(original) ~= "table"
+                or position.z == ROOF_REPAIR_TEMP_Z
+                or position.x ~= original.x or position.y ~= original.y
+                or position.z ~= original.z then
+                member.finalReturned = false
+            end
+        end
         if not member.finalReturned then
-            local returned, returnReason = rollbackRoofRepairRelocation(member)
+            local rollbackCallOk, returned, returnReason = pcall(
+                rollbackRoofRepairRelocation, member)
+            if not rollbackCallOk then
+                returnReason = safeErrorText(returned)
+                returned = false
+            end
             member.finalReturned = returned == true
             member.finalReturnReason = returnReason
         end
@@ -3709,29 +4165,14 @@ local function processRoofRepairGroupFinalReturn()
         roofRepairGroupFinalReturn = nil
         return
     end
-    if retry.attempts >= ROOF_REPAIR_RETURN_RETRY_LIMIT
-        or serverTick >= (retry.deadlineTick or serverTick) then
-        for i = 1, #(group.members or {}) do
-            local member = group.members[i]
-            if not member.finalReturned then
-                notifyFailure(member.player, "roof repair group final return failed: "
-                    .. safeErrorText(member.finalReturnReason))
-                if Boundary and type(Boundary.clearPlayer) == "function" then
-                    pcall(Boundary.clearPlayer, member.player)
-                end
-            end
-        end
-        print("[RailroaderRVTest] roof repair group final return exhausted room="
-            .. tostring(group.roomKey or "unknown") .. " attempts="
-            .. tostring(retry.attempts))
-        roofRepairGroupFinalReturn = nil
-        return
-    end
+    -- A member at the remote z=-15 target is not a recoverable completion.
+    -- Keep the current-schema identity/context alive and continue bounded-rate
+    -- retries until the authoritative object is actually back.  In particular,
+    -- do not clear the Boundary lease or drop the group after a finite count.
     retry.nextTick = serverTick + ROOF_REPAIR_RETURN_RETRY_TICKS
-    print("[RailroaderRVTest] roof repair group final return retry room="
+    print("[RailroaderRVTest] roof repair group final return pending room="
         .. tostring(group.roomKey or "unknown") .. " attempt="
-        .. tostring(retry.attempts + 1) .. "/"
-        .. tostring(ROOF_REPAIR_RETURN_RETRY_LIMIT))
+        .. tostring(retry.attempts + 1) .. " reason=authoritative-return-required")
 end
 
 -- Begin or advance the multi-player refresh transaction. The adapter supplies
@@ -3744,8 +4185,7 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
         if (type(request) ~= "table" or request.phase == "temporary")
             and (roofRepairRelocationGroup ~= nil
                 or roofRepairGroupFinalReturn ~= nil)
-            or pendingRoofRepairRelocation ~= nil
-            or roofRepairFinalReturn ~= nil or transactionBusy
+            or transactionBusy
             or pendingGeneration ~= nil then
             return false, "another RV relocation or generation is in progress"
         end
@@ -3773,12 +4213,16 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
                 return false, "roof repair group temporary phase is not complete"
             end
             local returnToken = group.token
-            group.phase = "return"
-            group.returnStartedAtTick = serverTick
             for i = 1, #group.members do
                 local member = group.members[i]
-                local resolved, playerOrReason = resolvePendingPlayer(member)
+                local resolved, playerOrReason = resolveRoofRepairGroupPlayer(
+                    group, member)
                 if not resolved then
+                    -- A live-process disconnect is retryable; the stable
+                    -- identity remains owned by this in-memory group.
+                    if playerOrReason == "requesting player disconnected or was replaced" then
+                        return false, playerOrReason
+                    end
                     failRoofRepairRelocationGroup(playerOrReason)
                     return false, playerOrReason
                 end
@@ -3794,10 +4238,12 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
                     return false, contextOrReason
                 end
                 local returnPosition = member.returnPosition
-                if not Bitmap.containsScope(contextOrReason.bitmap,
-                    returnPosition.x, returnPosition.y, returnPosition.z)
-                    or not Bitmap.isActive(contextOrReason.bitmap,
-                        returnPosition.x, returnPosition.y, returnPosition.z) then
+                local returnX, returnY, returnZ = math.floor(returnPosition.x),
+                    math.floor(returnPosition.y), math.floor(returnPosition.z)
+                if not Bitmap.containsScope(contextOrReason.bitmap, returnX,
+                    returnY, returnZ)
+                    or not Bitmap.isActive(contextOrReason.bitmap, returnX,
+                        returnY, returnZ) then
                     local failure = "roof repair group return position is not current active RV geometry"
                     failRoofRepairRelocationGroup(failure)
                     return false, failure
@@ -3813,7 +4259,7 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
                 member.acknowledged = false
                 member.arrived = false
                 member.arrivalConsumed = false
-                local payload = {
+                member.returnPayload = {
                     token = returnToken,
                     onlineId = member.identity.onlineId,
                     rvId = rvId, generation = generation,
@@ -3822,15 +4268,32 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
                     roofRepairTransition = true,
                     roofRepairPhase = "return",
                 }
-                local sentOk = callGlobal("sendServerCommand", livePlayer,
-                    COMMAND_MODULE, COMMAND_RELOCATE, payload)
-                if not sentOk or not callSucceeded(livePlayer, "teleportTo",
-                    member.target.x + 0.5, member.target.y + 0.5,
-                    member.target.z) then
+            end
+            group.phase = "return"
+            group.returnStartedAtTick = serverTick
+            for i = 1, #group.members do
+                local member = group.members[i]
+                local resolved, playerOrReason = resolveRoofRepairGroupPlayer(
+                    group, member)
+                if not resolved then
+                    if playerOrReason == "requesting player disconnected or was replaced" then
+                        return false, playerOrReason
+                    end
+                    failRoofRepairRelocationGroup(playerOrReason)
+                    return false, playerOrReason
+                end
+                local sentOk = callGlobalSucceeded("sendServerCommand", playerOrReason,
+                    COMMAND_MODULE, COMMAND_RELOCATE, member.returnPayload)
+                if not sentOk or not callSucceeded(playerOrReason, "teleportTo",
+                    member.target.x, member.target.y, member.target.z) then
                     local failure = "roof repair group return relocation failed"
                     failRoofRepairRelocationGroup(failure)
                     return false, failure
                 end
+                member.relocationLastSentTick = serverTick
+                member.relocationRetryAtTick = serverTick
+                    + ROOF_RELOCATION_RETRY_TICKS
+                member.relocationNeedsResend = false
             end
             print("[RailroaderRVTest] roof repair group return queued room="
                 .. roomKey .. " members=" .. tostring(#group.members)
@@ -3888,6 +4351,12 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
                 arrived = false,
                 arrivalConsumed = false,
                 finalReturned = false,
+                relocationNeedsResend = false,
+                relocationRetryAtTick = serverTick,
+                relocationLastSentTick = nil,
+                -- Keep the repair bit present from the first in-memory member
+                -- record so completion is explicit and idempotent.
+                repairCompleted = false,
             }
             print("[RailroaderRVTest] roof repair group member captured room="
                 .. roomKey .. " player=" .. tostring(identityOrReason.key)
@@ -3914,8 +4383,10 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
             bitmapVersion = bitmapVersion, phase = "temporary", token = token,
             target = copyRoofRepairPosition(destination), members = members,
             allowedPlayers = {},
+            startedAt = os.time(),
             queuedAtTick = serverTick,
             deadlineTick = serverTick + RELOCATION_TIMEOUT_TICKS,
+            disconnectStartedTick = nil,
         }
         roofRepairRelocationGroup = group
         roofRepairGroupFailure = nil
@@ -3923,10 +4394,13 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
             local member = members[i]
             member.token = token
             group.allowedPlayers[member.player] = true
-            local armed = Boundary and type(Boundary.beginTransition)
-                == "function" and Boundary.beginTransition(member.player, rvId,
-                    generation, token, "roof-repair-group", bitmapVersion)
-            if armed ~= true then
+            local beginCallOk, armed = false, false
+            if Boundary and type(Boundary.beginTransition) == "function" then
+                beginCallOk, armed = pcall(Boundary.beginTransition,
+                    member.player, rvId, generation, token,
+                    "roof-repair-group", bitmapVersion)
+            end
+            if not beginCallOk or armed ~= true then
                 local failure = "roof repair group boundary transition could not be armed"
                 failRoofRepairRelocationGroup(failure)
                 return false, failure
@@ -3940,9 +4414,8 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
                 bitmapVersion = bitmapVersion,
                 x = group.target.x, y = group.target.y, z = group.target.z,
                 roofRepairTransition = true, roofRepairPhase = "temporary",
-                haloText = "正在刷新房间",
             }
-            local sentOk = callGlobal("sendServerCommand", member.player,
+            local sentOk = callGlobalSucceeded("sendServerCommand", member.player,
                 COMMAND_MODULE, COMMAND_RELOCATE, payload)
             if not sentOk or not callSucceeded(member.player, "teleportTo",
                 group.target.x + 0.5, group.target.y + 0.5, group.target.z) then
@@ -3950,6 +4423,10 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
                 failRoofRepairRelocationGroup(failure)
                 return false, failure
             end
+            member.relocationLastSentTick = serverTick
+            member.relocationRetryAtTick = serverTick
+                + ROOF_RELOCATION_RETRY_TICKS
+            member.relocationNeedsResend = false
         end
         print("[RailroaderRVTest] roof repair group relocation queued room="
             .. roomKey .. " members=" .. tostring(#members) .. " target="
@@ -3962,83 +4439,141 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
     return result, reason
 end
 
-local function failRoofRepairRelocation(reason)
-    local pending = pendingRoofRepairRelocation or roofRepairTransitionLease
-    pendingRoofRepairRelocation = nil
-    roofRepairRelocationArrival = nil
-    roofRepairTransitionLease = nil
-    if pending then
-        local rolledBack, rollbackReason = rollbackRoofRepairRelocation(pending)
-        roofRepairRelocationFailure = roofRepairFailureFor(pending, reason)
-        notifyFailure(pending.player, reason)
-        if not rolledBack then
-            -- Keep a bounded finally-equivalent return path alive after any
-            -- intermediate failure.  The first attempt above remains the
-            -- authoritative move; retries revalidate current schema/identity
-            -- and reuse only the server-captured active RV square.
-            roofRepairFinalReturn = {
-                pending = pending,
-                reason = rollbackReason or reason,
-                attempts = 0,
-                nextTick = serverTick + 1,
-                deadlineTick = serverTick
-                    + ROOF_REPAIR_RETURN_RETRY_TICKS
-                        * ROOF_REPAIR_RETURN_RETRY_LIMIT,
-            }
+local function keepRoofRepairFinalReturnAlive(member)
+    if type(member) ~= "table" or type(member.token) ~= "string"
+        or not Boundary then return end
+    local resolved, playerOrReason = resolvePendingPlayer(member)
+    if not resolved then return end
+    member.player = playerOrReason
+    local livePlayer = playerOrReason
+    local keepUntil = serverTick + RELOCATION_POST_ACK_TICKS + 2
+    if type(Boundary.extendTransition) == "function" then
+        local extendCallOk, extended = pcall(Boundary.extendTransition,
+            livePlayer, member.token, keepUntil)
+        if extendCallOk and extended == true then return end
+    end
+    -- If the live lease expired while the same process was waiting, re-arm only
+    -- this exact in-memory token and stable identity; no guessed player is used.
+    if type(Boundary.beginTransition) == "function" then
+        local beginCallOk, armed = pcall(Boundary.beginTransition, livePlayer,
+            member.rvId, member.generation, member.token, "roof-repair-return",
+            member.bitmapVersion)
+        if armed == true and type(Boundary.extendTransition) == "function" then
+            pcall(Boundary.extendTransition, livePlayer, member.token, keepUntil)
+            print("[RailroaderRVTest] roof repair return lease re-armed identity="
+                .. tostring(member.identityKey))
         end
-        if Boundary and type(Boundary.clearPlayer) == "function"
-            and not rolledBack then
-            -- The first rollback attempt above is authoritative.  The bounded
-            -- final-return retry state owns any subsequent server move; clear
-            -- only stale correction state and never invent a coordinate.
-            pcall(Boundary.clearPlayer, pending.player)
-        end
-        print("[RailroaderRVTest] roof repair relocation cancelled room="
-            .. tostring(pending.roomKey or "unknown") .. " reason="
-            .. safeErrorText(reason))
     end
 end
 
-local function processRoofRepairFinalReturn()
-    local retry = roofRepairFinalReturn
-    if not retry then return end
-    if serverTick < (retry.nextTick or serverTick) then return end
-    local pending = retry.pending
-    retry.attempts = (retry.attempts or 0) + 1
-    local returned, returnReason = rollbackRoofRepairRelocation(pending)
-    if returned then
-        print("[RailroaderRVTest] roof repair final return complete room="
-            .. tostring(pending.roomKey or "unknown") .. " attempts="
-            .. tostring(retry.attempts))
-        roofRepairFinalReturn = nil
-        return
+-- A reconnect drops the client's in-flight relocation state.  Re-send only
+-- the current grouped phase for the same member/token, at a bounded cadence;
+-- this is process-local and never creates a second roof transaction.
+local function resendRoofRepairMemberPhase(group, member)
+    if type(group) ~= "table" or type(member) ~= "table"
+        or not member.player or type(member.token) ~= "string"
+        or member.token == "" then
+        return false
     end
-    retry.reason = returnReason or retry.reason
-    if retry.attempts >= ROOF_REPAIR_RETURN_RETRY_LIMIT
-        or serverTick >= (retry.deadlineTick or serverTick) then
-        local reason = "roof repair final return failed: "
-            .. safeErrorText(retry.reason)
-        notifyFailure(pending.player, reason)
-        if Boundary and type(Boundary.clearPlayer) == "function" then
-            pcall(Boundary.clearPlayer, pending.player)
-        end
-        print("[RailroaderRVTest] roof repair final return exhausted room="
-            .. tostring(pending.roomKey or "unknown") .. " attempts="
-            .. tostring(retry.attempts) .. " reason=" .. safeErrorText(reason))
-        roofRepairFinalReturn = nil
-        return
+    -- An already observed arrival is still owned by the grouped transaction,
+    -- but it no longer needs a relocation packet.  In particular, a reconnect
+    -- between the arrival ACK and the adapter's consume call must not reset
+    -- that barrier and make the group wait for a packet the client no longer
+    -- owns.
+    if member.arrived == true or member.completed == true then
+        member.relocationNeedsResend = false
+        return false
     end
-    retry.nextTick = serverTick + ROOF_REPAIR_RETURN_RETRY_TICKS
-    print("[RailroaderRVTest] roof repair final return retry room="
-        .. tostring(pending.roomKey or "unknown") .. " attempt="
-        .. tostring(retry.attempts + 1) .. "/"
-        .. tostring(ROOF_REPAIR_RETURN_RETRY_LIMIT) .. " reason="
-        .. safeErrorText(retry.reason))
+    local payload, target, exactReturn
+    if group.phase == "temporary" then
+        target = group.target
+        payload = {
+            token = member.token,
+            onlineId = member.identity and member.identity.onlineId,
+            rvId = member.rvId, generation = member.generation,
+            bitmapVersion = member.bitmapVersion,
+            x = target and target.x, y = target and target.y,
+            z = target and target.z,
+            roofRepairTransition = true, roofRepairPhase = "temporary",
+        }
+        exactReturn = false
+    elseif group.phase == "return" then
+        payload = member.returnPayload
+        target = member.target
+        exactReturn = true
+    else
+        return false
+    end
+    if type(payload) ~= "table" or type(target) ~= "table"
+        or type(target.x) ~= "number" or type(target.y) ~= "number"
+        or type(target.z) ~= "number" then
+        return false
+    end
+    local sentOk = callGlobalSucceeded("sendServerCommand", member.player,
+        COMMAND_MODULE, COMMAND_RELOCATE, payload)
+    local teleportX = exactReturn and target.x or target.x + 0.5
+    local teleportY = exactReturn and target.y or target.y + 0.5
+    local moved = callSucceeded(member.player, "teleportTo", teleportX,
+        teleportY, target.z)
+    if not sentOk or not moved then return false end
+    member.relocationNeedsResend = false
+    member.relocationRetryAtTick = serverTick
+    member.relocationLastSentTick = serverTick
+    member.acknowledged = false
+    member.acknowledgedAtTick = nil
+    member.arrived = false
+    member.arrivalConsumed = false
+    member.completed = false
+    return true
 end
 
 local function keepRoofRepairTransitionAlive()
+    if roofRepairGroupFinalReturn and roofRepairGroupFinalReturn.group then
+        local group = roofRepairGroupFinalReturn.group
+        for i = 1, #(group.members or {}) do
+            local member = group.members[i]
+            if not member.finalReturned then
+                keepRoofRepairFinalReturnAlive(member)
+            end
+        end
+    end
     local group = roofRepairRelocationGroup
     if group then
+        local disconnected = false
+        for i = 1, #(group.members or {}) do
+            local resolved, reason = resolveRoofRepairGroupPlayer(group,
+                group.members[i])
+            if not resolved then
+                if reason == "requesting player disconnected or was replaced" then
+                    disconnected = true
+                end
+            end
+        end
+        if disconnected then
+            -- Do not spend the timeout while an authoritative player object is
+            -- absent; the group remains owned until reconnect.  The deadline
+            -- is shifted only when all identities have rebound, preserving the
+            -- same token and one transaction.
+            if group.disconnectStartedTick == nil then
+                group.disconnectStartedTick = serverTick
+            end
+            return true
+        end
+        if group.disconnectStartedTick ~= nil then
+            local paused = serverTick - group.disconnectStartedTick
+            if paused > 0 then
+                group.queuedAtTick = (group.queuedAtTick or serverTick) + paused
+                group.deadlineTick = (group.deadlineTick or serverTick) + paused
+            end
+            group.disconnectStartedTick = nil
+            for i = 1, #(group.members or {}) do
+                local member = group.members[i]
+                if not member.arrived and not member.completed then
+                    member.relocationNeedsResend = true
+                    member.relocationRetryAtTick = serverTick
+                end
+            end
+        end
         if serverTick > (group.deadlineTick or serverTick) then
             failRoofRepairRelocationGroup("roof repair group relocation transaction timed out")
             return false
@@ -4050,202 +4585,62 @@ local function keepRoofRepairTransitionAlive()
         for i = 1, #(group.members or {}) do
             local member = group.members[i]
             if not member.completed then
-                local extended = Boundary.extendTransition(member.player,
-                    member.token, math.min(group.deadlineTick,
+                local resolved, livePlayer = resolveRoofRepairGroupPlayer(
+                    group, member)
+                if not resolved then return true end
+                member.player = livePlayer
+                local extendCallOk, extended = pcall(
+                    Boundary.extendTransition, member.player, member.token,
+                    math.min(group.deadlineTick,
                         serverTick + RELOCATION_POST_ACK_TICKS + 2))
-                if extended ~= true then
-                    failRoofRepairRelocationGroup(
-                        "roof repair group boundary transition expired")
-                    return false
+                if not extendCallOk or extended ~= true then
+                    keepRoofRepairFinalReturnAlive(member)
+                    local retryOk, retryLive = resolveRoofRepairGroupPlayer(
+                        group, member)
+                    if not retryOk or not retryLive then return true end
+                    local recheckOk, rechecked = pcall(Boundary.extendTransition,
+                        retryLive, member.token,
+                        math.min(group.deadlineTick,
+                            serverTick + RELOCATION_POST_ACK_TICKS + 2))
+                    if not recheckOk or rechecked ~= true then
+                        failRoofRepairRelocationGroup(
+                            "roof repair group boundary transition expired")
+                        return false
+                    end
                 end
             end
         end
-    end
-    local lease = roofRepairTransitionLease
-    if not lease then return true end
-    if serverTick > (lease.deadlineTick or serverTick) then
-        failRoofRepairRelocation("roof repair relocation transaction timed out")
-        return false
-    end
-    if not Boundary or type(Boundary.extendTransition) ~= "function"
-        or type(lease.token) ~= "string" then
-        failRoofRepairRelocation("roof repair boundary lease service is unavailable")
-        return false
-    end
-    if Boundary and type(Boundary.extendTransition) == "function"
-        and type(lease.token) == "string" then
-        local keepUntil = math.min(lease.deadlineTick,
-            serverTick + RELOCATION_POST_ACK_TICKS + 2)
-        local extended = Boundary.extendTransition(lease.player, lease.token,
-            keepUntil)
-        if extended ~= true then
-            failRoofRepairRelocation("roof repair boundary transition expired")
-            return false
+        for i = 1, #(group.members or {}) do
+            local member = group.members[i]
+            if member.arrived or member.completed then
+                member.relocationNeedsResend = false
+            elseif member.relocationNeedsResend
+                and serverTick >= (member.relocationRetryAtTick or 0) then
+                local resent = resendRoofRepairMemberPhase(group, member)
+                member.relocationRetryAtTick = serverTick
+                    + ROOF_RELOCATION_RETRY_TICKS
+                if not resent then
+                    -- Keep the same transaction alive and retry at the bounded
+                    -- cadence; processRoofRepairRelocationGroup remains the
+                    -- authoritative failure/timeout path.
+                    member.relocationNeedsResend = true
+                end
+            end
         end
     end
     return true
 end
 
--- Start one phase of the server-owned roof refresh transaction.  The temporary
--- phase computes the current managed-scope center from the validated bitmap,
--- subtracts the current remote-refresh vector, and never accepts a target
--- coordinate from the client.  The return phase is bound to the exact server
--- position captured before the wall event.
-function RV.Server.beginRoofRepairRelocation(player, request)
-    local callOk, result, reason = pcall(function()
-        if roofRepairRelocationGroup ~= nil
-            or roofRepairGroupFinalReturn ~= nil
-            or pendingRoofRepairRelocation ~= nil
-            or roofRepairRelocationArrival ~= nil
-            or roofRepairFinalReturn ~= nil
-            or transactionBusy or pendingGeneration ~= nil then
-            return false, "another RV relocation or generation is in progress"
-        end
-        if type(request) ~= "table"
-            or (request.phase ~= "temporary" and request.phase ~= "return") then
-            return false, "roof repair relocation request is malformed"
-        end
-        local identityOk, identityOrReason = playerIdentity(player)
-        if not identityOk then return false, identityOrReason end
-        if type(request.identityKey) ~= "string"
-            or request.identityKey ~= identityOrReason.key then
-            return false, "roof repair relocation identity changed"
-        end
-        local contextOk, contextOrReason = currentRoofRepairContext(player,
-            {
-                rvId = request.rvId,
-                generation = request.generation,
-                bitmapVersion = request.bitmapVersion,
-                identityKey = identityOrReason.key,
-            })
-        if not contextOk then return false, contextOrReason end
-        local context = contextOrReason
-        local expectedRoomKey = tostring(request.rvId) .. ":"
-            .. tostring(integer(request.generation)) .. ":"
-            .. tostring(integer(request.bitmapVersion))
-        if type(request.roomKey) ~= "string"
-            or request.roomKey ~= expectedRoomKey then
-            return false, Constants.SAVE_REBUILD_REQUIRED
-        end
-        local returnPositionOk, returnPosition = pcall(roofRepairPosition,
-            request.returnPosition, "return")
-        if not returnPositionOk then
-            return false, Constants.SAVE_REBUILD_REQUIRED
-        end
-        local returnX, returnY, returnZ = math.floor(returnPosition.x),
-            math.floor(returnPosition.y), math.floor(returnPosition.z)
-        if not Bitmap.containsScope(context.bitmap, returnX, returnY, returnZ)
-            or not Bitmap.isActive(context.bitmap, returnX, returnY, returnZ) then
-            return false, "roof repair return position is not current active RV geometry"
-        end
-        if not roofRepairTransitionLease then
-            if request.phase ~= "temporary" then
-                return false, "roof repair temporary relocation is not active"
-            end
-        elseif request.phase ~= "return"
-            or not roofRepairRelocationMatches(roofRepairTransitionLease,
-                request.rvId, request.generation, request.bitmapVersion)
-            or roofRepairTransitionLease.identity.key ~= identityOrReason.key
-            or math.floor(roofRepairTransitionLease.returnPosition.x)
-                ~= returnX
-            or math.floor(roofRepairTransitionLease.returnPosition.y)
-                ~= returnY
-            or math.floor(roofRepairTransitionLease.returnPosition.z)
-                ~= returnZ then
-            return false, "roof repair relocation lease identity is stale"
-        end
-
-        local destinationOk, destinationOrReason = roofRepairDestination(
-            context, request)
-        if not destinationOk then return false, destinationOrReason end
-        local destination = destinationOrReason
-        local worldOk, worldReason = roofRepairWorldCoordinateValid(destination)
-        if not worldOk then return false, worldReason end
-
-        roofRepairRelocationSerial = roofRepairRelocationSerial + 1
-        local token = "roof-repair:" .. tostring(identityOrReason.key) .. ":"
-            .. tostring(request.rvId) .. ":" .. tostring(request.generation)
-            .. ":" .. tostring(serverTick) .. ":"
-            .. tostring(roofRepairRelocationSerial)
-        local pending = {
-            player = player,
-            identity = identityOrReason,
-            identityKey = identityOrReason.key,
-            roomKey = request.roomKey,
-            rvId = tostring(request.rvId),
-            generation = integer(request.generation),
-            bitmapVersion = integer(request.bitmapVersion),
-            phase = request.phase,
-            token = token,
-            target = copyRoofRepairPosition(destination),
-            returnPosition = returnPosition,
-            queuedAtTick = serverTick,
-            acknowledged = false,
-            deadlineTick = serverTick + RELOCATION_TIMEOUT_TICKS,
-        }
-        local armed = Boundary and type(Boundary.beginTransition) == "function"
-            and Boundary.beginTransition(player, pending.rvId,
-                pending.generation, token, "roof-repair", pending.bitmapVersion)
-        if armed ~= true then
-            return false, "roof repair boundary transition could not be armed"
-        end
-        roofRepairTransitionLease = pending
-        pendingRoofRepairRelocation = pending
-
-        local relocatePayload = {
-            token = token,
-            onlineId = identityOrReason.onlineId,
-            rvId = pending.rvId,
-            generation = pending.generation,
-            bitmapVersion = pending.bitmapVersion,
-            x = pending.target.x, y = pending.target.y, z = pending.target.z,
-            roofRepairTransition = true,
-            roofRepairPhase = pending.phase,
-        }
-        if pending.phase == "temporary" then
-            relocatePayload.haloText = "正在刷新房间"
-        end
-        local sentOk = callGlobal("sendServerCommand", player, COMMAND_MODULE,
-            COMMAND_RELOCATE, relocatePayload)
-        if not sentOk then
-            local failure = "roof repair server-to-client relocation command failed"
-            failRoofRepairRelocation(failure)
-            return false, failure
-        end
-        if not callSucceeded(player, "teleportTo", pending.target.x + 0.5,
-            pending.target.y + 0.5, pending.target.z) then
-            local failure = "roof repair authoritative relocation failed"
-            failRoofRepairRelocation(failure)
-            return false, failure
-        end
-        print("[RailroaderRVTest] roof repair relocation queued room="
-            .. tostring(pending.roomKey or "unknown") .. " phase="
-            .. tostring(pending.phase) .. " target=" .. tostring(pending.target.x)
-            .. "," .. tostring(pending.target.y) .. ","
-            .. tostring(pending.target.z) .. " targetKind=rv-center-minus-offset")
-        return true, pending.token
-    end)
-    if not callOk then return false, safeErrorText(result) end
-    return result, reason
-end
-
 function RV.Server.consumeRoofRepairRelocationArrival(player)
-    if roofRepairRelocationGroup then
-        local member = roofRepairGroupMember(roofRepairRelocationGroup, player)
-        if not member or not member.arrived or member.arrivalConsumed then
-            return nil
-        end
-        local resolved, current = resolvePendingPlayer(member)
-        if not resolved then return nil end
-        member.arrivalConsumed = true
-        return member
+    local member = roofRepairGroupMember(roofRepairRelocationGroup, player)
+    if not member or not member.arrived or member.arrivalConsumed then
+        return nil
     end
-    local arrival = roofRepairRelocationArrival
-    if not arrival or arrival.player ~= player then return nil end
-    local identityOk, identity = playerIdentity(player)
-    if not identityOk or identity.key ~= arrival.identityKey then return nil end
-    roofRepairRelocationArrival = nil
-    return arrival
+    local resolved, current = resolveRoofRepairGroupPlayer(
+        roofRepairRelocationGroup, member)
+    if not resolved then return nil end
+    member.arrivalConsumed = true
+    return member
 end
 
 function RV.Server.roofRepairRelocationGroupReady(rvId, generation,
@@ -4256,54 +4651,126 @@ function RV.Server.roofRepairRelocationGroupReady(rvId, generation,
         and roofRepairGroupAll(group, "arrived", true)
 end
 
+-- Cross-module mutex queries.  These expose only live process state; no
+-- relocation ledger or save field is involved.  A roof group remains busy
+-- through temporary, return, repair and its final-return retry object so the
+-- adapter cannot mutate the same RV while its captured members are returning.
+function RV.Server.isGenerationTransactionActive()
+    return pendingGeneration ~= nil or transactionBusy
+end
+
+function RV.Server.isRoofRepairTransactionActive(_rvId)
+    -- This is a service-wide mutex query.  The optional rvId is retained in
+    -- the signature for callers that want to keep their diagnostic context,
+    -- but an active roof transaction must never be bypassed by naming another
+    -- RV in the same managed world scope.
+    local function busyGroup(group)
+        if group == nil then return false end
+        if type(group) ~= "table" then
+            return true, "roof repair transaction state is unavailable"
+        end
+        if type(group.rvId) ~= "string" or group.rvId == "" then
+            return true, "roof repair transaction state is unavailable"
+        end
+        return true, "roof repair refresh is in progress (rvId="
+            .. tostring(group.rvId) .. ")"
+    end
+    local active, reason = busyGroup(roofRepairRelocationGroup)
+    if active then return true, reason end
+    if roofRepairGroupFinalReturn ~= nil
+        and type(roofRepairGroupFinalReturn) ~= "table" then
+        return true, "roof repair transaction state is unavailable"
+    end
+    local finalReturn = roofRepairGroupFinalReturn
+        and roofRepairGroupFinalReturn.group or nil
+    if roofRepairGroupFinalReturn ~= nil and type(finalReturn) ~= "table" then
+        return true, "roof repair transaction state is unavailable"
+    end
+    active, reason = busyGroup(finalReturn)
+    if active then return true, reason end
+    return false
+end
+
+-- The stateless z=-15 sentinel must never race a transaction that this live
+-- process still owns.  Claims are keyed only by the stable onlineID+username
+-- identity and exist in memory for the lifetime of the transaction.
+function RV.Server.isRelocationIdentityClaimed(identityKey)
+    if type(identityKey) ~= "string" or identityKey == "" then
+        return false
+    end
+    local function groupClaims(group)
+        if group == nil then return false end
+        if type(group) ~= "table" or type(group.members) ~= "table"
+            or #group.members < 1 then
+            return nil
+        end
+        for i = 1, #(group and group.members or {}) do
+            local member = group.members[i]
+            if type(member) ~= "table" or type(member.identityKey) ~= "string"
+                or member.identityKey == "" then
+                return nil
+            end
+            if member.identityKey == identityKey
+                or type(member.identity) == "table"
+                and member.identity.key == identityKey then
+                return true
+            end
+        end
+        return false
+    end
+    if pendingGeneration ~= nil then
+        if type(pendingGeneration) ~= "table"
+            or type(pendingGeneration.identity) ~= "table"
+            or type(pendingGeneration.identity.key) ~= "string"
+            or pendingGeneration.identity.key == "" then
+            return nil
+        end
+        return pendingGeneration.identity.key == identityKey
+    end
+    local activeClaims = groupClaims(roofRepairRelocationGroup)
+    if activeClaims ~= false then return activeClaims end
+    if roofRepairGroupFinalReturn ~= nil
+        and (type(roofRepairGroupFinalReturn) ~= "table"
+            or type(roofRepairGroupFinalReturn.group) ~= "table") then
+        return nil
+    end
+    local finalGroup = roofRepairGroupFinalReturn
+        and roofRepairGroupFinalReturn.group or nil
+    local finalClaims = groupClaims(finalGroup)
+    if finalClaims ~= false then return finalClaims end
+    return false
+end
+
 function RV.Server.getRoofRepairRelocationState(rvId, generation,
-    bitmapVersion)
+    bitmapVersion, token)
     if roofRepairGroupMatches(roofRepairRelocationGroup, rvId, generation,
         bitmapVersion) then
         return "active", roofRepairRelocationGroup.phase
     end
-    local candidates = { pendingRoofRepairRelocation,
-        roofRepairRelocationArrival, roofRepairTransitionLease }
-    for i = 1, #candidates do
-        local candidate = candidates[i]
-        if roofRepairRelocationMatches(candidate, rvId, generation,
-            bitmapVersion) then
-            if candidate == roofRepairRelocationArrival then
-                return "arrived", candidate.phase
-            end
-            return "active", candidate.phase
-        end
-    end
-    if roofRepairRelocationFailure
-        and roofRepairRelocationMatches(roofRepairRelocationFailure, rvId,
-            generation, bitmapVersion) then
-        return "failed", roofRepairRelocationFailure.reason
-    end
     if roofRepairGroupFailure
         and roofRepairGroupMatches(roofRepairGroupFailure, rvId, generation,
-            bitmapVersion) then
+            bitmapVersion)
+        and type(token) == "string"
+        and token ~= ""
+        and roofRepairGroupFailure.token == token then
         return "failed", roofRepairGroupFailure.reason
     end
     return "idle"
 end
 
 function RV.Server.consumeRoofRepairRelocationFailure(rvId, generation,
-    bitmapVersion)
+    bitmapVersion, token)
     if roofRepairGroupFailure
         and roofRepairGroupMatches(roofRepairGroupFailure, rvId, generation,
-            bitmapVersion) then
+            bitmapVersion)
+        and type(token) == "string"
+        and token ~= ""
+        and roofRepairGroupFailure.token == token then
         local failure = roofRepairGroupFailure
         roofRepairGroupFailure = nil
         return failure.reason
     end
-    if not roofRepairRelocationFailure
-        or not roofRepairRelocationMatches(roofRepairRelocationFailure, rvId,
-            generation, bitmapVersion) then
-        return nil
-    end
-    local failure = roofRepairRelocationFailure
-    roofRepairRelocationFailure = nil
-    return failure.reason
+    return nil
 end
 
 function RV.Server.completeRoofRepairRelocation(player, token)
@@ -4313,7 +4780,8 @@ function RV.Server.completeRoofRepairRelocation(player, token)
         if not member or group.phase ~= "return" then
             return false, "roof repair group return acknowledgement is stale"
         end
-        local resolved, livePlayerOrReason = resolvePendingPlayer(member)
+        local resolved, livePlayerOrReason = resolveRoofRepairGroupPlayer(
+            group, member)
         if not resolved then
             return false, livePlayerOrReason
         end
@@ -4331,55 +4799,84 @@ function RV.Server.completeRoofRepairRelocation(player, token)
         local atTarget, targetReason = playerAtRoofRepairDestination(livePlayer,
             member.target)
         if not atTarget then return false, targetReason end
-        if Boundary and type(Boundary.completeTransition) == "function"
-            and Boundary.completeTransition(livePlayer, token) ~= true then
-            return false, "roof repair group boundary transition could not be completed"
+        local authoritativeOk, authoritativePosition =
+            authoritativePlayerPosition(livePlayer)
+        if not authoritativeOk then return false, authoritativePosition end
+        if authoritativePosition.z == ROOF_REPAIR_TEMP_Z
+            or authoritativePosition.x ~= member.target.x
+            or authoritativePosition.y ~= member.target.y
+            or authoritativePosition.z ~= member.target.z then
+            member.completed = false
+            member.arrived = false
+            member.arrivalConsumed = false
+            return false, "roof repair group player has not reached captured return position"
         end
-        member.completed = true
-        if roofRepairGroupAll(group, "completed", true) then
-            roofRepairRelocationGroup = nil
+        if not member.completed then
+            if Boundary and type(Boundary.completeTransition) == "function"
+                and Boundary.completeTransition(livePlayer, token) ~= true then
+                return false, "roof repair group boundary transition could not be completed"
+            end
+            member.completed = true
+        end
+        if roofRepairGroupAll(group, "completed", true)
+            and not group.returnLogged then
+            group.returnLogged = true
             print("[RailroaderRVTest] roof repair group relocation returned room="
                 .. tostring(group.roomKey or "unknown") .. " members="
-                .. tostring(#group.members))
+                .. tostring(#group.members) .. " repair=pending")
         end
         return true, contextOrReason
     end
-    local lease = roofRepairTransitionLease
-    if type(lease) ~= "table" or lease.phase ~= "return"
-        or lease.token ~= token or lease.player ~= player then
-        local suppliedIdentityOk, suppliedIdentity = playerIdentity(player)
-        if type(lease) ~= "table" or lease.phase ~= "return"
-            or lease.token ~= token or not suppliedIdentityOk
-            or suppliedIdentity.key ~= lease.identityKey then
-            return false, "roof repair return acknowledgement is stale"
+    return false, "roof repair return acknowledgement is stale"
+end
+
+-- Mark one existing-entry roof repair complete after every grouped member has
+-- already returned to its captured coordinate. The per-member repair bit stays
+-- in the in-memory group until this idempotent completion call.
+function RV.Server.completeRoofRepairRepair(player, token)
+    local group = roofRepairRelocationGroup
+    if not group or group.phase ~= "return" then
+        return false, "roof repair group repair acknowledgement is stale"
+    end
+    local member = roofRepairGroupMember(group, player, token)
+    if not member or member.completed ~= true then
+        return false, "roof repair group member has not completed return"
+    end
+    if not roofRepairGroupAll(group, "completed", true) then
+        return false, "roof repair group return is not complete for every member"
+    end
+    local resolved, livePlayerOrReason = resolveRoofRepairGroupPlayer(
+        group, member)
+    if not resolved then return false, livePlayerOrReason end
+    local representativeReason
+    for i = 1, #group.members do
+        local groupMember = group.members[i]
+        local memberResolved, livePlayer = resolveRoofRepairGroupPlayer(
+            group, groupMember)
+        if not memberResolved then return false, livePlayer end
+        local contextOk, contextOrReason = currentRoofRepairContext(livePlayer, {
+            rvId = groupMember.rvId, generation = groupMember.generation,
+            bitmapVersion = groupMember.bitmapVersion,
+            identityKey = groupMember.identityKey,
+        })
+        if not contextOk then return false, contextOrReason end
+        local positionOk, position = authoritativePlayerPosition(livePlayer)
+        if not positionOk or not relocationPositionsEqual(position,
+            groupMember.originalPosition) then
+            return false, "roof repair member return coordinate is not authoritative"
+        end
+        representativeReason = representativeReason or contextOrReason
+    end
+    if not roofRepairGroupAll(group, "repairCompleted", true) then
+        for i = 1, #group.members do
+            group.members[i].repairCompleted = true
         end
     end
-    local resolved, livePlayerOrReason = resolvePendingPlayer(lease)
-    if not resolved then return false, livePlayerOrReason end
-    local livePlayer = livePlayerOrReason
-    local identityOk, identityOrReason = playerIdentity(livePlayer)
-    if not identityOk or identityOrReason.key ~= lease.identityKey then
-        return false, identityOk and "roof repair return identity changed"
-            or identityOrReason
-    end
-    local contextOk, contextOrReason = currentRoofRepairContext(livePlayer,
-        { rvId = lease.rvId, generation = lease.generation,
-            bitmapVersion = lease.bitmapVersion, identityKey = lease.identityKey })
-    if not contextOk then return false, contextOrReason end
-    local atTarget, targetReason = playerAtRoofRepairDestination(livePlayer,
-        lease.target)
-    if not atTarget then return false, targetReason end
-    if Boundary and type(Boundary.completeTransition) == "function"
-        and Boundary.completeTransition(livePlayer, token) ~= true then
-        return false, "roof repair boundary transition could not be completed"
-    end
-    roofRepairTransitionLease = nil
-    roofRepairRelocationArrival = nil
-    print("[RailroaderRVTest] roof repair relocation returned room="
-        .. tostring(lease.roomKey or "unknown") .. " target="
-        .. tostring(lease.target.x) .. "," .. tostring(lease.target.y) .. ","
-        .. tostring(lease.target.z))
-    return true, contextOrReason
+    roofRepairRelocationGroup = nil
+    print("[RailroaderRVTest] roof repair group transaction complete room="
+        .. tostring(group.roomKey or "unknown") .. " members="
+        .. tostring(#group.members) .. " repair=applied return=acknowledged")
+    return true, representativeReason
 end
 
 function RV.Server.cancelRoofRepairRelocation(reason)
@@ -4387,8 +4884,7 @@ function RV.Server.cancelRoofRepairRelocation(reason)
         failRoofRepairRelocationGroup(reason or "roof repair group relocation cancelled")
         return true
     end
-    failRoofRepairRelocation(reason or "roof repair relocation cancelled")
-    return true
+    return false, "no roof repair group relocation is active"
 end
 
 -- Public read-only readiness gate used by the Railroader adapter immediately
@@ -4448,7 +4944,7 @@ end
 
 -- Deliver the final in-house relocation only after buildGeneration succeeds.
 -- The payload is created entirely from the server's prepared anchor; the
--- client never sends coordinates and this command has no acknowledgement path.
+-- client never sends coordinates and completion uses a separate token-only ACK.
 local function relocatePlayerIntoHouse(player, prepared)
     local destination = prepared.finalDestination
     local anchor = prepared.anchor
@@ -4488,7 +4984,7 @@ local function relocatePlayerIntoHouse(player, prepared)
         finalPayload.role = prepared.railroader.sourceRole
         finalPayload.seat = prepared.railroader.sourceSeat
     end
-    local sentOk = callGlobal("sendServerCommand", player, COMMAND_MODULE,
+    local sentOk = callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
         COMMAND_FINAL_RELOCATE, finalPayload)
     if not sentOk then
         error("RailroaderRVTest: final server-to-client relocation command failed")
@@ -4496,6 +4992,16 @@ local function relocatePlayerIntoHouse(player, prepared)
     if not callSucceeded(player, "teleportTo", x, y, z) then
         error("RailroaderRVTest: final authoritative server relocation failed")
     end
+    -- Do not advance the manifest here. The client must complete its guard/
+    -- room scan and prove the exact target with the token-only final ACK; the
+    -- in-memory transaction owns the deadline and rollback.
+    prepared.finalRelocationSent = true
+    prepared.finalRelocationAcked = false
+    prepared.finalRelocationAckAtTick = nil
+    prepared.finalRelocationDeadlineTick = serverTick + RELOCATION_TIMEOUT_TICKS
+    prepared.finalDestination = {
+        x = x, y = y, z = z,
+    }
 end
 
 local function generateForPlayer(player, prepared)
@@ -4537,7 +5043,7 @@ local function generateForPlayer(player, prepared)
         end
         transactionBusy = false
         transactionPlayer = nil
-        return false, "generation already in progress or recovery is required"
+        return false, "generation already in progress"
     end
     -- B42 Kahlua exposes pcall; the protected body returns
     -- the raw error; finalizeGeneration formats it safely and records FAILED.
@@ -4627,6 +5133,8 @@ local function generateForPlayer(player, prepared)
         manifest.boundary = boundaryOrReason
         manifest.startedAt = os.time()
         manifest.rollback = nil
+        manifest.completedAt = nil
+        manifest.lastError = nil
         setManifestState(manifest, "RUNNING")
         local buildOk, buildError = pcall(clearGenerationArea, cell, bounds,
             generation, manifest)
@@ -4650,31 +5158,24 @@ local function generateForPlayer(player, prepared)
                 buildError = refreshError
             else
                 prepared.generation = generation
+            end
+            if buildOk then
                 setGenerationPhase(manifest, generation, "FINAL_RELOCATE")
                 local finalRelocationOk, finalRelocationError = pcall(
                     relocatePlayerIntoHouse, player, prepared)
                 if not finalRelocationOk then
                     buildOk = false
                     buildError = finalRelocationError
+                else
+                    prepared.manifest = manifest
+                    prepared.generationCell = cell
+                    prepared.generationRoomOwnershipGuard = roomOwnershipGuard
+                    prepared.generationNumber = generation
+                    -- Keep the process-local transaction alive across the
+                    -- asynchronous client readiness proof. The continuation
+                    -- below is the only path that can commit READY.
+                    return "await-final-relocate"
                 end
-            end
-        end
-        if buildOk and prepared.railroader ~= nil and not railroaderCommitHook then
-            buildOk = false
-            buildError = "Railroader RV commit hook is unavailable"
-        end
-        if buildOk and prepared.railroader ~= nil and railroaderCommitHook then
-            -- Persist the train/RV/player relation while the generation is
-            -- still inside the same rollback gate.  A failed mapping write is
-            -- therefore treated like any other failed build stage.
-            local commitOk, commitResult, commitReason = pcall(
-                railroaderCommitHook, player, prepared.railroader, prepared)
-            if not commitOk then
-                buildOk = false
-                buildError = commitResult
-            elseif commitResult ~= true then
-                buildOk = false
-                buildError = commitReason or "Railroader RV mapping commit failed"
             end
         end
         if not buildOk then
@@ -4693,7 +5194,6 @@ local function generateForPlayer(player, prepared)
                     .. " rollback=COMPLETE")
             else
                 manifest.rollback = "FAILED"
-                manifest.recovery = "RECOVERY_REQUIRED"
                 print("[RailroaderRVTest] generation=" .. tostring(generation)
                     .. " rollback=FAILED: " .. safeErrorText(rollbackError))
                 error(safeErrorText(buildError) .. " (rollback failed: "
@@ -4701,31 +5201,103 @@ local function generateForPlayer(player, prepared)
             end
             error(buildError)
         end
-        refreshServerRoomOwnershipGuard(roomOwnershipGuard, "before-commit")
-        setGenerationPhase(manifest, generation, "COMMITTED")
-        manifest.completedAt = os.time()
-        manifest.recovery = nil
-        setManifestState(manifest, "READY")
-        refreshServerRoomOwnershipGuard(roomOwnershipGuard, "after-commit")
-        if Boundary and type(Boundary.completeTransition) == "function" then
-            -- The Railroader adapter may have completed this same token while
-            -- committing its player/loco relation.  The call is deliberately
-            -- idempotent from this transaction's perspective; for the
-            -- technical path it closes the generation transition here.
-            pcall(Boundary.completeTransition, player, prepared.token)
-        end
-        return true
+        error("RailroaderRVTest: generation did not enter final relocation")
     end)
     return finalizeGeneration(manifest, ok, resultOrError)
+end
+
+-- Continue generation only after the client has sent the strict
+-- FinalRelocateAck.  This function is intentionally separate from the build
+-- body: a client readiness failure can never fall through to READY, and the
+-- in-memory transaction remains the idempotent retry owner.
+local function finalizeGenerationAfterRelocate(player, prepared)
+    if type(prepared) ~= "table"
+        or prepared.finalRelocationSent ~= true
+        or prepared.finalRelocationAcked ~= true then
+        return false, "final relocation acknowledgement is still pending"
+    end
+    local ok, result = pcall(function()
+        local positionOk, position = authoritativePlayerPosition(player)
+        if not positionOk or not relocationPositionsEqual(position,
+            prepared.finalDestination) then
+            error("final relocation authoritative target proof failed")
+        end
+        local manifest = prepared.manifest
+        if type(manifest) ~= "table" then manifest = manifestTable() end
+        local schemaOk = pcall(requireCurrentManifest, manifest, false)
+        if not schemaOk or manifest.state ~= "RUNNING"
+            or manifest.phase ~= "FINAL_RELOCATE"
+            or tostring(manifest.rvId) ~= tostring(prepared.rvId)
+            or integer(manifest.generation) ~= prepared.generation
+            or integer(manifest.bitmapVersion) ~= prepared.bitmapVersion then
+            error(Constants.SAVE_REBUILD_REQUIRED)
+        end
+        local anchor = manifest.anchor
+        local anchorX = requiredInteger(anchor.x, "final manifest anchor x")
+        local anchorY = requiredInteger(anchor.y, "final manifest anchor y")
+        local anchorZ = requiredInteger(anchor.z, "final manifest anchor z")
+        if prepared.finalDestination.x ~= anchorX + 0.5
+            or prepared.finalDestination.y ~= anchorY + 0.5
+            or prepared.finalDestination.z ~= anchorZ then
+            error(Constants.SAVE_REBUILD_REQUIRED)
+        end
+        local guard = prepared.generationRoomOwnershipGuard
+        if guard then
+            refreshServerRoomOwnershipGuard(guard, "before-commit")
+        end
+        if prepared.railroader ~= nil and not railroaderCommitHook then
+            error("Railroader RV commit hook is unavailable")
+        end
+        if prepared.railroader ~= nil and not prepared.commitApplied then
+            local commitOk, commitResult, commitReason = pcall(
+                railroaderCommitHook, player, prepared.railroader, prepared)
+            if not commitOk then error(commitResult) end
+            if commitResult ~= true then
+                error(commitReason or "Railroader RV mapping commit failed")
+            end
+            prepared.commitApplied = true
+        end
+        if not Boundary or type(Boundary.completeTransition) ~= "function"
+            or Boundary.completeTransition(player, prepared.token) ~= true then
+            error("generation boundary transition could not be completed")
+        end
+        setGenerationPhase(manifest, prepared.generation, "COMMITTED")
+        manifest.completedAt = os.time()
+        setManifestState(manifest, "READY")
+        if guard then refreshServerRoomOwnershipGuard(guard, "after-commit") end
+        local readySchemaOk = pcall(requireCurrentManifest, manifest, false)
+        if not readySchemaOk or manifest.state ~= "READY"
+            or manifest.phase ~= "COMMITTED" then
+            error(Constants.SAVE_REBUILD_REQUIRED)
+        end
+        prepared.finalizationReady = true
+    end)
+    if not ok then
+        return false, safeErrorText(result)
+    end
+    transactionBusy = false
+    transactionPlayer = nil
+    return true
 end
 
 local function queueGeneration(player, authoritativePosition, railroaderData)
     if pendingGeneration ~= nil or transactionBusy then
         return false, "generation already queued or in progress"
     end
+    -- Generation and roof refresh both mutate the current managed scope and
+    -- stream the same world region.  The roof group owns the service-wide
+    -- mutex until its active/repair/final-return state has fully retired.
+    if roofRepairRelocationGroup ~= nil
+        or roofRepairGroupFinalReturn ~= nil then
+        return false, "roof repair refresh is in progress"
+    end
     local identityOk, identityOrReason = playerIdentity(player)
     if not identityOk then
         return false, identityOrReason
+    end
+    local positionOk, originalPosition = authoritativePlayerPosition(player)
+    if not positionOk then
+        return false, originalPosition
     end
 
     local manifestOk, manifestOrError = pcall(manifestTable)
@@ -4738,7 +5310,7 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         return false, Constants.SAVE_REBUILD_REQUIRED
     end
     if manifest.state == "RUNNING" then
-        return false, "generation already in progress or recovery is required"
+        return false, "generation already in progress"
     end
 
     -- Capture the fixed destination plan before relocation.  It is never
@@ -4764,8 +5336,8 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         -- intentionally does not inspect loaded target squares.
         validateTargetCoordinates(plannedBounds, destination)
         local oldBounds = manifest.generation ~= nil and manifest.bounds or nil
-        local stagingDestination = selectStagingDestination(plannedBounds,
-            oldBounds, { x = targetX, y = targetY, z = targetZ })
+        local stagingDestination = selectGenerationStagingDestination(layout,
+            plannedBounds)
         return layout, plannedBounds, destination, finalDestination,
             stagingDestination, oldBounds
     end)
@@ -4786,12 +5358,22 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     pendingGeneration = {
         player = player,
         identity = identityOrReason,
+        originalPosition = {
+            x = originalPosition.x,
+            y = originalPosition.y,
+            z = originalPosition.z,
+        },
         token = token,
         rvId = tostring(transitionRvId),
         generation = transitionGeneration,
         bitmapVersion = transitionBitmapVersion,
         queuedAtTick = serverTick,
         acknowledged = false,
+        relocationPhase = "temporary",
+        relocationLastSentTick = nil,
+        relocationRetryAtTick = serverTick,
+        relocationNeedsResend = false,
+        disconnectStartedTick = nil,
         layout = layoutOrError,
         bounds = bounds,
         oldBounds = oldBounds,
@@ -4810,6 +5392,7 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
             x = stagingDestination.x,
             y = stagingDestination.y,
             z = stagingDestination.z,
+            purpose = stagingDestination.purpose,
         },
         railroader = railroaderData,
     }
@@ -4846,6 +5429,8 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         x = stagingDestination.x,
         y = stagingDestination.y,
         z = stagingDestination.z,
+        generationTransition = true,
+        generationPhase = "temporary",
     }
     -- Re-assert the complete generation identity after constructing the
     -- asynchronous payload.  The marker below is only valid with this exact
@@ -4865,11 +5450,11 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         relocatePayload.role = railroaderData.sourceRole
         relocatePayload.seat = railroaderData.sourceSeat
     end
-    local sentOk = callGlobal("sendServerCommand", player, COMMAND_MODULE,
+    local sentOk = callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
         COMMAND_RELOCATE, relocatePayload)
     if not sentOk then
         if Boundary and type(Boundary.clearPlayer) == "function" then
-            Boundary.clearPlayer(player)
+            pcall(Boundary.clearPlayer, player)
         end
         pendingGeneration = nil
         return false, "server-to-client relocation command failed"
@@ -4877,11 +5462,13 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     if not callSucceeded(player, "teleportTo", stagingDestination.x + 0.5,
         stagingDestination.y + 0.5, stagingDestination.z) then
         if Boundary and type(Boundary.clearPlayer) == "function" then
-            Boundary.clearPlayer(player)
+            pcall(Boundary.clearPlayer, player)
         end
         pendingGeneration = nil
         return false, "authoritative server relocation failed"
     end
+    pendingGeneration.relocationLastSentTick = serverTick
+    pendingGeneration.relocationRetryAtTick = serverTick
     print("[RailroaderRVTest] generation queued after relocation player="
         .. identityOrReason.key .. " staging=" .. tostring(stagingDestination.x)
         .. "," .. tostring(stagingDestination.y) .. ","
@@ -4890,8 +5477,6 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     return true
 end
 
--- Public only to the sibling Railroader adapter.  Keeping these tiny hooks on
--- the existing transaction avoids exposing generation internals to clients.
 function RV.Server.setRailroaderValidationHook(callback)
     railroaderValidationHook = type(callback) == "function" and callback or nil
 end
@@ -4913,6 +5498,340 @@ function RV.Server.requestRailroaderGeneration(player, railroaderData)
         return false, "Railroader RV transaction hooks are unavailable"
     end
     return queueGeneration(player, nil, railroaderData)
+end
+
+-- Read-only current-schema gate for the stateless -15 sentinel.  It returns
+-- the manifest only after the same strict validator used by normal entry has
+-- checked the persisted boundary/bitmap contract; it never repairs or writes.
+function RV.Server.currentRVManifestForRelocation(rvId, generation,
+    bitmapVersion)
+    local manifestOk, manifest = pcall(manifestTable)
+    if not manifestOk or type(manifest) ~= "table" then
+        return false, Constants.SAVE_REBUILD_REQUIRED
+    end
+    local schemaOk = pcall(requireCurrentManifest, manifest, false)
+    if not schemaOk or manifest.state ~= "READY"
+        or tostring(manifest.rvId) ~= tostring(rvId)
+        or integer(manifest.generation) ~= integer(generation)
+        or integer(manifest.bitmapVersion) ~= integer(bitmapVersion)
+        or type(manifest.boundary) ~= "table"
+        or tostring(manifest.boundary.rvId) ~= tostring(rvId)
+        or integer(manifest.boundary.generation) ~= integer(generation)
+        or integer(manifest.boundary.bitmapVersion) ~= integer(bitmapVersion) then
+        return false, Constants.SAVE_REBUILD_REQUIRED
+    end
+    return true, manifest
+end
+
+-- BoundaryServer needs the same strict manifest/geometry identity while a
+-- generation is still RUNNING (the normal roof/entry guard must not require
+-- READY until the final acknowledgement commits it).  This narrow hook keeps
+-- that exception explicit and still rejects FAILED/partial/unknown schemas.
+function RV.Server.currentRVManifestForBoundary(rvId, generation,
+    bitmapVersion)
+    local manifestOk, manifest = pcall(manifestTable)
+    if not manifestOk or type(manifest) ~= "table" then
+        return false, Constants.SAVE_REBUILD_REQUIRED
+    end
+    local schemaOk = pcall(requireCurrentManifest, manifest, false)
+    if not schemaOk
+        or (manifest.state ~= "RUNNING" and manifest.state ~= "READY")
+        or tostring(manifest.rvId) ~= tostring(rvId)
+        or integer(manifest.generation) ~= integer(generation)
+        or integer(manifest.bitmapVersion) ~= integer(bitmapVersion) then
+        return false, Constants.SAVE_REBUILD_REQUIRED
+    end
+    return true, manifest
+end
+
+-- Cross-object current-geometry gate shared by boundary/roof/sentinel paths.
+-- The map record and manifest are independently persisted snapshots, so an
+-- identity tuple alone is insufficient: a stale bitmap, bounds, wall ledger,
+-- shell edge set, or region must fail closed even when rvId/generation still
+-- match.  This helper is read-only apart from registering the validated
+-- current boundary snapshot in Boundary's process-local cache.
+function RV.Server.currentRVRecordGeometryConsistent(record, manifest)
+    local function exactKeys(value, fields)
+        if type(value) ~= "table" then return false end
+        local allowed = {}
+        for i = 1, #fields do allowed[fields[i]] = true end
+        for key in pairs(value) do
+            if not allowed[key] then return false end
+        end
+        for i = 1, #fields do
+            if value[fields[i]] == nil then return false end
+        end
+        return true
+    end
+
+    local function integerFieldsEqual(left, right, fields)
+        if not exactKeys(left, fields) or not exactKeys(right, fields) then
+            return false
+        end
+        for i = 1, #fields do
+            if integer(left[fields[i]]) ~= integer(right[fields[i]]) then
+                return false
+            end
+        end
+        return true
+    end
+
+    local function integerFieldsMatch(left, right, fields)
+        if type(left) ~= "table" or type(right) ~= "table" then return false end
+        for i = 1, #fields do
+            if integer(left[fields[i]]) ~= integer(right[fields[i]]) then
+                return false
+            end
+        end
+        return true
+    end
+
+    local managedFields = { "originX", "originY", "width", "height",
+        "minZ", "maxZ" }
+    local boundaryFields = { "schemaVersion", "rvId", "generation",
+        "bitmapVersion", "managed", "bitmap", "shellEdges" }
+    local shellFields = { "edgeKey", "rvId", "generation", "bitmapVersion",
+        "hostX", "hostY", "z", "axis", "side", "objectX", "objectY",
+        "objectZ", "role", "corner", "replacementAllowed" }
+    local boundsShellFields = { "edgeKey", "hostX", "hostY", "z", "axis",
+        "side", "objectX", "objectY", "objectZ", "role", "corner",
+        "replacementAllowed" }
+    local regionFields = { "minX", "minY", "maxX", "maxY", "minZ", "maxZ" }
+
+    if type(record) ~= "table" or type(manifest) ~= "table"
+        or record.generated ~= true
+        or record.version ~= nil or manifest.version ~= nil
+        or type(record.boundary) ~= "table"
+        or type(manifest.boundary) ~= "table"
+        or type(manifest.bounds) ~= "table"
+        or type(manifest.anchor) ~= "table" then
+        return false
+    end
+    local recordGeneration, manifestGeneration = integer(record.generation),
+        integer(manifest.generation)
+    local recordBitmapVersion, manifestBitmapVersion = integer(record.bitmapVersion),
+        integer(manifest.bitmapVersion)
+    if type(record.rvId) ~= "string" or record.rvId == ""
+        or tostring(record.locoId) ~= record.rvId
+        or tostring(manifest.rvId) ~= record.rvId
+        or recordGeneration == nil or recordGeneration < 1
+        or recordGeneration ~= manifestGeneration
+        or recordBitmapVersion ~= Constants.BITMAP_VERSION
+        or manifestBitmapVersion ~= recordBitmapVersion
+        or integer(record.schemaVersion) ~= Constants.RV_RECORD_SCHEMA_VERSION
+        or integer(record.boundarySchemaVersion) ~= Constants.BOUNDARY_SCHEMA_VERSION
+        or integer(manifest.schemaVersion) ~= Constants.MANIFEST_SCHEMA_VERSION
+        or manifest.techVersion ~= Constants.TECH_VERSION
+        or integer(manifest.boundarySchemaVersion)
+            ~= Constants.BOUNDARY_SCHEMA_VERSION
+        or integer(record.boundary.schemaVersion)
+            ~= Constants.BOUNDARY_SCHEMA_VERSION
+        or integer(manifest.boundary.schemaVersion)
+            ~= Constants.BOUNDARY_SCHEMA_VERSION
+        or tostring(record.boundary.rvId) ~= record.rvId
+        or tostring(manifest.boundary.rvId) ~= record.rvId
+        or integer(record.boundary.generation) ~= recordGeneration
+        or integer(manifest.boundary.generation) ~= recordGeneration
+        or integer(record.boundary.bitmapVersion) ~= recordBitmapVersion
+        or integer(manifest.boundary.bitmapVersion) ~= recordBitmapVersion
+        or not exactKeys(record.boundary, boundaryFields)
+        or not exactKeys(manifest.boundary, boundaryFields) then
+        return false
+    end
+
+    local decoded = {}
+    local function decodeCurrent(encoded)
+        if not Bitmap or type(Bitmap.decode) ~= "function"
+            or type(Bitmap.validate) ~= "function" then
+            return nil
+        end
+        local decodeOk, bitmap = pcall(Bitmap.decode, encoded)
+        if not decodeOk or type(bitmap) ~= "table" then return nil end
+        local validOk, valid = pcall(Bitmap.validate, bitmap)
+        if not validOk or valid ~= true then return nil end
+        return bitmap
+    end
+    decoded.record = decodeCurrent(record.boundary.bitmap)
+    decoded.manifest = decodeCurrent(manifest.boundary.bitmap)
+    if not decoded.record or not decoded.manifest then return false end
+
+    local function bitmapsEqual(left, right)
+        if not integerFieldsMatch(left, right, managedFields)
+            or integer(left.bitmapVersion) ~= integer(right.bitmapVersion) then
+            return false
+        end
+        for z = left.minZ, left.maxZ - 1 do
+            local leftLayer, rightLayer = Bitmap.layer(left, z),
+                Bitmap.layer(right, z)
+            if type(leftLayer) ~= "table" or type(rightLayer) ~= "table"
+                or leftLayer.walkBits ~= rightLayer.walkBits
+                or leftLayer.buildBits ~= rightLayer.buildBits then
+                return false
+            end
+        end
+        return true
+    end
+    local bitmapCompareOk, bitmapSame = pcall(bitmapsEqual, decoded.record,
+        decoded.manifest)
+    if not bitmapCompareOk or bitmapSame ~= true
+        or not integerFieldsEqual(record.boundary.managed,
+            manifest.boundary.managed, managedFields)
+        or not integerFieldsEqual(record.managed, record.boundary.managed,
+            managedFields) then
+        return false
+    end
+    if not integerFieldsMatch(decoded.record, record.boundary.managed,
+            managedFields)
+        or not integerFieldsMatch(decoded.manifest, manifest.boundary.managed,
+            managedFields) then
+        return false
+    end
+
+    local function shellSetEqual(left, right)
+        if type(left) ~= "table" or type(right) ~= "table" then return false end
+        local leftCount, rightCount = 0, 0
+        for key, edge in pairs(left) do
+            leftCount = leftCount + 1
+            local other = right[key]
+            if type(key) ~= "string" or type(edge) ~= "table"
+                or type(other) ~= "table"
+                or not exactKeys(edge, shellFields)
+                or not exactKeys(other, shellFields) then
+                return false
+            end
+            for i = 1, #shellFields do
+                local field = shellFields[i]
+                if edge[field] ~= other[field] then return false end
+            end
+        end
+        for _ in pairs(right) do rightCount = rightCount + 1 end
+        return leftCount == rightCount
+    end
+    if not shellSetEqual(record.boundary.shellEdges,
+            manifest.boundary.shellEdges) then
+        return false
+    end
+
+    -- The manifest wall/shell contract is already validated by the strict
+    -- current-only validator.  Re-run it here so this public cross-object
+    -- hook remains safe when a caller reaches it without first calling the
+    -- manifest helper.
+    local manifestValidOk, manifestValid = pcall(currentManifestValid,
+        manifest, false)
+    if not manifestValidOk or manifestValid ~= true then return false end
+    -- currentManifestValid also gates this snapshot for normal callers, but
+    -- keep the cross-object contract explicit here: bounds.bitmap is a
+    -- decoded current-layout bitmap and must be byte/bit identical to the
+    -- encoded boundary bitmap and the record copy before any consumer uses
+    -- the center, region, or shell geometry.
+    local boundsBitmap = manifest.bounds and manifest.bounds.bitmap
+    local boundsBitmapOk, boundsBitmapValid = false, false
+    if Bitmap and type(Bitmap.validate) == "function" then
+        boundsBitmapOk, boundsBitmapValid = pcall(Bitmap.validate, boundsBitmap)
+    end
+    if not boundsBitmapOk or boundsBitmapValid ~= true
+        or not bitmapsEqual(boundsBitmap, decoded.manifest) then
+        return false
+    end
+    local bounds = manifest.bounds
+    local boundsShell = bounds.shellEdges
+    for key, edge in pairs(record.boundary.shellEdges) do
+        local boundEdge = type(boundsShell) == "table" and boundsShell[key]
+            or nil
+        if type(boundEdge) ~= "table"
+            or not exactKeys(boundEdge, boundsShellFields) then
+            return false
+        end
+        for i = 1, #boundsShellFields do
+            local field = boundsShellFields[i]
+            if edge[field] ~= boundEdge[field] then return false end
+        end
+    end
+    local boundaryCount, boundsCount = 0, 0
+    for _ in pairs(record.boundary.shellEdges) do boundaryCount = boundaryCount + 1 end
+    for _ in pairs(boundsShell or {}) do boundsCount = boundsCount + 1 end
+    if boundaryCount ~= boundsCount then return false end
+
+    local anchor = manifest.anchor
+    if not exactKeys(anchor, { "x", "y", "z" })
+        or integer(anchor.x) == nil or integer(anchor.y) == nil
+        or integer(anchor.z) == nil then
+        return false
+    end
+    local anchorX, anchorY, anchorZ = integer(anchor.x), integer(anchor.y),
+        integer(anchor.z)
+    local boundsManaged = {
+        originX = integer(bounds.managedOriginX),
+        originY = integer(bounds.managedOriginY),
+        width = integer(bounds.managedWidth),
+        height = integer(bounds.managedHeight),
+        minZ = integer(bounds.managedMinZ),
+        maxZ = integer(bounds.managedMaxZ),
+    }
+    if not integerFieldsEqual(boundsManaged, record.managed, managedFields)
+        or anchorX ~= boundsManaged.originX + math.floor(boundsManaged.width / 2)
+        or anchorY ~= boundsManaged.originY + math.floor(boundsManaged.height / 2)
+        or anchorZ ~= integer(bounds.z)
+        or type(record.rvPosition) ~= "table"
+        or not exactKeys(record.rvPosition, { "x", "y", "z" })
+        or toNumber(record.rvPosition.x) ~= anchorX + 0.5
+        or toNumber(record.rvPosition.y) ~= anchorY + 0.5
+        or toNumber(record.rvPosition.z) ~= anchorZ then
+        return false
+    end
+
+    local regionSize = integer(Constants.RV_REGION_SIZE)
+    local regionMinXOffset = integer(Constants.RV_REGION_MIN_OFFSET_X)
+    local regionMinYOffset = integer(Constants.RV_REGION_MIN_OFFSET_Y)
+    local managedMinZOffset = integer(Constants.RV_MANAGED_MIN_Z_OFFSET)
+    local managedMaxZOffset = integer(Constants.RV_MANAGED_MAX_Z_OFFSET)
+    if not regionSize or not regionMinXOffset or not regionMinYOffset
+        or not managedMinZOffset or not managedMaxZOffset then
+        return false
+    end
+    local expectedRegion = {
+        minX = anchorX + regionMinXOffset,
+        minY = anchorY + regionMinYOffset,
+        maxX = anchorX + regionMinXOffset + regionSize,
+        maxY = anchorY + regionMinYOffset + regionSize,
+        minZ = anchorZ + managedMinZOffset,
+        maxZ = anchorZ + managedMaxZOffset,
+    }
+    if not integerFieldsEqual(record.region, expectedRegion, regionFields) then
+        return false
+    end
+
+    if not Boundary or type(Boundary.registerGeneration) ~= "function" then
+        return false
+    end
+    local registerOk, registered = pcall(Boundary.registerGeneration,
+        record.rvId, recordGeneration, record.boundary, record)
+    return registerOk and registered == true
+end
+
+-- Narrow current-only gate for adapter Enter/Exit mutations.  Callers do not
+-- supply a manifest snapshot: the service reads the current persisted
+-- manifest, requires the READY/COMMITTED contract, and then reuses the full
+-- cross-object geometry validator above.  A failed gate has one stable public
+-- result so an adapter cannot accidentally continue with a partial snapshot.
+function RV.Server.validateCurrentRVRecord(record)
+    if type(record) ~= "table" or type(record.rvId) ~= "string"
+        or record.rvId == "" then
+        return false, Constants.SAVE_REBUILD_REQUIRED
+    end
+    local manifestCallOk, manifestAccepted, manifestOrReason = pcall(
+        RV.Server.currentRVManifestForRelocation, record.rvId,
+        record.generation, record.bitmapVersion)
+    if not manifestCallOk or manifestAccepted ~= true
+        or type(manifestOrReason) ~= "table" then
+        return false, Constants.SAVE_REBUILD_REQUIRED
+    end
+    local geometryCallOk, consistent = pcall(
+        RV.Server.currentRVRecordGeometryConsistent, record, manifestOrReason)
+    if not geometryCallOk or consistent ~= true then
+        return false, Constants.SAVE_REBUILD_REQUIRED
+    end
+    return true, manifestOrReason
 end
 
 -- Re-run the official add-floor/remove-floor neighbour invalidation after an
@@ -5074,7 +5993,7 @@ local function acknowledgeRelocation(player, args)
         member.acknowledgedAtTick = serverTick
         return true
     end
-    local pending = pendingGeneration or pendingRoofRepairRelocation
+    local pending = pendingGeneration
     local token = ackPayloadToken(args)
     if pending == nil or token == nil or token ~= pending.token then
         return false, "unexpected or malformed relocation acknowledgement"
@@ -5093,18 +6012,207 @@ local function acknowledgeRelocation(player, args)
     return true
 end
 
+-- FinalRelocate has its own ACK namespace.  The payload is deliberately only
+-- the opaque token; all RV identity, destination and room/guard evidence is
+-- re-read from the server-owned pending plan and current manifest.
+local function acknowledgeFinalRelocation(player, args)
+    local pending = pendingGeneration
+    local token = ackPayloadToken(args)
+    if not pending or pending.finalRelocationSent ~= true
+        or token == nil or token ~= pending.token then
+        return false, "unexpected or malformed final relocation acknowledgement"
+    end
+    local resolved, livePlayerOrReason = resolvePendingPlayer(pending)
+    if not resolved then return false, livePlayerOrReason end
+    local identityOk, identityOrReason = playerIdentity(player)
+    if not identityOk or identityOrReason.key ~= pending.identity.key then
+        return false, identityOk
+            and "final acknowledgement sender does not own the request"
+            or identityOrReason
+    end
+    local manifestOk, manifest = pcall(manifestTable)
+    if not manifestOk or type(manifest) ~= "table" then
+        return false, Constants.SAVE_REBUILD_REQUIRED
+    end
+    local schemaOk = pcall(requireCurrentManifest, manifest, false)
+    if not schemaOk or manifest.state ~= "RUNNING"
+        or manifest.phase ~= "FINAL_RELOCATE"
+        or tostring(manifest.rvId) ~= tostring(pending.rvId)
+        or integer(manifest.generation) ~= pending.generation
+        or integer(manifest.bitmapVersion) ~= pending.bitmapVersion then
+        return false, Constants.SAVE_REBUILD_REQUIRED
+    end
+    local anchor = manifest.anchor
+    local anchorX = type(anchor) == "table"
+        and requiredInteger(anchor.x, "final acknowledgement anchor x") or nil
+    local anchorY = type(anchor) == "table"
+        and requiredInteger(anchor.y, "final acknowledgement anchor y") or nil
+    local anchorZ = type(anchor) == "table"
+        and requiredInteger(anchor.z, "final acknowledgement anchor z") or nil
+    local target = pending.finalDestination
+    if anchorX == nil or anchorY == nil or anchorZ == nil
+        or type(target) ~= "table"
+        or target.x ~= anchorX + 0.5 or target.y ~= anchorY + 0.5
+        or target.z ~= anchorZ then
+        return false, Constants.SAVE_REBUILD_REQUIRED
+    end
+    local stateOk, state = authoritativePlayerPosition(livePlayerOrReason)
+    if not stateOk or not relocationPositionsEqual(state, target) then
+        return false, "final relocation acknowledgement has no authoritative target proof"
+    end
+    pending.finalRelocationAcked = true
+    pending.finalRelocationAckAtTick = serverTick
+    return true
+end
+
+local function rollbackPendingGenerationWorld(pending, reason)
+    if type(pending) ~= "table"
+        or pending.finalRelocationSent ~= true
+        or pending.rollbackApplied == true then
+        return true
+    end
+    if serverTick < (pending.rollbackWorldRetryAtTick or 0) then
+        return false
+    end
+    local manifest = pending.manifest
+    if type(manifest) ~= "table" then
+        local manifestOk, manifestOrReason = pcall(manifestTable)
+        if not manifestOk or type(manifestOrReason) ~= "table" then
+            print("[RailroaderRVTest] final relocation rollback deferred reason="
+                .. safeErrorText(manifestOrReason))
+            return false
+        end
+        manifest = manifestOrReason
+    end
+    local cell = pending.generationCell
+    if not cell then
+        local cellOk, cellOrReason = pcall(getCellForPlayer, pending.player)
+        if not cellOk or not cellOrReason then
+            print("[RailroaderRVTest] final relocation rollback deferred reason="
+                .. safeErrorText(cellOrReason))
+            return false
+        end
+        cell = cellOrReason
+    end
+    local rollbackOk, rollbackReason = pcall(removeGeneration, cell,
+        pending.bounds, pending.generation, pending.rvId,
+        pending.bitmapVersion)
+    if not rollbackOk then
+        manifest.rollback = "FAILED"
+        pending.rollbackWorldRetryAtTick = serverTick
+            + GENERATION_RELOCATION_RETRY_TICKS
+        print("[RailroaderRVTest] final relocation rollback failed: "
+            .. safeErrorText(rollbackReason))
+        return false
+    end
+    manifest.rollback = "COMPLETE"
+    local markedOk, marked, markedReason = pcall(markGenerationFailed, manifest,
+        safeErrorText(reason or "final relocation acknowledgement failed"))
+    if not markedOk or marked ~= true then
+        pending.rollbackWorldRetryAtTick = serverTick
+            + GENERATION_RELOCATION_RETRY_TICKS
+        print("[RailroaderRVTest] final relocation failure marker deferred: "
+            .. safeErrorText(markedOk and markedReason or marked))
+        return false
+    end
+    pending.rollbackApplied = true
+    transactionBusy = false
+    transactionPlayer = nil
+    return true
+end
+
 local function cancelPending(reason)
     local pending = pendingGeneration
-    pendingGeneration = nil
-    if pending and Boundary and type(Boundary.clearPlayer) == "function" then
-        Boundary.clearPlayer(pending.player)
+    if not pending then return end
+    pending.failureReason = reason
+    pending.cancelled = true
+    local resolved, livePlayerOrReason = resolvePendingPlayer(pending)
+    if not resolved then
+        if generationDisconnected(livePlayerOrReason) then
+            pauseGenerationForDisconnect(pending)
+        end
+        transactionBusy = true
+        transactionPlayer = nil
+        print("[RailroaderRVTest] generation cancellation deferred identity="
+            .. tostring(pending.identity and pending.identity.key or "unknown")
+            .. " reason=" .. safeErrorText(livePlayerOrReason))
+        return
     end
-    if pending and pending.railroader ~= nil and railroaderFailureHook then
-        pcall(railroaderFailureHook, pending.player, pending.railroader, reason,
+    local livePlayer = livePlayerOrReason
+    pending.player = livePlayer
+    resumeGenerationAfterDisconnect(pending)
+    if pending.boundaryCleared ~= true
+        and not rearmGenerationTransition(pending, livePlayer, "generation") then
+        pending.rollbackRetryAtTick = serverTick
+            + GENERATION_RELOCATION_RETRY_TICKS
+        transactionBusy = true
+        transactionPlayer = livePlayer
+        return
+    end
+    if pending.finalRelocationSent == true and pending.rollbackApplied ~= true then
+        local rollbackOk = rollbackPendingGenerationWorld(pending, reason)
+        if not rollbackOk then
+            transactionBusy = true
+            transactionPlayer = livePlayer
+            return
+        end
+    end
+    local positionOk, position = authoritativePlayerPosition(livePlayer)
+    local original = pending.originalPosition
+    local atOriginal = positionOk and type(position) == "table"
+        and type(original) == "table"
+        and relocationPositionsEqual(position, original)
+    if not atOriginal then
+        if type(original) ~= "table" then
+            transactionBusy = true
+            transactionPlayer = livePlayer
+            return
+        end
+        if serverTick < (pending.rollbackRetryAtTick or 0) then
+            transactionBusy = true
+            transactionPlayer = livePlayer
+            return
+        end
+        local returned = resendGenerationPhase(pending, livePlayer, "rollback")
+        pending.rollbackRetryAtTick = serverTick
+            + GENERATION_RELOCATION_RETRY_TICKS
+        if not returned then
+            transactionBusy = true
+            transactionPlayer = livePlayer
+            return
+        end
+        local afterOk, after = authoritativePlayerPosition(livePlayer)
+        if not afterOk or not relocationPositionsEqual(after, original) then
+            pending.rollbackRetryAtTick = serverTick
+                + GENERATION_RELOCATION_RETRY_TICKS
+            transactionBusy = true
+            transactionPlayer = livePlayer
+            return
+        end
+    end
+    if pending.boundaryCleared ~= true and Boundary
+        and type(Boundary.completeTransition) == "function"
+        and pending.token ~= nil then
+        local completeOk, complete = pcall(Boundary.completeTransition,
+            livePlayer, pending.token)
+        if not completeOk or complete ~= true then
+            pending.rollbackRetryAtTick = serverTick
+                + GENERATION_RELOCATION_RETRY_TICKS
+            transactionBusy = true
+            transactionPlayer = livePlayer
+            return
+        end
+    end
+    if pending.railroader ~= nil and railroaderFailureHook then
+        pcall(railroaderFailureHook, livePlayer, pending.railroader, reason,
             pending)
     end
+    notifyFailure(livePlayer, reason)
+    pendingGeneration = nil
+    transactionBusy = false
+    transactionPlayer = nil
     print("[RailroaderRVTest] queued generation cancelled player="
-        .. (pending and pending.identity.key or "unknown") .. ": "
+        .. tostring(pending.identity and pending.identity.key or "unknown") .. ": "
         .. safeErrorText(reason))
 end
 
@@ -5120,6 +6228,14 @@ end
 local function processRoofRepairRelocationGroup()
     local group = roofRepairRelocationGroup
     if not group then return end
+    -- A live process owns the exact-float group across a player disconnect.
+    -- Defer all phase work until every stable identity has a live IsoPlayer;
+    -- this avoids converting a reconnect into a failed/cancelled transaction.
+    for i = 1, #(group.members or {}) do
+        local resolved = resolveRoofRepairGroupPlayer(group,
+            group.members[i])
+        if not resolved then return end
+    end
     if serverTick > (group.deadlineTick or serverTick) then
         failRoofRepairRelocationGroup("roof repair group relocation transaction timed out")
         return
@@ -5127,9 +6243,9 @@ local function processRoofRepairRelocationGroup()
     for i = 1, #(group.members or {}) do
         local member = group.members[i]
         if not member.arrived then
-            local resolved, playerOrReason = resolvePendingPlayer(member)
+            local resolved, playerOrReason = resolveRoofRepairGroupPlayer(
+                group, member)
             if not resolved then
-                failRoofRepairRelocationGroup(playerOrReason)
                 return
             end
             local stateCallOk, stateOk, stateOrReason = pcall(
@@ -5142,15 +6258,65 @@ local function processRoofRepairRelocationGroup()
                 failRoofRepairRelocationGroup(stateOrReason)
                 return
             end
-            local contextOk, contextOrReason = currentRoofRepairContext(
-                playerOrReason, {
+            local contextCallOk, contextOk, contextOrReason = pcall(
+                currentRoofRepairContext, playerOrReason, {
                     rvId = member.rvId, generation = member.generation,
                     bitmapVersion = member.bitmapVersion,
                     identityKey = member.identityKey,
                 })
+            if not contextCallOk then
+                contextOrReason = safeErrorText(contextOk)
+                contextOk = false
+            end
             if not contextOk then
                 failRoofRepairRelocationGroup(contextOrReason)
                 return
+            end
+            local target = group.phase == "temporary"
+                and group.target or member.target
+            if group.phase == "return" then
+                local exactCallOk, exactPosition = pcall(
+                    authoritativePlayerPosition, playerOrReason)
+                local atTarget = exactCallOk and type(exactPosition) == "table"
+                    and exactPosition.x == target.x
+                    and exactPosition.y == target.y
+                    and exactPosition.z == target.z
+                    and exactPosition.z ~= ROOF_REPAIR_TEMP_Z
+                if not atTarget then
+                    -- A stale/fallen member needs the same return command again,
+                    -- but never once per tick.  Clear any old ACK first so a
+                    -- delayed packet cannot complete a command that has just
+                    -- been reissued.
+                    member.acknowledged = false
+                    member.arrivalConsumed = false
+                    member.completed = false
+                    member.arrived = false
+                    member.relocationNeedsResend = true
+                    if serverTick < (member.relocationRetryAtTick or 0) then
+                        -- Wait for the bounded retry cadence below.
+                    elseif type(member.returnPayload) ~= "table" then
+                        failRoofRepairRelocationGroup(
+                            "roof repair group return payload is unavailable")
+                        return
+                    else
+                        local sentOk = callGlobalSucceeded("sendServerCommand",
+                            playerOrReason, COMMAND_MODULE, COMMAND_RELOCATE,
+                            member.returnPayload)
+                        local moved = callSucceeded(playerOrReason, "teleportTo",
+                            target.x, target.y, target.z)
+                        member.relocationLastSentTick = serverTick
+                        member.relocationRetryAtTick = serverTick
+                            + ROOF_RELOCATION_RETRY_TICKS
+                        if not sentOk or not moved then
+                            -- A transient send/teleport failure is retried with
+                            -- this token; the transaction timeout remains the
+                            -- final bounded failure path.
+                            member.relocationNeedsResend = true
+                        else
+                            member.relocationNeedsResend = false
+                        end
+                    end
+                end
             end
             local elapsed = serverTick - group.queuedAtTick
             if not member.acknowledged
@@ -5160,10 +6326,13 @@ local function processRoofRepairRelocationGroup()
                 -- The player may still be synchronizing its current square;
                 -- do not treat an absent ACK as a permanent failure yet.
             else
-                local target = group.phase == "temporary"
-                    and group.target or member.target
-                local ready, readyReason = roofRepairTargetReady(playerOrReason,
-                    target, group.phase, group.allowedPlayers)
+                    local readyCallOk, ready, readyReason = pcall(
+                        roofRepairTargetReady, playerOrReason, target,
+                        group.phase, group.allowedPlayers)
+                    if not readyCallOk then
+                        readyReason = safeErrorText(ready)
+                        ready = false
+                    end
                 if not ready then
                     if roofRepairRelocationPositionStillSyncing(readyReason) then
                         -- Wait for the authoritative square/current cell to
@@ -5187,57 +6356,6 @@ local function processRoofRepairRelocationGroup()
     end
 end
 
-local function processPendingRoofRepairRelocation()
-    local pending = pendingRoofRepairRelocation
-    if not pending then return end
-    if serverTick > (pending.deadlineTick or serverTick) then
-        failRoofRepairRelocation("roof repair relocation transaction timed out")
-        return
-    end
-    local resolved, playerOrReason = resolvePendingPlayer(pending)
-    if not resolved then
-        failRoofRepairRelocation(playerOrReason)
-        return
-    end
-    local stateCallOk, stateOk, stateOrReason = pcall(
-        validateAuthoritativePlayer, playerOrReason)
-    if not stateCallOk then
-        failRoofRepairRelocation(safeErrorText(stateOk))
-        return
-    end
-    if not stateOk then
-        failRoofRepairRelocation(stateOrReason)
-        return
-    end
-    local elapsed = serverTick - pending.queuedAtTick
-    if not pending.acknowledged
-        or elapsed < RELOCATION_MIN_TICKS
-        or serverTick - (pending.acknowledgedAtTick or serverTick)
-            < RELOCATION_POST_ACK_TICKS then
-        return
-    end
-    local ready, readyReason = roofRepairTargetReady(playerOrReason,
-        pending.target, pending.phase)
-    if not ready then
-        if roofRepairRelocationPositionStillSyncing(readyReason) then
-            return
-        end
-        failRoofRepairRelocation(readyReason)
-        return
-    end
-    pendingRoofRepairRelocation = nil
-    pending.arrived = true
-    pending.arrivedAtTick = serverTick
-    roofRepairRelocationArrival = pending
-    -- Keep the token/Boundary lease active while the Railroader adapter waits
-    -- for the 5/10/15-tick repair attempts and starts the return phase.
-    print("[RailroaderRVTest] roof repair relocation arrived room="
-        .. tostring(pending.roomKey or "unknown") .. " phase="
-        .. tostring(pending.phase) .. " target=" .. tostring(pending.target.x)
-        .. "," .. tostring(pending.target.y) .. ","
-        .. tostring(pending.target.z))
-end
-
 function RV.Server.OnTick()
     serverTick = serverTick + 1
     -- Extend the token-scoped boundary lease before Boundary.onTick runs.  The
@@ -5245,26 +6363,38 @@ function RV.Server.OnTick()
     -- bitmap while the engine settles room state; correction must stay paused
     -- for that bounded transaction only.
     if not keepRoofRepairTransitionAlive() then return end
+    if not keepGenerationTransitionAlive() then return end
     if Boundary and type(Boundary.onTick) == "function" then
         pcall(Boundary.onTick)
     end
     processServerRoomOwnershipGuards()
     processRoofRepairRelocationGroup()
-    processPendingRoofRepairRelocation()
-    processRoofRepairFinalReturn()
     processRoofRepairGroupFinalReturn()
     local pending = pendingGeneration
     if pending == nil then
         return
     end
-    local elapsed = serverTick - pending.queuedAtTick
-    if elapsed > RELOCATION_TIMEOUT_TICKS then
-        cancelPending("relocation acknowledgement timed out before world mutation")
+    if pending.cancelled == true then
+        cancelPending(pending.failureReason or "generation transaction cancelled")
         return
     end
     local resolved, playerOrReason = resolvePendingPlayer(pending)
     if not resolved then
-        cancelPending(playerOrReason)
+        -- A live server keeps the exact-float transaction until the same stable
+        -- identity reconnects; no timeout or failure callback is run on a
+        -- missing player object.
+        if not generationDisconnected(playerOrReason) then
+            cancelPending(playerOrReason)
+        else
+            pauseGenerationForDisconnect(pending)
+        end
+        return
+    end
+    resumeGenerationAfterDisconnect(pending)
+    local elapsed = serverTick - pending.queuedAtTick
+    if pending.finalRelocationSent ~= true
+        and elapsed > RELOCATION_TIMEOUT_TICKS then
+        cancelPending("relocation acknowledgement timed out before world mutation")
         return
     end
     if pending.railroader == nil then
@@ -5285,6 +6415,28 @@ function RV.Server.OnTick()
     end
     if not stateOk then
         cancelPending(stateOrReason)
+        return
+    end
+    if pending.finalRelocationSent == true then
+        if not pending.finalRelocationAcked then
+            if serverTick > (pending.finalRelocationDeadlineTick
+                or serverTick) then
+                cancelPending("final relocation acknowledgement timed out")
+            end
+            return
+        end
+        local finalOk, finalReason = finalizeGenerationAfterRelocate(
+            playerOrReason, pending)
+        if finalOk then
+            pendingGeneration = nil
+            print("[RailroaderRVTest] generation committed READY")
+        else
+            pending.failureReason = finalReason
+            pending.cancelled = true
+            cancelPending(finalReason)
+            print("[RailroaderRVTest] generation finalization failed: "
+                .. safeErrorText(finalReason))
+        end
         return
     end
     if not pending.acknowledged or elapsed < RELOCATION_MIN_TICKS
@@ -5316,15 +6468,15 @@ function RV.Server.OnTick()
 
     local completedPending = pending
     local ok, reason = generateForPlayer(playerOrReason, completedPending)
-    pendingGeneration = nil
     if not ok then
-        if completedPending.railroader ~= nil and railroaderFailureHook then
-            pcall(railroaderFailureHook, playerOrReason,
-                completedPending.railroader, reason, completedPending)
-        end
-        notifyFailure(playerOrReason, reason)
+        completedPending.failureReason = reason
+        completedPending.cancelled = true
+        cancelPending(reason)
         print("[RailroaderRVTest] generation failed: " .. tostring(reason))
+    elseif reason == "await-final-relocate" then
+        print("[RailroaderRVTest] generation awaiting FinalRelocateAck")
     else
+        pendingGeneration = nil
         print("[RailroaderRVTest] generation committed READY")
     end
 end
@@ -5341,6 +6493,19 @@ function RV.Server.OnClientCommand(module, command, player, args)
     -- validator log them as malformed Generate requests.
     if module == COMMAND_MODULE
         and (command == COMMAND_RV_ENTER or command == COMMAND_RV_EXIT) then
+        return
+    end
+    if module == COMMAND_MODULE and command == COMMAND_FINAL_RELOCATE_ACK then
+        local ackOk, accepted, reason = pcall(acknowledgeFinalRelocation,
+            player, args)
+        if not ackOk then
+            reason = safeErrorText(accepted)
+            accepted = false
+        end
+        if not accepted then
+            print("[RailroaderRVTest] final relocation acknowledgement rejected: "
+                .. safeErrorText(reason))
+        end
         return
     end
     if module == COMMAND_MODULE and command == COMMAND_RELOCATE_ACK then

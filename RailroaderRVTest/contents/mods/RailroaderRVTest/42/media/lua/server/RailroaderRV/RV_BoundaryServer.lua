@@ -64,6 +64,17 @@ local function integer(value)
     return result
 end
 
+local function exactKeys(value, expected)
+    if type(value) ~= "table" then return false end
+    local allowed, count = {}, 0
+    for i = 1, #expected do allowed[expected[i]] = true end
+    for key in pairs(value) do
+        if not allowed[key] then return false end
+        count = count + 1
+    end
+    return count == #expected
+end
+
 local function call(target, method, ...)
     if target == nil or type(target[method]) ~= "function" then
         return false, nil
@@ -143,33 +154,6 @@ local function square(cell, x, y, z)
     return ok and result or nil
 end
 
-local function mapData()
-    if not ModData then return nil end
-    if type(ModData.get) == "function" then
-        local ok, map = pcall(ModData.get, C.RV_MAP_KEY)
-        if ok and type(map) == "table"
-            and integer(map.schemaVersion) == C.MAP_SCHEMA_VERSION
-            and type(map.locomotives) == "table"
-            and type(map.players) == "table" then
-            return map
-        end
-    end
-    return nil
-end
-
-local function findRecord(map, locoId)
-    if type(map) ~= "table" or type(map.locomotives) ~= "table"
-        or locoId == nil then return nil end
-    local wanted = tostring(locoId)
-    for _, record in pairs(map.locomotives) do
-        if type(record) == "table" and record.locoId ~= nil
-            and tostring(record.locoId) == wanted then
-            return record
-        end
-    end
-    return nil
-end
-
 local function encodeShellEdges(source, rvId, generation, bitmapVersion)
     local result = {}
     if type(source) ~= "table" then return result end
@@ -197,10 +181,22 @@ local function validShellEdges(edges, rvId, generation, bitmapVersion)
         or integer(bitmapVersion) ~= C.BITMAP_VERSION then
         return false
     end
+    local edgeCount = 0
+    local allowedEdgeKeys = {
+        edgeKey = true, rvId = true, generation = true,
+        bitmapVersion = true, hostX = true, hostY = true, z = true,
+        axis = true, side = true, objectX = true, objectY = true,
+        objectZ = true, role = true, corner = true,
+        replacementAllowed = true,
+    }
     for key, edge in pairs(edges) do
+        edgeCount = edgeCount + 1
         if type(key) ~= "string" or type(edge) ~= "table"
             or edge.edgeKey ~= key then
             return false
+        end
+        for field in pairs(edge) do
+            if not allowedEdgeKeys[field] then return false end
         end
         local axis, edgeX, edgeY, edgeZ = string.match(
             key, "^([NW]):(-?%d+):(-?%d+):(-?%d+)$")
@@ -223,11 +219,13 @@ local function validShellEdges(edges, rvId, generation, bitmapVersion)
             or integer(edge.objectX) ~= edgeX
             or integer(edge.objectY) ~= edgeY
             or integer(edge.objectZ) ~= edgeZ
+            or type(edge.role) ~= "string"
+            or type(edge.corner) ~= "boolean"
             or type(edge.replacementAllowed) ~= "boolean" then
             return false
         end
     end
-    return true
+    return edgeCount == 92
 end
 
 -- Build the persistent record from a layout plan.  Only the encoded bitmap is
@@ -285,6 +283,10 @@ end
 
 local function decodeBoundary(boundary)
     if type(boundary) ~= "table" then return nil end
+    if not exactKeys(boundary, { "schemaVersion", "rvId", "generation",
+        "bitmapVersion", "managed", "bitmap", "shellEdges" }) then
+        return nil
+    end
     if boundary.version ~= nil then return nil end
     if integer(boundary.schemaVersion) ~= C.BOUNDARY_SCHEMA_VERSION then return nil end
     local encoded = boundary.bitmap
@@ -292,7 +294,8 @@ local function decodeBoundary(boundary)
     local bitmap = Bitmap.decode(encoded)
     if not bitmap or not Bitmap.validate(bitmap) then return nil end
     local managed = boundary.managed
-    if type(managed) ~= "table"
+    if not exactKeys(managed, { "originX", "originY", "width", "height",
+        "minZ", "maxZ" })
         or integer(managed.originX) ~= bitmap.originX
         or integer(managed.originY) ~= bitmap.originY
         or integer(managed.width) ~= bitmap.width
@@ -320,6 +323,72 @@ local function boundaryKey(boundary)
         .. ":" .. tostring(boundary.bitmapVersion)
 end
 
+local function sameBoundaryManaged(left, right)
+    if type(left) ~= "table" or type(right) ~= "table" then return false end
+    local fields = { "originX", "originY", "width", "height", "minZ", "maxZ" }
+    if not exactKeys(left, fields) or not exactKeys(right, fields) then
+        return false
+    end
+    for i = 1, #fields do
+        if integer(left[fields[i]]) ~= integer(right[fields[i]]) then
+            return false
+        end
+    end
+    return true
+end
+
+local function sameBoundaryBitmap(left, right)
+    if type(left) ~= "table" or type(right) ~= "table" then
+        return false
+    end
+    for _, field in ipairs({ "originX", "originY", "width", "height", "minZ", "maxZ" }) do
+        if integer(left[field]) ~= integer(right[field]) then return false end
+    end
+    for z = left.minZ, left.maxZ - 1 do
+        local leftLayer, rightLayer = Bitmap.layer(left, z), Bitmap.layer(right, z)
+        if type(leftLayer) ~= "table" or type(rightLayer) ~= "table"
+            or leftLayer.walkBits ~= rightLayer.walkBits
+            or leftLayer.buildBits ~= rightLayer.buildBits then
+            return false
+        end
+    end
+    return true
+end
+
+local function sameBoundaryShellEdges(left, right)
+    if type(left) ~= "table" or type(right) ~= "table" then return false end
+    local fields = { "edgeKey", "rvId", "generation", "bitmapVersion",
+        "hostX", "hostY", "z", "axis", "side", "objectX", "objectY",
+        "objectZ", "role", "corner", "replacementAllowed" }
+    local leftCount, rightCount = 0, 0
+    for key, edge in pairs(left) do
+        leftCount = leftCount + 1
+        local other = right[key]
+        if type(edge) ~= "table" or type(other) ~= "table"
+            or not exactKeys(edge, fields) or not exactKeys(other, fields) then
+            return false
+        end
+        for i = 1, #fields do
+            local field = fields[i]
+            if edge[field] ~= other[field] then return false end
+        end
+    end
+    for _ in pairs(right) do rightCount = rightCount + 1 end
+    return leftCount == rightCount
+end
+
+-- The cache key is an identity tuple, not a geometry checksum.  A malformed
+-- or partially replaced current save can therefore reuse the same tuple with
+-- different bitmap/shell geometry.  Reject that reuse and replace the cached
+-- snapshot before any guard or cleanup consumes it.
+local function sameBoundaryGeometry(cached, boundary, bitmap)
+    return type(cached) == "table"
+        and sameBoundaryBitmap(cached.bitmap, bitmap)
+        and sameBoundaryManaged(cached.encoded and cached.encoded.managed,
+            boundary.managed)
+        and sameBoundaryShellEdges(cached.shellEdges, boundary.shellEdges)
+end
+
 local function sameBoundary(left, right)
     return type(left) == "table" and type(right) == "table"
         and boundaryKey(left) == boundaryKey(right)
@@ -331,7 +400,16 @@ local function loadedBoundary(boundary)
     local key = boundaryKey({ rvId = rvId, generation = generation,
         bitmapVersion = bitmapVersion })
     local cached = Boundary._registered[key]
-    if cached then return cached end
+    if cached and sameBoundaryGeometry(cached, boundary, bitmap) then
+        return cached
+    end
+    if cached then
+        Boundary._registered[key] = nil
+        -- A new geometry with the same identity must not inherit an old
+        -- cleanup cursor.  The next current-only registration starts a fresh
+        -- cursor against the replacement snapshot.
+        Boundary._cleanups[key] = nil
+    end
     local result = {
         rvId = rvId, generation = generation, bitmapVersion = bitmapVersion,
         bitmap = bitmap, encoded = boundary, shellEdges = boundary.shellEdges or {},
@@ -363,26 +441,30 @@ end
 function Boundary.boundaryForPlayer(player)
     local id = identity(player)
     if not id then return nil end
-    local map = mapData()
-    local relation = map and map.players and map.players[id.username] or nil
-    if type(relation) ~= "table"
-        or integer(relation.schemaVersion) ~= C.RV_RELATION_SCHEMA_VERSION
-        or relation.inside ~= true then return nil end
-    local record = findRecord(map, relation.locoId)
-    if not record or record.generated ~= true
-        or integer(record.schemaVersion) ~= C.RV_RECORD_SCHEMA_VERSION
-        or integer(record.boundarySchemaVersion) ~= C.BOUNDARY_SCHEMA_VERSION then
+    -- The complete current-only map/record validator lives in the Railroader
+    -- adapter.  Boundary must not maintain a second shallow ModData parser:
+    -- if the hook is missing, or rejects a missing/unknown/partial schema,
+    -- no boundary guard is allowed to run.
+    local rv = rawget(_G, "RailroaderRV")
+    local adapter = rv and rv.RailroaderServer
+    local validator = adapter and adapter.validateCurrentBoundaryPlayer
+    if type(validator) ~= "function" then return nil end
+    local hookOk, boundary, record, relation, validatedIdentity = pcall(
+        validator, player)
+    if not hookOk or type(boundary) ~= "table"
+        or type(record) ~= "table" or type(relation) ~= "table"
+        or type(validatedIdentity) ~= "table"
+        or validatedIdentity.key ~= id.key then
         return nil
     end
-    local boundary = record.boundary
     local loaded = loadedBoundary(boundary)
     if not loaded then return nil end
-    if loaded.rvId ~= tostring(record.rvId or relation.locoId)
+    if loaded.rvId ~= tostring(record.rvId)
         or loaded.generation ~= integer(record.generation)
         or loaded.bitmapVersion ~= integer(record.bitmapVersion) then
         return nil
     end
-    return loaded, record, relation, id
+    return loaded, record, relation, validatedIdentity
 end
 
 function Boundary.managedContains(boundary, x, y, z)
@@ -582,10 +664,13 @@ local function updatePlayer(player)
     if not boundary then return end
     local state = stateFor(player)
     if not state then return end
-    if state.rvId ~= boundary.rvId or state.generation ~= boundary.generation
+    if state.boundaryReference ~= boundary
+        or state.rvId ~= boundary.rvId
+        or state.generation ~= boundary.generation
         or state.bitmapVersion ~= boundary.bitmapVersion then
         state.rvId, state.generation, state.bitmapVersion = boundary.rvId,
             boundary.generation, boundary.bitmapVersion
+        state.boundaryReference = boundary
         state.lastValid, state.lastPosition, state.invalidSegment = nil, nil, nil
         state.recoveryCooldown = 0
         state.snapshotKey = nil

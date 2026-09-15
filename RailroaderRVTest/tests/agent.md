@@ -21,16 +21,17 @@ entry 与 presence/reconnect 还必须由服务端按当前 manifest/mapping ide
 `OnObjectAboutToBeRemoved`，仅匹配当前 `IsoThumpable` 墙 tag 与 shell ledger；
 `OnDestroyIsoThumpable` 只能作为同一严格匹配的直接销毁补充入口。两条事件按完整房间 key
 去抖并启动 `queued → temporary → repairing → returning → complete` 状态机；先将玩家移到
-当前 boundary bitmap 声明的 100×100 managed scope 中心与固定实验层
+当前 boundary bitmap 中心减去 `(18000,0,15)` 的远端点与固定实验层
 `ROOF_REPAIR_TEMP_Z=-15`，确认离开房间 geometry 且目标/相关方格已加载，再按
-到达后的 5/10/15 server ticks 安排三次 roof repair。roof refresh 使用当前 bitmap 中心减去
-`(18000,0,15)`，首次 generation staging 与此远点契约严格区分；generation 临时阶段客户端使用
+到达后的 5/10/15 server ticks 安排三次 roof repair；该远点路径用于跨 chunk 卸载/重载。
+首次 generation staging 与此远点契约严格区分；generation 临时阶段客户端使用
 本地常量显示“正在生成房车”，roof 临时阶段使用本地 roof 提示，均不信任任意网络文本；
 只执行服务端坐标与 token-only ACK；修复后返回服务端事先捕获的合法 RV 位置。若事件未暴露，
 30-tick authoritative presence 流程检测当前 RV 内 player square 的 inside→outside transition
 后安排同一事务。每次尝试都必须重验 current schema、完整 identity、relation、online identity、scope
 与 authoritative inside player，不得退化为客户端坐标或永久 0.5 秒无条件强制刷新；
-同 x/y 改 z 不视为 chunk unload/reload，跨 chunk 仅列为第一阶段失败后的后续实验；
+同 x/y 改 z 不视为 chunk unload/reload；当前 roof refresh 的远点路径仍需实机验证，
+未有可靠 ACK 时不得宣称刷新完成；
 `OnTileRemoved` 不作为服务端 sledge packet 唯一入口；
 服务端 generation guard 仍具有稳定 tick、硬超时和多 generation 清理；每个 relocation 在首次
 `Relocate`/`teleportTo` 前只保存在服务进程内存，稳定 identity 与精确原坐标用于同进程掉线

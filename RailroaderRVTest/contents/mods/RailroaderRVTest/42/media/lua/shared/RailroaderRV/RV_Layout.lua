@@ -67,8 +67,9 @@ end
 --
 -- The 92 entries are all unique: two single corner strips, 11 north-facing
 -- straight walls (5 top + 6 bottom), and 79 west-facing straight walls
--- (39 west edge + 40 east edge).  The NW/SE corner strips contribute one
--- north-facing and one west-facing constructor orientation respectively.
+-- (39 west edge + 40 east edge).  The NW/SE corner strips add one entry to
+-- each orientation, so the complete list contains 12 north-oriented and 80
+-- west-oriented entries.
 local function wallCoordinatesForAnchor(cx, cy, cz)
     local result = {}
     local northSprite = C.SPRITES.wall.northSprite
@@ -361,67 +362,6 @@ function Layout.make(cx, cy, cz)
     result.wallEdgeCounts = { north = northCount, west = westCount }
     result.wallCornerCount = cornerCount
     return result
-end
-
-function Layout.fromPlayer(player)
-    if not player or not player.getX or not player.getY or not player.getZ then
-        return nil
-    end
-    return Layout.make(player:getX(), player:getY(), player:getZ())
-end
-
-function Layout.eachRect(rect, callback, z)
-    if not rect or not callback then return end
-    local resolvedZ = z or rect.z
-    local maxX = rect.halfOpen and rect.maxX - 1 or rect.maxX
-    local maxY = rect.halfOpen and rect.maxY - 1 or rect.maxY
-    for y = rect.minY, maxY do
-        for x = rect.minX, maxX do
-            callback(x, y, resolvedZ)
-        end
-    end
-end
-
-function Layout.eachPerimeter(rect, callback, z)
-    if not rect or not callback then return end
-    local resolvedZ = z or rect.z
-    local maxX = rect.halfOpen and rect.maxX - 1 or rect.maxX
-    local maxY = rect.halfOpen and rect.maxY - 1 or rect.maxY
-    for x = rect.minX, maxX do
-        callback(x, rect.minY, resolvedZ)
-        if maxY ~= rect.minY then
-            callback(x, maxY, resolvedZ)
-        end
-    end
-    for y = rect.minY + 1, maxY - 1 do
-        callback(rect.minX, y, resolvedZ)
-        if maxX ~= rect.minX then
-            callback(maxX, y, resolvedZ)
-        end
-    end
-end
-
--- The map's valid vertical range is world-dependent.  This iterator exposes
--- the required XY footprint and lets the server supply the valid z range.
-function Layout.eachClearXY(plan, callback)
-    if not plan or not plan.clear or not callback then return end
-    for y = plan.clear.minY, plan.clear.maxY - 1 do
-        for x = plan.clear.minX, plan.clear.maxX - 1 do
-            callback(x, y)
-        end
-    end
-end
-
--- Apply the same XY footprint to an explicitly resolved half-open z range.
--- The caller supplies minZ/maxZ from the loaded cell because map heights are
--- not fixed by this mod.  This is the intended all-valid-z server API.
-function Layout.eachClear(plan, minZ, maxZ, callback)
-    if not plan or not plan.clear or not callback then return end
-    for z = minZ, maxZ - 1 do
-        Layout.eachClearXY(plan, function(x, y)
-            callback(x, y, z)
-        end)
-    end
 end
 
 return Layout

@@ -4,7 +4,7 @@ RV_RoofRepair.lua 是服务器权威的房顶缓存修复模块；RV_RailroaderS
 权威进入/退出、座位规则与存档地图 ModData 映射；MP 读取官方 `RR.ServerTrain.active`
 和 `driver/passengers`，SP 明确切换到 `RR.TrainEntity.active` 的 `rider/seat/passenger`
 及 `RR.Ride.current`，不把 SP 布尔 rider 当成 online ID，不改写官方源文件或恢复
-RailroaderMP。座位坐标使用 `RR.Body.seatWorld`，外部交互距离使用官方
+独立旧适配层。座位坐标使用 `RR.Body.seatWorld`，外部交互距离使用官方
 `RR.Body.hullDistance` + `RR.Ride.MOUNT_REACH=2.0` 契约；无 Body 仅允许同样 2.0 格的
 保守中心距离回退。
 

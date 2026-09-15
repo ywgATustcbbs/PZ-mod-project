@@ -1,6 +1,9 @@
 # RailroaderRVTest
 
-Railroader RV 的程序化生成技术验证包。RailroaderMP 的功能已合并进 Railroader 官方版本；独立版本不再维护，也不作为本包依赖或实现对照。当前目标是 Railroader RV，命名空间固定为 `RailroaderRV`，模组 ID 为 `RailroaderRVTest`。
+Railroader RV 的程序化生成技术验证包。当前技术版本为 `0.2.0-tech`，只针对官方
+Railroader 2.1 与 Project Zomboid Build 42；不加载任何独立的旧适配层。命名空间固定为
+`RailroaderRV`，模组 ID 为 `RailroaderRVTest`；该版本同时写入 `mod.info` 和 manifest
+`techVersion`。
 
 ## 技术路线
 
@@ -96,11 +99,13 @@ mapping record 与完整 `rvId:generation:bitmapVersion`，再用当前 manifest
 contents/mods/RailroaderRVTest/42/
   media/lua/client/RailroaderRV/RV_ContextMenu.lua       菜单与意图请求
   media/lua/client/RailroaderRV/RV_BoundaryClient.lua    bitmap 预测与修正反馈
+  media/lua/client/RailroaderRV/RV_RailroaderContextMenu.lua Railroader 入口与座位交接
   media/lua/server/RailroaderRV/RV_Server.lua            facade、权威事务与事件注册
   media/lua/server/RailroaderRV/RV_ServerUtil.lua        纯调用/数值/空 payload 工具
   media/lua/server/RailroaderRV/RV_ServerWorld.lua       方格、对象快照/标签、清理与回滚原语
   media/lua/server/RailroaderRV/RV_ServerSchema.lua      current-schema 几何与加载预检
   media/lua/server/RailroaderRV/RV_BoundaryServer.lua    边界 guard、建造审计、周期清理
+  media/lua/server/RailroaderRV/RV_RoofRepair.lua        roof-refresh 事务辅助
   media/lua/server/RailroaderRV/RV_RailroaderServer.lua  RV↔玩家↔机车适配、无状态哨兵
   media/lua/shared/RailroaderRV/RV_Constants.lua          共享常量契约
   media/lua/shared/RailroaderRV/RV_Layout.lua             共享布局契约
@@ -150,7 +155,8 @@ current-only gate 失败；本次 RV 操作随即停止，不使用旧 geometry�
   ```
 
   总计 92 个唯一墙坐标和 92 个对象，其中 2 个为单角条（NW/SE），直墙为
-  11 个 north 方向和 79 个 west 方向；两个角条的构造方向各贡献一个计数。
+  11 个 north 方向和 79 个 west 方向；角条各增加一个对应方向，因此完整列表计数为
+  12 个 north-oriented 与 80 个 west-oriented 条目。
   墙体去重键为坐标+朝向+role，拒绝同一坐标的同一朝向重复。
   角条选择已由只读 B42 tile definition 定向查证：`walls_interior_house_03_22`
   明确声明 `WallNW` 并对应 `CornerNorthWall/CornerWestWall`，
@@ -199,7 +205,7 @@ sprite；房屋 carpet 地板与屋顶地板连续改写同一对象时不会覆
 已有地板的 generation 标签通过单独的 `transmitModData` 增量发送；新建地板不发送
 任何前置增量，只发送一次完整对象包。
 
-任一阶段（包括未来重新启用的最后灯光）失败时，服务端会按本次 generation 遍历已记录边界：已有地板
+任一阶段（包括最后的灯光阶段）失败时，服务端会按本次 generation 遍历已记录边界：已有地板
 恢复原 sprite 并清除本模组标签，本轮新建地板、墙体、发电机、雨桶、家具和灯只调用 B42 的
 `transmitRemoveItemFromSquare`；该 API 自己负责网络包、`OnObjectAboutToBeRemoved`、对象脱离
 world/square 与邻居重算，服务端随后再次扫描服务端权威对象，
@@ -224,12 +230,13 @@ world/square 与邻居重算，服务端随后再次扫描服务端权威对象�
 - 工作模式为“直接实现 → 测试 → 修复问题”，不是 TDD。
 - `modinfos.json` 只读，约含 2000 个模组 metadata；禁止全量读取或加载进上下文，只能定向搜索与房车功能相近、相似或可能解决 bug 的条目。确认目标后可用 `steamcmd` 下载对应模组并参考源代码。
 
-## 明确暂缓
+## 当前未承诺的范围
 
-本阶段只验证程序化坐标、对象摆放和 B42 对封闭玩家建筑的动态房间识别；没有门。
-房间长期回收、玩家自建对象和丢弃物品的覆盖策略留给后续实现；当前清场明确是破坏性
-操作。动态房间重建的瞬态只能通过实机联机确认；源码侧以 Lua 语法扫描、布局数量、
-撤离握手和事务顺序断言进行快速检查。
+本包只验证程序化坐标、对象摆放和 B42 对封闭玩家建筑的动态房间识别；当前布局没有门。
+清场是破坏性操作。建造审计只删除能够由当前 RV 身份、完整 footprint 与 build bitmap
+明确证明归属的玩家对象；未标记或归属含糊的对象按 fail-open 保留，不宣称覆盖所有第三方
+建造物、掉落物或长期房间回收策略。动态房间重建的瞬态仍需实机联机观察；源码侧以 Lua
+语法、布局数量、撤离握手、schema gate 和事务顺序断言做快速检查。
 
 ## 本地 Workshop 源包
 

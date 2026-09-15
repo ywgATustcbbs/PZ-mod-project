@@ -1,6 +1,6 @@
 -- RailroaderRVTest server-side generation transaction.
 --
--- This file deliberately owns no client UI and does not depend on RailroaderMP.
+-- This file deliberately owns no client UI and does not depend on a legacy adapter.
 -- The shared RV_Constants/RV_Layout modules are required at request time. A
 -- missing or malformed shared contract rejects the request before world I/O.
 
@@ -2430,7 +2430,7 @@ local function selectGenerationStagingDestination(layout, bounds)
     return destination
 end
 
-local function playerIsAtStagingDestination(player, destination, bounds, _oldBounds)
+local function playerIsAtStagingDestination(player, destination, bounds)
     local playerOk, positionOrReason = validateAuthoritativePlayer(player)
     if not playerOk then
         return false, positionOrReason
@@ -3958,7 +3958,7 @@ local function generateForPlayer(player, prepared)
         local cell = ServerWorld.getCellForPlayer(player)
         local oldBounds = prepared.oldBounds
         local atStaging, stagingReason = playerIsAtStagingDestination(player,
-            prepared.stagingDestination, bounds, oldBounds)
+            prepared.stagingDestination, bounds)
         if not atStaging then
             error(stagingReason)
         end
@@ -5473,7 +5473,7 @@ function RV.Server.OnTick()
         return
     end
     local atStaging, stagingReason = playerIsAtStagingDestination(playerOrReason,
-        pending.stagingDestination, pending.bounds, pending.oldBounds)
+        pending.stagingDestination, pending.bounds)
     if not atStaging then
         if relocationPositionStillSyncing(stagingReason) then
             return

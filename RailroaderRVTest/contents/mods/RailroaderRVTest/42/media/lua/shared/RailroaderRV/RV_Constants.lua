@@ -1,8 +1,7 @@
 -- RailroaderRVTest shared constants.
 --
--- This module has no dependency on RailroaderMP or Architect.  BuildingCraft
--- and Railroader are required runtime dependencies for the light/locomotive
--- adapters below.
+-- This module has no dependency on a legacy Railroader adapter.  BuildingCraft
+-- and Railroader are the runtime dependencies for the light/locomotive paths.
 -- The server side owns all world mutation; these values are shared only so
 -- that the client request and server layout use the same contract.
 
@@ -12,7 +11,6 @@ RailroaderRV.Constants = RailroaderRV.Constants or {}
 local C = RailroaderRV.Constants
 
 C.MOD_ID = "RailroaderRVTest"
-C.NAMESPACE = "RailroaderRV"
 C.COMMAND_GENERATE = "Generate"
 C.COMMAND_FINAL_RELOCATE = "FinalRelocate"
 C.COMMAND_FINAL_RELOCATE_ACK = "FinalRelocateAck"
@@ -50,8 +48,6 @@ C.BITMAP_SCHEMA_VERSION = 1
 C.BITMAP_VERSION = 1
 C.RV_REGION_MIN_OFFSET_X = -50
 C.RV_REGION_MIN_OFFSET_Y = -50
-C.RV_REGION_MAX_OFFSET_X = C.RV_REGION_MIN_OFFSET_X + C.RV_REGION_SIZE
-C.RV_REGION_MAX_OFFSET_Y = C.RV_REGION_MIN_OFFSET_Y + C.RV_REGION_SIZE
 C.RV_MANAGED_MIN_Z_OFFSET = 0
 -- maxZ is half-open.  The current generated layout owns the base and roof
 -- layers; future layouts may add more layers without changing XY semantics.
@@ -66,8 +62,6 @@ C.CLEAR_MIN_OFFSET_X = -50
 C.CLEAR_MAX_OFFSET_X = C.CLEAR_MIN_OFFSET_X + C.RV_MANAGED_WIDTH
 C.CLEAR_MIN_OFFSET_Y = -50
 C.CLEAR_MAX_OFFSET_Y = C.CLEAR_MIN_OFFSET_Y + C.RV_MANAGED_HEIGHT
-C.CLEAR_MIN_Z = C.TELEPORT_Z + C.RV_MANAGED_MIN_Z_OFFSET
-C.CLEAR_MAX_Z = C.TELEPORT_Z + C.RV_MANAGED_MAX_Z_OFFSET
 C.BOUNDARY_TICK_INTERVAL = 1
 C.BOUNDARY_RECOVERY_COOLDOWN_TICKS = 8
 C.BOUNDARY_TRANSITION_TIMEOUT_TICKS = 120
@@ -157,28 +151,7 @@ C.LIGHT_PROPERTIES = {
     moveTypeValue = "WallObject",
 }
 
--- Object/item type names are hints for the server implementation.  They are
--- kept here to make the eventual IsoRoom/object implementation replaceable
--- without changing the menu or layout contract.
-C.TYPES = {
-    generator = "Base.Generator",
-    counter = "Base.Counter",
-    sink = "Base.Sink",
-    rainCollector = "Base.RainCollector",
-}
-
 -- Technical-test initial state requested by the design brief.
 C.GENERATOR_INITIAL_FUEL = 10.0 -- B42.20 max fuel; this is 100% full.
-C.GENERATOR_INITIAL_ON = true
--- Capacity differs between small and large vanilla collectors in Build 42;
--- the server resolves the generated object's FluidContainer capacity before
--- setting waterMax/waterAmount.  B42.20's carpentry_02_122 large collector is
--- 600; this value is only the defensive fallback when the runtime component
--- cannot be queried (it is not a replacement for the component's capacity).
-C.RAIN_COLLECTOR_INITIAL_WATER = "full"
-C.RAIN_COLLECTOR_INITIAL_WATER_RATIO = 1.0
-C.RAIN_COLLECTOR_CAPACITY_FALLBACK = 600
-C.RAIN_COLLECTOR_CAPACITY = C.RAIN_COLLECTOR_CAPACITY_FALLBACK
-C.LAMP_INITIAL_ON = true
 
 return C

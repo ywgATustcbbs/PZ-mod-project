@@ -1,5 +1,5 @@
 version=1
 title=Railroader RV Test
-description=Railroader RV procedural-generation technical validation. Server-authoritative generation in a designated loaded area; no built-in map or external assets.
+description=Server-authoritative Railroader RV procedural-generation technical validation for Build 42. Requires BuildingCraft and Railroader at runtime; no packaged map or copied external assets.
 tags=Build 42;Vehicles;Building;Procedural Generation;Multiplayer;Technical Test
 visibility=private

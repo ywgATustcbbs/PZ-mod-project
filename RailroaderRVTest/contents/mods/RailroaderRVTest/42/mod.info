@@ -1,9 +1,9 @@
 name=Railroader RV Test
 id=RailroaderRVTest
 authors=RailroaderRV contributors
-description=Independent procedural RV generation technical validation for Project Zomboid Build 42.
+description=Server-authoritative procedural RV generation technical validation for Project Zomboid Build 42.
 versionMin=42.20.0
-modversion=0.1.0-tech
+modversion=0.2.0-tech
 require=\BuildingCraft,\Railroader
 url=
 versionurl=

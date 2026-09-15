@@ -1,6 +1,6 @@
 # shared/RailroaderRV
 
-结构：`RV_Constants.lua` 定义版本、尺寸、贴图与初始状态；`RV_Layout.lua` 纯函数生成坐标契约；`RV_Bitmap.lua` 提供共享的 packed bitmap、cell、segment 和序列化操作。
+结构：`RV_Constants.lua` 定义版本、尺寸、贴图与初始状态；`RV_Layout.lua` 仅通过纯函数 `Layout.make` 生成坐标契约；`RV_Bitmap.lua` 提供共享的 packed bitmap、cell、segment 和序列化操作。
 
 职责：布局必须显式返回固定目标 `(20050,2050,0)` 周围半开区间
 `x=[20000,20100)`、`y=[2000,2100)` 的 100×100×Z 管理 scope；每层 bitmap

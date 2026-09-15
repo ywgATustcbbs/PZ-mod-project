@@ -1,9 +1,11 @@
 # server
 
 结构：`RailroaderRV/` 服务端命令入口与生成事务；其中 `RV_Server.lua` 是 facade/bootstrap
-与事件唯一所有者，`RV_ServerUtil.lua`、`RV_ServerWorld.lua`、`RV_ServerSchema.lua` 分别
-承载纯工具、世界对象原语和当前 schema/加载预检；`RV_Server.lua` 前置声明后文的当前
-manifest gate，使 generation 清理调用到当前 schema 校验而非未定义全局。
+与事件唯一所有者，`RV_ServerUtil.lua`、`RV_ServerWorld.lua`、`RV_ServerSchema.lua`、
+`RV_BoundaryServer.lua`、`RV_RoofRepair.lua` 与 `RV_RailroaderServer.lua` 分别承载纯工具、
+世界对象原语、当前 schema/加载预检、边界审计、roof-refresh 辅助和 Railroader 适配；
+`RV_Server.lua` 前置声明后文的当前 manifest gate，使 generation 清理调用到当前 schema
+校验而非未定义全局。
 
 职责：权威校验、固定生成 anchor 与 staging 分离传送；首次 generation staging 严格由当前
 layout/bitmap 管理 scope 中心计算为 `(managedOriginX+floor(width/2),
@@ -67,12 +69,13 @@ lease 存续期间跳过 Boundary 普通 geometry/cleanup 扫描及服务端 sta
 重新绑定；服务端仍以权威位置、身份和 current-schema context 复核，并保持 lease，
 直到 `completeRoofRepairRelocation` 与 `roofRepairSquaresLoaded` 证明加载完成。
 
-当前只实现同 scope 第一阶段；同 x/y 改 z 不等于客户端 chunk unload/reload。若运行时仍
-无法刷新屋顶，下一轮才按实际 client chunk-grid streaming 半径开展跨 chunk 卸载/重载实验，
-没有可靠 ACK 时不得伪造完成。每次尝试都重验 current map/record/relation/identity 与
-authoritative inside player；generation staging 的加载等待可硬超时，但 roof-refresh 的最终
-回传在同一进程内不能因有限 retry 耗尽而清理，必须保留内存 context 直到成员离开 `-15`
-并回到记录方格。匹配、调度、加载、回滚阶段均有受控日志。
+当前 roof-refresh 已使用当前 bitmap 中心减 `(18000,0,15)` 的远端点执行跨 chunk
+卸载/重载路径；同 x/y 改 z 不等于客户端 chunk unload/reload。若实机仍无法刷新屋顶，
+只能记录为未验收并另行设计后续实验，没有可靠 ACK 时不得伪造完成。每次尝试都重验
+current map/record/relation/identity 与 authoritative inside player；generation staging 的
+加载等待可硬超时，但 roof-refresh 的最终回传在同一进程内不能因有限 retry 耗尽而清理，
+必须保留内存 context 直到成员离开 `-15` 并回到记录方格。匹配、调度、加载、回滚阶段均有
+受控日志。
 
 除普通事务外，服务端按固定 tick 运行无状态 `z=-15` 哨兵。候选玩家必须未被当前内存
 generation/roof 事务的稳定 identity claim，且 `floor(x/y)` 精确命中当前 bitmap 的单个

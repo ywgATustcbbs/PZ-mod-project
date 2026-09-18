@@ -735,4 +735,11 @@ if not railroaderMenuOk then
         .. tostring(railroaderMenuError))
 end
 
+local utilityMenuOk, utilityMenuError = pcall(require,
+    "RailroaderRV/RV_UtilityContextMenu")
+if not utilityMenuOk then
+    print("[RailroaderRVTest] utility context menu unavailable: "
+        .. tostring(utilityMenuError))
+end
+
 return Client

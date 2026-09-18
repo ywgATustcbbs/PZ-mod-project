@@ -75,6 +75,7 @@ RV.Server = RV.Server or {}
 local ServerUtil = require("RailroaderRV/RV_ServerUtil")
 local ServerWorld = require("RailroaderRV/RV_ServerWorld")
 local ServerSchema = require("RailroaderRV/RV_ServerSchema")
+local UtilityServer = require("RailroaderRV/RV_UtilityServer")
 
 local transactionBusy = false
 local transactionPlayer = nil
@@ -92,6 +93,10 @@ local serverTick = 0
 local roomOwnershipGuards = {}
 local safeErrorText
 local requireCurrentManifest
+
+if UtilityServer and type(UtilityServer.initializeRecord) == "function" then
+    RV.Server.initializeUtilityRecord = UtilityServer.initializeRecord
+end
 
 -- The client acknowledgement requires a full server -> client -> server
 -- round trip.  Keep an additional cross-tick guard before touching the old
@@ -5390,6 +5395,12 @@ function RV.Server.OnTick()
     processServerRoomOwnershipGuards()
     processRoofRepairRelocationGroup()
     processRoofRepairGroupFinalReturn()
+    if UtilityServer and type(UtilityServer.onTick) == "function" then
+        local utilityOk, utilityError = pcall(UtilityServer.onTick, serverTick)
+        if not utilityOk then
+            print("[RailroaderRVTest] utility tick error: " .. safeErrorText(utilityError))
+        end
+    end
     local pending = pendingGeneration
     if pending == nil then
         return
@@ -5515,6 +5526,18 @@ function RV.Server.OnClientCommand(module, command, player, args)
     -- commands are not RV requests and must not be reported as malformed RV
     -- traffic.
     if module ~= COMMAND_MODULE then
+        return
+    end
+    if command == Constants.COMMAND_RV_UTILITY then
+        local utilityOk, utilityAccepted, utilityReason = pcall(
+            UtilityServer.handleCommand, player, args)
+        if not utilityOk then
+            print("[RailroaderRVTest] utility command error: "
+                .. safeErrorText(utilityAccepted))
+        elseif utilityAccepted ~= true then
+            print("[RailroaderRVTest] utility command rejected: "
+                .. safeErrorText(utilityReason))
+        end
         return
     end
     -- The Railroader adapter owns these two commands.  This handler is also

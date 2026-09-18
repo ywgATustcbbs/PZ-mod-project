@@ -100,6 +100,9 @@ contents/mods/RailroaderRVTest/42/
   media/lua/client/RailroaderRV/RV_ContextMenu.lua       菜单与意图请求
   media/lua/client/RailroaderRV/RV_BoundaryClient.lua    bitmap 预测与修正反馈
   media/lua/client/RailroaderRV/RV_RailroaderContextMenu.lua Railroader 入口与座位交接
+  media/lua/client/RailroaderRV/RV_UtilityContextMenu.lua 水设备/generator 意图菜单
+  media/lua/client/RailroaderRV/RV_UtilityClient.lua     水电 snapshot/ACK 客户端缓存
+  media/lua/client/RailroaderRV/RV_UtilityDashboard.lua  水电只读状态与菜单展示
   media/lua/server/RailroaderRV/RV_Server.lua            facade、权威事务与事件注册
   media/lua/server/RailroaderRV/RV_ServerUtil.lua        纯调用/数值/空 payload 工具
   media/lua/server/RailroaderRV/RV_ServerWorld.lua       方格、对象快照/标签、清理与回滚原语
@@ -107,9 +110,15 @@ contents/mods/RailroaderRVTest/42/
   media/lua/server/RailroaderRV/RV_BoundaryServer.lua    边界 guard、建造审计、周期清理
   media/lua/server/RailroaderRV/RV_RoofRepair.lua        roof-refresh 事务辅助
   media/lua/server/RailroaderRV/RV_RailroaderServer.lua  RV↔玩家↔机车适配、无状态哨兵
+  media/lua/server/RailroaderRV/RV_UtilityStore.lua      水电 current-schema 持久化
+  media/lua/server/RailroaderRV/RV_UtilityWater.lua      canonical 水量、registry 与结算
+  media/lua/server/RailroaderRV/RV_UtilityPower.lua      原生 generator 绑定与意图校验
+  media/lua/server/RailroaderRV/RV_UtilityServer.lua     水电 facade、guard、协议与 tick
   media/lua/shared/RailroaderRV/RV_Constants.lua          共享常量契约
   media/lua/shared/RailroaderRV/RV_Layout.lua             共享布局契约
   media/lua/shared/RailroaderRV/RV_Bitmap.lua             100×100×Z packed bitmap
+  media/lua/shared/RailroaderRV/RV_UtilityConstants.lua   水电 schema/操作/reason code
+  media/lua/shared/RailroaderRV/RV_UtilityCatalog.lua     设备目录与液体 profile
   media/lua/shared/Translate/                        UI 翻译
   mod.info                                             模组元数据
 README.md                                               技术路线与验收契约
@@ -221,6 +230,28 @@ world/square 与邻居重算，服务端随后再次扫描服务端权威对象�
 `media/lua/shared/RailroaderRV/RV_Constants.lua` 和 `RV_Layout.lua` 是服务端可
 `require` 的纯共享契约；它们不直接修改世界。`RV_ContextMenu.lua` 负责菜单、空
 生成请求和服务端定向的本地撤离；撤离回执不含坐标，生成布局不会从撤离后位置重算。
+
+## 水电 current schema
+
+水系统只有一份服务端 canonical `sharedAmount`，持久化在
+`RailroaderRVTest.Utility` 的当前 utility store；中央雨水桶和已登记设备的原生
+`FluidContainer` 都是 `capacity/amount/fluidProfile` 镜像，不是额外余额。每次 tick
+在单一 RV guard 内现场检查 registry，消费只按设备上一基线到本轮读数的正向下降
+`sum(max(Dprev-Dobs,0))` 计算；中央对象读数、容量变化和设备加水不会反向改写 canonical。
+设备条目只允许服务端验证的右键连接，记录 `deviceId`、RV identity、坐标、token、
+fingerprint、注册序列和 `ACTIVE/NEEDS_INIT` 状态。未加载或暂时 API 异常的设备保留
+并重新初始化；确认拆除/替换只清理该设备；重复身份、同一对象多登记和跨 RV 占用拒绝
+整轮。设备目录中的原生水槽、马桶、浴缸、淋浴和洗衣机在完成整体联机验证前均保持
+`runtimeValidated=false`，静态代码不宣称这些设备已经支持。
+
+`ADD_WATER` 先由服务端验证独立玩家物品源，再在同一 guard 内结算已有消费；随后重新读取源容器计算
+`plannedTransfer`，扣源并读回确认 `confirmedTransfer`，canonical 只增加确认值。客户端菜单的
+只读状态入口展示最新 snapshot，不提交任何余额或设备状态。
+中央投影和设备镜像不能作为 source；液体 profile 只接受干净水、污染的水及二者的
+原生混合，其他成分拒绝。原生 generator 仍是唯一燃油/condition 事实源，power record
+只保存绑定 identity、回路策略和序列，不保存第二份燃料余额。缺失、过期、未知字段、
+旧 identity 或任意非 current utility schema 都 fail-closed，并返回稳定的
+`SAVE_REBUILD_REQUIRED`；没有迁移、别名、fallback 或 crash journal。
 
 ## 开发与验证约束
 

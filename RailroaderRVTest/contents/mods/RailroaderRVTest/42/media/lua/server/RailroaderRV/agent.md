@@ -170,3 +170,15 @@ manifest、bitmap、shell ledger、mapping 或异步身份只要不是当前完�
 facade 继续单点注册 `OnClientCommand`、`OnTick`、Boundary 事件和 Railroader hook，
 并保持公共 `RV.Server` 与 adapter 契约不变。每个服务端 Lua chunk 的主作用域均须
 低于 Kahlua 200-local 限制，静态测试使用 luaparse 逐文件核验。
+
+水电服务端模块由 `RV_UtilityStore.lua`、`RV_UtilityWater.lua`、
+`RV_UtilityPower.lua` 和 `RV_UtilityServer.lua` 组成。Store 只接受完整 current
+schema 的水/电记录；缺失或 identity 不匹配进入 `SAVE_REBUILD_REQUIRED`，不迁移旧字段。
+Water 持有唯一 canonical `sharedAmount`，每个 server tick 由 facade 在一次
+`inWaterSettlement` guard 内现场遍历 registry，按
+`sum(max(Dprev-Dobs,0))` 结算，再单向镜像到中央和设备 FluidContainer。普通设备
+失效只清理/标记本设备，重复身份、同对象多登记和跨 RV 占用拒绝整轮。`ADD_WATER`
+先服务端验证独立玩家物品源，再调用已有 guard 下的 `settleUnderGuard`，随后扣除源容器并只按确认的
+`confirmedTransfer` 入账；中央和设备镜像不允许作为 source。Power 只绑定原生
+`IsoGenerator` 身份与回路状态，燃油/condition 不复制为第二份余额。未经过整体
+运行时验证的目录设备保持禁用；本目录静态检查不等同于游戏/联机测试。

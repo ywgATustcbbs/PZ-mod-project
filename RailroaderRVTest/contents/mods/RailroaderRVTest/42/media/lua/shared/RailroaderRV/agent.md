@@ -1,6 +1,6 @@
 # shared/RailroaderRV
 
-结构：`RV_Constants.lua` 定义版本、尺寸、贴图与初始状态；`RV_Layout.lua` 仅通过纯函数 `Layout.make` 生成坐标契约；`RV_Bitmap.lua` 提供共享的 packed bitmap、cell、segment 和序列化操作。
+结构：`RV_Constants.lua` 定义版本、尺寸、贴图与初始状态；`RV_Layout.lua` 仅通过纯函数 `Layout.make` 生成坐标契约；`RV_Bitmap.lua` 提供共享的 packed bitmap、cell、segment 和序列化操作；`RV_UtilityConstants.lua` 声明水电 current schema、操作与稳定 reason code；`RV_UtilityCatalog.lua` 声明 FluidContainer 能力和仅允许干净/污染水组成的 profile。
 
 职责：布局必须显式返回固定目标 `(20050,2050,0)` 周围半开区间
 `x=[20000,20100)`、`y=[2000,2100)` 的 100×100×Z 管理 scope；每层 bitmap
@@ -29,3 +29,8 @@ identity、精确原坐标和阶段只保存在服务进程内存，客户端不
 schema 只支持当前版本：manifest、bitmap、shell ledger、RV mapping 和异步身份的
 缺失/不匹配必须 fail-closed，由服务端提示删除测试存档并重建。共享模块 MUST NOT
 提供旧字段别名、旧 bounds/bitmap fallback 或新旧数据转换；空的新容器才可初始化为当前 schema。
+
+水电共享契约同样 current-only。设备目录条目在整体联机验证前保持
+`runtimeValidated=false`，不能由客户端或服务端猜测性启用；`fluidProfile` 只表示空、干净水、污染的水或两者原生混合，不能包含其他液体。
+混合 profile 只在可读的 per-fluid amount 与总量闭合时接受；无法证明组成则拒绝。客户端的
+`REQUEST_SNAPSHOT` 只是只读快照意图，不改变 current schema 或任何世界状态。

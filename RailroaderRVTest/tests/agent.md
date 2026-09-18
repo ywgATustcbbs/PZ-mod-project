@@ -58,3 +58,10 @@ entry 与 presence/reconnect 还必须由服务端按当前 manifest/mapping ide
 
 存档 schema 只测当前版本 gate：legacy/migration/alias/fallback 转换路径必须不存在；
 schema mismatch 或 identity 缺失必须返回删档重建提示。不得新增旧存档兼容测试。
+
+水电代码的静态检查应核对 `RV_UtilityStore` 的 exact-field current schema、
+`RV_UtilityWater` 的 canonical→FluidContainer 单向镜像与下降结算公式、
+`plannedTransfer/confirmedTransfer` 的加水顺序、独立 source 限制、一次-per-RV
+guard/幂等协议，以及 `RV_UtilityPower` 不复制 generator fuel/condition。当前目录
+设备仍有 `runtimeValidated=false` 门；在未完成整体联机验证前，静态检查不能把它们标为
+已支持。水电本轮只做源码/引用检查，不启动服务器或客户端。

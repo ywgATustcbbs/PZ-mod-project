@@ -21,6 +21,9 @@ C.COMMAND_RV_TELEPORT = "RVTeleport"
 C.COMMAND_RV_BOUNDARY_CORRECTION = "RVBoundaryCorrection"
 C.COMMAND_RV_BITMAP = "RVBitmap"
 C.COMMAND_RV_BITMAP_CLEAR = "RVBitmapClear"
+C.COMMAND_RV_UTILITY = "RVUtility"
+C.COMMAND_RV_UTILITY_ACK = "RVUtilityAck"
+C.COMMAND_RV_UTILITY_SNAPSHOT = "RVUtilitySnapshot"
 C.RV_MAP_KEY = "RailroaderRVTest.TrainMap"
 C.MANIFEST_KEY = "RailroaderRVTest.Manifest"
 C.TECH_VERSION = "0.2.0-tech"
@@ -30,6 +33,10 @@ C.RV_RECORD_SCHEMA_VERSION = 1
 C.RV_RELATION_SCHEMA_VERSION = 1
 C.BOUNDARY_SCHEMA_VERSION = 1
 C.LAYOUT_SCHEMA_VERSION = 4
+C.UTILITY_STORE_SCHEMA_VERSION = 1
+C.UTILITY_WATER_SCHEMA_VERSION = 1
+C.UTILITY_POWER_SCHEMA_VERSION = 1
+C.UTILITY_WATER_CAPACITY = 100.0
 C.SAVE_REBUILD_REQUIRED = "RailroaderRVTest: 开发版本存档不兼容，请删除该测试存档并重建 (delete this test save and rebuild it)"
 
 -- The current test button always targets this server-selected destination.

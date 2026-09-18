@@ -1,0 +1,340 @@
+-- Utility protocol facade.  RV_Server owns the actual event registration and
+-- calls this module once per command/tick, so every RV settles under one
+-- process-local guard and the inner water function never re-acquires it.
+
+local C = require("RailroaderRV/RV_Constants")
+local U = require("RailroaderRV/RV_UtilityConstants")
+local Store = require("RailroaderRV/RV_UtilityStore")
+local Water = require("RailroaderRV/RV_UtilityWater")
+local Power = require("RailroaderRV/RV_UtilityPower")
+local Util = require("RailroaderRV/RV_ServerUtil")
+
+local M = {}
+local inWaterSettlement = {}
+local locks = inWaterSettlement
+local sessions = {}
+local players = {}
+local lastTick = -1
+
+local function key(identity)
+    return tostring(identity.rvId) .. ":" .. tostring(identity.generation)
+        .. ":" .. tostring(identity.bitmapVersion)
+end
+
+local function playerKey(player)
+    local idOk, id = Util.invoke(player, "getOnlineID")
+    local nameOk, name = Util.invoke(player, "getUsername")
+    if not nameOk or name == nil then nameOk, name = Util.invoke(player, "getFullName") end
+    local onlineId = idOk and id or nil
+    local playerName = nameOk and name or nil
+    if onlineId == nil and playerName == nil then return nil end
+    return tostring(onlineId or "0") .. ":" .. tostring(playerName or "unknown")
+end
+
+local function stableReason(reason)
+    if tostring(reason):find(C.SAVE_REBUILD_REQUIRED, 1, true) then
+        return U.REASON_SAVE_REBUILD_REQUIRED
+    end
+    if reason == "outside-rv" then return U.REASONS.OUTSIDE_RV end
+    if reason == "unmapped-rv" then return U.REASONS.RV_NOT_FOUND end
+    if reason == "permission-denied" then return U.REASONS.PERMISSION end
+    return tostring(reason or U.REASONS.API_ERROR)
+end
+
+local function send(player, command, payload)
+    if not player then return false end
+    return Util.callGlobalSucceeded("sendServerCommand", player, C.MOD_ID,
+        command, payload)
+end
+
+local function resolveRV(player)
+    local rv = rawget(_G, "RailroaderRV")
+    local server = rv and rv.Server
+    if not server or type(server.resolveCurrentUtilityRV) ~= "function" then
+        return false, U.REASONS.RV_NOT_FOUND
+    end
+    local ok, accepted, context = pcall(server.resolveCurrentUtilityRV, player)
+    if not ok or accepted ~= true or type(context) ~= "table"
+        or context.authorized ~= true or type(context.identity) ~= "table" then
+        return false, stableReason((not ok and accepted) or context
+            or U.REASONS.RV_NOT_FOUND)
+    end
+    local identity = context.identity
+    if type(identity.rvId) ~= "string" or identity.rvId == ""
+        or Util.integer(identity.generation) == nil
+        or Util.integer(identity.bitmapVersion) ~= C.BITMAP_VERSION then
+        return false, U.REASON_SAVE_REBUILD_REQUIRED
+    end
+    context.player = player
+    return true, context
+end
+
+local function serviceBusy()
+    local rv = rawget(_G, "RailroaderRV")
+    local server = rv and rv.Server
+    if not server then return true end
+    if type(server.isGenerationTransactionActive) == "function" then
+        local ok, active = pcall(server.isGenerationTransactionActive)
+        if not ok then return true end
+        if active == true then return true end
+    end
+    if type(server.isRoofRepairTransactionActive) == "function" then
+        local ok, active = pcall(server.isRoofRepairTransactionActive)
+        if not ok then return true end
+        if active == true then return true end
+    end
+    return false
+end
+
+local function validText(value, maxLength)
+    return type(value) == "string" and value ~= "" and #value <= maxLength
+end
+
+local function validHint(value)
+    if value == nil then return true end
+    return type(value) == "table"
+end
+
+local function validRequest(args)
+    if type(args) ~= "table" then return false, U.REASONS.INVALID_REQUEST end
+    local allowed = { requestId = true, sessionNonce = true, operation = true,
+        targetHint = true, sourceHint = true }
+    for field in pairs(args) do if not allowed[field] then return false, U.REASONS.INVALID_REQUEST end end
+    if not validText(args.requestId, U.MAX_REQUEST_ID_LENGTH)
+        or not validText(args.sessionNonce, U.MAX_NONCE_LENGTH)
+        or not validText(args.operation, 64)
+        or not validHint(args.targetHint) or not validHint(args.sourceHint) then
+        return false, U.REASONS.INVALID_REQUEST
+    end
+    return true
+end
+
+local function knownOperation(operation)
+    return operation == U.OP_CONNECT_WATER_DEVICE or operation == U.OP_ADD_WATER
+        or operation == U.OP_REQUEST_SNAPSHOT
+        or operation == U.OP_CONNECT_GENERATOR or operation == U.OP_START_GENERATOR
+        or operation == U.OP_STOP_GENERATOR or operation == U.OP_REPAIR_GENERATOR
+end
+
+local function acquire(identity)
+    local identityKey = key(identity)
+    if locks[identityKey] then return false, U.REASONS.BUSY end
+    locks[identityKey] = true
+    return true, identityKey
+end
+
+local function release(identityKey)
+    if identityKey then locks[identityKey] = nil end
+end
+
+local function withGuard(identity, callback)
+    local acquired, identityKeyOrReason = acquire(identity)
+    if not acquired then return false, identityKeyOrReason end
+    local ok, accepted, result = pcall(callback)
+    release(identityKeyOrReason)
+    if not ok then return false, stableReason(accepted) end
+    return accepted, result
+end
+
+local function acknowledge(player, requestId, accepted, result)
+    local payload = { requestId = requestId, ok = accepted == true }
+    if accepted then
+        payload.reason = U.REASONS.OK
+        if type(result) == "table" then
+            payload.sequence = result.sequence
+            payload.sharedAmount = result.sharedAmount
+            payload.plannedTransfer = result.plannedTransfer
+            payload.confirmedTransfer = result.confirmedTransfer
+        end
+    else
+        payload.reason = stableReason(result)
+    end
+    send(player, C.COMMAND_RV_UTILITY_ACK, payload)
+end
+
+local function remember(session, requestId, response)
+    if type(session) ~= "table" then return end
+    session.processed = session.processed or {}
+    session.processed[requestId] = response
+    local count = 0
+    for _ in pairs(session.processed) do count = count + 1 end
+    if count > 64 then
+        for id in pairs(session.processed) do
+            session.processed[id] = nil
+            break
+        end
+    end
+end
+
+local function sessionFor(nonce, player, previous)
+    local retired = previous and previous.retired or {}
+    if previous and previous.nonce then retired[previous.nonce] = true end
+    return { nonce = nonce, player = player, processed = {}, retired = retired }
+end
+
+local function replaceSession(id, player, nonce, previous)
+    local session = sessionFor(nonce, player, previous)
+    sessions[id] = session
+    return session
+end
+
+local function broadcast(context, record)
+    local identity = context.identity
+    local payload = Store.snapshot(record)
+    payload.water = Store.copyWater(record.water)
+    payload.power = Power.snapshot(record, identity, context)
+    send(context.player, C.COMMAND_RV_UTILITY_SNAPSHOT, payload)
+    players[key(identity)] = context.player
+end
+
+local function authoritativeTickContext(identity, player)
+    local rv = rawget(_G, "RailroaderRV")
+    local server = rv and rv.Server
+    if not server or type(server.validateCurrentUtilityIdentity) ~= "function" then
+        return false, U.REASONS.RV_NOT_FOUND
+    end
+    local ok, accepted, value = pcall(server.validateCurrentUtilityIdentity, identity)
+    if not ok or accepted ~= true or type(value) ~= "table"
+        or type(value.record) ~= "table" then
+        return false, stableReason((not ok and accepted) or value
+            or U.REASONS.RV_NOT_FOUND)
+    end
+    return true, { identity = identity, player = player, record = value.record }
+end
+
+function M.handleCommand(player, args)
+    local requestOk, requestReason = validRequest(args)
+    if not requestOk then return false, requestReason end
+    if not knownOperation(args.operation) then return false, U.REASONS.INVALID_REQUEST end
+    local id = playerKey(player)
+    if not id then return false, U.REASONS.INVALID_REQUEST end
+    local session = sessions[id]
+    if session then
+        if session.retired and session.retired[args.sessionNonce] then
+            acknowledge(player, args.requestId, false, U.REASONS.INVALID_NONCE)
+            return false, U.REASONS.INVALID_NONCE
+        elseif session.player == player and session.nonce == args.sessionNonce then
+            -- Continue the active session; its idempotency table is scoped to
+            -- this nonce and is never shared with a later reconnect.
+        elseif session.player ~= player and session.nonce == args.sessionNonce then
+            -- A replacement server player object cannot inherit the active
+            -- session nonce.  The client must establish a fresh session.
+            acknowledge(player, args.requestId, false, U.REASONS.INVALID_NONCE)
+            return false, U.REASONS.INVALID_NONCE
+        else
+            -- A new nonce denotes a reconnect/reinitialised client, even when
+            -- the authoritative player object is reused. Retire the old
+            -- nonce so delayed packets cannot create another session with
+            -- the old idempotency namespace.
+            session = replaceSession(id, player, args.sessionNonce, session)
+        end
+    else
+        session = replaceSession(id, player, args.sessionNonce, nil)
+    end
+    if session.processed and session.processed[args.requestId] then
+        local old = session.processed[args.requestId]
+        acknowledge(player, args.requestId, old.ok, old.result or old.reason)
+        return old.ok, old.result or old.reason
+    end
+    if serviceBusy() then
+        acknowledge(player, args.requestId, false, U.REASONS.BUSY)
+        return false, U.REASONS.BUSY
+    end
+    local rvOk, contextOrReason = resolveRV(player)
+    if not rvOk then
+        acknowledge(player, args.requestId, false, contextOrReason)
+        remember(session, args.requestId, { ok = false, reason = contextOrReason })
+        return false, contextOrReason
+    end
+    local context = contextOrReason
+    if context.phase ~= "READY" then
+        local reason = U.REASONS.PERMISSION
+        acknowledge(player, args.requestId, false, reason)
+        remember(session, args.requestId, { ok = false, reason = reason })
+        return false, reason
+    end
+    local identity = context.identity
+    local guardOk, guardReason = withGuard(identity, function()
+        local recordOk, recordOrReason = Store.getRecord(identity, false)
+        if not recordOk then return false, recordOrReason end
+        local accepted, detail
+        if args.operation == U.OP_CONNECT_WATER_DEVICE then
+            accepted, detail = Water.connectDevice(identity, context, args.targetHint)
+        elseif args.operation == U.OP_ADD_WATER then
+            accepted, detail = Water.addWater(identity, context, args.sourceHint)
+        elseif args.operation == U.OP_REQUEST_SNAPSHOT then
+            accepted, detail = true, { record = recordOrReason }
+        else
+            accepted, detail = Power.handleIntent(identity, context, args.operation,
+                args.targetHint)
+        end
+        if accepted ~= true then return false, detail end
+        local appliedRecord = type(detail) == "table" and detail.record or nil
+        broadcast(context, appliedRecord or recordOrReason)
+        return true, detail
+    end)
+    local response = { ok = guardOk == true, result = guardOk and guardReason or nil,
+        reason = guardOk and nil or guardReason }
+    remember(session, args.requestId, response)
+    acknowledge(player, args.requestId, guardOk, guardOk and guardReason or guardReason)
+    return guardOk, guardOk and guardReason or guardReason
+end
+
+function M.onTick(tick)
+    if lastTick == tick then return end
+    lastTick = tick
+    if serviceBusy() then return end
+    local recordsOk, recordsOrReason = Store.allRecords()
+    if not recordsOk then
+        print("[RailroaderRVTest] utility schema gate: " .. stableReason(recordsOrReason))
+        return
+    end
+    for i = 1, #recordsOrReason do
+        local item = recordsOrReason[i]
+        local identity = item.identity
+        local contextOk, contextOrReason = authoritativeTickContext(identity,
+            players[key(identity)])
+        if not contextOk then
+            print("[RailroaderRVTest] utility tick rejected rv=" .. tostring(identity.rvId)
+                .. " reason=" .. stableReason(contextOrReason))
+        else
+            local context = contextOrReason
+            local accepted, result = withGuard(identity, function()
+                local settled, detail = Water.settleUnderGuard(identity, context)
+                if settled then
+                    if context.player then broadcast(context, detail.record) end
+                    return true, detail
+                end
+                return false, detail
+            end)
+            if not accepted and result ~= U.REASONS.BUSY then
+                print("[RailroaderRVTest] utility tick rejected rv=" .. tostring(identity.rvId)
+                    .. " reason=" .. stableReason(result))
+            end
+        end
+    end
+end
+
+function M.snapshotForPlayer(player)
+    local ok, context = resolveRV(player)
+    if not ok then return false, context end
+    local recordOk, record = Store.getRecord(context.identity, false)
+    if not recordOk then return false, record end
+    broadcast(context, record)
+    return true, record
+end
+
+function M.initializeRecord(identity, context)
+    local recordOk, recordOrReason = Store.getRecord(identity, true)
+    if not recordOk then return false, recordOrReason end
+    local committed, reason = Store.commit(recordOrReason, identity)
+    if not committed then return false, reason end
+    if context and context.player then broadcast(context, recordOrReason) end
+    return true, recordOrReason
+end
+
+function M.isLocked(identity)
+    return locks[key(identity)] == true
+end
+
+return M

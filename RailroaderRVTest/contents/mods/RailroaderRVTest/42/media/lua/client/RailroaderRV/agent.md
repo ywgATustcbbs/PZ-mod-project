@@ -102,3 +102,13 @@ staging transition 才是唯一允许的无 marker 重试例外。
 
 客户端不得实现任何旧存档/旧字段兼容或转换逻辑；缺少当前 bitmap identity 时保持 inert，
 由服务端 authoritative gate 负责拒绝并通知用户删档重建。
+
+水电客户端由 `RV_UtilityContextMenu.lua`、`RV_UtilityClient.lua` 和
+`RV_UtilityDashboard.lua` 组成。菜单提供水设备/原生 generator 的意图入口，并提供只读
+`Show RV utility status` 状态入口（以本地 halo note 展示最新服务端快照）；只发送
+`requestId`、`sessionNonce`、操作名和
+服务端可重新解析的目标提示；`RV_UtilityClient` 只缓存服务端 snapshot/ACK，不写任何
+FluidContainer、registry、amount、profile 或 generator fuel。Dashboard 只展示
+`sharedAmount/capacity`、profile、设备状态和原生 generator 状态。收到
+`SAVE_REBUILD_REQUIRED` 时仅显示本地 ASCII 的删档重建提示；任意网络文本、客户端
+坐标和客户端计算结果都不作为权限或水量依据。

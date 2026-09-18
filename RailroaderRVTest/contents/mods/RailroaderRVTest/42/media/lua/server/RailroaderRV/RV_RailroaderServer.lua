@@ -1221,6 +1221,98 @@ local function recordAtPlayerCoordinate(map, player)
     return nil, nil, nil, "unmapped-rv"
 end
 
+-- Utility commands resolve the current RV exclusively from the authoritative
+-- mapping and player coordinate.  Client-supplied RV ids, generations and
+-- object coordinates never enter this result.  The generic server geometry
+-- gate is run again so a water request cannot use a stale mapping snapshot.
+function Adapter.resolveCurrentUtilityRV(player)
+    if not player or playerDead(player) then
+        return false, "permission-denied"
+    end
+    local mapOk, mapOrReason = pcall(mapData)
+    if not mapOk or type(mapOrReason) ~= "table" then
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
+    local map = mapOrReason
+    local record, _, train, status = recordAtPlayerCoordinate(map, player)
+    if not record then return false, status or "outside-rv" end
+    local name = playerName(player)
+    local onlineId = playerId(player)
+    local relation = name and map.players and map.players[name] or nil
+    local rider = name and record.players and record.players[name] or nil
+    if onlineId == nil or not name or not relation or not rider or rider.inside ~= true
+        or tostring(relation.locoId) ~= tostring(record.locoId)
+        or tostring(rider.locoId) ~= tostring(record.locoId)
+        or tostring(rider.onlineId) ~= tostring(onlineId) then
+        return false, "permission-denied"
+    end
+    -- Reuse the existing authoritative boundary/player contract as the
+    -- utility permission check.  It proves the persisted inside relation,
+    -- stable online identity and current geometry; no client role field is
+    -- accepted.  A utility context is authorized only for this same mapping.
+    local boundaryOk, _, boundaryRecord, boundaryRelation = pcall(
+        Adapter.validateCurrentBoundaryPlayer, player)
+    if not boundaryOk or boundaryRecord ~= record
+        or type(boundaryRelation) ~= "table"
+        or boundaryRelation.inside ~= true then
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
+    local rv = rawget(_G, "RailroaderRV")
+    local server = rv and rv.Server
+    if not server or type(server.validateCurrentRVRecord) ~= "function" then
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
+    local gateOk, gateResult = pcall(server.validateCurrentRVRecord, record)
+    if not gateOk or gateResult ~= true then return false, C.SAVE_REBUILD_REQUIRED end
+    return true, {
+        identity = { rvId = tostring(record.rvId), generation = integer(record.generation),
+            bitmapVersion = integer(record.bitmapVersion) },
+        record = record, relation = relation, train = train, status = status,
+        phase = "READY",
+        authorized = boundaryRecord == record and boundaryRelation.inside == true,
+    }
+end
+
+-- Tick settlement has no client player to use as an identity source.  It
+-- still needs the complete current map/manifest/geometry gate before a
+-- persisted utility record can be touched, so expose the same read-only
+-- validation without accepting coordinates or RV identity from a request.
+function Adapter.validateCurrentUtilityIdentity(identity)
+    if type(identity) ~= "table" or type(identity.rvId) ~= "string"
+        or identity.rvId == "" or integer(identity.generation) == nil
+        or integer(identity.bitmapVersion) ~= C.BITMAP_VERSION then
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
+    local mapOk, map = pcall(mapData)
+    if not mapOk or type(map) ~= "table" then
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
+    local record = recordForLoco(map, identity.rvId)
+    if not record or not validMappingRecord(record)
+        or integer(record.generation) ~= integer(identity.generation)
+        or integer(record.bitmapVersion) ~= integer(identity.bitmapVersion) then
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
+    local rv = rawget(_G, "RailroaderRV")
+    local server = rv and rv.Server
+    if not server or type(server.currentRVManifestForBoundary) ~= "function"
+        or type(server.currentRVRecordGeometryConsistent) ~= "function" then
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
+    local manifestOk, manifestAccepted, manifest = pcall(
+        server.currentRVManifestForBoundary, record.rvId, record.generation,
+        record.bitmapVersion)
+    if not manifestOk or manifestAccepted ~= true or type(manifest) ~= "table" then
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
+    local geometryOk, consistent = pcall(
+        server.currentRVRecordGeometryConsistent, record, manifest)
+    if not geometryOk or consistent ~= true then
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
+    return true, { record = record, train = findTrain(record.locoId) }
+end
+
 local function sendResult(player, ok, reason)
     local onlineId = playerId(player)
     if onlineId == nil then return end
@@ -1574,6 +1666,22 @@ local function commitGeneration(player, data, prepared)
     record.updatedAt = math.floor(os.time())
     markPlayerInside(map, record, key, player,
         data.entryPosition, data.sourceRole, data.sourceSeat)
+    local server = RailroaderRV and RailroaderRV.Server
+    if not server or type(server.initializeUtilityRecord) ~= "function" then
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
+    local utilityOk, utilityAccepted, utilityReason = pcall(
+        server.initializeUtilityRecord,
+        { rvId = record.rvId, generation = record.generation,
+            bitmapVersion = record.bitmapVersion },
+        { player = player, identity = {
+            rvId = record.rvId, generation = record.generation,
+            bitmapVersion = record.bitmapVersion,
+        }, record = record })
+    if not utilityOk or utilityAccepted ~= true then
+        return false, utilityOk and (utilityReason or C.SAVE_REBUILD_REQUIRED)
+            or tostring(utilityAccepted)
+    end
     -- RV_Server owns the transition close after FinalRelocateAck and the
     -- current-manifest readiness proof. Do not release the lease from this
     -- mapping commit hook before that final client proof.

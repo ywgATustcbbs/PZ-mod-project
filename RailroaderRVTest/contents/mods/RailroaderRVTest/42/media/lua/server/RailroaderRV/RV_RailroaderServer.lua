@@ -1278,37 +1278,44 @@ end
 -- persisted utility record can be touched, so expose the same read-only
 -- validation without accepting coordinates or RV identity from a request.
 function Adapter.validateCurrentUtilityIdentity(identity)
+    local function reject(stage)
+        print("[RailroaderRVTest] utility identity gate rejected stage=" .. stage)
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
     if type(identity) ~= "table" or type(identity.rvId) ~= "string"
         or identity.rvId == "" or integer(identity.generation) == nil
         or integer(identity.bitmapVersion) ~= C.BITMAP_VERSION then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return reject("identity")
     end
     local mapOk, map = pcall(mapData)
     if not mapOk or type(map) ~= "table" then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return reject("map-read")
     end
     local record = recordForLoco(map, identity.rvId)
-    if not record or not validMappingRecord(record)
+    if not record then
+        return reject("mapping-missing")
+    end
+    if not validMappingRecord(record)
         or integer(record.generation) ~= integer(identity.generation)
         or integer(record.bitmapVersion) ~= integer(identity.bitmapVersion) then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return reject("mapping-schema-or-identity")
     end
     local rv = rawget(_G, "RailroaderRV")
     local server = rv and rv.Server
     if not server or type(server.currentRVManifestForBoundary) ~= "function"
         or type(server.currentRVRecordGeometryConsistent) ~= "function" then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return reject("server-gate-missing")
     end
     local manifestOk, manifestAccepted, manifest = pcall(
         server.currentRVManifestForBoundary, record.rvId, record.generation,
         record.bitmapVersion)
     if not manifestOk or manifestAccepted ~= true or type(manifest) ~= "table" then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return reject("manifest")
     end
     local geometryOk, consistent = pcall(
         server.currentRVRecordGeometryConsistent, record, manifest)
     if not geometryOk or consistent ~= true then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return reject("geometry")
     end
     return true, { record = record, train = findTrain(record.locoId) }
 end
@@ -1405,6 +1412,7 @@ local function markPlayerInside(map, record, key, player, sourcePosition,
     end
     record.players[name] = {
         schemaVersion = C.RV_RELATION_SCHEMA_VERSION,
+        locoId = tostring(record.locoId),
         onlineId = relation.onlineId, inside = true,
         role = sourceRole, seat = sourceSeat,
         enterPosition = enterPosition,

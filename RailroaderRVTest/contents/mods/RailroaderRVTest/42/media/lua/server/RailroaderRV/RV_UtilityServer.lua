@@ -325,10 +325,22 @@ function M.snapshotForPlayer(player)
 end
 
 function M.initializeRecord(identity, context)
+    print("[RailroaderRVTest] utility init begin rv=" .. tostring(identity and identity.rvId)
+        .. " generation=" .. tostring(identity and identity.generation))
     local recordOk, recordOrReason = Store.getRecord(identity, true)
-    if not recordOk then return false, recordOrReason end
+    if not recordOk then
+        print("[RailroaderRVTest] utility init failed stage=get-record reason="
+            .. tostring(recordOrReason))
+        return false, recordOrReason
+    end
     local committed, reason = Store.commit(recordOrReason, identity)
-    if not committed then return false, reason end
+    if not committed then
+        print("[RailroaderRVTest] utility init failed stage=commit reason="
+            .. tostring(reason))
+        return false, reason
+    end
+    print("[RailroaderRVTest] utility init committed rv=" .. tostring(identity.rvId)
+        .. " generation=" .. tostring(identity.generation))
     if context and context.player then broadcast(context, recordOrReason) end
     return true, recordOrReason
 end

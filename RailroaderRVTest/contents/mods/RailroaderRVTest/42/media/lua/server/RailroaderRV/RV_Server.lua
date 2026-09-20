@@ -5616,6 +5616,18 @@ if not railroaderAdapterOk then
         .. safeErrorText(railroaderAdapterOrError))
 elseif type(railroaderAdapterOrError) == "table"
     and type(railroaderAdapterOrError.installTransactionHooks) == "function" then
+    -- Utility persistence validates the same current Railroader mapping and
+    -- geometry as the generation transaction.  Keep these adapter gates on
+    -- the public server facade so the commit hook does not fail closed merely
+    -- because the optional adapter was loaded in its own module table.
+    if type(railroaderAdapterOrError.resolveCurrentUtilityRV) == "function" then
+        RV.Server.resolveCurrentUtilityRV =
+            railroaderAdapterOrError.resolveCurrentUtilityRV
+    end
+    if type(railroaderAdapterOrError.validateCurrentUtilityIdentity) == "function" then
+        RV.Server.validateCurrentUtilityIdentity =
+            railroaderAdapterOrError.validateCurrentUtilityIdentity
+    end
     if railroaderAdapterOrError.installTransactionHooks() then
         print("[RailroaderRVTest] Railroader RV transaction hooks installed.")
     else

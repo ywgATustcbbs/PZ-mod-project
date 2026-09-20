@@ -95,3 +95,8 @@ manifest 与 mapping 中的 epoch 时间字段写入整秒（`math.floor(os.time
 schema 的整数 gate 严格校验；Kahlua 的 `os.time()` 小数返回值不得直接持久化。
 缺失或不匹配时服务端必须拒绝操作并提示删除测试存档后重建；不得迁移、转换、使用
 旧 bounds、清理对象、传送玩家或运行 boundary guard。空的新容器才可按当前 schema 初始化。
+
+Railroader 适配器由 `RV_Server` 在加载后显式桥接到公共 `RV.Server` facade；utility
+初始化只能通过该 facade 的 current mapping/geometry 身份 gate。mapping 与 record 的
+`inside=true` rider 关系同时保存当前 `locoId`，供 utility 初始化、重连和边界监视做
+严格的 current-schema 双向校验；适配器缺失或身份不匹配时继续 fail-closed。

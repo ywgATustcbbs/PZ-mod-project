@@ -236,9 +236,17 @@ function M.validateIdentity(identity)
     if not server or type(server.currentRVManifestForBoundary) ~= "function" then
         return false, C.SAVE_REBUILD_REQUIRED
     end
-    local ok, accepted = pcall(server.currentRVManifestForBoundary,
+    local ok, accepted, manifest = pcall(server.currentRVManifestForBoundary,
         identity.rvId, identity.generation, identity.bitmapVersion)
-    if not ok or accepted ~= true then return false, C.SAVE_REBUILD_REQUIRED end
+    if not ok or accepted ~= true then
+        print("[RailroaderRVTest] utility identity manifest gate failed ok="
+            .. tostring(ok) .. " accepted=" .. tostring(accepted)
+            .. " state=" .. tostring(type(manifest) == "table" and manifest.state)
+            .. " phase=" .. tostring(type(manifest) == "table" and manifest.phase)
+            .. " generation=" .. tostring(type(manifest) == "table" and manifest.generation)
+            .. " bitmap=" .. tostring(type(manifest) == "table" and manifest.bitmapVersion))
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
     if type(server.validateCurrentUtilityIdentity) ~= "function" then
         return false, C.SAVE_REBUILD_REQUIRED
     end
@@ -250,19 +258,43 @@ function M.validateIdentity(identity)
 end
 
 function M.getRecord(identity, allowCreate)
-    if not identityValid(identity) then return false, C.SAVE_REBUILD_REQUIRED end
+    local initializing = allowCreate == true
+    if not identityValid(identity) then
+        if initializing then
+            print("[RailroaderRVTest] utility init rejected stage=identity")
+        end
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
     local identityOk, identityReason = M.validateIdentity(identity)
-    if not identityOk then return false, identityReason end
+    if not identityOk then
+        if initializing then
+            print("[RailroaderRVTest] utility init rejected stage=identity-gate")
+        end
+        return false, identityReason
+    end
     local ok, value = pcall(root, allowCreate == true)
-    if not ok then return false, C.SAVE_REBUILD_REQUIRED end
+    if not ok then
+        if initializing then
+            print("[RailroaderRVTest] utility init rejected stage=root-schema")
+        end
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
     local record = value.records[tostring(identity.rvId)]
     if record == nil and allowCreate == true then
         record = newRecord(identity)
         value.records[tostring(identity.rvId)] = record
     elseif record == nil then
+        if initializing then
+            print("[RailroaderRVTest] utility init rejected stage=record-missing")
+        end
         return false, C.SAVE_REBUILD_REQUIRED
     end
-    if not validRecord(record, identity) then return false, C.SAVE_REBUILD_REQUIRED end
+    if not validRecord(record, identity) then
+        if initializing then
+            print("[RailroaderRVTest] utility init rejected stage=record-schema")
+        end
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
     local key = tostring(identity.rvId) .. ":" .. tostring(identity.generation)
         .. ":" .. tostring(identity.bitmapVersion)
     if not sessionPrepared[key] then
@@ -278,13 +310,22 @@ function M.getRecord(identity, allowCreate)
 end
 
 function M.commit(record, identity)
-    if not validRecord(record, identity) then return false, C.SAVE_REBUILD_REQUIRED end
+    if not validRecord(record, identity) then
+        print("[RailroaderRVTest] utility init rejected stage=commit-record-schema")
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
     local ok, value = pcall(root, true)
-    if not ok then return false, C.SAVE_REBUILD_REQUIRED end
+    if not ok then
+        print("[RailroaderRVTest] utility init rejected stage=commit-root-schema")
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
     value.records[tostring(identity.rvId)] = record
     if ModData and type(ModData.transmit) == "function" then
         local sent, result = pcall(ModData.transmit, U.STORE_KEY)
-        if not sent or result == false then return false, U.REASONS.CANONICAL_COMMIT_FAILED end
+        if not sent or result == false then
+            print("[RailroaderRVTest] utility init rejected stage=commit-transmit")
+            return false, U.REASONS.CANONICAL_COMMIT_FAILED
+        end
     end
     return true
 end

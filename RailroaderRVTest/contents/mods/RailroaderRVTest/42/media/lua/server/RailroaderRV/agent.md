@@ -68,7 +68,10 @@ BoundaryServer 仅通过适配器的完整 current map/record schema hook 取得
 
 `OnClientCommand` 在 generation/roof-refresh identity 占用时会以明确原因拒绝进入或退出，
 并保持服务端事务互斥；B42 浮点 `teleportTo` 的半格目标由服务端和客户端在官方传送调用后
-分别通过 `setX/setY/setZ`、`setLastX/setLastY` 恢复，再进行最终位置证明与严格回执。
+分别通过 `setX/setY/setZ`、`setLastX/setLastY` 恢复，再进行最终位置证明与严格回执。generation
+失败回滚也会在同一服务端权威传送后重断言已捕获的原始坐标；只有精确位置证明成功才结束回滚，
+避免引擎向下取整造成相同 `return` 命令的无界重发。断线/身份替换仍暂停事务并等待同一稳定身份重绑，
+不会把离线或新身份当作回传目标。
 若 B42 的 IsoPlayer 网络更新在最终回执前把半格 x/y 归一化为包含方格，最终证明保留
 精确值优先，并仅在 z 精确且 floor(x/y) 仍命中同一服务端目标方格时接受该引擎归一化；
 跨方格仍 fail-closed。
@@ -77,7 +80,7 @@ BoundaryServer 仅通过适配器的完整 current map/record schema hook 取得
 
 地板事务会在第一次替换每个对象时记录原 sprite；室内精确 carpet→roof floor 的连续阶段保留同一份初始快照。已有地板使用 `transmitUpdatedSpriteToClients`，新建地板使用添加包。失败回滚对已有地板恢复原 sprite 并清除本模组标签，对本轮新建地板只调用 `transmitRemoveItemFromSquare`；该 B42 API 负责网络、移除事件、本地脱离和重算，随后重新扫描边界，只有服务端权威对象上不再存在该 generation 标签时才报告 `rollback=COMPLETE`。
 
-实体脚本由 B42 `GameEntityFactory.CreateIsoObjectEntity` 创建；该 Java API 是 void，不能以返回值或 `getEntity` 判断成功。调用后检查同一 `IsoObject:getEntityScript`，雨桶还必须检查真实的 `getFluidContainer` 组件，并以组件的 `getCapacity/getAmount/isFull` 作为满水后置条件。官方 `stateToIsoObject` 未达到后置条件时只允许通过 B42 支持的 `Empty/addFluid` 组件方法修复，并调用所属 `IsoObject:sync`；失败诊断必须包含组件和对象的实际容量/数量，不能吞掉不一致。最终组件实际数量会同步回 `luaObject.waterAmount`、对象 modData，并调用 `updateOnClient`。清理 generation 标签只清除已知字段并保留空命名空间及无关 modData 键，不依赖 Kahlua 不提供的 `next`。无实体脚本的普通柜台/水槽允许走普通家具路径；有脚本但工厂或组件验证失败则拒绝生成。重试不会重复创建方格或对象。
+实体脚本由 B42 `GameEntityFactory.CreateIsoObjectEntity` 创建；该 Java API 是 void，不能以返回值或 `getEntity` 判断成功。生成的普通 sink 在附着前通过 `GameEntityFactory.AddComponent` 补齐 `ComponentType.FluidContainer`；隐藏 usage tank/proxy 由服务端创建真实 FluidContainer，校验 `getCapacity/getAmount`，设置 `inputLocked`、`rainCatcher=0` 与隐藏表现，再在对象挂入 square/index 后发送唯一完整包。组件投影失败只能保留 projection pending/reconcile 状态，不能把 world object 当 canonical 余额。清理 generation 标签只清除已知字段并保留空命名空间及无关 modData 键，不依赖 Kahlua 不提供的 `next`。无实体脚本的普通柜台/水槽允许走普通家具路径；有脚本但工厂或组件验证失败则拒绝生成。重试不会重复创建方格或对象。
 官方无 payload 请求在服务端以 `nil` 到达，这是 `Generate` 的规范表示；B42 网络层也可能以空 Lua table 或
 `PZNetKahluaTableImpl` 且 `size()==0` 表示同一个当前空 payload。非空 payload 和其他类型一律拒绝。
 
@@ -87,11 +90,10 @@ BoundaryServer 仅通过适配器的完整 current map/record schema hook 取得
 `addNormalObject` 只写本地状态、附着对象、校验 `getObjectIndex` 并重算，不发送对象
 索引增量包；创建者在首次广播时恰好调用一次 `transmitCompleteItemToClients`。墙体、
 柜台、发电机和灯在标签/必要本地状态完成并附着后发送该唯一完整包，灯仍在附着后
-激活再发送。雨桶先附着并发送唯一完整包，然后才进入会调用 `sync`、
-`transmitModData`、`updateOnClient` 的全局对象/FluidContainer 状态桥。水槽同样先
-附着并发送唯一完整包，再执行 `setUsesExternalWaterSource`、
-`doFindExternalWaterSource`，最后按官方路径发送 `transmitModData` 和
-`sendObjectChange` 增量，防止客户端重复 `AddItemToMap` 导致对象索引错位。已有地板
+激活再发送。隐藏 usage tank/proxy 在组件 amount/capacity 和 identity tag 完成后发送
+唯一完整包。水槽连接事务先创建并验证正上方 proxy，再执行
+`setUsesExternalWaterSource`、`doFindExternalWaterSource`，最后按官方路径发送
+`transmitModData` 和 `sendObjectChange` 增量，防止客户端重复 `AddItemToMap` 导致对象索引错位。已有地板
 替换则显式发送 `transmitUpdatedSpriteToClients` 与 `transmitModData` 两个增量；新建
 地板只发送一次完整对象包。回滚阶段对已存在客户端对象的标签清理和地板恢复同步仍
 保留显式增量发送。
@@ -167,18 +169,77 @@ manifest、bitmap、shell ledger、mapping 或异步身份只要不是当前完�
 
 拆分模块不注册事件、不接受客户端坐标，也不持有持久事务状态；依赖方向为
 `RV_ServerUtil` → `RV_ServerWorld` → `RV_ServerSchema` → `RV_Server` facade。
-facade 继续单点注册 `OnClientCommand`、`OnTick`、Boundary 事件和 Railroader hook，
+facade 继续单点注册 `OnClientCommand`、`OnTick`、Boundary 事件、Water 的
+`OnObjectAboutToBeRemoved`/`OnObjectAdded` 清算回调和 Railroader hook，
 并保持公共 `RV.Server` 与 adapter 契约不变。每个服务端 Lua chunk 的主作用域均须
 低于 Kahlua 200-local 限制，静态测试使用 luaparse 逐文件核验。
 
 水电服务端模块由 `RV_UtilityStore.lua`、`RV_UtilityWater.lua`、
-`RV_UtilityPower.lua` 和 `RV_UtilityServer.lua` 组成。Store 只接受完整 current
+`RV_UtilityPower.lua` 和 `RV_UtilityServer.lua` 组成。Store 只接受完整 current-only
 schema 的水/电记录；缺失或 identity 不匹配进入 `SAVE_REBUILD_REQUIRED`，不迁移旧字段。
-Water 持有唯一 canonical `sharedAmount`，每个 server tick 由 facade 在一次
-`inWaterSettlement` guard 内现场遍历 registry，按
-`sum(max(Dprev-Dobs,0))` 结算，再单向镜像到中央和设备 FluidContainer。普通设备
-失效只清理/标记本设备，重复身份、同对象多登记和跨 RV 占用拒绝整轮。`ADD_WATER`
-先服务端验证独立玩家物品源，再调用已有 guard 下的 `settleUnderGuard`，随后扣除源容器并只按确认的
-`confirmedTransfer` 入账；中央和设备镜像不允许作为 source。Power 只绑定原生
-`IsoGenerator` 身份与回路状态，燃油/condition 不复制为第二份余额。未经过整体
-运行时验证的目录设备保持禁用；本目录静态检查不等同于游戏/联机测试。
+Water 持有唯一 canonical `canonicalTank.amount`（当前默认容量 1000L），并以隐藏普通
+`IsoObject + FluidContainer` usage tank 与每 fixture 一个隐藏 `IsoThumpable` proxy 作为
+干净 Water 工作镜像；二者不注册 `SRainBarrelSystem`，也不是第二份余额。所有覆盖、连接、
+加水、拆除和周期结算都在一次 `flushBeforeOverwrite` guard 内按
+`collectAllLoadedProxyDeltas → settleUsageToCanonical → executeOperation →`
+`projectCanonicalToUsage → projectUsageToProxies` 顺序执行；`OnWaterAmountChange`
+优先收集，固定 tick 负责漏事件兜底。逐对象 baseline/sequence、projection pending、
+DEFERRED、quarantine 和 faultPolicy 必须保留，未知/损坏对象 fail-closed；方格恢复加载
+后会重新验证 fixture/proxy 身份并回到 reconcile 阶段。对象写入的本地可见量与 sync
+确认分开记账，重试只推进未确认阶段，避免重复扣水；隔离清理在 rebuild lock 下仍持续
+重试。原生回调负责差分收集，低频 settlement tick 负责漏事件结算；B42 对当前完整 fixture
+tag 触发 `OnObjectAboutToBeRemoved` 时，先按 registry/token/fingerprint 完整证据执行
+普通 detach，再允许引擎移除对象；`OnObjectAdded` 只消费同一进程内同一对象身份的
+配对 witness，以清除 IsoThumpable moveable 可能携带的当前 tag。缺失、过期或不匹配
+的 tag 不作孤儿推断，仍交给当前 schema 的审计/重建门。无变化对象只有在 amount/capacity、clean Water profile
+和 `isInputLocked()==true` 都匹配时才跳过写入/transmit。
+`ADD_WATER` 的 `INTERNAL`/`LOCOMOTIVE` entryPoint 共用服务端 source planned→confirmed
+事务和 requestLedger 幂等；只接受玩家库存 clean/tainted Water，LOCOMOTIVE 可在内部
+chunk 未加载时只提交 canonical 并记录 deferred projection。当前仅允许目录 sink
+（`runtimeTestEnabled=true`）进入兼容性测试连接；模组生成 sink 必须通过 owner/当前
+identity tag，原生/未知名称 fixture 必须具备真实 `waterPiped` 或 `canBeWaterPiped`
+能力且精确拒绝化学马桶。`runtimeValidated=false` 仍表示本轮尚未完成整体运行时验证，
+其他目录设备保持禁用。旧 sink、旧 proxy/usage tag、缺少组件或错误代际统一返回
+`SAVE_REBUILD_REQUIRED`，不补组件、不重写 tag、不迁移旧存档；客户端只显示删档重建提示。
+所有对象坐标、token、fingerprint 和 source 都由服务端重解析，客户端 hint 只作查找请求。
+普通拆除先完整 flush；damaged-object emergency 在 suppression guard 下撤销 external、
+清空/移除 proxy，无法确认的消费进入人工重建门。
+本目录静态检查不等同于游戏/联机测试。
+
+生成阶段的 vanilla sink sprite 可能是没有实体脚本的普通 `IsoObject`；`RV_Server.lua`
+会在写入 owner/identity tag、附着到方格和发送唯一完整对象包前，通过
+`GameEntityFactory.AddComponent` 显式补齐 `ComponentType.FluidContainer`。这样客户端
+`RV_UtilityCatalog.findEntry` 与服务端 `RV_UtilityWater` 看到的是同一个当前对象能力，
+不会因 sink sprite 缺少脚本而隐藏连接菜单或进入不可镜像的登记状态。
+
+重连后的 `RVUtilityMapping` 由 `RV_RailroaderServer.resolveCurrentUtilityRV` 使用服务端
+玩家身份、当前关系、live generation、manifest geometry 与车旁范围重新验证后定向发送；
+客户端提示不参与授权。`RV_UtilityServer` 周期性刷新该候选并替换已验证的 tick player
+对象。`ADD_WATER` 按服务端 item ID 重解析背包物品，不要求 Java userdata 包装对象恒等；
+`removeFluid` 后回读实际下降量，必要时只用服务端计划值调用 `adjustAmount` 兜底；服务端
+在记账前按 B42 官方 `ISFluidTransferAction`/`ISAddFluidFromItemAction` 路径调用已解析
+`InventoryItem:syncItemFields()`，让拥有该物品的客户端立即收到 FluidContainer stats，
+耗尽来源会从客户端来源列表自然消失。失败或提交失败则尽力恢复源容器并再次同步最终量，
+canonical ledger 只增加确认转移量；客户端不伪造扣水，也不以隐藏条目代替服务端同步。
+
+当前 persistence boundary：`RV_UtilityStore.getRecord`/`allRecords` 只返回深拷贝，
+`commit` 在 transmit 成功前将 candidate 与 ModData root 隔离；transmit/结构性失败按
+本次 root snapshot 恢复，fresh 空容器不会留下半初始化 record。初始化把同一个 working
+record 显式传给 `ensureUsageTank`，usage tank object postcondition 与 commit 同属一次
+事务；新对象 attach、组件、完整包或 commit 失败时只回滚本次可确认附着的 current object，
+无法证明移除则返回 `SAVE_REBUILD_REQUIRED`。已确认 consumption settlement 不由该结构
+回滚路径补偿；未知/旧代际对象和旧 barrel role 仍只触发 current-only rebuild gate。
+`flushBeforeOverwrite` 将 commit failure 标记单独向 CONNECT/DETACH/settlement 路径传递；
+结构性清理完成后尽力写入当前 record 的 rebuild lock，防止未确认的 world delta 在下一次
+操作中重复结算；已成功 commit 的 consumption settlement 不走该 lock 的补偿路径。
+
+水电对象审计只把有历史证据的 generic legacy role `rain_barrel` 当作 retired
+evidence；当前 generic `RailroaderRVTest` sink/floor/roof/counter/generator tags（以及
+current generated sink 的 generic sink tag）不能单独触发旧对象门。`Store.getRecord` 返回
+working copy 和可信 `fresh` 元信息；初始化在 fresh record 发现任何 current/retired usage
+tank evidence 时直接 `SAVE_REBUILD_REQUIRED`，不采纳、删除或迁移对象。CONNECT 在目标 proxy
+square 发现无完整 registry+proxyLedger 对应项的 current proxy、重复 proxy 或 orphan 时同样
+fail-closed 并保留未知对象；完整登记的 world proxy 才按普通 `DEVICE_CONFLICT` 拒绝重复意图。
+persisted current record 若 expected usage tank 缺失也直接 `SAVE_REBUILD_REQUIRED`；在具备
+完整 loaded U/P、baseline、pending delta 和 checkpoint recovery transaction 之前，不从
+canonical amount 重建或替代创建 usage tank。

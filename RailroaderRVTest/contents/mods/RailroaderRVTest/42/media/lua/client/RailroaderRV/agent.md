@@ -104,11 +104,33 @@ staging transition 才是唯一允许的无 marker 重试例外。
 由服务端 authoritative gate 负责拒绝并通知用户删档重建。
 
 水电客户端由 `RV_UtilityContextMenu.lua`、`RV_UtilityClient.lua` 和
-`RV_UtilityDashboard.lua` 组成。菜单提供水设备/原生 generator 的意图入口，并提供只读
-`Show RV utility status` 状态入口（以本地 halo note 展示最新服务端快照）；只发送
-`requestId`、`sessionNonce`、操作名和
-服务端可重新解析的目标提示；`RV_UtilityClient` 只缓存服务端 snapshot/ACK，不写任何
-FluidContainer、registry、amount、profile 或 generator fuel。Dashboard 只展示
-`sharedAmount/capacity`、profile、设备状态和原生 generator 状态。收到
+`RV_UtilityDashboard.lua` 组成。菜单提供水设备/原生 generator 的意图入口，并通过
+`RV_RailroaderContextMenu` 在成功收到当前 schema 的 enter/exit 传送回执后才展示水电面板入口；
+当前兼容性测试菜单只接受 `runtimeTestEnabled` 的 sink 目录项：模组生成 sink 必须带当前
+owner/identity tag，玩家摆放或模组添加的原生 fixture 必须有当前 B42 `waterPiped` 或
+`canBeWaterPiped` 能力，并精确排除化学马桶。两条路径都
+只用于客户端候选展示，`runtimeValidated` 仍为独立的验证结果，不由客户端设置；点击仍由
+服务端完整验证，机车旁还须命中本地近车候选。
+若带有模组 sink tag 的旧对象缺少当前 `FluidContainer`/目录项，菜单不提交连接意图，只显示
+`SAVE_REBUILD_REQUIRED` 的本地删档重建提示；这条路径不补组件、不改 tag、不迁移对象。
+面板展示服务端快照的 canonical 水/燃油数值与容量、百分比进度条，并从玩家背包选择添加水/燃油来源；
+添加水意图携带 `INTERNAL` 或 `LOCOMOTIVE` entryPoint，权限、来源和 deferred projection 均由服务端重解析。
+客户端只用当前映射/附近机车位置选择这两个 entryPoint 提示；服务端仍以实时 inside/mapping/range
+复核为准，客户端位置不会授予 `LOCOMOTIVE` 权限。
+菜单和面板文字统一走 `shared/Translate/CN/UI_CN.json`、`EN/UI_EN.json` 的本地化 key，避免 Lua
+中文字面量编码问题。水电状态不使用头顶 halo 文本；快照只刷新已经打开且匹配当前映射会话的面板，
+不会因广播创建或重开 UI。`Events.OnConnected`/`OnDisconnect` 会清空客户端 mapping、snapshot、
+session nonce 并移除已打开面板；首次打开只接受与当前 mapping identity 相同的缓存快照，否则显示等待。
+客户端只发送
+`requestId`、`sessionNonce`、操作名和服务端可重新解析的目标/来源提示；`RV_UtilityClient`
+只缓存服务端 snapshot/ACK，不写任何 FluidContainer、registry、amount、profile 或
+generator fuel；收到隐藏 usage tank/proxy 或加载其 square 时只根据当前 tag 重新应用
+`setDoRender(false)`，不创建、不修复、不写服务端对象。收到
 `SAVE_REBUILD_REQUIRED` 时仅显示本地 ASCII 的删档重建提示；任意网络文本、客户端
 坐标和客户端计算结果都不作为权限或水量依据。
+
+重连后服务端按持久玩家身份、current-schema mapping、inside/绑定关系、当前 generation
+和权威范围重新发出 `RVUtilityMapping` 候选；客户端只在本地 online ID 和当前
+`mapSchemaVersion`/`bitmapVersion` 匹配时缓存它，后续点击仍走完整服务端权限验证。
+客户端背包源遍历只对实际暴露 `getInventory` 的物品调用 Java API，避免普通物品触发
+B42 RuntimeException；面板 ACK 状态在下一次快照到达时保留，直到用户刷新或下一次操作。

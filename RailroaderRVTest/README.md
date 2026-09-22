@@ -1,6 +1,6 @@
 # RailroaderRVTest
 
-Railroader RV 的程序化生成技术验证包。当前技术版本为 `0.2.0-tech`，只针对官方
+Railroader RV 的程序化生成技术验证包。当前技术版本为 `0.3.0-tech`，只针对官方
 Railroader 2.1 与 Project Zomboid Build 42；不加载任何独立的旧适配层。命名空间固定为
 `RailroaderRV`，模组 ID 为 `RailroaderRVTest`；该版本同时写入 `mod.info` 和 manifest
 `techVersion`。
@@ -69,7 +69,7 @@ context 复核推进，并继续持有 lease，直到 `completeRoofRepairRelocat
 
 实现约束：Lua 服务端对 canonical `edgeKey` 的 N/W 解析统一使用字符类 `([NW])`；不得改回不受 Lua pattern 支持的 `N|W` alternation。`RV_Server` 与 `RV_BoundaryServer` 的解析契约必须保持一致。
 
-重复生成会让 B42 动态房间系统移除旧 `IsoRoom` 并重建 `RoomDef`；当前房间/对象生成已启用，清场失败会短路生成，任一生成阶段失败则进入本代回滚。B42.20 没有向 Lua 暴露 `GameServer.sendTeleport`，所以服务端向目标客户端发送自有 `Relocate` staging 命令并同步调用服务端玩家的 `teleportTo`；客户端仅回传无坐标 token。任何 roof-refresh 或首次 generation-staging 临时传送前，服务端先验证当前 schema、RV identity、稳定异步身份、精确原坐标和服务端目标，再把它们保存在当前进程的内存事务中；验证失败即禁止传送。回执后还需跨 tick，并由服务端再次核对 online ID+用户名、权限、当前位置、staging 安全性和固定 anchor 的完整加载状态，才执行 100×100 清场及后续生成。完整建造成功后、提交 `READY` 前，服务端发送独立 `FinalRelocate` 命令并同步调用服务端玩家 `teleportTo(20050.5,2050.5,0)`；客户端在该命令处理器内先同步扫描并清除目标旧/新 footprint 中 `room~=nil && RoomDef==nil` 的引用，再执行本地 teleport，只有 guard/room scan/实际目标坐标均成功才发送严格 token-only `FinalRelocateAck`。玩家掉线时，当前进程保留稳定 online ID+用户名、精确浮点原坐标和阶段；同一身份重新上线后继续权威回传，不能因替换 `IsoPlayer` 对象而丢失事务。服务器进程崩溃、关闭或重启会丢弃这些内存事务；中间传送不建立持久记录，也不恢复原坐标、repair、`READY` 或最终回传阶段。服务端在加载等待期间不做任何世界修改，并以硬超时结束；旧、缺失或部分持久 schema 一律提示删档重建，不自动迁移。
+重复生成会让 B42 动态房间系统移除旧 `IsoRoom` 并重建 `RoomDef`；当前房间/对象生成已启用，清场失败会短路生成，任一生成阶段失败则进入本代回滚。B42.20 没有向 Lua 暴露 `GameServer.sendTeleport`，所以服务端向目标客户端发送自有 `Relocate` staging 命令并同步调用服务端玩家的 `teleportTo`；客户端仅回传无坐标 token。任何 roof-refresh 或首次 generation-staging 临时传送前，服务端先验证当前 schema、RV identity、稳定异步身份、精确原坐标和服务端目标，再把它们保存在当前进程的内存事务中；验证失败即禁止传送。回执后还需跨 tick，并由服务端再次核对 online ID+用户名、权限、当前位置、staging 安全性和固定 anchor 的完整加载状态，才执行 100×100 清场及后续生成。完整建造成功后、提交 `READY` 前，服务端发送独立 `FinalRelocate` 命令并同步调用服务端玩家 `teleportTo(20050.5,2050.5,0)`；客户端在该命令处理器内先同步扫描并清除目标旧/新 footprint 中 `room~=nil && RoomDef==nil` 的引用，再执行本地 teleport，只有 guard/room scan/实际目标坐标均成功才发送严格 token-only `FinalRelocateAck`。失败回滚使用同一服务端捕获的原始坐标，并在 B42 传送后通过官方 setter 重断言精确 `x/y/z` 与移动历史；只有权威位置证明成功才结束回滚，避免浮点取整导致重复 `return`。玩家掉线时，当前进程保留稳定 online ID+用户名、精确浮点原坐标和阶段；同一身份重新上线后继续权威回传，不能因替换 `IsoPlayer` 对象而丢失事务。服务器进程崩溃、关闭或重启会丢弃这些内存事务；中间传送不建立持久记录，也不恢复原坐标、repair、`READY` 或最终回传阶段。服务端在加载等待期间不做任何世界修改，并以硬超时结束；旧、缺失或部分持久 schema 一律提示删档重建，不自动迁移。
 
 除正常事务外，服务端还运行无状态的 `z=-15` 哨兵：在普通事务处理之后按固定 tick 扫描在线玩家，只考虑 `floor(z)==-15` 且没有被当前内存 generation/roof 事务以稳定身份占用的玩家。玩家的 `floor(x/y)` 必须精确命中当前 bitmap 派生的单个临时格：首次 generation 是 managed bitmap 中心，roof-refresh 是该中心减去 `(18000,0,15)`；不是宽范围或旧 bounds。哨兵只有在当前 manifest、mapping、boundary、bitmap、双向 `inside=true` 玩家关系和异步身份均通过 current-schema 校验，且匹配到恰好一个 RV 时才继续，并在传送前后再次检查事务 claim。回传目标复用正常 Enter 使用的当前 `record.rvPosition` 与权威 record 契约，并验证 active bitmap 和合法世界坐标；哨兵不恢复原坐标、不执行 roof repair、不改变 manifest phase/`READY`，匹配不唯一或 schema/身份不完整时 fail-closed 并提示 `SAVE_REBUILD_REQUIRED`。短 cooldown 和 busy 标记防止重复发送；玩家仍停留在 `-15` 时只受控延迟重试，不会永久吞掉候选。
 
@@ -178,7 +178,7 @@ current-only gate 失败；本次 RV 操作随即停止，不使用旧 geometry�
   `ROOF_FLOOR` 阶段对缺失方格复用官方玩家建造路径
   (`IsoGridSquare.new(cell,nil,x,y,z)` → `cell:ConnectNewSquare(square,false)`)，
   校验连接结果后再铺地板，已有方格则直接复用。
-- 西墙玩家建筑照明灯为 `(cx-2,cy,cz)`；柜台和水槽为 `(cx+1,cy,cz)`；雨水收集桶在正上方 `(cx+1,cy,cz+1)`；发电机在 `(cx-1,cy,cz+1)`。
+- 西墙玩家建筑照明灯为 `(cx-2,cy,cz)`；柜台和水槽为 `(cx+1,cy,cz)`；隐藏 usage tank 位于确定性的 `utilityTankOffset`；发电机在 `(cx-1,cy,cz+1)`。
   照明灯必须使用 BuildCraft 的“自建房电灯开关1”`BuildingCraft_Light_17`，而不是
   系统房开关组（`lighting_indoor_01_1/0/2/3`、`lighting_indoor_01_5/4/7/6`）或普通
   原版壁灯。该图集和 tile definition 由运行时 BuildingCraft 依赖提供，本包不复制贴图。
@@ -189,11 +189,12 @@ current-only gate 失败；本次 RV 操作随即停止，不使用旧 geometry�
   没有 `Facing` 键，`attachedW` 是方向依据。`attachedW` 不属于字符串属性键，
   `lightswitch` 也不是字符串属性，不能用 `PropertyContainer:has("attachedW")` 或
   `PropertyContainer:has("lightswitch")` 替代枚举校验。
-- 发电机初始开启且燃油 100；雨水桶初始满水；照明灯初始开启。
+- 发电机初始开启且燃油 100；canonicalTank 初始为 0，隐藏 usage tank 只投影该值；照明灯初始开启。
 
 当前运行时阶段顺序固定为：服务端目标/旧新 footprint 校验 → 选择并定向传送到安全 staging 格 → 等待客户端 token/跨 tick 复核 → 服务端等待并复核 10000 个 base 方格加载 → 100×100 清场 → 6×40 carpet 地板 → NW/SE 单角条与 N/W 直墙 →
   按官方路径创建/复用 z+1 方格并铺 6x40 普通地板 → 整体 `RecalcProperties`/`RecalcAllWithNeighbours(true)`
-   与屋顶/区域探测 → 发电机 → 雨水桶 → 柜台/水槽 → 最后照明灯 → 服务端发送
+   与屋顶/区域探测 → 发电机 → 柜台/具备 plumbing capability 的水槽 → 最后照明灯 →
+  current mapping 提交后创建隐藏 usage tank → 服务端发送
    独立 `FinalRelocate` 并将玩家校正到 `(20050.5,2050.5,0)` → 提交 `READY`。照明灯严格复用
   BuildCraft 的 `IsoLightSwitch` 路径（`IsLighting=true`、`setPower(2)`、
   `addLightSourceFromSprite`、`update`、`AddSpecialObject`、重算），不再手工创建
@@ -202,10 +203,10 @@ current-only gate 失败；本次 RV 操作随即停止，不使用旧 geometry�
   `addNormalObject` 只写本地状态、附着、索引校验和重算，不发送对象索引增量包；
   每个创建者在首次广播时恰好调用一次 `transmitCompleteItemToClients`。
   墙体、柜台、发电机和灯在标签/必要本地状态完成并附着后发送该唯一完整包。
-  雨桶先附着并发送唯一完整包，再进入会调用 `sync`、`transmitModData` 与
-  `updateOnClient` 的官方全局对象/FluidContainer 状态桥；水槽也先附着并发送
-  唯一完整包，再执行 `setUsesExternalWaterSource`、`doFindExternalWaterSource`，
-  最后按官方路径发送 `transmitModData` 与 `sendObjectChange` 增量。这样所有
+  隐藏 usage tank/proxy 在服务端创建 FluidContainer、完成 identity tag 与 amount
+  后发送唯一完整包；水槽连接事务再创建其正上方 proxy，执行
+  `setUsesExternalWaterSource`、`doFindExternalWaterSource` 后按官方路径发送
+  `transmitModData` 与 `sendObjectChange` 增量。这样所有
   增量都只引用客户端已存在的对象，不会因重复 `AddItemToMap` 造成索引错位。
 
 每个对象都带有 `RailroaderRVTest` owner/rvId/generation/bitmapVersion 标签。地板首次被替换时还保存原
@@ -215,14 +216,14 @@ sprite；房屋 carpet 地板与屋顶地板连续改写同一对象时不会覆
 任何前置增量，只发送一次完整对象包。
 
 任一阶段（包括最后的灯光阶段）失败时，服务端会按本次 generation 遍历已记录边界：已有地板
-恢复原 sprite 并清除本模组标签，本轮新建地板、墙体、发电机、雨桶、家具和灯只调用 B42 的
+恢复原 sprite 并清除本模组标签，本轮新建地板、墙体、发电机、隐藏 usage tank/proxy、家具和灯只调用 B42 的
 `transmitRemoveItemFromSquare`；该 API 自己负责网络包、`OnObjectAboutToBeRemoved`、对象脱离
 world/square 与邻居重算，服务端随后再次扫描服务端权威对象，
 只有不存在该 generation 标签时才记录 `rollback=COMPLETE`，否则记录
-`rollback=FAILED` 并要求恢复。实体脚本使用 B42 `GameEntityFactory` 的 void API，雨桶
-创建后必须从同一 `IsoObject` 的 `FluidContainer` 读取真实 `getCapacity/getAmount/isFull`
-状态；官方 `stateToIsoObject` 未达到满水后，才使用组件支持的 `Empty/addFluid` 修复，仍
-失败时记录组件与对象的实际容量/数量，并将组件实际数量同步回全局对象和 modData。
+`rollback=FAILED` 并要求恢复。实体脚本使用 B42 `GameEntityFactory` 的 void API；隐藏
+usage tank/proxy 创建后必须从同一 `IsoObject` 的 `FluidContainer` 读取真实
+`getCapacity/getAmount` 状态，组件写入失败时保留 projection pending/reconcile 状态，不能
+把 world object 当作 canonical 余额。
 标签清理只清除已知字段并保留空命名空间及其他 modData 键，不扫描 Kahlua 命名空间、
 也不会调用不提供的 `next`。无实体脚本的普通家具仍允许走普通 `AddTileObject` 路径。
 生成期间的 `phase` 也会写入 manifest 并打印日志。
@@ -233,25 +234,39 @@ world/square 与邻居重算，服务端随后再次扫描服务端权威对象�
 
 ## 水电 current schema
 
-水系统只有一份服务端 canonical `sharedAmount`，持久化在
-`RailroaderRVTest.Utility` 的当前 utility store；中央雨水桶和已登记设备的原生
-`FluidContainer` 都是 `capacity/amount/fluidProfile` 镜像，不是额外余额。每次 tick
-在单一 RV guard 内现场检查 registry，消费只按设备上一基线到本轮读数的正向下降
-`sum(max(Dprev-Dobs,0))` 计算；中央对象读数、容量变化和设备加水不会反向改写 canonical。
-设备条目只允许服务端验证的右键连接，记录 `deviceId`、RV identity、坐标、token、
-fingerprint、注册序列和 `ACTIVE/NEEDS_INIT` 状态。未加载或暂时 API 异常的设备保留
-并重新初始化；确认拆除/替换只清理该设备；重复身份、同一对象多登记和跨 RV 占用拒绝
-整轮。设备目录中的原生水槽、马桶、浴缸、淋浴和洗衣机在完成整体联机验证前均保持
-`runtimeValidated=false`，静态代码不宣称这些设备已经支持。
+水系统只有一份服务端 canonical `canonicalTank.amount`，持久化在
+`RailroaderRVTest.Utility` 的 current-only utility store。每辆 RV 另有一个隐藏普通
+`IsoObject + FluidContainer` usage tank，以及每个已连接 fixture 正上方一个隐藏
+`IsoThumpable` proxy；usage tank/proxy 都只是干净 Water 工作镜像，不能替代 canonical
+余额、不能注册到 `SRainBarrelSystem`，也不接受雨水自动补给。proxy 位于
+`(fixture.x, fixture.y, fixture.z+1)`，连接事务创建后才重新调用原版
+`doFindExternalWaterSource`/`FindExternalWaterSource`，证明返回对象就是该 proxy。
 
-`ADD_WATER` 先由服务端验证独立玩家物品源，再在同一 guard 内结算已有消费；随后重新读取源容器计算
-`plannedTransfer`，扣源并读回确认 `confirmedTransfer`，canonical 只增加确认值。客户端菜单的
-只读状态入口展示最新 snapshot，不提交任何余额或设备状态。
-中央投影和设备镜像不能作为 source；液体 profile 只接受干净水、污染的水及二者的
-原生混合，其他成分拒绝。原生 generator 仍是唯一燃油/condition 事实源，power record
-只保存绑定 identity、回路策略和序列，不保存第二份燃料余额。缺失、过期、未知字段、
-旧 identity 或任意非 current utility schema 都 fail-closed，并返回稳定的
-`SAVE_REBUILD_REQUIRED`；没有迁移、别名、fallback 或 crash journal。
+每次覆盖、连接、加水、拆除或周期结算都在单一 RV guard 内经过
+`flushBeforeOverwrite`：先收集全部 proxy baseline delta，再结算 usage tank 到
+canonical，执行当前操作，最后按 canonical → usage tank → proxy 投影。OnWaterAmountChange
+是首选收集入口，固定 tick 是漏事件兜底；projection pending、DEFERRED、quarantine
+和逐对象 baseline/sequence 都保持在 current schema 中。已登记 fixture 按当前
+identity/token/fingerprint 持续验证；未加载 chunk 只标记 DEFERRED/NEEDS_RECONCILE，
+损坏对象在 suppression guard 下撤销 external source、清空/移除 proxy，未确认消费进入
+`UNCONFIRMED_CONSUMPTION_REBUILD`，绝不猜测余额或重扣。
+
+原生候选使用真实 `waterPiped`/`canBeWaterPiped` capability，并精确拒绝
+`Base.Mov_ChemicalToilet`；不按名称、sprite、容量、当前 amount 或连接前 source
+结果做资格判断。设备目录只保存显示/测试元数据，当前 sink 项为
+`runtimeTestEnabled=true`、`runtimeValidated=false`，其他目录项保持禁用。
+
+`ADD_WATER` 有 `INTERNAL` 与 `LOCOMOTIVE` 两个服务端 entryPoint，共用 requestId 幂等和
+planned→confirmed source 事务：只从服务端重新解析玩家背包中 clean/tainted Water
+source 扣除并按实际回读增加 canonical；汽油、酒精等非水 source、usage/proxy 作为
+source、客户端 amount/坐标/deviceType 均拒绝。INTERNAL 需要当前 usage chunk 已加载；
+LOCOMOTIVE 可在内部 chunk 未加载时只提交 canonical，并记录
+`projectionPending/LOCOMOTIVE_ADD_UNLOADED`，以后先 reconcile 再投影。
+
+原生 generator 仍是唯一燃油/condition 事实源，power record 只保存绑定 identity、
+回路策略和序列，不保存第二份燃料余额。缺失、过期、未知字段、旧 identity 或任意非
+current utility schema 都 fail-closed，并返回稳定的 `SAVE_REBUILD_REQUIRED`；没有
+迁移、别名、fallback 或自动改写旧存档。
 
 ## 开发与验证约束
 

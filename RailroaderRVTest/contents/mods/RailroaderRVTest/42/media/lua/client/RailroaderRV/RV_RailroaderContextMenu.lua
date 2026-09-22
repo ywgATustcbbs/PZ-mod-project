@@ -5,12 +5,15 @@
 -- player seat, speed, range and all world coordinates again.
 
 require("RailroaderRV/RV_Constants")
+local U = require("RailroaderRV/RV_UtilityConstants")
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.RailroaderContextMenu = RailroaderRV.RailroaderContextMenu or {}
 
 local Menu = RailroaderRV.RailroaderContextMenu
 local C = RailroaderRV.Constants
+
+Menu._rvUtilityMapping = Menu._rvUtilityMapping or nil
 
 local function finiteNumber(value)
     local valueType = type(value)
@@ -108,6 +111,32 @@ local function mapContainsPlayer(player)
     -- The server mapping gate is authoritative.  The client only decides
     -- whether to show the local affordance from its fixed coordinate scope.
     return true
+end
+
+local function validUtilityMapping(value)
+    return type(value) == "table"
+        and type(value.rvId) == "string" and value.rvId ~= ""
+        and type(value.locoId) == "string" and value.locoId ~= ""
+        and finiteInteger(value.generation) ~= nil
+        and finiteInteger(value.generation) >= 1
+        and finiteInteger(value.bitmapVersion) == C.BITMAP_VERSION
+        and finiteInteger(value.mapSchemaVersion) == C.MAP_SCHEMA_VERSION
+end
+
+local function rememberUtilityMapping(args)
+    if type(args) ~= "table" then return end
+    local action = tostring(args.action or "")
+    if action ~= "enter" and action ~= "exit" then return end
+    local mapping = {
+        rvId = tostring(args.rvId or ""),
+        locoId = tostring(args.locoId or ""),
+        generation = finiteInteger(args.generation),
+        bitmapVersion = finiteInteger(args.bitmapVersion),
+        mapSchemaVersion = finiteInteger(args.mapSchemaVersion),
+    }
+    if validUtilityMapping(mapping) then
+        Menu._rvUtilityMapping = mapping
+    end
 end
 
 local function isIsoAnimal(animal)
@@ -225,6 +254,69 @@ local function nearestLocomotive()
         return record.animal
     end
     return nil
+end
+
+function Menu.getUtilityMapping()
+    local mapping = Menu._rvUtilityMapping
+    if not validUtilityMapping(mapping) then return nil end
+    return {
+        rvId = mapping.rvId, locoId = mapping.locoId,
+        generation = mapping.generation, bitmapVersion = mapping.bitmapVersion,
+        mapSchemaVersion = mapping.mapSchemaVersion,
+    }
+end
+
+-- Reconnect recovery is a server-created candidate only.  The payload does
+-- not grant permission or carry coordinates; it is accepted solely after the
+-- local online identity and current code schema have been checked.  Every
+-- utility command still performs the complete server-side mapping/range gate.
+function Menu.acceptUtilityMapping(args)
+    if type(args) ~= "table" or args.ok ~= true then return false end
+    local onlineId = finiteInteger(args.onlineId)
+    if onlineId == nil or not localPlayerByOnlineId(onlineId) then return false end
+    local mapping = {
+        rvId = tostring(args.rvId or ""),
+        locoId = tostring(args.locoId or ""),
+        generation = finiteInteger(args.generation),
+        bitmapVersion = finiteInteger(args.bitmapVersion),
+        mapSchemaVersion = finiteInteger(args.mapSchemaVersion),
+    }
+    if not validUtilityMapping(mapping) then return false end
+    Menu._rvUtilityMapping = mapping
+    return true
+end
+
+function Menu.clearUtilityMapping()
+    Menu._rvUtilityMapping = nil
+end
+
+function Menu.hasUtilityDashboardCandidate(player)
+    local mapping = Menu.getUtilityMapping()
+    if not mapping or not player then return false end
+    if mapContainsPlayer(player) then return true end
+    local locomotive = nearestLocomotive()
+    if not locomotive then return false end
+    local id = locomotiveId(locomotive)
+    return id ~= nil and tostring(id) == mapping.locoId
+end
+
+-- This is only a local entry-point hint for the menu/dashboard. The server
+-- resolves the live relation and locomotive again and rejects a mismatched
+-- label, so stale client position or mapping state cannot grant the deferred
+-- locomotive path.
+function Menu.utilityEntryPoint(player)
+    local mapping = Menu.getUtilityMapping()
+    if mapping and player and mapContainsPlayer(player) then
+        return U.ENTRY_INTERNAL
+    end
+    if mapping and player then
+        local locomotive = nearestLocomotive()
+        local id = locomotive and locomotiveId(locomotive) or nil
+        if id ~= nil and tostring(id) == mapping.locoId then
+            return U.ENTRY_LOCOMOTIVE
+        end
+    end
+    return U.ENTRY_INTERNAL
 end
 
 local function nowMs()
@@ -461,6 +553,7 @@ function Menu.prepareGenerationRelocation(args)
         -- server payload immediately below this hook.
         pending.finalSeen = true
         pending.expiresAt = nowMs() + GENERATION_TRANSITION_TTL_MS
+        rememberUtilityMapping(args)
         return true
     end
     -- Never infer Railroader state from the generic technical FinalRelocate.
@@ -468,6 +561,7 @@ function Menu.prepareGenerationRelocation(args)
     -- used by the staging transition.
     if not validGenerationFinalHint(args) then return false end
     args.action = args.action or "enter"
+    rememberUtilityMapping(args)
     prepareRideTransition(args)
     Menu._rvGenerationTransition = {
         token = args.token,
@@ -565,6 +659,7 @@ function Menu.OnServerCommand(module, command, args)
         if args.reason then print("[RailroaderRVTest] " .. tostring(args.reason)) end
         return
     end
+    rememberUtilityMapping(args)
     local x, y, z = finiteNumber(args.x), finiteNumber(args.y), finiteNumber(args.z)
     if onlineId == nil or x == nil or y == nil or z == nil
         or z < -32 or z > 31 then return end
@@ -641,6 +736,12 @@ if Events and Events.OnPreFillWorldObjectContextMenu
 end
 if Events and Events.OnServerCommand and type(Events.OnServerCommand.Add) == "function" then
     Events.OnServerCommand.Add(Menu.OnServerCommand)
+end
+if Events and Events.OnConnected and type(Events.OnConnected.Add) == "function" then
+    Events.OnConnected.Add(Menu.clearUtilityMapping)
+end
+if Events and Events.OnDisconnect and type(Events.OnDisconnect.Add) == "function" then
+    Events.OnDisconnect.Add(Menu.clearUtilityMapping)
 end
 if Events and Events.OnTick and type(Events.OnTick.Add) == "function"
     and not Menu._rvCurrentSquareRefreshHook then

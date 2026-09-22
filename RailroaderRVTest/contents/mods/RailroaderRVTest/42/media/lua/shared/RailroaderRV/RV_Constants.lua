@@ -24,19 +24,20 @@ C.COMMAND_RV_BITMAP_CLEAR = "RVBitmapClear"
 C.COMMAND_RV_UTILITY = "RVUtility"
 C.COMMAND_RV_UTILITY_ACK = "RVUtilityAck"
 C.COMMAND_RV_UTILITY_SNAPSHOT = "RVUtilitySnapshot"
+C.COMMAND_RV_UTILITY_MAPPING = "RVUtilityMapping"
 C.RV_MAP_KEY = "RailroaderRVTest.TrainMap"
 C.MANIFEST_KEY = "RailroaderRVTest.Manifest"
-C.TECH_VERSION = "0.2.0-tech"
-C.MANIFEST_SCHEMA_VERSION = 1
-C.MAP_SCHEMA_VERSION = 1
-C.RV_RECORD_SCHEMA_VERSION = 1
-C.RV_RELATION_SCHEMA_VERSION = 1
-C.BOUNDARY_SCHEMA_VERSION = 1
-C.LAYOUT_SCHEMA_VERSION = 4
-C.UTILITY_STORE_SCHEMA_VERSION = 1
-C.UTILITY_WATER_SCHEMA_VERSION = 1
-C.UTILITY_POWER_SCHEMA_VERSION = 1
-C.UTILITY_WATER_CAPACITY = 100.0
+C.TECH_VERSION = "0.3.0-tech"
+C.MANIFEST_SCHEMA_VERSION = 2
+C.MAP_SCHEMA_VERSION = 2
+C.RV_RECORD_SCHEMA_VERSION = 2
+C.RV_RELATION_SCHEMA_VERSION = 2
+C.BOUNDARY_SCHEMA_VERSION = 2
+C.LAYOUT_SCHEMA_VERSION = 5
+C.UTILITY_STORE_SCHEMA_VERSION = 3
+C.UTILITY_WATER_SCHEMA_VERSION = 3
+C.UTILITY_POWER_SCHEMA_VERSION = 2
+C.UTILITY_WATER_CAPACITY = 1000.0
 C.SAVE_REBUILD_REQUIRED = "RailroaderRVTest: 开发版本存档不兼容，请删除该测试存档并重建 (delete this test save and rebuild it)"
 
 -- The current test button always targets this server-selected destination.
@@ -51,8 +52,8 @@ C.TELEPORT_Z = 0
 C.RV_REGION_SIZE = 100
 C.RV_MANAGED_WIDTH = 100
 C.RV_MANAGED_HEIGHT = 100
-C.BITMAP_SCHEMA_VERSION = 1
-C.BITMAP_VERSION = 1
+C.BITMAP_SCHEMA_VERSION = 2
+C.BITMAP_VERSION = 2
 C.RV_REGION_MIN_OFFSET_X = -50
 C.RV_REGION_MIN_OFFSET_Y = -50
 C.RV_MANAGED_MIN_Z_OFFSET = 0
@@ -100,12 +101,22 @@ C.WALL_MIN_OFFSET_Y = C.INTERIOR_MIN_OFFSET_Y
 C.WALL_MAX_OFFSET_Y = C.INTERIOR_MAX_OFFSET_Y + 1
 C.ROOF_Z_OFFSET = 1
 
+-- Water uses a deterministic, non-visible work object.  It is deliberately
+-- outside every fixture's 3x3/z+1 search neighborhood; it is a mirror of the
+-- canonicalTank record, never a second balance or a global water provider.
+C.UTILITY_TANK_OFFSET = { x = 4, y = 0, z = 0 }
+C.UTILITY_PROXY_Z_OFFSET = 1
+C.UTILITY_ROLE_TANK = "rv_hidden_usage_tank"
+C.UTILITY_ROLE_PROXY = "rv_hidden_proxy"
+C.UTILITY_AUTO_REFILL_STATE = "DISABLED"
+C.UTILITY_AUTO_REFILL_PROVIDER = ""
+C.UTILITY_AUTO_REFILL_CHANNEL = ""
+
 -- Direction-independent object placement contract.  Layout.lua resolves
 -- these offsets into absolute coordinates for the server worker.
 C.LAMP_OFFSET = { x = -2, y = 0, z = 0 }
 C.COUNTER_OFFSET = { x = 1, y = 0, z = 0 }
 C.SINK_OFFSET = { x = 1, y = 0, z = 0 }
-C.RAIN_COLLECTOR_OFFSET = { x = 1, y = 0, z = 1 }
 C.GENERATOR_OFFSET = { x = -1, y = 0, z = 1 }
 
 -- BuildCraft's ordinary, resource-free sprites are used as the visual
@@ -126,10 +137,10 @@ C.SPRITES = {
     -- tile is supplied by the required runtime dependency; do not replace it
     -- with either of BuildingCraft's system-house switches or a vanilla lamp.
     wallLamp = { sprite = "BuildingCraft_Light_17", northSprite = "BuildingCraft_Light_17" },
-    -- B42.20's map-object conversion uses 122 for the large collector.  It
-    -- carries the generated entity/FluidContainer component; 52/53 are the
-    -- old map-state sprites and are not safe construction sprites here.
-    rainCollector = { sprite = "carpentry_02_122", northSprite = "carpentry_02_122" },
+    -- The utility objects are rendered off.  The sprite is only a construction
+    -- blueprint and is never registered in a global collection system.
+    utilityHidden = { sprite = "furniture_counters_01_0", northSprite = "furniture_counters_01_0" },
+    utilityProxy = { sprite = "furniture_counters_01_0", northSprite = "furniture_counters_01_0" },
     generator = { sprite = "appliances_misc_01_0", northSprite = "appliances_misc_01_0" },
     counter = { sprite = "furniture_counters_01_0", northSprite = "furniture_counters_01_0" },
     sink = { sprite = "fixtures_sinks_01_0", northSprite = "fixtures_sinks_01_0" },

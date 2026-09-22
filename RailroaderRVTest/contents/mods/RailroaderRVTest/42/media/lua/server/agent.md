@@ -60,6 +60,13 @@ authoritative player square 的 `isInARoom()`，以 `getRoom()/getRoomDef()` 作
 继续精确回传；服务器进程崩溃、关闭或重启时内存事务丢失，不恢复原坐标、repair、phase 或
 `READY`。服务端日志只表示权威 add/remove 已应用，不表示客户端视觉已成功。
 
+Water fixture 的 `OnObjectAboutToBeRemoved` 只接受完整当前 utility tag、registry
+entry、坐标、token 和 fingerprint 全部匹配的对象，并在移除前完成普通 detach。若
+`IsoThumpable` moveable 把该完整 tag 带到新对象，服务端只用同一进程内对应的
+identity/device/token/fingerprint witness 清除新对象上的 carried tag；witness 不设墙钟
+过期、不持久化，也不为缺失或重启后的 orphan 提供 fallback。它只在精确匹配的
+`OnObjectAdded`/显式 reconnect 被消费，其他旧 identity 状态不主动推断或清理。
+
 远端 relocation 持有 Boundary correction lease；`RV_Server.OnTick` 先续租再推进组状态，
 lease 存续期间跳过 Boundary 普通 geometry/cleanup 扫描及服务端 stale-room ownership
 扫描，避免用远端玩家 cell 解析原 RV footprint；全员权威回传并完成后才释放 lease、恢复

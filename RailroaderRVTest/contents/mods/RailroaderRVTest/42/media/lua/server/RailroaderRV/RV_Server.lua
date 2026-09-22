@@ -45,7 +45,7 @@ local function loadModule(name, globalName)
 end
 
 -- PZ's Lua loader uses slash-separated media paths (the same contract used by
--- RV_Layout.lua and the vanilla RainBarrel scripts).  Keep the global fallback
+-- RV_Layout.lua and the utility modules).  Keep the global fallback
 -- only for a debugger reload; normal loading must return the actual tables.
 local Constants = loadModule("RailroaderRV/RV_Constants", "RV_Constants")
 local boundaryLoaded, Boundary = pcall(require, "RailroaderRV/RV_BoundaryServer")
@@ -76,6 +76,7 @@ local ServerUtil = require("RailroaderRV/RV_ServerUtil")
 local ServerWorld = require("RailroaderRV/RV_ServerWorld")
 local ServerSchema = require("RailroaderRV/RV_ServerSchema")
 local UtilityServer = require("RailroaderRV/RV_UtilityServer")
+local UtilityWater = require("RailroaderRV/RV_UtilityWater")
 
 local transactionBusy = false
 local transactionPlayer = nil
@@ -307,7 +308,7 @@ local function removeGeneration(cell, bounds, generation, rvId, bitmapVersion)
         return
     end
     -- Failed builds are rolled back by the same owner+generation tag used by
-    -- repeat generation.  This includes roof floors, generators, barrels and
+    -- repeat generation.  This includes roof floors, generators and fixtures
     -- the final light, even when the failure occurs in the last phase.
     ServerSchema.walkBounds(cell, bounds, function(square)
         ServerWorld.clearSquare(square, generation, rvId, bitmapVersion)
@@ -506,7 +507,7 @@ local function addSpecialObject(square, object)
         error("RailroaderRVTest: object attachment was not observable")
     end
     -- The caller must transmit exactly once, after all object-specific state is
-    -- final.  Sending here made the subsequent light/generator/barrel sync send
+    -- final.  Sending here made the subsequent light/generator sync send
     -- a second AddItemToMap for the same object index.
     ServerWorld.recalcSquare(square)
 end
@@ -545,6 +546,24 @@ local function hasEntityComponent(object, componentName)
     end
     local componentOk, component = ServerUtil.invoke(object, "getComponent", componentType)
     return componentOk and component ~= nil
+end
+
+local function ensureSinkFluidContainer(object)
+    if hasEntityComponent(object, "FluidContainer") then return true end
+    local componentTypes = rawget(_G, "ComponentType")
+    local fluidType = componentTypes and componentTypes.FluidContainer or nil
+    local factory = rawget(_G, "GameEntityFactory")
+    if not fluidType or not factory
+        or type(fluidType.CreateComponent) ~= "function"
+        or type(factory.AddComponent) ~= "function" then
+        return false
+    end
+    local created, component = pcall(function()
+        return fluidType:CreateComponent()
+    end)
+    if not created or not component then return false end
+    local added = pcall(factory.AddComponent, object, true, component)
+    return added and hasEntityComponent(object, "FluidContainer")
 end
 
 local function createEntityFromSprite(object, sprite, requiredComponent)
@@ -813,246 +832,6 @@ local function createGenerator(cell, square, sprite, generation, tagContext)
     return generator
 end
 
-local function getRainBarrelGlobalClass()
-    local class = rawget(_G, "SRainBarrelGlobalObject")
-    if class then
-        return class
-    end
-    local requireFn = rawget(_G, "require")
-    if type(requireFn) == "function" then
-        pcall(requireFn, "RainBarrel/SRainBarrelGlobalObject")
-    end
-    return rawget(_G, "SRainBarrelGlobalObject")
-end
-
-local function getRainBarrelFluidContainer(barrel)
-    -- IsoObject is itself the GameEntity in B42.20; the required component is
-    -- therefore exposed directly on the barrel.  Do not probe a nonexistent
-    -- nested getEntity() object or treat modData as the component state.
-    local ok, container = ServerUtil.invoke(barrel, "getFluidContainer")
-    if ok and container then
-        return container
-    end
-    return nil
-end
-
-local function getRainBarrelCapacity(barrel)
-    local container = getRainBarrelFluidContainer(barrel)
-    if not container then
-        error("RailroaderRVTest: rain barrel FluidContainer component is unavailable")
-    end
-    -- B42.20's FluidContainer API exposes the authoritative capacity directly.
-    -- Do not fall back to a guessed constant: a wrong entity script must fail
-    -- before generation is reported as successful.
-    local capacityOk, capacity = ServerUtil.invoke(container, "getCapacity")
-    capacity = ServerUtil.toNumber(capacity)
-    if not capacityOk or not capacity or capacity <= 0 then
-        error("RailroaderRVTest: rain barrel FluidContainer capacity is unavailable"
-            .. " (ok=" .. tostring(capacityOk) .. ", value=" .. tostring(capacity) .. ")")
-    end
-    return capacity, container
-end
-
-local function readRainBarrelFluidState(barrel, container)
-    local state = {}
-    state.amountOk, state.amount = ServerUtil.invoke(container, "getAmount")
-    state.amount = ServerUtil.toNumber(state.amount)
-    state.capacityOk, state.capacity = ServerUtil.invoke(container, "getCapacity")
-    state.capacity = ServerUtil.toNumber(state.capacity)
-    state.fullOk, state.full = ServerUtil.invoke(container, "isFull")
-    state.objectAmountOk, state.objectAmount = ServerUtil.invoke(barrel, "getFluidAmount")
-    state.objectAmount = ServerUtil.toNumber(state.objectAmount)
-    state.objectCapacityOk, state.objectCapacity = ServerUtil.invoke(barrel, "getFluidCapacity")
-    state.objectCapacity = ServerUtil.toNumber(state.objectCapacity)
-    state.taintedOk, state.tainted = ServerUtil.invoke(barrel, "isTaintedWater")
-    return state
-end
-
-local function rainBarrelFluidStateText(state)
-    return "componentAmount=" .. tostring(state.amount)
-        .. " componentCapacity=" .. tostring(state.capacity)
-        .. " componentIsFull=" .. tostring(state.full)
-        .. " objectAmount=" .. tostring(state.objectAmount)
-        .. " objectCapacity=" .. tostring(state.objectCapacity)
-        .. " objectTainted=" .. tostring(state.tainted)
-end
-
-local function rainBarrelFluidStateIsFull(state, expectedCapacity)
-    local amount = state.amount
-    local componentCapacity = state.capacity
-    return state.amountOk and state.capacityOk and state.fullOk
-        and amount ~= nil and componentCapacity ~= nil
-        and math.abs(amount - expectedCapacity) <= 0.001
-        and math.abs(componentCapacity - expectedCapacity) <= 0.001
-        and state.full == true
-end
-
-local function refillRainBarrelFluid(container, barrel, capacity)
-    -- `stateToIsoObject` already follows the vanilla bridge.  If the bridge's
-    -- postcondition is not observable on this freshly-created entity, repair
-    -- the same component through B42's supported FluidContainer methods.  The
-    -- component API has Empty()/addFluid(), not setAmount()/setTainted*().
-    local fluidTypes = rawget(_G, "FluidType")
-    local fluidType = fluidTypes and (fluidTypes.TaintedWater or fluidTypes.Water) or nil
-    if not fluidType then
-        return false, "FluidType.TaintedWater and FluidType.Water are unavailable"
-    end
-    local emptied = ServerUtil.callSucceeded(container, "Empty")
-    local added = false
-    if emptied then
-        added = ServerUtil.callSucceeded(container, "addFluid", fluidType, capacity)
-    end
-    local synced = false
-    if emptied and added then
-        synced = ServerUtil.callSucceeded(barrel, "sync")
-    end
-    if not emptied or not added or not synced then
-        return false, "Empty=" .. tostring(emptied)
-            .. " addFluid=" .. tostring(added)
-            .. " sync=" .. tostring(synced)
-    end
-    return true, nil
-end
-
-local function ensureRainBarrelGlobalObject(barrel)
-    local system = ServerWorld.getRainBarrelSystem()
-    if not system or not system.system then
-        error("RailroaderRVTest: SRainBarrelSystem is unavailable")
-    end
-    if not getRainBarrelGlobalClass() then
-        error("RailroaderRVTest: SRainBarrelGlobalObject is unavailable")
-    end
-    local square = select(2, ServerUtil.invoke(barrel, "getSquare"))
-    if not square then
-        error("RailroaderRVTest: rain barrel has no square")
-    end
-    local x = ServerUtil.floorInt(select(2, ServerUtil.invoke(square, "getX")))
-    local y = ServerUtil.floorInt(select(2, ServerUtil.invoke(square, "getY")))
-    local z = ServerUtil.floorInt(select(2, ServerUtil.invoke(square, "getZ")))
-    local globalObject = select(2, ServerUtil.invoke(system.system, "getObjectAt", x, y, z))
-    local luaObject
-    if globalObject then
-        -- Loading is explicit because vanilla isValidIsoObject() is false.
-        local wrapped, existing = ServerUtil.invoke(system, "newLuaObject", globalObject)
-        if not wrapped or not existing then
-            error("RailroaderRVTest: unable to load rain barrel global object")
-        end
-        luaObject = existing
-    else
-        -- This is the public SGlobalObjectSystem creation API.  It calls
-        -- SRainBarrelGlobalObject:new() and publishes the object to clients.
-        local created, fresh = ServerUtil.invoke(system, "newLuaObjectOnSquare", square)
-        if not created or not fresh then
-            error("RailroaderRVTest: unable to create rain barrel global object")
-        end
-        luaObject = fresh
-        local initialized = ServerUtil.callSucceeded(luaObject, "initNew")
-        if not initialized then
-            error("RailroaderRVTest: unable to initialize rain barrel global object")
-        end
-    end
-
-    local capacity, fluidContainer = getRainBarrelCapacity(barrel)
-    local outsideOk, outside = ServerUtil.invoke(square, "isOutside")
-    outside = outsideOk and outside == true or false
-    luaObject.waterMax = capacity
-    luaObject.waterAmount = capacity
-    luaObject.exterior = outside
-    luaObject.taintedWater = true
-
-    -- Use the official global-object state bridge.  It writes the four
-    -- SRainBarrelGlobalObject fields, fills the entity FluidContainer with
-    -- tainted water, sets waterMax on IsoObject modData, and transmits it.
-    local stateOk = ServerUtil.callSucceeded(luaObject, "stateToIsoObject", barrel)
-    if not stateOk then
-        error("RailroaderRVTest: rain barrel stateToIsoObject failed")
-    end
-
-    -- Validate the component that GameEntityFactory attached, rather than
-    -- relying only on IsoObject's convenience getter.  B42's FluidContainer
-    -- implements getAmount()/getCapacity()/isFull(); these are the authoritative
-    -- values used by the entity system and tolerate its documented float
-    -- epsilon.  A failed state bridge is repaired once through Empty()+addFluid
-    -- and remains a hard failure if the component still is not full.
-    local fluidState = readRainBarrelFluidState(barrel, fluidContainer)
-    local refillReason
-    if not rainBarrelFluidStateIsFull(fluidState, capacity) then
-        local refilled
-        refilled, refillReason = refillRainBarrelFluid(fluidContainer, barrel, capacity)
-        if refilled then
-            luaObject.waterMax = capacity
-            luaObject.waterAmount = capacity
-            luaObject.taintedWater = true
-            fluidState = readRainBarrelFluidState(barrel, fluidContainer)
-        end
-    end
-    if not rainBarrelFluidStateIsFull(fluidState, capacity) then
-        error("RailroaderRVTest: rain barrel fluid postcondition failed at capacity "
-            .. tostring(capacity) .. " (" .. rainBarrelFluidStateText(fluidState)
-            .. "; refill=" .. tostring(refillReason) .. ")")
-    end
-
-    -- The component is authoritative.  Mirror its observed amount/capacity in
-    -- the vanilla global object and object modData, rather than assuming the
-    -- requested capacity survived the bridge unchanged.
-    luaObject.waterMax = fluidState.capacity
-    luaObject.waterAmount = fluidState.amount
-    luaObject.taintedWater = true
-    local data = ServerWorld.objectModData(barrel)
-    if data then
-        data.waterMax = fluidState.capacity
-        data.waterAmount = fluidState.amount
-        data.exterior = outside
-        data.taintedWater = true
-    end
-    if not ServerUtil.callSucceeded(barrel, "transmitModData") then
-        error("RailroaderRVTest: rain barrel modData synchronisation failed")
-    end
-    local synced = ServerUtil.callSucceeded(luaObject, "updateOnClient")
-    if not synced then
-        local fallbackSync = ServerUtil.callSucceeded(system, "updateLuaObjectOnClient", luaObject)
-        if not fallbackSync then
-            error("RailroaderRVTest: rain barrel global object sync failed")
-        end
-    end
-    return luaObject
-end
-
-local function createRainBarrel(cell, square, sprite, generation, tagContext)
-    local cls = rawget(_G, "IsoThumpable")
-    local ok, barrel = ServerUtil.invokeClass(cls, {
-        -- Match vanilla MORainCollectorBarrel: a large full collector is a
-        -- thumpable with its entity script supplying the FluidContainer.
-        { cell, square, sprite, false, nil },
-    })
-    if not ok then
-        error("RailroaderRVTest: rain barrel construction failed")
-    end
-    if not ServerUtil.callSucceeded(barrel, "setName", "Rain Collector Barrel")
-        or not ServerUtil.callSucceeded(barrel, "setCanPassThrough", false)
-        or not ServerUtil.callSucceeded(barrel, "setCanBarricade", false)
-        or not ServerUtil.callSucceeded(barrel, "setBlockAllTheSquare", true)
-        or not ServerUtil.callSucceeded(barrel, "setIsThumpable", true) then
-        error("RailroaderRVTest: rain barrel initial state failed")
-    end
-    if not createEntityFromSprite(barrel, sprite, "FluidContainer") then
-        error("RailroaderRVTest: rain barrel entity script is unavailable")
-    end
-    ServerWorld.tagObject(barrel, generation, "rain_barrel", ServerWorld.withTagIdentity(nil, tagContext))
-    addSpecialObject(square, barrel)
-    -- The global-object bridge below emits object-index deltas (`sync`,
-    -- `transmitModData`, and updateOnClient).  Publish the newly attached
-    -- IsoObject exactly once before entering that bridge, so every later
-    -- incremental update targets an object the client already knows.
-    if not ServerUtil.callSucceeded(barrel, "transmitCompleteItemToClients") then
-        error("RailroaderRVTest: rain barrel client transmission failed")
-    end
-    -- Do not rely on OnObjectAdded: B42.20's vanilla validity callback is
-    -- fixed false.  Register/load the SRainBarrelGlobalObject directly.
-    ensureRainBarrelGlobalObject(barrel)
-    return barrel
-end
-
 local function createFurniture(cell, square, sprite, generation, role, tagContext)
     local cls = rawget(_G, "IsoObject")
     local ok, object = ServerUtil.invokeClass(cls, {
@@ -1067,6 +846,13 @@ local function createFurniture(cell, square, sprite, generation, role, tagContex
     local entityCreated = createEntityFromSprite(object, sprite)
     if entityCreated == false then
         error("RailroaderRVTest: furniture entity creation failed for " .. tostring(role))
+    end
+    -- The vanilla sink sprite is ordinary furniture and may have no entity
+    -- script.  The utility catalog and authoritative water mirror both need
+    -- the public FluidContainer component, so attach the B42 component before
+    -- tagging, tile attachment, and the sink's unique full-object packet.
+    if role == "sink" and not ensureSinkFluidContainer(object) then
+        error("RailroaderRVTest: generated sink FluidContainer creation failed")
     end
     ServerWorld.tagObject(object, generation, role, ServerWorld.withTagIdentity(nil, tagContext))
     addNormalObject(square, object)
@@ -1206,12 +992,11 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
     local roofFloorSprite = sprites and sprites.roofFloor and sprites.roofFloor.sprite
     local lightSprite = sprites and sprites.wallLamp and sprites.wallLamp.sprite
     local generatorSprite = sprites and sprites.generator and sprites.generator.sprite
-    local barrelSprite = sprites and sprites.rainCollector and sprites.rainCollector.sprite
     local counterSprite = sprites and sprites.counter and sprites.counter.sprite
     local sinkSprite = sprites and sprites.sink and sprites.sink.sprite
     if not woodSprite or not northWallSprite or not westWallSprite
         or not nwWallSprite or not seWallSprite
-        or not roofFloorSprite or not lightSprite or not barrelSprite
+        or not roofFloorSprite or not lightSprite
         or not generatorSprite or not counterSprite or not sinkSprite then
         error("RailroaderRVTest: shared sprite contract is incomplete")
     end
@@ -1365,21 +1150,12 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
     end
     createGenerator(cell, generatorSquare, generatorSprite, generation, tagContext)
 
-    setGenerationPhase(manifest, generation, "RAIN_BARREL")
-    local barrelPoint = ServerUtil.copyPoint(layout.barrel, "layout.barrel")
-    local barrelSquare = ServerWorld.getSquare(cell, barrelPoint.x, barrelPoint.y, bounds.roofZ)
-    if not barrelSquare then
-        error("RailroaderRVTest: rain barrel square is not loaded")
-    end
-    createRainBarrel(cell, barrelSquare, barrelSprite, generation, tagContext)
-
     setGenerationPhase(manifest, generation, "COUNTER_SINK")
-    -- The counter and sink are directly below the barrel's roof square.  The
-    -- sink may share the counter square because it is placed on the counter.
+    -- The sink is a normal native fixture.  Water connections create a
+    -- separate hidden proxy above it; no visible collector is generated.
     local counterPoint = ServerUtil.copyPoint(layout.counter, "layout.counter")
     local sinkPoint = ServerUtil.copyPoint(layout.sink, "layout.sink")
-    counterPoint.x, counterPoint.y, counterPoint.z = barrelPoint.x, barrelPoint.y, bounds.z
-    sinkPoint.x, sinkPoint.y, sinkPoint.z = barrelPoint.x, barrelPoint.y, bounds.z
+    counterPoint.z, sinkPoint.z = bounds.z, bounds.z
     if sinkPoint.x == lightPoint.x and sinkPoint.y == lightPoint.y and sinkPoint.z == lightPoint.z then
         error("RailroaderRVTest: sink/light placement collides")
     end
@@ -1395,26 +1171,17 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
     end
     local sink = createFurniture(cell, sinkSquare, sinkSprite, generation, "sink",
         tagContext)
-    -- The sink is already attached by createFurniture.  Publish it before
-    -- plumbing APIs below: setUsesExternalWaterSource/doFindExternalWaterSource
-    -- and their official deltas address an object index that must exist on the
-    -- client first.  Rollback removes this broadcast object if plumbing fails.
+    -- The sink is already attached by createFurniture.  Publish its initial
+    -- capability object before any later connection transaction can create a
+    -- proxy or apply the native external-source bridge.
     if not ServerUtil.callSucceeded(sink, "transmitCompleteItemToClients") then
         error("RailroaderRVTest: sink client transmission failed")
     end
-    -- IsoObject's B42.20 plumbing flag is setUsesExternalWaterSource; the
-    -- setHasExternalWaterSource/setExternalWaterSource names do not exist.
-    if not ServerUtil.callSucceeded(sink, "setUsesExternalWaterSource", true)
-        or not ServerUtil.callSucceeded(sink, "doFindExternalWaterSource")
-        or not ServerUtil.callSucceeded(sink, "transmitModData") then
-        error("RailroaderRVTest: sink water-source synchronisation failed")
-    end
-    -- IsoObject.sendObjectChange resolves the B42.20 enum, not an arbitrary
-    -- string.  The official plumbing action uses this exact constant.
-    if not IsoObjectChange or not IsoObjectChange.USES_EXTERNAL_WATER_SOURCE
-        or not ServerUtil.callSucceeded(sink, "sendObjectChange",
-            IsoObjectChange.USES_EXTERNAL_WATER_SOURCE, { value = true }) then
-        error("RailroaderRVTest: sink object-change synchronisation failed")
+    local sinkData = ServerWorld.objectModData(sink)
+    if not sinkData then error("RailroaderRVTest: sink modData is unavailable") end
+    sinkData.canBeWaterPiped = true
+    if not ServerUtil.callSucceeded(sink, "transmitModData") then
+        error("RailroaderRVTest: sink capability synchronisation failed")
     end
 
     local lightSquare = ServerWorld.getSquare(cell, lightPoint.x, lightPoint.y, lightPoint.z)
@@ -1804,6 +1571,19 @@ local function resendGenerationPhase(pending, player, phase)
         or not ServerUtil.callSucceeded(player, "teleportTo", teleportX, teleportY,
             target.z) then
         return false
+    end
+    if phase == "rollback" then
+        -- B42's float teleport overload floors x/y.  A failed generation must
+        -- return to the exact server-captured position before the transaction
+        -- can complete; otherwise cancelPending sees the floored position and
+        -- resends the same return command every retry tick.
+        if not ServerUtil.callSucceeded(player, "setX", target.x)
+            or not ServerUtil.callSucceeded(player, "setY", target.y)
+            or not ServerUtil.callSucceeded(player, "setZ", target.z)
+            or not ServerUtil.callSucceeded(player, "setLastX", target.x)
+            or not ServerUtil.callSucceeded(player, "setLastY", target.y) then
+            return false
+        end
     end
     pending.relocationLastSentTick = serverTick
     pending.relocationRetryAtTick = serverTick
@@ -2240,7 +2020,7 @@ local function currentManifestValid(manifest, allowEmpty)
             and manifest.phase ~= "ROOF_FLOOR"
             and manifest.phase ~= "STRUCTURE_RECALC"
             and manifest.phase ~= "GENERATOR"
-            and manifest.phase ~= "RAIN_BARREL"
+            and manifest.phase ~= "UTILITY_TANK"
             and manifest.phase ~= "COUNTER_SINK"
             and manifest.phase ~= "LIGHT"
             and manifest.phase ~= "FINAL_RELOCATE"
@@ -3842,6 +3622,7 @@ local function relocatePlayerIntoHouse(player, prepared)
             bitmapVersion = ServerUtil.requiredInteger(prepared.boundary
                 and prepared.boundary.bitmapVersion,
                 "final relocation bitmapVersion"),
+            mapSchemaVersion = Constants.MAP_SCHEMA_VERSION,
             onlineId = prepared.identity.onlineId,
             x = x,
             y = y,
@@ -4061,7 +3842,7 @@ local function generateForPlayer(player, prepared)
             -- The lamp is intentionally last, but any phase can fail.  Remove
             -- every object tagged by this generation before exposing FAILED;
             -- otherwise a failed lamp/API call would leave a powered
-            -- generator, full barrel or roof as a half-built cabin.
+            -- generator, utility object or roof as a half-built cabin.
             local rollbackOk, rollbackError = pcall(function()
                 removeGeneration(cell, bounds, generation, manifest.rvId,
                     manifest.bitmapVersion)
@@ -5596,6 +5377,19 @@ if Events and Events.OnClientCommand and type(Events.OnClientCommand.Add) == "fu
 end
 if Events and Events.OnTick and type(Events.OnTick.Add) == "function" then
     Events.OnTick.Add(RV.Server.OnTick)
+end
+if Events and Events.OnWaterAmountChange and type(Events.OnWaterAmountChange.Add) == "function"
+    and UtilityWater and type(UtilityWater.onWaterAmountChange) == "function" then
+    Events.OnWaterAmountChange.Add(UtilityWater.onWaterAmountChange)
+end
+if Events and Events.OnObjectAboutToBeRemoved
+    and type(Events.OnObjectAboutToBeRemoved.Add) == "function"
+    and UtilityWater and type(UtilityWater.onObjectAboutToBeRemoved) == "function" then
+    Events.OnObjectAboutToBeRemoved.Add(UtilityWater.onObjectAboutToBeRemoved)
+end
+if Events and Events.OnObjectAdded and type(Events.OnObjectAdded.Add) == "function"
+    and UtilityWater and type(UtilityWater.onObjectAdded) == "function" then
+    Events.OnObjectAdded.Add(UtilityWater.onObjectAdded)
 end
 if Boundary and Events and Events.OnProcessAction
     and type(Events.OnProcessAction.Add) == "function" then

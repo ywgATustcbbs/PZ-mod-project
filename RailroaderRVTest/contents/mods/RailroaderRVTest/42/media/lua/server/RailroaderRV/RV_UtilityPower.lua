@@ -84,15 +84,19 @@ end
 
 local function readNativeState(object)
     local fuelOk, fuel = invoke(object, "getFuel")
+    local capacityOk, capacity = invoke(object, "getMaxFuel")
     local conditionOk, condition = invoke(object, "getCondition")
     local activeOk, active = invoke(object, "isActivated")
-    fuel, condition = Util.toNumber(fuel), Util.toNumber(condition)
-    if not fuelOk or not conditionOk or not activeOk or not finite(fuel)
-        or not finite(condition) or fuel < 0 or condition < 0
-        or condition > 100 or type(active) ~= "boolean" then
+    fuel, capacity, condition = Util.toNumber(fuel), Util.toNumber(capacity),
+        Util.toNumber(condition)
+    if not fuelOk or not capacityOk or not conditionOk or not activeOk
+        or not finite(fuel) or not finite(capacity) or not finite(condition)
+        or fuel < 0 or capacity <= 0 or fuel > capacity + U.PROFILE_EPSILON
+        or condition < 0 or condition > 100 or type(active) ~= "boolean" then
         return false, U.REASONS.GENERATOR_INVALID
     end
-    return true, { fuel = fuel, condition = condition, active = active == true }
+    return true, { fuel = fuel, fuelCapacity = capacity, condition = condition,
+        active = active == true }
 end
 
 local function bindingFor(identity, object)
@@ -109,7 +113,8 @@ end
 function M.bindGenerator(identity, context, hint)
     local recordOk, recordOrReason = Store.getRecord(identity, false)
     if not recordOk then return false, recordOrReason end
-    local objectOk, objectOrReason = Water.resolveObjectForPower(context.player, hint)
+    local objectOk, objectOrReason = Water.resolveObjectForPower(context.player, hint,
+        true)
     if not objectOk then return false, objectOrReason end
     local object = objectOrReason
     if not insideRecord(object, context) or not isGeneratedGenerator(object, identity) then
@@ -138,7 +143,8 @@ local function boundGenerator(identity, context, record)
     local hint = { x = binding.x, y = binding.y, z = binding.z,
         objectIndex = tonumber(string.match(binding.objectToken, ":(%-?%d+)$")) }
     if not hint.objectIndex then return false, U.REASONS.GENERATOR_INVALID end
-    local objectOk, objectOrReason = Water.resolveObjectForPower(context.player, hint)
+    local objectOk, objectOrReason = Water.resolveObjectForPower(context.player, hint,
+        true)
     if not objectOk then return false, objectOrReason end
     local object = objectOrReason
     local token = objectToken(identity, object)
@@ -201,6 +207,106 @@ function M.handleIntent(identity, context, operation, hint)
     local committed, reason = Store.commit(recordOrReason, identity)
     if not committed then return false, reason end
     return true, { record = recordOrReason, state = stateOrReason }
+end
+
+local function inventoryItems(inventory, result, seen)
+    if not inventory or seen[inventory] then return end
+    seen[inventory] = true
+    local items = World.collectionSnapshot(select(2, invoke(inventory, "getItems")))
+    for i = 1, #items do
+        result[#result + 1] = items[i]
+        local nestedOk, nested = invoke(items[i], "getInventory")
+        if nestedOk and nested then inventoryItems(nested, result, seen) end
+    end
+end
+
+local function resolveFuelSource(player, hint)
+    if type(hint) ~= "table" then return false, U.REASONS.SOURCE_INVALID end
+    local inventoryOk, inventory = invoke(player, "getInventory")
+    if not inventoryOk or not inventory then return false, U.REASONS.SOURCE_NOT_INVENTORY end
+    local fluid = rawget(_G, "Fluid")
+    local petrol = fluid and fluid.Petrol
+    if petrol == nil then return false, U.REASONS.SOURCE_INVALID end
+    local wanted = hint.itemId or hint.id
+    local items = {}
+    inventoryItems(inventory, items, {})
+    for i = 1, #items do
+        local idOk, itemId = invoke(items[i], "getID")
+        if wanted ~= nil and idOk and tostring(itemId) == tostring(wanted) then
+            local containerOk, container = invoke(items[i], "getFluidContainer")
+            if containerOk and container then
+                local containsOk, contains = invoke(container, "contains", petrol)
+                local amountOk, amount = invoke(container, "getAmount")
+                amount = amountOk and Util.toNumber(amount) or nil
+                if containsOk and contains == true and finite(amount)
+                    and amount > U.PROFILE_EPSILON then
+                    return true, items[i], container, amount
+                end
+            end
+        end
+    end
+    return false, U.REASONS.SOURCE_NOT_INVENTORY
+end
+
+local function restoreFuel(container, amount)
+    local fluid = rawget(_G, "Fluid")
+    local petrol = fluid and fluid.Petrol
+    if not container or petrol == nil or not finite(amount) or amount <= U.PROFILE_EPSILON then
+        return false
+    end
+    local addOk, addResult = invoke(container, "addFluid", petrol, amount)
+    return addOk and addResult ~= false
+end
+
+function M.addFuel(identity, context, hint)
+    local recordOk, recordOrReason = Store.getRecord(identity, false)
+    if not recordOk then return false, recordOrReason end
+    local objectOk, objectOrReason = boundGenerator(identity, context, recordOrReason)
+    if not objectOk then return false, objectOrReason end
+    local generator = objectOrReason
+    local stateOk, initial = readNativeState(generator)
+    if not stateOk then return false, initial end
+    local sourceOk, sourceOrReason, container, sourceAmount = resolveFuelSource(
+        context and context.player, hint)
+    if not sourceOk then return false, sourceOrReason end
+    local remaining = math.max(0, initial.fuelCapacity - initial.fuel)
+    if remaining <= U.PROFILE_EPSILON then return false, U.REASONS.CAPACITY_FULL end
+    local plannedTransfer = math.min(remaining, sourceAmount)
+    local before = sourceAmount
+    local removeOk, removeResult = invoke(container, "removeFluid", plannedTransfer, false)
+    if not removeOk or removeResult == false then
+        removeOk, removeResult = invoke(container, "adjustAmount", before - plannedTransfer)
+    end
+    if not removeOk or removeResult == false then return false, U.REASONS.API_ERROR end
+    local afterOk, after = invoke(container, "getAmount")
+    after = afterOk and Util.toNumber(after) or nil
+    local confirmed = finite(after) and math.max(0, math.min(plannedTransfer, before - after)) or 0
+    if confirmed <= U.PROFILE_EPSILON then return false, U.REASONS.SOURCE_INVALID end
+    local targetFuel = initial.fuel + confirmed
+    local setOk = Util.callSucceeded(generator, "setFuel", targetFuel)
+    local verifyOk, verified = false, nil
+    if setOk then verifyOk, verified = readNativeState(generator) end
+    if not verifyOk or math.abs(verified.fuel - targetFuel) > U.PROFILE_EPSILON then
+        restoreFuel(container, confirmed)
+        Util.callSucceeded(generator, "setFuel", initial.fuel)
+        return false, U.REASONS.API_ERROR
+    end
+    if not Util.callSucceeded(generator, "sync") then
+        restoreFuel(container, confirmed)
+        Util.callSucceeded(generator, "setFuel", initial.fuel)
+        return false, U.REASONS.API_ERROR
+    end
+    recordOrReason.power.circuitState = verified.active and U.CIRCUIT_ON or U.CIRCUIT_OFF
+    recordOrReason.power.sequence = recordOrReason.power.sequence + 1
+    local committed, reason = Store.commit(recordOrReason, identity)
+    if not committed then
+        restoreFuel(container, confirmed)
+        Util.callSucceeded(generator, "setFuel", initial.fuel)
+        Util.callSucceeded(generator, "sync")
+        return false, reason
+    end
+    return true, { record = recordOrReason, state = verified,
+        plannedTransfer = plannedTransfer, confirmedTransfer = confirmed }
 end
 
 function M.snapshot(record, identity, context)

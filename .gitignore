@@ -10,3 +10,7 @@
 /testserver/
 /modinfos.json
 __pycache__/
+/.vs/PZ-mod-project.slnx/FileContentIndex
+/.vs/PZ-mod-project.slnx/v18
+/.vs/slnx.sqlite
+/.vs/slnx.sqlite-journal

@@ -98,6 +98,7 @@ local roofRepairOwnsPlayer
 local roofRepairTransactionBlocks
 local currentGeometryGate
 local serverTransactionMutexStatus
+local sourceWithinRange
 
 local function number(value)
     local valueType = type(value)
@@ -1234,28 +1235,53 @@ function Adapter.resolveCurrentUtilityRV(player)
         return false, C.SAVE_REBUILD_REQUIRED
     end
     local map = mapOrReason
-    local record, _, train, status = recordAtPlayerCoordinate(map, player)
-    if not record then return false, status or "outside-rv" end
     local name = playerName(player)
     local onlineId = playerId(player)
     local relation = name and map.players and map.players[name] or nil
+    local record, _, train, status = recordAtPlayerCoordinate(map, player)
+    local locomotiveSide = false
+    if not record and status == "outside-rv" and onlineId ~= nil and name
+        and type(relation) == "table" and relation.inside == false
+        and type(map.locomotives) == "table" then
+        local boundRecord = recordForLoco(map, relation.locoId)
+        local rider = boundRecord and boundRecord.players
+            and boundRecord.players[name] or nil
+        if boundRecord and type(rider) == "table" and rider.inside == false
+            and tostring(rider.locoId) == tostring(boundRecord.locoId)
+            and tostring(relation.locoId) == tostring(boundRecord.locoId)
+            and tostring(relation.onlineId) == tostring(onlineId)
+            and tostring(rider.onlineId) == tostring(onlineId)
+            and validMappingRecord(boundRecord) then
+            local liveTrain = findTrain(boundRecord.locoId)
+            if liveTrain and trainPosition(liveTrain)
+                and sourceWithinRange(player, liveTrain) then
+                record, train, status = boundRecord, liveTrain, "locomotive-bound"
+                locomotiveSide = true
+            end
+        end
+    end
+    if not record then return false, status or "outside-rv" end
     local rider = name and record.players and record.players[name] or nil
-    if onlineId == nil or not name or not relation or not rider or rider.inside ~= true
+    if onlineId == nil or not name or not relation or not rider
         or tostring(relation.locoId) ~= tostring(record.locoId)
         or tostring(rider.locoId) ~= tostring(record.locoId)
-        or tostring(rider.onlineId) ~= tostring(onlineId) then
+        or tostring(rider.onlineId) ~= tostring(onlineId)
+        or (locomotiveSide and (relation.inside ~= false or rider.inside ~= false))
+        or (not locomotiveSide and (relation.inside ~= true or rider.inside ~= true)) then
         return false, "permission-denied"
     end
-    -- Reuse the existing authoritative boundary/player contract as the
-    -- utility permission check.  It proves the persisted inside relation,
-    -- stable online identity and current geometry; no client role field is
-    -- accepted.  A utility context is authorized only for this same mapping.
-    local boundaryOk, _, boundaryRecord, boundaryRelation = pcall(
-        Adapter.validateCurrentBoundaryPlayer, player)
-    if not boundaryOk or boundaryRecord ~= record
-        or type(boundaryRelation) ~= "table"
-        or boundaryRelation.inside ~= true then
-        return false, C.SAVE_REBUILD_REQUIRED
+    if not locomotiveSide then
+        -- Reuse the existing authoritative boundary/player contract as the
+        -- utility permission check.  It proves the persisted inside relation,
+        -- stable online identity and current geometry; no client role field is
+        -- accepted.  A utility context is authorized only for this mapping.
+        local boundaryOk, _, boundaryRecord, boundaryRelation = pcall(
+            Adapter.validateCurrentBoundaryPlayer, player)
+        if not boundaryOk or boundaryRecord ~= record
+            or type(boundaryRelation) ~= "table"
+            or boundaryRelation.inside ~= true then
+            return false, C.SAVE_REBUILD_REQUIRED
+        end
     end
     local rv = rawget(_G, "RailroaderRV")
     local server = rv and rv.Server
@@ -1269,7 +1295,7 @@ function Adapter.resolveCurrentUtilityRV(player)
             bitmapVersion = integer(record.bitmapVersion) },
         record = record, relation = relation, train = train, status = status,
         phase = "READY",
-        authorized = boundaryRecord == record and boundaryRelation.inside == true,
+        authorized = true, locomotiveSide = locomotiveSide,
     }
 end
 
@@ -1351,6 +1377,7 @@ local function movePlayer(player, position, action, relation)
             payload.rvId = tostring(relation.rvId)
             payload.generation = integer(relation.generation)
             payload.bitmapVersion = integer(relation.bitmapVersion)
+            payload.mapSchemaVersion = C.MAP_SCHEMA_VERSION
         end
     end
     local sentCallOk, sentResult = callGlobal("sendServerCommand", player,
@@ -1429,7 +1456,7 @@ local function otherGeneratedRecord(map, locoId)
     return nil
 end
 
-local function sourceWithinRange(player, train)
+sourceWithinRange = function(player, train)
     local distance = hullDistance(player, train)
     local rr = rawget(_G, "RR")
     local officialReach = rr and rr.Ride and rr.Ride.MOUNT_REACH
@@ -1888,6 +1915,44 @@ local function onlinePlayersSnapshot()
         if player then result[1] = player end
     end
     return result
+end
+
+-- Rebuild the client-side utility affordance after a reconnect from the
+-- authoritative player identity and current persisted mapping.  This is only
+-- a candidate hint: the utility command path calls resolveCurrentUtilityRV
+-- again, so a stale client hint cannot grant access or select an RV.
+function Adapter.onlinePlayersSnapshot()
+    return onlinePlayersSnapshot()
+end
+
+function Adapter.syncUtilityMapping(player)
+    local accepted, context = Adapter.resolveCurrentUtilityRV(player)
+    if accepted ~= true or type(context) ~= "table"
+        or type(context.identity) ~= "table"
+        or type(context.record) ~= "table" then
+        return false
+    end
+    local onlineId = playerId(player)
+    local identity = context.identity
+    local record = context.record
+    if onlineId == nil or type(identity.rvId) ~= "string"
+        or identity.rvId == "" or integer(identity.generation) == nil
+        or integer(identity.bitmapVersion) ~= C.BITMAP_VERSION
+        or record.locoId == nil then
+        return false
+    end
+    local payload = {
+        ok = true,
+        onlineId = onlineId,
+        rvId = tostring(identity.rvId),
+        locoId = tostring(record.locoId),
+        generation = integer(identity.generation),
+        bitmapVersion = integer(identity.bitmapVersion),
+        mapSchemaVersion = C.MAP_SCHEMA_VERSION,
+    }
+    local sentOk, sent = callGlobal("sendServerCommand", player, C.MOD_ID,
+        C.COMMAND_RV_UTILITY_MAPPING, payload)
+    return sentOk and sent ~= false, identity
 end
 
 local function resolveSavedPlayer(saved)

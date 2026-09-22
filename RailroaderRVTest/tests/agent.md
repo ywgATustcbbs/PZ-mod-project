@@ -46,6 +46,8 @@ entry 与 presence/reconnect 还必须由服务端按当前 manifest/mapping ide
 `walls_interior_house_03_20/21` 直墙对及 tile-definition 查证的 `..._22` NW、`..._23` SE
 角条，不得以未查证编号替代；并精确断言 staging 期间玩家不在危险 footprint、`FinalRelocate` 处理器在本地 teleport 前同步清 stale-room，及 `buildGeneration` 成功后、`READY` 提交前发送
 `FinalRelocate` 到 `(20050.5,2050.5,0)`，最终命令不进入初次 token-only ack。测试精确断言清场失败会短路、生成或最终传送失败进入既有 generation 回滚路径。最终运行时联机验证仍由游戏环境完成。
+generation 回滚还必须在服务端 `teleportTo` 后重断言捕获的精确原始坐标与移动历史，避免 B42
+浮点取整使同一 `return` 命令按重试节拍无界重发；掉线/身份替换只能暂停并等待同一稳定身份。
 
 运行：`python RailroaderRVTest/tests/test_rv_server.py`。
 
@@ -60,8 +62,27 @@ entry 与 presence/reconnect 还必须由服务端按当前 manifest/mapping ide
 schema mismatch 或 identity 缺失必须返回删档重建提示。不得新增旧存档兼容测试。
 
 水电代码的静态检查应核对 `RV_UtilityStore` 的 exact-field current schema、
-`RV_UtilityWater` 的 canonical→FluidContainer 单向镜像与下降结算公式、
-`plannedTransfer/confirmedTransfer` 的加水顺序、独立 source 限制、一次-per-RV
+`canonicalTank → usageTank → proxy` 投影、proxy baseline/sequence 下降结算、
+`flushBeforeOverwrite` 的固定顺序、逐对象 pending/quarantine、
+`plannedTransfer/confirmedTransfer` 的双 entryPoint 加水顺序、独立 source 限制、一次-per-RV
 guard/幂等协议，以及 `RV_UtilityPower` 不复制 generator fuel/condition。当前目录
-设备仍有 `runtimeValidated=false` 门；在未完成整体联机验证前，静态检查不能把它们标为
-已支持。水电本轮只做源码/引用检查，不启动服务器或客户端。
+设备仍有独立的 `runtimeTestEnabled`/`runtimeValidated` 门：当前只有 sink 目录项的测试
+allowlist 为 `true/false`，它同时覆盖带当前 identity tag 的生成 sink 和具备真实
+`waterPiped`/`canBeWaterPiped` 能力的原生或未知名称 fixture；化学马桶必须精确拒绝，
+其余设备为 `false/false`；静态检查不能把 allowlist 当作已支持。
+旧 sink tag 缺少当前 FluidContainer/代际 identity 时必须 fail-closed 为
+`SAVE_REBUILD_REQUIRED`，客户端必须有删档重建提示且不得为旧对象补组件。
+水电本轮只做源码/引用检查，不启动服务器或客户端；整体 runtime 仍只能从仓库根目录
+执行唯一入口 `python testserver/run_test.py`，且需用户在可见客户端中操作并反馈。
+
+当前水电静态断言还必须覆盖：`ensureUsageTank` 对 `squareObject` 的
+`duplicate`/`invalid` 双门禁及其先于 `makeObject` 的顺序；hidden object attach、组件、
+完整包失败时按实际 square 附着状态回滚；`RV_UtilityStore` 的 clone-on-read、root
+snapshot 恢复、clone-on-commit 和 fresh record 不预写 ModData；初始化复用同一 working
+record，CONNECT 结构失败只撤销本次 proxy/fixture tag/registry，而不补偿已提交 consumption。
+还必须锁定 legacy 审计的精确 `rain_barrel` role gate，证明 generic
+`RailroaderRVTest` sink/floor/roof/counter/generator tags 不会被误当 retired evidence；
+锁定 `Store.getRecord` 的 fresh 元信息和 fresh record 遇 existing usage tank 时的
+`SAVE_REBUILD_REQUIRED` 门；CONNECT proxy square 的 current/duplicate/orphan 必须有完整
+registry+proxyLedger 对应，否则 fail-closed 且不清理未知对象，只有完整登记项才可返回普通
+`DEVICE_CONFLICT`。这些断言仍只做源码/契约检查，不得启动 runtime。

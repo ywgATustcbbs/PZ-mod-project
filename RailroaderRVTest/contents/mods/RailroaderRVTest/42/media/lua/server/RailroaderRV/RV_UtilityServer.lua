@@ -98,7 +98,7 @@ end
 local function validRequest(args)
     if type(args) ~= "table" then return false, U.REASONS.INVALID_REQUEST end
     local allowed = { requestId = true, sessionNonce = true, operation = true,
-        targetHint = true, sourceHint = true }
+        targetHint = true, sourceHint = true, entryPoint = true }
     for field in pairs(args) do if not allowed[field] then return false, U.REASONS.INVALID_REQUEST end end
     if not validText(args.requestId, U.MAX_REQUEST_ID_LENGTH)
         or not validText(args.sessionNonce, U.MAX_NONCE_LENGTH)
@@ -106,11 +106,16 @@ local function validRequest(args)
         or not validHint(args.targetHint) or not validHint(args.sourceHint) then
         return false, U.REASONS.INVALID_REQUEST
     end
+    if args.operation == U.OP_ADD_WATER
+        and args.entryPoint ~= U.ENTRY_INTERNAL and args.entryPoint ~= U.ENTRY_LOCOMOTIVE then
+        return false, U.REASONS.INVALID_REQUEST
+    end
     return true
 end
 
 local function knownOperation(operation)
     return operation == U.OP_CONNECT_WATER_DEVICE or operation == U.OP_ADD_WATER
+        or operation == U.OP_ADD_FUEL
         or operation == U.OP_REQUEST_SNAPSHOT
         or operation == U.OP_CONNECT_GENERATOR or operation == U.OP_START_GENERATOR
         or operation == U.OP_STOP_GENERATOR or operation == U.OP_REPAIR_GENERATOR
@@ -142,9 +147,12 @@ local function acknowledge(player, requestId, accepted, result)
         payload.reason = U.REASONS.OK
         if type(result) == "table" then
             payload.sequence = result.sequence
-            payload.sharedAmount = result.sharedAmount
+            payload.canonicalAmount = result.record and result.record.water
+                and result.record.water.canonicalTank
+                and result.record.water.canonicalTank.amount or result.canonicalAmount
             payload.plannedTransfer = result.plannedTransfer
             payload.confirmedTransfer = result.confirmedTransfer
+            payload.projectionPending = result.projectionPending
         end
     else
         payload.reason = stableReason(result)
@@ -254,6 +262,20 @@ function M.handleCommand(player, args)
         return false, reason
     end
     local identity = context.identity
+    if args.operation == U.OP_ADD_WATER then
+        -- The entry point is an intent label, never a permission grant.  The
+        -- authoritative resolver already classified the player as inside the
+        -- RV or beside its locomotive; bind the two labels to that result so
+        -- a client cannot request the deferred locomotive path from inside or
+        -- bypass the loaded usage-tank requirement from outside.
+        if (args.entryPoint == U.ENTRY_INTERNAL and context.locomotiveSide == true)
+            or (args.entryPoint == U.ENTRY_LOCOMOTIVE and context.locomotiveSide ~= true) then
+            local reason = U.REASONS.PERMISSION
+            acknowledge(player, args.requestId, false, reason)
+            remember(session, args.requestId, { ok = false, reason = reason })
+            return false, reason
+        end
+    end
     local guardOk, guardReason = withGuard(identity, function()
         local recordOk, recordOrReason = Store.getRecord(identity, false)
         if not recordOk then return false, recordOrReason end
@@ -261,7 +283,13 @@ function M.handleCommand(player, args)
         if args.operation == U.OP_CONNECT_WATER_DEVICE then
             accepted, detail = Water.connectDevice(identity, context, args.targetHint)
         elseif args.operation == U.OP_ADD_WATER then
-            accepted, detail = Water.addWater(identity, context, args.sourceHint)
+            local requestKey = tostring(args.sessionNonce) .. ":" .. tostring(args.entryPoint)
+                .. ":" .. tostring(args.requestId)
+            accepted, detail = Water.addWater(identity, context, args.entryPoint,
+                args.sourceHint, { key = requestKey, requestId = args.requestId,
+                    sessionNonce = args.sessionNonce })
+        elseif args.operation == U.OP_ADD_FUEL then
+            accepted, detail = Power.addFuel(identity, context, args.sourceHint)
         elseif args.operation == U.OP_REQUEST_SNAPSHOT then
             accepted, detail = true, { record = recordOrReason }
         else
@@ -280,10 +308,33 @@ function M.handleCommand(player, args)
     return guardOk, guardOk and guardReason or guardReason
 end
 
+local function syncUtilityMappings()
+    local rv = rawget(_G, "RailroaderRV")
+    local adapter = rv and rv.RailroaderServer
+    if not adapter or type(adapter.onlinePlayersSnapshot) ~= "function"
+        or type(adapter.syncUtilityMapping) ~= "function" then
+        return
+    end
+    local listOk, list = pcall(adapter.onlinePlayersSnapshot)
+    if not listOk or type(list) ~= "table" then return end
+    for i = 1, #list do
+        local player = list[i]
+        local syncOk, accepted, identity = pcall(adapter.syncUtilityMapping, player)
+        if syncOk and accepted == true and type(identity) == "table" then
+            -- A replacement player object after reconnect becomes the tick
+            -- recipient only after the same authoritative resolver accepted
+            -- it; no client-provided identity enters this cache.
+            players[key(identity)] = player
+        end
+    end
+end
+
 function M.onTick(tick)
     if lastTick == tick then return end
     lastTick = tick
+    if tick % 30 == 0 then syncUtilityMappings() end
     if serviceBusy() then return end
+    if tick % U.WATER_SETTLEMENT_INTERVAL ~= 0 then return end
     local recordsOk, recordsOrReason = Store.allRecords()
     if not recordsOk then
         print("[RailroaderRVTest] utility schema gate: " .. stableReason(recordsOrReason))
@@ -302,7 +353,9 @@ function M.onTick(tick)
             local accepted, result = withGuard(identity, function()
                 local settled, detail = Water.settleUnderGuard(identity, context)
                 if settled then
-                    if context.player then broadcast(context, detail.record) end
+                    if context.player and (type(detail) ~= "table" or detail.changed ~= false) then
+                        broadcast(context, detail.record)
+                    end
                     return true, detail
                 end
                 return false, detail
@@ -327,17 +380,21 @@ end
 function M.initializeRecord(identity, context)
     print("[RailroaderRVTest] utility init begin rv=" .. tostring(identity and identity.rvId)
         .. " generation=" .. tostring(identity and identity.generation))
-    local recordOk, recordOrReason = Store.getRecord(identity, true)
+    local recordOk, recordOrReason, recordFresh = Store.getRecord(identity, true)
     if not recordOk then
         print("[RailroaderRVTest] utility init failed stage=get-record reason="
             .. tostring(recordOrReason))
         return false, recordOrReason
     end
-    local committed, reason = Store.commit(recordOrReason, identity)
-    if not committed then
-        print("[RailroaderRVTest] utility init failed stage=commit reason="
-            .. tostring(reason))
-        return false, reason
+    -- Pass the isolated fresh/current working record through the usage-tank
+    -- creation transaction.  Water commits this same record only after the
+    -- object postcondition succeeds; Store never exposes a live ModData row.
+    local tankOk, tankOrReason = Water.ensureUsageTank(identity, context, recordOrReason,
+        { fresh = recordFresh })
+    if not tankOk then
+        print("[RailroaderRVTest] utility init failed stage=usage-tank reason="
+            .. tostring(tankOrReason))
+        return false, tankOrReason
     end
     print("[RailroaderRVTest] utility init committed rv=" .. tostring(identity.rvId)
         .. " generation=" .. tostring(identity.generation))

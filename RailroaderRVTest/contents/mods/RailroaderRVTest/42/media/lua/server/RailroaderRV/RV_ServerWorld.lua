@@ -220,67 +220,11 @@ local function isVehicleObject(object)
     return ok and result == true
 end
 
-local function isOwnedRainBarrel(object)
-    local data = objectModData(object)
-    if type(data) ~= "table" then
-        return false
-    end
-    if data.owner == OWNER and data.role == "rain_barrel" then
-        return true
-    end
-    local nested = data.RailroaderRVTest
-    return type(nested) == "table" and nested.owner == OWNER
-        and nested.role == "rain_barrel"
-end
-
-local function getRainBarrelSystem()
-    local class = rawget(_G, "SRainBarrelSystem")
-    local instance = type(class) == "table" and class.instance or nil
-    if instance then
-        return instance
-    end
-    return nil
-end
-
-local function unregisterRainBarrelGlobalObject(object)
-    -- B42.20's vanilla SRainBarrelSystem:isValidIsoObject() is deliberately
-    -- `false`, so OnObjectAboutToBeRemoved cannot unregister this mod's barrel.
-    -- Remove the public global-object entry explicitly while the IsoObject is
-    -- still attached to its square; this is the inverse of newLuaObjectOnSquare.
-    if not isOwnedRainBarrel(object) then
-        return
-    end
-    local system = getRainBarrelSystem()
-    if not system or not system.system then
-        error("RailroaderRVTest: SRainBarrelSystem is unavailable while removing a rain barrel")
-    end
-    local square = select(2, ServerUtil.invoke(object, "getSquare"))
-    if not square then
-        return
-    end
-    local x = ServerUtil.floorInt(select(2, ServerUtil.invoke(square, "getX")))
-    local y = ServerUtil.floorInt(select(2, ServerUtil.invoke(square, "getY")))
-    local z = ServerUtil.floorInt(select(2, ServerUtil.invoke(square, "getZ")))
-    local globalObject = select(2, ServerUtil.invoke(system.system, "getObjectAt", x, y, z))
-    if not globalObject then
-        return
-    end
-    local okLua, luaObject = ServerUtil.invoke(system, "newLuaObject", globalObject)
-    if not okLua or not luaObject then
-        error("RailroaderRVTest: unable to wrap rain barrel global object for removal")
-    end
-    local removed = ServerUtil.callSucceeded(system, "removeLuaObject", luaObject)
-    if not removed then
-        error("RailroaderRVTest: unable to unregister rain barrel global object")
-    end
-end
-
 local function deregisterSpecialSystems(object)
-    -- Explicitly unregister our barrel while it is still attached.  Vanilla's
-    -- event bridge cannot see it because SRainBarrelSystem:isValidIsoObject()
-    -- is false in B42.20.  The normal OnObjectAboutToBeRemoved event is owned
-    -- by transmitRemoveItemFromSquare and must not be triggered here as well.
-    unregisterRainBarrelGlobalObject(object)
+    -- Utility objects are ordinary IsoObject/IsoThumpable instances and do
+    -- not participate in any global collection system.  Object removal is
+    -- owned by transmitRemoveItemFromSquare below.
+    return object
 end
 
 local function removeCorpse(square, corpse)
@@ -517,9 +461,6 @@ M.withTagIdentity = withTagIdentity
 M.isTaggedForGeneration = isTaggedForGeneration
 M.isPlayerObject = isPlayerObject
 M.isVehicleObject = isVehicleObject
-M.isOwnedRainBarrel = isOwnedRainBarrel
-M.getRainBarrelSystem = getRainBarrelSystem
-M.unregisterRainBarrelGlobalObject = unregisterRainBarrelGlobalObject
 M.deregisterSpecialSystems = deregisterSpecialSystems
 M.removeCorpse = removeCorpse
 M.removeZombie = removeZombie

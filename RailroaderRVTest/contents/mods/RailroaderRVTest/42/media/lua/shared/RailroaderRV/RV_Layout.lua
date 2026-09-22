@@ -353,7 +353,7 @@ function Layout.make(cx, cy, cz)
         light = offsetPoint(anchor, C.LAMP_OFFSET),
         counter = offsetPoint(anchor, C.COUNTER_OFFSET),
         sink = offsetPoint(anchor, C.SINK_OFFSET),
-        barrel = offsetPoint(anchor, C.RAIN_COLLECTOR_OFFSET),
+        utilityTank = offsetPoint(anchor, C.UTILITY_TANK_OFFSET),
         generator = offsetPoint(anchor, C.GENERATOR_OFFSET),
     }
     result.wallCount = #wallCoordinates

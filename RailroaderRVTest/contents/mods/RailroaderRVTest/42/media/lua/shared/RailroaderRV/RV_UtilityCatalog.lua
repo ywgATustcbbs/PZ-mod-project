@@ -1,11 +1,13 @@
 -- Shared water-device and fluid-profile rules.
 --
--- Device entries are deliberately marked runtimeValidated=false until the
--- complete B42/MP matrix in WATER_POWER_IMPLEMENTATION_PLAN.md has been run.
--- The server never silently promotes an unverified device into the active
--- registry.
+-- runtimeTestEnabled is only an explicit development allowlist for entering
+-- the compatibility-test path.  It is not evidence that the device passed
+-- the complete B42/MP matrix; runtimeValidated remains false until that
+-- matrix has actually been run.  The server never silently treats an
+-- unverified device as generally supported outside that explicit path.
 
 RailroaderRV = RailroaderRV or {}
+local C = require("RailroaderRV/RV_Constants")
 local U = require("RailroaderRV/RV_UtilityConstants")
 
 local M = {}
@@ -14,22 +16,36 @@ local EPSILON = U.PROFILE_EPSILON
 M.DEVICE_CATALOG = {
     sink = {
         id = "sink", aliases = { "sink", "faucet", "washbasin" },
+        runtimeTestEnabled = true,
+        runtimeValidated = false,
+    },
+    -- Native plumbing capability is intentionally a catalog entry rather than
+    -- a name allowlist.  The entry is used as the current-schema deviceType
+    -- for any object that the B42 context-menu plumbing rule accepts, including
+    -- mod-added furniture with an unknown sprite/name.
+    nativeWaterDevice = {
+        id = "nativeWaterDevice", aliases = {},
+        runtimeTestEnabled = false,
         runtimeValidated = false,
     },
     toilet = {
         id = "toilet", aliases = { "toilet", "wc" },
+        runtimeTestEnabled = false,
         runtimeValidated = false,
     },
     bathtub = {
         id = "bathtub", aliases = { "bathtub", "bath" },
+        runtimeTestEnabled = false,
         runtimeValidated = false,
     },
     shower = {
         id = "shower", aliases = { "shower" },
+        runtimeTestEnabled = false,
         runtimeValidated = false,
     },
     washingMachine = {
         id = "washingMachine", aliases = { "washingmachine", "washing_machine", "washer" },
+        runtimeTestEnabled = false,
         runtimeValidated = false,
     },
 }
@@ -227,35 +243,114 @@ function M.applyProfile(container, capacity, value)
     return lockCallOk and lockResult ~= false
 end
 
-local function objectText(object)
-    local parts = {}
-    for _, method in ipairs({ "getType", "getObjectName", "getName" }) do
-        local ok, value = invoke(object, method)
-        if ok and value ~= nil then parts[#parts + 1] = lower(value) end
-    end
+function M.entryIsValidated(entry)
+    return type(entry) == "table" and entry.runtimeValidated == true
+end
+
+function M.entryIsRuntimeTestEnabled(entry)
+    return type(entry) == "table" and entry.runtimeTestEnabled == true
+end
+
+local function hasWaterPipedFlag(object)
     local spriteOk, sprite = invoke(object, "getSprite")
-    if spriteOk and sprite then
-        local ok, value = invoke(sprite, "getName")
-        if ok and value ~= nil then parts[#parts + 1] = lower(value) end
+    if not spriteOk or not sprite then return false end
+    local propertiesOk, properties = invoke(sprite, "getProperties")
+    local flags = rawget(_G, "IsoFlagType")
+    local waterPiped = flags and flags.waterPiped
+    if not propertiesOk or not properties or waterPiped == nil then return false end
+    local hasOk, has = invoke(properties, "has", waterPiped)
+    return hasOk and has == true
+end
+
+local function modDataCanBeWaterPiped(object)
+    local ok, data = invoke(object, "getModData")
+    return ok and type(data) == "table" and data.canBeWaterPiped == true
+end
+
+local MOV_CHEMICAL_TOILET = "Base.Mov_ChemicalToilet"
+
+local function isChemicalToilet(object)
+    -- ItemKey.MOV_CHEMICAL_TOILET is the exact vanilla identity.  A placed
+    -- object can retain it in movableData; never use names or sprite prefixes.
+    local dataOk, data = invoke(object, "getModData")
+    local movable = dataOk and type(data) == "table" and data.movableData or nil
+    if type(movable) == "table" then
+        for _, key in ipairs({ "fullType", "fulltype", "itemType", "type" }) do
+            local value = movable[key]
+            if value ~= nil and lower(value) == string.lower(MOV_CHEMICAL_TOILET) then
+                return true
+            end
+        end
     end
-    return table.concat(parts, " ")
+    local itemOk, itemType = invoke(object, "getItemType")
+    if itemOk and itemType ~= nil and lower(itemType) == string.lower(MOV_CHEMICAL_TOILET) then
+        return true
+    end
+    return false
+end
+
+-- This mirrors the B42 plumbing capability gate.  Source lookup is deliberately
+-- not part of the predicate: connection creates a proxy and proves the source
+-- as a postcondition.  Names, capacity, and current amount are not allowlists.
+-- Room, range, player permission, RV identity, and request phase remain server
+-- responsibilities outside this shared capability helper.
+function M.isWaterPipedDevice(object)
+    if object == nil or isChemicalToilet(object) then return false end
+    if not hasWaterPipedFlag(object) and not modDataCanBeWaterPiped(object) then
+        return false
+    end
+    return true
+end
+
+-- A player-placed native fixture has no RailroaderRVTest geometry tag.  Its
+-- eligibility is exactly the current B42 plumbing capability above; names and
+-- FluidContainer capacity are intentionally not used as the allowlist.
+function M.isNativeWaterDevice(object)
+    return not M.isGeneratedSink(object) and M.isWaterPipedDevice(object)
+end
+
+-- Compatibility name retained for callers during the current schema; it now
+-- means any native water-piped fixture, not only a named sink.
+function M.isNativeSink(object)
+    return M.isNativeWaterDevice(object)
+end
+
+function M.hasFluidContainer(object)
+    local ok, container = invoke(object, "getFluidContainer")
+    return ok and container ~= nil
+end
+
+-- Only the object generated by the current RV builder may enter the explicit
+-- sink compatibility-test path.  A generic sink elsewhere in the RV (or a
+-- client-created/lookalike object) is not a test target.
+function M.isGeneratedSink(object, identity)
+    if object == nil or type(object.getModData) ~= "function" then return false end
+    local ok, data = pcall(function() return object:getModData() end)
+    local tag = ok and type(data) == "table" and data.RailroaderRVTest or nil
+    if type(tag) ~= "table" or tag.owner ~= C.MOD_ID or tag.role ~= "sink" then
+        return false
+    end
+    if identity == nil then return true end
+    return tostring(tag.rvId) == tostring(identity.rvId)
+        and number(tag.generation) == number(identity.generation)
+        and number(tag.bitmapVersion) == number(identity.bitmapVersion)
 end
 
 function M.findEntry(object)
     if object == nil then return nil end
-    local ok, container = invoke(object, "getFluidContainer")
-    if not ok or container == nil then return nil end
-    local text = objectText(object)
-    for _, entry in pairs(M.DEVICE_CATALOG) do
-        for _, alias in ipairs(entry.aliases) do
-            if string.find(text, lower(alias), 1, true) then return entry end
-        end
+    -- Current generated sinks retain the stable sink deviceType.  The
+    -- FluidContainer check here is a data-mirror contract and a legacy-save
+    -- detector; plumbing eligibility itself is decided by isWaterPipedDevice.
+    if M.isGeneratedSink(object) then
+        return M.hasFluidContainer(object) and M.DEVICE_CATALOG.sink or nil
+    end
+    if M.isNativeWaterDevice(object) then
+        -- The current compatibility allowlist has one sink entry.  The
+        -- entry is metadata only; the capability predicate above decides
+        -- whether this native fixture is actually eligible.
+        return M.DEVICE_CATALOG.sink
     end
     return nil
-end
-
-function M.entryIsValidated(entry)
-    return type(entry) == "table" and entry.runtimeValidated == true
 end
 
 return M

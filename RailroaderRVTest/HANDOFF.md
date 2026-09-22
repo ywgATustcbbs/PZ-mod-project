@@ -1,6 +1,6 @@
 # Railroader RV 当前移交报告
 
-更新时间：2026-09-15。当前技术版本为 `0.2.0-tech`，与 `mod.info` 及 manifest 的
+更新时间：2026-09-22。当前技术版本为 `0.3.0-tech`，与 `mod.info` 及 manifest 的
 `techVersion` 一致。本文只描述当前工作树中的 RailroaderRVTest 实现；历史运行日志、旧存档
 和旧方案不构成当前契约。
 

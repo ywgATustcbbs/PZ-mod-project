@@ -134,6 +134,12 @@ def main() -> int:
     bitmap_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_Bitmap.lua"
     boundary_server_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_BoundaryServer.lua"
     boundary_client_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_BoundaryClient.lua"
+    utility_catalog_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_UtilityCatalog.lua"
+    utility_context_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_UtilityContextMenu.lua"
+    utility_client_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_UtilityClient.lua"
+    utility_server_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_UtilityServer.lua"
+    utility_water_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_UtilityWater.lua"
+    utility_store_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_UtilityStore.lua"
     start_bat_path = root / "testserver" / "steamcmd" / "380870" / "StartServer64 - test.bat"
     runner_path = root / "testserver" / "run_test.py"
     testserver_agent_path = root / "testserver" / "agent.md"
@@ -169,6 +175,15 @@ def main() -> int:
         boundary_client_path.is_file(),
         f"boundary client Lua is missing: {boundary_client_path}",
     )
+    for utility_path in (
+        utility_catalog_path,
+        utility_context_path,
+        utility_client_path,
+        utility_server_path,
+        utility_water_path,
+        utility_store_path,
+    ):
+        checks.true(utility_path.is_file(), f"utility Lua is missing: {utility_path}")
     checks.true(start_bat_path.is_file(), f"server launcher batch is missing: {start_bat_path}")
 
     if server_path.is_file() and client_path.is_file():
@@ -201,6 +216,24 @@ def main() -> int:
         boundary_client = (
             read_utf8(boundary_client_path) if boundary_client_path.is_file() else ""
         )
+        utility_catalog = (
+            read_utf8(utility_catalog_path) if utility_catalog_path.is_file() else ""
+        )
+        utility_context = (
+            read_utf8(utility_context_path) if utility_context_path.is_file() else ""
+        )
+        utility_client = (
+            read_utf8(utility_client_path) if utility_client_path.is_file() else ""
+        )
+        utility_server = (
+            read_utf8(utility_server_path) if utility_server_path.is_file() else ""
+        )
+        utility_water = (
+            read_utf8(utility_water_path) if utility_water_path.is_file() else ""
+        )
+        utility_store = (
+            read_utf8(utility_store_path) if utility_store_path.is_file() else ""
+        )
 
         checks.true(
             'require("RailroaderRV/RV_ServerUtil")' in server_facade
@@ -221,6 +254,90 @@ def main() -> int:
                 local_count is not None and local_count < 200,
                 f"{label} exceeds or cannot prove the Kahlua main-chunk local budget: {local_count}",
             )
+
+        sink_test_gate = re.search(
+            r"sink\s*=\s*\{(?:(?!\n\s*\},).)*?runtimeTestEnabled\s*=\s*true,"
+            r"(?:(?!\n\s*\},).)*?runtimeValidated\s*=\s*false,",
+            utility_catalog,
+            re.S,
+        )
+        other_test_gates = all(
+            re.search(
+                rf"{name}\s*=\s*\{{(?:(?!\n\s*\}},).)*?runtimeTestEnabled\s*=\s*false,"
+                r"(?:(?!\n\s*\}},).)*?runtimeValidated\s*=\s*false,",
+                utility_catalog,
+                re.S,
+            )
+            for name in ("toilet", "bathtub", "shower", "washingMachine")
+        )
+        checks.true(
+            sink_test_gate is not None
+            and other_test_gates
+            and "function M.entryIsRuntimeTestEnabled" in utility_catalog
+            and "function M.entryIsValidated" in utility_catalog
+            and "function M.isGeneratedSink" in utility_catalog,
+            "utility catalog does not separate the sink test allowlist from runtime validation",
+        )
+        checks.true(
+            "function M.isNativeSink" in utility_catalog
+            and "getFluidContainer" in utility_catalog,
+            "utility catalog does not expose the current native-sink FluidContainer gate",
+        )
+        utility_candidate = section(
+            utility_context,
+            r"local function candidate",
+            r"local function generatorCandidate",
+        )
+        checks.true(
+            utility_candidate is not None
+            and "entryIsRuntimeTestEnabled" in utility_candidate
+            and "isGeneratedSink" in utility_candidate
+            and "isNativeSink" in utility_candidate
+            and "mapping == nil" in utility_candidate
+            and "entryIsValidated" not in utility_candidate,
+            "client utility menu does not separate native sinks from generated identity tags",
+        )
+        checks.true(
+            "local function staleGeneratedSink" in utility_context
+            and "ContextMenu_RailroaderRVTest_UtilitySaveRebuild" in utility_context
+            and "Client.showSaveRebuildRequired" in utility_context
+            and "function Client.showSaveRebuildRequired" in utility_client
+            and "AddComponent" not in utility_context,
+            "legacy generated sinks are silently hidden or client-side component repair is present",
+        )
+        utility_connect = section(
+            utility_water,
+            r"function M\.connectDevice",
+            r"function M\.addWater",
+        )
+        checks.true(
+            utility_connect is not None
+            and "isGeneratedSink(object, identity)" in utility_connect
+            and "Catalog.isNativeSink(object)" in utility_connect
+            and 'entry.id ~= "sink"' in utility_connect
+            and "local taggedSink = Catalog.isGeneratedSink(object)" in utility_connect
+            and "U.REASON_SAVE_REBUILD_REQUIRED" in utility_connect
+            and "entryIsRuntimeTestEnabled" in utility_connect
+            and "entryIsValidated" not in utility_connect,
+            "server utility connect path does not distinguish native sinks from stale generated objects",
+        )
+        checks.true(
+            "local function objectCoordinates" in utility_water
+            and "x = x, y = y, z = z" in utility_water
+            and "x = hint.x, y = hint.y, z = hint.z" not in utility_water,
+            "server utility registry persists client coordinate hints instead of the resolved object",
+        )
+        registry_gate = section(
+            utility_store,
+            r"local function validRegistryEntry",
+            r"local function validWater",
+        )
+        checks.true(
+            registry_gate is not None
+            and "entryIsRuntimeTestEnabled" in registry_gate
+            and "entryIsValidated" not in registry_gate,
+            "utility current-schema registry gate still requires the unachievable validation bit",
+        )
 
         checks.true(
             all(token in bitmap for token in (
@@ -1013,6 +1130,21 @@ def main() -> int:
             and "Boundary.extendTransition" in generation_rebind
             and "GENERATION_RELOCATION_RETRY_TICKS" in generation_rebind,
             "generation relocation does not rebind stable identities and renew/retry the same token",
+        )
+        generation_rollback = section(
+            server,
+            r"local function resendGenerationPhase",
+            r"local function keepGenerationTransitionAlive",
+        )
+        checks.true(
+            generation_rollback is not None
+            and 'if phase == "rollback" then' in generation_rollback
+            and 'callSucceeded(player, "setX", target.x)' in generation_rollback
+            and 'callSucceeded(player, "setY", target.y)' in generation_rollback
+            and 'callSucceeded(player, "setZ", target.z)' in generation_rollback
+            and 'callSucceeded(player, "setLastX", target.x)' in generation_rollback
+            and 'callSucceeded(player, "setLastY", target.y)' in generation_rollback,
+            "generation rollback does not reassert the server-captured exact position",
         )
         roof_rebind = section(
             server,
@@ -2785,76 +2917,185 @@ def main() -> int:
                 'invoke(properties, "has", lightProperties.attachedFlag)' not in light_validate,
                 "player light validation still passes attachedW as a literal string",
             )
-        fluid_helper = section(
-            server,
-            r"local function getRainBarrelFluidContainer\(barrel\)",
-            r"local function ensureRainBarrelGlobalObject",
+        hidden_water = section(
+            utility_water,
+            r"local function addFluidComponent",
+            r"local function fixtureTag",
         )
-        checks.true(fluid_helper is not None, "rain barrel fluid helper is missing")
-        if fluid_helper is not None:
-            for method_name in ("getAmount", "getCapacity", "isFull", "Empty", "addFluid"):
-                checks.true(
-                    f'"{method_name}"' in fluid_helper,
-                    f"rain barrel fluid helper does not use FluidContainer:{method_name}",
-                )
+        checks.true(hidden_water is not None, "hidden usage/proxy object helper is missing")
+        if hidden_water is not None:
             checks.true(
-                'invoke(container, "setAmount"' not in fluid_helper
-                and 'invoke(container, "setTainted"' not in fluid_helper
-                and 'invoke(container, "setTaintedWater"' not in fluid_helper,
-                "rain barrel fluid helper still calls unsupported setter APIs",
+                "IsoObject" in hidden_water
+                and "IsoThumpable" in hidden_water
+                and "GameEntityFactory" in hidden_water
+                and "AddComponent" in hidden_water
+                and "CreateComponent" in hidden_water
+                and "object, true, component" in hidden_water
+                and "setDoRender" in hidden_water
+                and "setRainCatcher" in hidden_water,
+                "hidden water objects do not use ordinary objects with a server FluidContainer",
             )
             checks.true(
-                "componentAmount=" in fluid_helper
-                and "objectAmount=" in fluid_helper,
-                "rain barrel fluid failure diagnostics omit actual component/object values",
+                "attachObject" in hidden_water
+                and "deferSync" in hidden_water
+                and hidden_water.find("applyAmount") < hidden_water.find(
+                "transmitCompleteItemToClients"
+                ),
+                "hidden object component state is not finalized before its unique complete packet",
             )
-            checks.true(
-                "fluidTypes.TaintedWater or fluidTypes.Water" in fluid_helper,
-                "rain barrel refill has no TaintedWater/Water FluidType fallback",
-            )
-            checks.true(
-                'callSucceeded(barrel, "sync")' in fluid_helper,
-                "rain barrel refill does not synchronize its owning IsoObject",
-            )
-        fluid_state = section(
-            server,
-            r"local function ensureRainBarrelGlobalObject",
-            r"local function createRainBarrel",
+        checks.true(
+            "validUtilityTag" in utility_water
+            and "schemaVersion = U.WATER_SCHEMA_VERSION" in utility_water
+            and "sameGenerationIdentity" in utility_water
+            and "retired role/schema" in utility_water
+            and 'validUtilityTag(oldTag, identity, "fixture", oldTag.deviceId)' in utility_water
+            and "proxyFingerprint = C.UTILITY_ROLE_PROXY" in utility_water
+            and "proxyPostcondition" in utility_water
+            and "objectFingerprint(found, C.UTILITY_ROLE_PROXY)" in utility_water,
+            "utility object tags/postcondition do not enforce current identity and stable proxy fingerprint",
         )
-        checks.true(fluid_state is not None, "rain barrel state helper is missing")
-        if fluid_state is not None:
-            bridge_position = fluid_state.find("stateToIsoObject")
-            postcondition_position = fluid_state.find("rainBarrelFluidStateIsFull")
-            checks.true(
-                bridge_position >= 0
-                and postcondition_position > bridge_position,
-                "rain barrel does not validate FluidContainer after stateToIsoObject",
-            )
-            checks.true(
-                "luaObject.waterAmount = fluidState.amount" in fluid_state
-                and "data.waterAmount = fluidState.amount" in fluid_state,
-                "rain barrel does not mirror the observed component amount",
-            )
-            checks.true(
-                'callSucceeded(luaObject, "updateOnClient")' in fluid_state
-                and 'callSucceeded(system, "updateLuaObjectOnClient", luaObject)' in fluid_state,
-                "rain barrel global object is not explicitly synchronized to clients",
-            )
-            checks.true(
-                'callSucceeded(barrel, "transmitModData")' in fluid_state,
-                "rain barrel modData synchronization failure is swallowed",
-            )
-        rain_barrel = section(
-            server,
-            r"local function createRainBarrel",
-            r"local function createFurniture",
+        checks.true(
+            "OnObjectAdded" in utility_client
+            and "OnLoadGridsquare" in utility_client
+            and "setDoRender(false)" in utility_client,
+            "client does not reapply hidden utility rendering state after object/square load",
         )
-        checks.true(rain_barrel is not None, "createRainBarrel function is missing")
-        if rain_barrel is not None:
+        checks.true(
+            "function Menu.utilityEntryPoint" in railroader_client
+            and "ENTRY_INTERNAL" in railroader_client
+            and "ENTRY_LOCOMOTIVE" in railroader_client,
+            "client utility menus do not select the two current manual-water entry points",
+        )
+        checks.true(
+            all(token in utility_water for token in (
+                "ensureUsageTank", "flushBeforeOverwrite", "collectAllLoadedProxyDeltas",
+                "settleUsageToCanonical", "projectUsageToProxies", "projectionPending",
+                "FAULT_UNCONFIRMED_CONSUMPTION_REBUILD", "onWaterAmountChange",
+                "doFindExternalWaterSource", "FindExternalWaterSource",
+                "UTILITY_PROXY_Z_OFFSET",
+            )),
+            "water module is missing the current usage/proxy settlement and postcondition contract",
+        )
+        ensure_tank = section(
+            utility_water,
+            r"function M\.ensureUsageTank",
+            r"local function hasPipeWrench",
+        )
+        checks.true(ensure_tank is not None, "usage-tank initialization transaction is missing")
+        if ensure_tank is not None:
+            invalid_gate = 'status == "duplicate" or status == "invalid"'
             checks.true(
-                'createEntityFromSprite(barrel, sprite, "FluidContainer")' in rain_barrel,
-                "rain barrel does not require its FluidContainer component",
+                invalid_gate in ensure_tank
+                and ensure_tank.find(invalid_gate) < ensure_tank.find("makeObject"),
+                "usage-tank initialization can create a replacement beside an incompatible object",
             )
+            checks.true(
+                "workingRecord" in ensure_tank
+                and "Store.validateRecord(workingRecord, identity)" in ensure_tank
+                and "recordMeta.fresh" in ensure_tank
+                and "recordFresh and object" in ensure_tank
+                and ensure_tank.find("recordFresh and object") < ensure_tank.find("makeObject")
+                and "not recordFresh and not object" in ensure_tank
+                and ensure_tank.find("not recordFresh and not object") < ensure_tank.find("makeObject")
+                and "Store.commit(record, identity)" in ensure_tank,
+                "usage-tank initialization does not carry fresh metadata or fail closed for persisted-missing objects",
+            )
+        checks.true(
+            "local function retiredObjectTag" in utility_water
+            and "RailroaderRVTestUtility" in utility_water
+            and 'nested.role == "rain_barrel"' in utility_water
+            and 'data.role == "rain_barrel"' in utility_water
+            and "generic boundary tags" in utility_water
+            and "former generation-owned barrel" in utility_water,
+            "usage-tank square audit does not restrict legacy evidence to the exact rain_barrel role",
+        )
+        checks.true(
+            "local recordFresh = false" in utility_store
+            and "recordFresh = true" in utility_store
+            and "return true, record, recordFresh" in utility_store,
+            "utility store does not expose trusted fresh-versus-persisted record metadata",
+        )
+        checks.true(
+            "local function objectAttached" in utility_water
+            and "local function rollbackCreatedObject" in utility_water
+            and "local function creationFailure" in utility_water
+            and "objectAttached(square, object) ~= false" in utility_water
+            and "return creationFailure(square, object, U.REASONS.API_ERROR)" in utility_water,
+            "hidden-object creation failure does not have an observable square rollback path",
+        )
+        checks.true(
+            "local function readRoot" in utility_store
+            and "local function restoreRoot" in utility_store
+            and "local function copyTable" in utility_store
+            and "record = copyTable(persisted)" in utility_store
+            and "value.records[tostring(identity.rvId)] = copyTable(record)" in utility_store
+            and "restoreRoot(before)" in utility_store,
+            "utility store does not isolate live ModData records across commit failure",
+        )
+        checks.true(
+            "local ok, accepted, detail, commitFailed = pcall" in utility_water
+            and "return accepted, detail, commitFailed" in utility_water
+            and "markCurrentWaterRebuild(identity, result)" in utility_water,
+            "utility flush does not carry commit failure into a current-only rebuild gate",
+        )
+        initialize_record = section(
+            utility_server,
+            r"function M\.initializeRecord",
+            r"function M\.isLocked",
+        )
+        checks.true(
+            initialize_record is not None
+            and "local recordOk, recordOrReason, recordFresh = Store.getRecord(identity, true)" in initialize_record
+            and "Water.ensureUsageTank(identity, context, recordOrReason," in initialize_record
+            and "fresh = recordFresh" in initialize_record
+            and "local committed, reason = Store.commit" not in initialize_record,
+            "utility initialization does not pass Store fresh metadata or still performs a second unisolated record commit",
+        )
+        connect_transaction = section(
+            utility_water,
+            r"function M\.connectDevice",
+            r"local function inventoryItems",
+        )
+        checks.true(connect_transaction is not None, "utility connect transaction is missing")
+        if connect_transaction is not None:
+            checks.true(
+                "runtimeObjects[key(identity)" in connect_transaction
+                and "removeObject(createdProxy)" in connect_transaction
+                and "restoreFixtureTag(object, oldTag)" in connect_transaction
+                and "proxySquareEvidence" in connect_transaction
+                and 'proxyState == "orphan"' in connect_transaction
+                and 'proxyState == "registered"' in connect_transaction
+                and connect_transaction.find('proxyState == "orphan"') < connect_transaction.find("makeObject")
+                and 'if existing or status == "duplicate" then return false, C.SAVE_REBUILD_REQUIRED end'
+                and "result.committed ~= true" in connect_transaction
+                and "markCurrentWaterRebuild(identity, result)" in connect_transaction,
+                "CONNECT does not gate orphan/duplicate proxy squares or prove proxy/fixture rollback around the isolated root",
+            )
+        checks.true(
+            "local function completeProxyRegistration" in utility_water
+            and "local function proxySquareEvidence" in utility_water
+            and "local function genericObjectTag" in utility_water
+            and "generic.role == C.UTILITY_ROLE_PROXY" in utility_water
+            and "entry.proxyToken" in utility_water
+            and "entry.proxyFingerprint" in utility_water
+            and "ledger.deviceId" in utility_water,
+            "CONNECT has no complete registry/proxy-ledger evidence gate for an existing proxy",
+        )
+        checks.true(
+            "restoreSourceOrRebuild" in utility_water
+            and "markSourceBoundaryRebuild" in utility_water
+            and "if transferResult then" in utility_water
+            and "lock this current record for manual rebuild" in utility_water,
+            "manual water source rollback/commit ambiguity does not fail closed",
+        )
+        checks.true(
+            "RAIN_BARREL" not in server
+            and "RainBarrel" not in server
+            and "SRainBarrelSystem" not in server
+            and "rainCollector" not in server
+            and "layout.barrel" not in server,
+            "server still contains the retired visible rain-barrel path",
+        )
         furniture = section(
             server,
             r"local function createFurniture",
@@ -2980,7 +3221,7 @@ def main() -> int:
         generator = section(
             server,
             r"local function createGenerator",
-            r"local function getRainBarrelGlobalClass",
+            r"local function createFurniture",
         )
         checks.true(generator is not None, "createGenerator function is missing")
         if generator is not None:
@@ -3011,30 +3252,39 @@ def main() -> int:
                 "generator emits a pre-complete object-index network packet",
             )
 
-        rain_barrel_sync = section(
-            server,
-            r"local function createRainBarrel",
-            r"local function createFurniture",
+        checks.true(
+            "createRainBarrel" not in server
+            and "ensureRainBarrelGlobalObject" not in server
+            and "getRainBarrelGlobalClass" not in server,
+            "retired rain-barrel creator or global bridge remains in the server facade",
         )
-        checks.true(rain_barrel_sync is not None, "createRainBarrel function is missing")
-        if rain_barrel_sync is not None:
-            checks.true(
-                rain_barrel_sync.count("transmitCompleteItemToClients") == 1,
-                "rain barrel does not have exactly one final full-object packet",
-            )
-            checks.true(
-                rain_barrel_sync.find("transmitCompleteItemToClients")
-                < rain_barrel_sync.find("ensureRainBarrelGlobalObject"),
-                "rain barrel full-object packet is not sent before incremental global/fluid sync",
-            )
-            checks.true(
-                re.search(
-                    r'callSucceeded\(barrel,\s*"(?:sync|transmitModData)"',
-                    rain_barrel_sync,
-                )
-                is None,
-                "rain barrel creator emits an extra object-index sync outside its global-state helper",
-            )
+
+        sink_component_helper = section(
+            server,
+            r"local function ensureSinkFluidContainer",
+            r"local function createEntityFromSprite",
+        )
+        checks.true(
+            sink_component_helper is not None
+            and "ComponentType" in sink_component_helper
+            and "FluidContainer" in sink_component_helper
+            and "GameEntityFactory" in sink_component_helper
+            and "AddComponent" in sink_component_helper,
+            "generated sink does not have a B42 FluidContainer component helper",
+        )
+        furniture_builder = section(
+            server,
+            r"local function createFurniture",
+            r"-- Error objects are not required",
+        )
+        checks.true(
+            furniture_builder is not None
+            and 'role == "sink"' in furniture_builder
+            and "ensureSinkFluidContainer" in furniture_builder
+            and furniture_builder.find("ensureSinkFluidContainer")
+                < furniture_builder.find("tagObject"),
+            "generated sink component is not ready before tag/attachment/full-packet flow",
+        )
 
         counter_sink = section(
             server,
@@ -3057,20 +3307,16 @@ def main() -> int:
                 counter_packet >= 0 and sink_packet > counter_packet,
                 "counter/sink final packet order is not explicit",
             )
+            capability_position = counter_sink.find("sinkData.canBeWaterPiped = true")
+            capability_packet = counter_sink.find(
+                'callSucceeded(sink, "transmitModData")'
+            )
             checks.true(
-                sink_packet < counter_sink.find(
-                    'callSucceeded(sink, "setUsesExternalWaterSource"'
-                )
-                and sink_packet < counter_sink.find(
-                    'callSucceeded(sink, "doFindExternalWaterSource"'
-                )
-                and sink_packet < counter_sink.find(
-                    'callSucceeded(sink, "sendObjectChange"'
-                )
-                and sink_packet < counter_sink.find(
-                    'callSucceeded(sink, "transmitModData"'
-                ),
-                "sink must publish its initial object before plumbing/incremental state sync",
+                sink_packet >= 0
+                and capability_position > sink_packet
+                and capability_packet > capability_position
+                and "doFindExternalWaterSource" not in counter_sink,
+                "sink capability metadata must be published after its initial object packet",
             )
             checks.true(
                 counter_packet > counter_sink.find(
@@ -3165,10 +3411,12 @@ def main() -> int:
         checks.true(special_remove is not None, "special-system removal helper is missing")
         if special_remove is not None:
             checks.true(
-                "unregisterRainBarrelGlobalObject" in special_remove
+                "return object" in special_remove
+                and "unregisterRainBarrelGlobalObject" not in special_remove
+                and "SRainBarrelSystem" not in special_remove
                 and 'callGlobal("triggerEvent"' not in special_remove
                 and "local systems =" not in special_remove,
-                "special-system cleanup manually duplicates the engine removal event",
+                "utility cleanup still assumes a global rain-barrel system",
             )
         rollback = section(
             server,

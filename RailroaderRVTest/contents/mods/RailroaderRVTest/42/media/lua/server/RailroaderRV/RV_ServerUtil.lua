@@ -215,7 +215,7 @@ local function makeLayout(x, y, z)
             <= requiredInteger(managed.minZ, "shared managed.minZ") then
         error("RailroaderRVTest: shared managed scope is not 100x100xZ")
     end
-    local requiredPoints = { "light", "generator", "barrel", "counter", "sink" }
+    local requiredPoints = { "light", "generator", "utilityTank", "counter", "sink" }
     for i = 1, #requiredPoints do
         local field = requiredPoints[i]
         local point = planned[field]

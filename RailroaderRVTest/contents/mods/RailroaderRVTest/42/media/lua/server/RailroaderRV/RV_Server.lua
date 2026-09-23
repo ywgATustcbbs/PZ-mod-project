@@ -205,9 +205,9 @@ end
 
 local function requestRoomOwnershipScan(object)
     local x, y, z = objectCoordinates(object)
+    if x == nil then return end
     for _, guard in pairs(roomOwnershipGuards) do
-        if x == nil
-            or coordinatesInRoomOwnershipBounds(x, y, z, guard.oldBounds)
+        if coordinatesInRoomOwnershipBounds(x, y, z, guard.oldBounds)
             or coordinatesInRoomOwnershipBounds(x, y, z, guard.newBounds) then
             guard.scanRequested = true
             guard.nextScanTick = serverTick

@@ -2516,20 +2516,22 @@ def main() -> int:
 
         client_room_clear = section(
             client,
-            r"local function refreshInvalidRoomOwnership",
+            r"local function inspectRoomOwnershipSquare",
             r"local function beginRoomOwnershipRefresh",
         )
         checks.true(client_room_clear is not None, "client stale-room correction is missing")
         if client_room_clear is not None:
             checks.true(
-                "local room = square:getRoom()" in client_room_clear
+                "local roomOk, room = pcall" in client_room_clear
+                and "return square:getRoom()" in client_room_clear
+                and "local roomDefOk, roomDef = pcall" in client_room_clear
                 and "return square:getRoomDef()" in client_room_clear
-                and "if roomDef == nil then" in client_room_clear,
+                and "if roomDef ~= nil then return true, 0 end" in client_room_clear,
                 "client stale-room correction does not require room!=nil and RoomDef=nil",
             )
             checks.true(
                 client_room_clear.count("square:setRoomID(-1)") == 1
-                and client_room_clear.find("if roomDef == nil then")
+                and client_room_clear.find("if roomDef ~= nil then return true, 0 end")
                 < client_room_clear.find("square:setRoomID(-1)"),
                 "client stale-room correction is absent, duplicated, or outside the RoomDef=nil branch",
             )
@@ -2546,6 +2548,28 @@ def main() -> int:
                 in client_room_clear,
                 "client stale-room correction does not cover complete old and new footprints",
             )
+            client_room_refresh = section(
+                client,
+                r"local function refreshInvalidRoomOwnership",
+                r"local function refreshCurrentPlayerRoomOwnership",
+            )
+            checks.true(
+                client_room_refresh is not None
+                and "inspectRoomOwnershipSquare(square)" in client_room_refresh,
+                "client complete room scan bypasses the safe room ownership inspector",
+            )
+
+        client_room_event = section(
+            client,
+            r"local function requestRoomOwnershipScan",
+            r"local function beginRoomOwnershipRefresh",
+        )
+        checks.true(
+            client_room_event is not None
+            and "if x == nil then return end" in client_room_event
+            and "x == nil or coordinatesInBounds" not in client_room_event,
+            "client room mutation events wake every guard when object coordinates are unavailable",
+        )
 
         client_structure_scan = section(
             client,
@@ -2646,6 +2670,10 @@ def main() -> int:
                 and "guard.scanRequested" in client_room_tick,
                 "client room monitor lacks an owned tick counter or mutation-safe immediate scan",
             )
+            checks.true(
+                "guard.scanRequested = not scanOk or cleared > 0" in client_room_tick,
+                "client room monitor drops failed full-scan retries",
+            )
 
         utility_mapping_sync = section(
             utility_server,
@@ -2672,6 +2700,18 @@ def main() -> int:
             and "cursor.completedTick" in boundary_server
             and "completedTick = Boundary._tick" in boundary_server,
             "boundary cleanup fallback has no timely cursor completion/cooldown contract",
+        )
+
+        server_room_event = section(
+            server,
+            r"local function requestRoomOwnershipScan",
+            r"local function roomOwnershipGuardKey",
+        )
+        checks.true(
+            server_room_event is not None
+            and "if x == nil then return end" in server_room_event
+            and "x == nil or" not in server_room_event,
+            "server room mutation events wake every guard when object coordinates are unavailable",
         )
 
         checks.true(

@@ -229,27 +229,12 @@ local function refreshInvalidRoomOwnership(guard)
         local key = tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
         if seen[key] then return end
         seen[key] = true
-        local room = square:getRoom()
-        if room == nil then return end
-        local inspected, roomDef = pcall(function()
-            return square:getRoomDef()
-        end)
+        local inspected, reset = inspectRoomOwnershipSquare(square)
         if not inspected then
             scanOk = false
             return
         end
-        -- Correct only the impossible state left by removeIsoRoom. Valid
-        -- retired or replacement rooms must retain their engine-owned IDs.
-        if roomDef == nil then
-            local reset = pcall(function()
-                square:setRoomID(-1)
-            end)
-            if not reset or square:getRoom() ~= nil then
-                scanOk = false
-            else
-                cleared = cleared + 1
-            end
-        end
+        cleared = cleared + reset
     end
     eachStructureSquare(cell, guard.oldBounds, inspect)
     eachStructureSquare(cell, guard.newBounds, inspect)
@@ -295,16 +280,20 @@ local function refreshCurrentPlayerRoomOwnership(guard)
 end
 
 local function objectCoordinates(object)
-    if not object or type(object.getSquare) ~= "function" then return nil end
-    local squareOk, square = pcall(function() return object:getSquare() end)
-    if not squareOk then return nil end
-    return squareCoordinates(square)
+    if not object then return nil end
+    local target = object
+    if type(object.getSquare) == "function" then
+        local squareOk, square = pcall(function() return object:getSquare() end)
+        if squareOk and square then target = square end
+    end
+    return squareCoordinates(target)
 end
 
 local function requestRoomOwnershipScan(object)
     local x, y, z = objectCoordinates(object)
+    if x == nil then return end
     for _, guard in pairs(roomOwnershipGuards) do
-        if x == nil or coordinatesInBounds(x, y, z, guard.oldBounds)
+        if coordinatesInBounds(x, y, z, guard.oldBounds)
             or coordinatesInBounds(x, y, z, guard.newBounds) then
             guard.scanRequested = true
             guard.nextScanTick = clientTick
@@ -420,7 +409,7 @@ local function updateRoomOwnershipGuards()
             local scanOk, cleared = refreshInvalidRoomOwnership(guard)
             guard.totalCleared = guard.totalCleared + cleared
             guard.lastScanStable = scanOk and cleared == 0
-            guard.scanRequested = false
+            guard.scanRequested = not scanOk or cleared > 0
             guard.nextScanTick = clientTick + ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS
             if guard.lastScanStable then
                 -- stableTicks represents successful full scans, expressed in

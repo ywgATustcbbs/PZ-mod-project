@@ -27,8 +27,16 @@
 - relocation sentinel 先筛选在线玩家是否位于 `z=-15`；没有候选时不进入 map/manifest/geometry gate。
 - utility mapping 同步按玩家对象和 mapping epoch 缓存，但仅在 `accepted=true` 且 identity 合法时记录完成；业务失败和发送失败会继续重试。
 - `.vs/` 已整体加入 `.gitignore`，并从 Git 索引移除已跟踪的 IDE 状态文件；本地缓存保留，不进入后续提交。
+- 完整 room footprint 扫描统一复用受 `pcall` 保护的 room inspector；单格或完整扫描异常不会中断客户端 relocation/ACK tick，失败会保留 `scanRequested` 重试。
+- 客户端和服务端 room mutation 事件在对象坐标不可解析时直接等待 fallback，不再唤醒所有 room guard；客户端还会尝试从对象自身读取坐标。
 
 新增静态回归断言覆盖 `clientTick`、mapping 失败不缓存、room mutation 唤醒和 cleanup cursor 冷却。所有改动已通过静态契约和 Lua 语法检查；尚未通过实机 profiler 或联机操作观察 CPU。
+
+## 最新审查处置
+
+最新静态审查确认上轮五项问题均已针对性修复，并指出一个房间扫描异常传播缺口。本轮已修复该缺口和未知坐标事件的全 guard 唤醒问题；未改变服务端 authority、current-schema gate、对象归属证明或事务协议。
+
+Boundary cleanup 当前使用每 tick 128 格的单轮推进，完整 20,000-cell 范围约需 157 tick，完成后冷却 600 tick。相对父提交的低频 cursor，这是“更快发现非法对象”与“更高稳态扫描量”的明确取舍，平均约 26.4 cells/tick；在运行时 profiler 数据出现前，不继续武断调整该冷却值。
 
 ## 直接热点
 
@@ -68,7 +76,7 @@
 - [RV_BoundaryServer.lua](contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RV_BoundaryServer.lua#L1340) 对每个方格获取多个对象集合并审计对象。
 - [RV_BoundaryServer.lua](contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RV_BoundaryServer.lua#L1350) 每个服务端 tick 驱动玩家检查和 cleanup。
 
-一个 boundary 当前有 100x100x2 = 20000 个 bitmap cell，但 cleanup 实际只在加载的方格上推进 cursor。若管理范围已经加载，单个 RV 每 tick 会执行 128 次 `getGridSquare`，每个方格还会查询 `getObjects`、`getSpecialObjects`、`getWorldObjects`、`getStaticMovingObjects`、`getMovingObjects`、`getDeadBodys` 和 floor。每个完整 100x100x2 范围约 78 个 tick 扫完，然后 cursor 被清空并在下一轮重新开始；因此这是持续循环扫描，而非一次性兜底。
+一个 boundary 当前有 100x100x2 = 20000 个 bitmap cell，但 cleanup 实际只在加载的方格上推进 cursor。若管理范围已经加载，单个 RV 每 tick 会执行 128 次 `getGridSquare`，每个方格还会查询 `getObjects`、`getSpecialObjects`、`getWorldObjects`、`getStaticMovingObjects`、`getMovingObjects`、`getDeadBodys` 和 floor。每个完整 100x100x2 范围约需 `ceil(20000 / 128) = 157` 个 tick 扫完，然后 cursor 进入 600 tick 冷却；当前稳态平均约为 `20000 / (157 + 600) = 26.4` 个 cell/tick。这是时效与 CPU 的明确取舍，最终数值仍需 profiler 校准。
 
 对象集合扫描代码位于 [RV_BoundaryServer.lua](contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RV_BoundaryServer.lua#L1255)，对象审计入口位于 [RV_BoundaryServer.lua](contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RV_BoundaryServer.lua#L1027)。当方格内有对象时，审计还会读取坐标、modData、tag、footprint、shell ledger 和 bitmap buildability。
 

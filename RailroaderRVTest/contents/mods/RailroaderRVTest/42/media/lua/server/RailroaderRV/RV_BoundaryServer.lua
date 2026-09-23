@@ -661,9 +661,9 @@ end
 
 local function updatePlayer(player)
     local boundary, _, _, id = Boundary.boundaryForPlayer(player)
-    if not boundary then return end
+    if not boundary then return nil end
     local state = stateFor(player)
-    if not state then return end
+    if not state then return nil end
     if state.boundaryReference ~= boundary
         or state.rvId ~= boundary.rvId
         or state.generation ~= boundary.generation
@@ -681,18 +681,18 @@ local function updatePlayer(player)
     if state.snapshotKey ~= boundaryKey(boundary) or snapshotAge >= refreshTicks then
         Boundary.sendSnapshot(player, boundary, state)
     end
-    if transitionActive(state) then return end
+    if transitionActive(state) then return boundary end
     local position = playerPosition(player)
-    if not position then return end
+    if not position then return boundary end
     -- Scope guard is intentionally before every correction path.  An inside
     -- relation alone never grants permission to touch a player outside this
     -- RV's exact managed region.
     if not Bitmap.containsScope(boundary.bitmap, position.x, position.y, position.z) then
         state.lastValid, state.lastPosition, state.invalidSegment = nil, nil, nil
-        return
+        return boundary
     end
-    if not currentSquareMatches(player, position) then return end
-    if Boundary._tick < (state.recoveryCooldown or 0) then return end
+    if not currentSquareMatches(player, position) then return boundary end
+    if Boundary._tick < (state.recoveryCooldown or 0) then return boundary end
     local active = Bitmap.isActive(boundary.bitmap, position.x, position.y, position.z)
     if active and state.lastPosition then
         local segmentOk = Bitmap.segmentValid(boundary.bitmap,
@@ -702,7 +702,7 @@ local function updatePlayer(player)
     if active and not state.invalidSegment then
         state.lastValid = copyPosition(position)
         state.lastPosition = copyPosition(position)
-        return
+        return boundary
     end
     if not active or state.invalidSegment then
         local target = state.lastValid
@@ -713,6 +713,7 @@ local function updatePlayer(player)
         end
         if target then correction(player, boundary, state, target) end
     end
+    return boundary
 end
 
 local function objectModData(object)
@@ -1364,8 +1365,7 @@ function Boundary.onTick()
             -- extended by RV_Server before this callback and normal boundary
             -- processing resumes after completeTransition.
             if not state or not transitionActive(state) then
-                updatePlayer(player)
-                local boundary = Boundary.boundaryForPlayer(player)
+                local boundary = updatePlayer(player)
                 if boundary then
                     activeBoundaries[boundaryKey(boundary)] = {
                         boundary = boundary, player = player,

@@ -46,6 +46,7 @@ local GENERATION_HALO_REFRESH_TICKS = 10
 -- RoomDef=nil reference on the next player update.
 local ROOM_OWNERSHIP_MIN_TICKS = 1800
 local ROOM_OWNERSHIP_STABLE_TICKS = 120
+local ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS = 30
 
 local function roomOwnershipGuardKey(rvId, generation, bitmapVersion)
     return tostring(rvId) .. ":" .. tostring(generation) .. ":"
@@ -258,8 +259,12 @@ local function beginRoomOwnershipRefresh(args)
     }
     -- Arm immediately, before any ordered removal/rebuild packets that follow
     -- this broadcast server command are applied.
-    local _, cleared = refreshInvalidRoomOwnership(roomOwnershipGuards[key])
-    roomOwnershipGuards[key].totalCleared = cleared
+    local guard = roomOwnershipGuards[key]
+    local scanOk, cleared = refreshInvalidRoomOwnership(guard)
+    guard.totalCleared = cleared
+    guard.lastScanStable = scanOk and cleared == 0
+    guard.stableTicks = guard.lastScanStable and 1 or 0
+    guard.nextScanTick = clientTick + ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS
 end
 
 local function finalTargetRoomIsValid(x, y, z)
@@ -309,12 +314,18 @@ end
 local function updateRoomOwnershipGuards()
     for generation, guard in pairs(roomOwnershipGuards) do
         guard.ticks = guard.ticks + 1
-        local scanOk, cleared = refreshInvalidRoomOwnership(guard)
-        guard.totalCleared = guard.totalCleared + cleared
-        if scanOk and cleared == 0 then
+        if clientTick >= (guard.nextScanTick or 0) then
+            local scanOk, cleared = refreshInvalidRoomOwnership(guard)
+            guard.totalCleared = guard.totalCleared + cleared
+            guard.lastScanStable = scanOk and cleared == 0
+            guard.nextScanTick = clientTick + ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS
+            if guard.lastScanStable then
+                guard.stableTicks = guard.stableTicks + 1
+            else
+                guard.stableTicks = 0
+            end
+        elseif guard.lastScanStable then
             guard.stableTicks = guard.stableTicks + 1
-        else
-            guard.stableTicks = 0
         end
         -- The warm-up/stable tail is diagnostic only.  This monitor is kept
         -- for the lifetime of the current identity because a later wall or

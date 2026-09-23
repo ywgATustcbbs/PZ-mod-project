@@ -121,6 +121,7 @@ local GENERATION_STAGING_Z = Constants.RELOCATION_SENTINEL_Z
 local ROOM_OWNERSHIP_MIN_TICKS = 1800
 local ROOM_OWNERSHIP_STABLE_TICKS = 120
 local ROOM_OWNERSHIP_MAX_TICKS = 7200
+local ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS = 30
 
 local WORLD_MIN_Z = -32
 local WORLD_MAX_Z = 31
@@ -209,6 +210,8 @@ local function registerServerRoomOwnershipGuard(generation, player, oldBounds,
         ticks = 0,
         stableTicks = 0,
         totalCleared = 0,
+        lastScanStable = false,
+        nextScanTick = serverTick + ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS,
     }
     guard.key = roomOwnershipGuardKey(guard.rvId, guard.generation, version)
     roomOwnershipGuards[guard.key] = guard
@@ -219,6 +222,10 @@ local function refreshServerRoomOwnershipGuard(guard, phase)
     local cleared = clearInvalidRoomOwnershipReferences(ServerWorld.getCellForPlayer(guard.player),
         guard.oldBounds, guard.newBounds)
     guard.totalCleared = guard.totalCleared + cleared
+    guard.lastScanStable = cleared == 0
+    if phase ~= nil then
+        guard.nextScanTick = serverTick + ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS
+    end
     if cleared > 0 or phase ~= nil then
         print("[RailroaderRVTest] room ownership refresh generation="
             .. tostring(guard.generation) .. " phase=" .. tostring(phase or "tick")
@@ -241,16 +248,24 @@ local function processServerRoomOwnershipGuards()
     local finished = {}
     for generation, guard in pairs(roomOwnershipGuards) do
         guard.ticks = guard.ticks + 1
-        local ok, clearedOrError = pcall(refreshServerRoomOwnershipGuard, guard, nil)
-        if not ok then
-            guard.stableTicks = 0
-            guard.lastError = safeErrorText(clearedOrError)
-        elseif clearedOrError > 0 then
-            guard.stableTicks = 0
-            guard.lastError = nil
-        else
+        if serverTick >= (guard.nextScanTick or 0) then
+            guard.nextScanTick = serverTick + ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS
+            local ok, clearedOrError = pcall(refreshServerRoomOwnershipGuard, guard, nil)
+            if not ok then
+                guard.lastScanStable = false
+                guard.lastError = safeErrorText(clearedOrError)
+            elseif clearedOrError > 0 then
+                guard.lastScanStable = false
+                guard.lastError = nil
+            else
+                guard.lastScanStable = true
+                guard.lastError = nil
+            end
+        end
+        if guard.lastScanStable then
             guard.stableTicks = guard.stableTicks + 1
-            guard.lastError = nil
+        else
+            guard.stableTicks = 0
         end
         if guard.ticks >= ROOM_OWNERSHIP_MAX_TICKS then
             print("[RailroaderRVTest] room ownership guard expired generation="

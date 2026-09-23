@@ -44,6 +44,7 @@ local WORLD_MIN_Z = -32
 local WORLD_MAX_Z = 31
 local roofRepairRooms = {}
 local ROOF_REPAIR_CACHE_TTL_TICKS = 1800
+Adapter._mappingEpoch = Adapter._mappingEpoch or 0
 local roofRepairPlayers = {}
 local roomMonitorPlayers = {}
 local pendingWallRoofRepairs = {}
@@ -747,6 +748,7 @@ local function mapData()
 end
 
 local function transmitMap()
+    Adapter._mappingEpoch = (Adapter._mappingEpoch or 0) + 1
     if ModData and type(ModData.transmit) == "function" then
         pcall(ModData.transmit, C.RV_MAP_KEY)
     end
@@ -2452,6 +2454,28 @@ local function processStatelessRelocationSentinel()
         or now % RELOCATION_SENTINEL_INTERVAL_TICKS ~= 0 then
         return
     end
+    local players = onlinePlayersSnapshot()
+    local present = {}
+    local sentinelPlayers = {}
+    for i = 1, #players do
+        local player = players[i]
+        local identityKey = sentinelIdentity(player)
+        local position = playerPosition(player)
+        if identityKey then
+            present[identityKey] = true
+            if position and math.floor(position.z) == RELOCATION_SENTINEL_Z then
+                sentinelPlayers[#sentinelPlayers + 1] = player
+            end
+        end
+    end
+    for identityKey in pairs(relocationSentinelCooldown) do
+        if not present[identityKey] then
+            relocationSentinelCooldown[identityKey] = nil
+            relocationSentinelWarnings[identityKey] = nil
+            relocationSentinelBusy[identityKey] = nil
+        end
+    end
+    if #sentinelPlayers == 0 then return end
     local server = RailroaderRV and RailroaderRV.Server
     if not server or type(server.isRelocationIdentityClaimed) ~= "function"
         or type(server.currentRVManifestForRelocation) ~= "function"
@@ -2479,10 +2503,8 @@ local function processStatelessRelocationSentinel()
         warnSentinelPlayersAtTemporaryCell(mapOk and map or C.SAVE_REBUILD_REQUIRED)
         return
     end
-    local players = onlinePlayersSnapshot()
-    local present = {}
-    for i = 1, #players do
-        local player = players[i]
+    for i = 1, #sentinelPlayers do
+        local player = sentinelPlayers[i]
         local candidate, identityKey, reason
         local candidateCallOk, candidateResult, candidateIdentity, candidateReason =
             pcall(sentinelRecordCandidate, map, player, server)
@@ -2538,13 +2560,6 @@ local function processStatelessRelocationSentinel()
             elseif reason ~= nil then
                 sentinelWarn(identityKey, reason)
             end
-        end
-    end
-    for identityKey in pairs(relocationSentinelCooldown) do
-        if not present[identityKey] then
-            relocationSentinelCooldown[identityKey] = nil
-            relocationSentinelWarnings[identityKey] = nil
-            relocationSentinelBusy[identityKey] = nil
         end
     end
 end
@@ -3561,6 +3576,23 @@ end
 
 local function processPendingWallRoofRepairs()
     local now = Adapter._ticks or 0
+    local hasWork = false
+    for _ in pairs(pendingWallRoofRepairs) do
+        hasWork = true
+        break
+    end
+    if not hasWork then
+        for _, events in pairs(followUpWallRemovalEvents) do
+            if type(events) == "table" then
+                for _ in pairs(events) do
+                    hasWork = true
+                    break
+                end
+            end
+            if hasWork then break end
+        end
+    end
+    if not hasWork then return end
     local server = RailroaderRV and RailroaderRV.Server
     if not server or type(server.getRoofRepairRelocationState) ~= "function"
         or type(server.isGenerationTransactionActive) ~= "function" then

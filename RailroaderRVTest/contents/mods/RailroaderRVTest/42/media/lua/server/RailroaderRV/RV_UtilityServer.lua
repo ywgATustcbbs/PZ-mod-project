@@ -14,6 +14,7 @@ local inWaterSettlement = {}
 local locks = inWaterSettlement
 local sessions = {}
 local players = {}
+local mappingSyncState = {}
 local lastTick = -1
 
 local function key(identity)
@@ -317,15 +318,30 @@ local function syncUtilityMappings()
     end
     local listOk, list = pcall(adapter.onlinePlayersSnapshot)
     if not listOk or type(list) ~= "table" then return end
+    local epoch = adapter._mappingEpoch or 0
+    local present = {}
     for i = 1, #list do
         local player = list[i]
-        local syncOk, accepted, identity = pcall(adapter.syncUtilityMapping, player)
-        if syncOk and accepted == true and type(identity) == "table" then
-            -- A replacement player object after reconnect becomes the tick
-            -- recipient only after the same authoritative resolver accepted
-            -- it; no client-provided identity enters this cache.
-            players[key(identity)] = player
+        local recipientKey = playerKey(player)
+        if recipientKey then
+            present[recipientKey] = true
+            local previous = mappingSyncState[recipientKey]
+            if not previous or previous.player ~= player or previous.epoch ~= epoch then
+                local syncOk, accepted, identity = pcall(adapter.syncUtilityMapping, player)
+                if syncOk then
+                    mappingSyncState[recipientKey] = { player = player, epoch = epoch }
+                end
+                if syncOk and accepted == true and type(identity) == "table" then
+                    -- A replacement player object after reconnect becomes the tick
+                    -- recipient only after the same authoritative resolver accepted
+                    -- it; no client-provided identity enters this cache.
+                    players[key(identity)] = player
+                end
+            end
         end
+    end
+    for recipientKey in pairs(mappingSyncState) do
+        if not present[recipientKey] then mappingSyncState[recipientKey] = nil end
     end
 end
 

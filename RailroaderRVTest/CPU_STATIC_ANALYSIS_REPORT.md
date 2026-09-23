@@ -15,17 +15,20 @@
 
 ## 已实施修复
 
-本轮未改变 current-schema、authority、对象归属或 fail-closed 规则，只调整常驻路径的调度和重复工作：
+本轮修复未改变 current-schema、authority、对象归属或 fail-closed 规则，只修复审查发现的回归并调整常驻路径的调度和重复工作：
 
-- 客户端 stale-room monitor 保留 guard 安装时的即时扫描，后续 footprint 扫描改为每 30 tick；稳定计时和无效 room 引用清理仍然保留。
-- 服务端 room ownership guard 保留生命周期与稳定窗口，但完整 footprint 重扫改为每 30 tick。
-- boundary cleanup fallback 从每 tick 改为每 10 tick；`OnProcessAction`、`OnObjectAdded` 和 dirty-cell 审计仍可即时工作。
+- 客户端 `RV_ContextMenu` 增加本模块独立的 `clientTick`，避免生成事务收到 `RefreshRoomOwnership` 后因 `nil + number` 中断。
+- 客户端 stale-room monitor 保留 guard 安装时的即时扫描；每 tick 检查当前玩家方格，`OnObjectAdded`/`OnObjectAboutToBeRemoved` 命中 footprint 时唤醒完整扫描，30 tick 完整扫描只作 fallback。
+- 客户端与服务端 room ownership guard 的稳定值只按成功的完整扫描次数推进，不再把上一次成功扫描后的经过时间当成连续稳定扫描。
+- 服务端 room ownership guard 也在 footprint 内对象新增/移除事件后立即请求完整扫描，roof relocation 暂停期间仍维持原有早退。
+- boundary cleanup fallback 恢复每 tick 推进 128 格，保持单轮约 157 tick 的时效；完整扫描结束后保留 600 tick 冷却，避免空闲时无限循环全范围扫描。
 - `Boundary.onTick` 复用 `updatePlayer` 已解析的 boundary，移除同一玩家同一 tick 的重复 `boundaryForPlayer`/current-schema gate。
 - roof-repair adapter 在没有 pending/follow-up 工作时直接返回，不再空闲读取完整 RV map。
 - relocation sentinel 先筛选在线玩家是否位于 `z=-15`；没有候选时不进入 map/manifest/geometry gate。
-- utility mapping 同步按玩家对象和 mapping epoch 缓存，仅在重连或 `transmitMap()` 后重新解析当前映射。
+- utility mapping 同步按玩家对象和 mapping epoch 缓存，但仅在 `accepted=true` 且 identity 合法时记录完成；业务失败和发送失败会继续重试。
+- `.vs/` 已整体加入 `.gitignore`，并从 Git 索引移除已跟踪的 IDE 状态文件；本地缓存保留，不进入后续提交。
 
-这些改动已通过现有静态契约和 Lua 语法检查；尚未通过实机 profiler 或联机操作观察 CPU。
+新增静态回归断言覆盖 `clientTick`、mapping 失败不缓存、room mutation 唤醒和 cleanup cursor 冷却。所有改动已通过静态契约和 Lua 语法检查；尚未通过实机 profiler 或联机操作观察 CPU。
 
 ## 直接热点
 
@@ -189,4 +192,4 @@ python RailroaderRVTest/tests/test_rv_server.py
 
 最可能的首要根因是“常驻 room footprint 扫描 + 常驻 boundary cleanup”，而不是 `Bitmap.isActive` 或单次几何计算本身。服务端重复 current-schema geometry proof 和 adapter 的空闲 `mapData()` 又把同一成本叠加了多次。
 
-本轮已停止每 tick 的 room footprint 重扫和 boundary cleanup，消除了空闲 roof queue/sentinel 的完整存档验证，并移除了 boundary tick 内的一次重复解析。剩余的 current-schema gate、每 5 tick 的 sentinel 在线位置筛选、每 30 tick 的 water settlement 和低频 cleanup 都需要通过运行时耗时日志确认实际占比；本报告不把静态降频等同于实机 CPU 验收。
+本轮已停止每 tick 的 room footprint 全量重扫，改为当前玩家方格/结构事件即时检查加低频 fallback；cleanup 恢复单轮时效并在完成后冷却，消除了空闲 roof queue/sentinel 的完整存档验证，并移除了 boundary tick 内的一次重复解析。剩余的 current-schema gate、每 5 tick 的 sentinel 在线位置筛选、每 30 tick 的 water settlement 和 fallback 重扫都需要通过运行时耗时日志确认实际占比；本报告不把静态修复等同于实机 CPU 验收。

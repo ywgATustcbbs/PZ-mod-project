@@ -328,10 +328,8 @@ local function syncUtilityMappings()
             local previous = mappingSyncState[recipientKey]
             if not previous or previous.player ~= player or previous.epoch ~= epoch then
                 local syncOk, accepted, identity = pcall(adapter.syncUtilityMapping, player)
-                if syncOk then
-                    mappingSyncState[recipientKey] = { player = player, epoch = epoch }
-                end
                 if syncOk and accepted == true and type(identity) == "table" then
+                    mappingSyncState[recipientKey] = { player = player, epoch = epoch }
                     -- A replacement player object after reconnect becomes the tick
                     -- recipient only after the same authoritative resolver accepted
                     -- it; no client-provided identity enters this cache.

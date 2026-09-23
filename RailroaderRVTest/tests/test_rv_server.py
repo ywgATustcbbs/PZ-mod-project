@@ -2639,6 +2639,40 @@ def main() -> int:
                 and "client room ownership monitor active generation=" in client_room_tick,
                 "client room monitor still retires after the initial generation tail",
             )
+            checks.true(
+                re.search(r"local clientTick\s*=\s*0", client) is not None
+                and "clientTick = clientTick + 1" in client
+                and "refreshCurrentPlayerRoomOwnership(guard)" in client_room_tick
+                and "guard.scanRequested" in client_room_tick,
+                "client room monitor lacks an owned tick counter or mutation-safe immediate scan",
+            )
+
+        utility_mapping_sync = section(
+            utility_server,
+            r"local function syncUtilityMappings",
+            r"function M\.onTick",
+        )
+        checks.true(
+            utility_mapping_sync is not None,
+            "utility mapping sync helper is missing",
+        )
+        if utility_mapping_sync is not None:
+            checks.true(
+                re.search(
+                    r"if syncOk and accepted == true and type\(identity\) == \"table\" then\s+"
+                    r"mappingSyncState\[recipientKey\]",
+                    utility_mapping_sync,
+                ) is not None,
+                "utility mapping sync caches a business failure or send failure",
+            )
+
+        checks.true(
+            "C.BOUNDARY_TICK_INTERVAL = 1" in constants
+            and "C.BOUNDARY_CLEANUP_RESCAN_TICKS" in constants
+            and "cursor.completedTick" in boundary_server
+            and "completedTick = Boundary._tick" in boundary_server,
+            "boundary cleanup fallback has no timely cursor completion/cooldown contract",
+        )
 
         checks.true(
             "GameServer.sendTeleport(" not in server,

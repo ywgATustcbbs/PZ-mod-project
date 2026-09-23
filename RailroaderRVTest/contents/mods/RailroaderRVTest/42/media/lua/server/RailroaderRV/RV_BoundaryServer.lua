@@ -1310,10 +1310,20 @@ end
 local function cleanupForBoundary(boundary, player)
     local key = boundaryKey(boundary)
     local cursor = Boundary._cleanups[key]
-    if not cursor then
+    if cursor and cursor.completedTick ~= nil then
+        local rescanTicks = integer(C.BOUNDARY_CLEANUP_RESCAN_TICKS) or 600
+        if Boundary._tick - cursor.completedTick < rescanTicks then
+            cursor.player = player
+            cursor.boundary = boundary
+            return
+        end
+        cursor.x, cursor.y, cursor.z = boundary.bitmap.originX,
+            boundary.bitmap.originY, boundary.bitmap.minZ
+        cursor.completedTick = nil
+    elseif not cursor then
         cursor = { player = player, boundary = boundary,
             x = boundary.bitmap.originX, y = boundary.bitmap.originY,
-            z = boundary.bitmap.minZ }
+            z = boundary.bitmap.minZ, completedTick = nil }
         Boundary._cleanups[key] = cursor
     else
         -- Any online member of this RV can provide the authoritative cell;
@@ -1345,7 +1355,9 @@ local function cleanupForBoundary(boundary, player)
             budget = budget - 1
         end
     end
-    if cursor.z >= bitmap.maxZ then Boundary._cleanups[key] = nil end
+    if cursor.z >= bitmap.maxZ then
+        cursor.completedTick = Boundary._tick
+    end
 end
 
 function Boundary.onTick()

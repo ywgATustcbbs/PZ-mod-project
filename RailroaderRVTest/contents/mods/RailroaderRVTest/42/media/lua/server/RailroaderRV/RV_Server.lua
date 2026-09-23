@@ -180,6 +180,41 @@ local function clearInvalidRoomOwnershipReferences(cell, oldBounds, newBounds)
     return cleared
 end
 
+local function coordinatesInRoomOwnershipBounds(x, y, z, bounds)
+    if type(bounds) ~= "table" then return false end
+    local inBase = x >= bounds.wallMinX and x <= bounds.wallMaxX
+        and y >= bounds.wallMinY and y <= bounds.wallMaxY and z == bounds.z
+    local inRoof = x >= bounds.roofMinX and x <= bounds.roofMaxX
+        and y >= bounds.roofMinY and y <= bounds.roofMaxY and z == bounds.roofZ
+    return inBase or inRoof
+end
+
+local function objectCoordinates(object)
+    if not object then return nil end
+    local squareOk, square = ServerUtil.invoke(object, "getSquare")
+    local target = squareOk and square or object
+    local xOk, x = ServerUtil.invoke(target, "getX")
+    local yOk, y = ServerUtil.invoke(target, "getY")
+    local zOk, z = ServerUtil.invoke(target, "getZ")
+    x, y, z = ServerUtil.integer(x), ServerUtil.integer(y), ServerUtil.integer(z)
+    if not xOk or not yOk or not zOk or x == nil or y == nil or z == nil then
+        return nil
+    end
+    return x, y, z
+end
+
+local function requestRoomOwnershipScan(object)
+    local x, y, z = objectCoordinates(object)
+    for _, guard in pairs(roomOwnershipGuards) do
+        if x == nil
+            or coordinatesInRoomOwnershipBounds(x, y, z, guard.oldBounds)
+            or coordinatesInRoomOwnershipBounds(x, y, z, guard.newBounds) then
+            guard.scanRequested = true
+            guard.nextScanTick = serverTick
+        end
+    end
+end
+
 local function roomOwnershipGuardKey(rvId, generation, bitmapVersion)
     return tostring(rvId) .. ":" .. tostring(generation) .. ":"
         .. tostring(bitmapVersion)
@@ -211,6 +246,7 @@ local function registerServerRoomOwnershipGuard(generation, player, oldBounds,
         stableTicks = 0,
         totalCleared = 0,
         lastScanStable = false,
+        scanRequested = false,
         nextScanTick = serverTick + ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS,
     }
     guard.key = roomOwnershipGuardKey(guard.rvId, guard.generation, version)
@@ -223,6 +259,7 @@ local function refreshServerRoomOwnershipGuard(guard, phase)
         guard.oldBounds, guard.newBounds)
     guard.totalCleared = guard.totalCleared + cleared
     guard.lastScanStable = cleared == 0
+    guard.scanRequested = false
     if phase ~= nil then
         guard.nextScanTick = serverTick + ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS
     end
@@ -248,11 +285,12 @@ local function processServerRoomOwnershipGuards()
     local finished = {}
     for generation, guard in pairs(roomOwnershipGuards) do
         guard.ticks = guard.ticks + 1
-        if serverTick >= (guard.nextScanTick or 0) then
+        if guard.scanRequested or serverTick >= (guard.nextScanTick or 0) then
             guard.nextScanTick = serverTick + ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS
             local ok, clearedOrError = pcall(refreshServerRoomOwnershipGuard, guard, nil)
             if not ok then
                 guard.lastScanStable = false
+                guard.scanRequested = true
                 guard.lastError = safeErrorText(clearedOrError)
             elseif clearedOrError > 0 then
                 guard.lastScanStable = false
@@ -261,11 +299,15 @@ local function processServerRoomOwnershipGuards()
                 guard.lastScanStable = true
                 guard.lastError = nil
             end
-        end
-        if guard.lastScanStable then
-            guard.stableTicks = guard.stableTicks + 1
-        else
-            guard.stableTicks = 0
+            if guard.lastScanStable then
+                -- stableTicks represents successful full scans, expressed in
+                -- the configured fallback interval, not elapsed ticks since
+                -- the last scan.
+                guard.stableTicks = guard.stableTicks
+                    + ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS
+            else
+                guard.stableTicks = 0
+            end
         end
         if guard.ticks >= ROOM_OWNERSHIP_MAX_TICKS then
             print("[RailroaderRVTest] room ownership guard expired generation="
@@ -5413,6 +5455,13 @@ end
 if Boundary and Events and Events.OnObjectAdded
     and type(Events.OnObjectAdded.Add) == "function" then
     Events.OnObjectAdded.Add(Boundary.onObjectAdded)
+end
+if Events and Events.OnObjectAboutToBeRemoved
+    and type(Events.OnObjectAboutToBeRemoved.Add) == "function" then
+    Events.OnObjectAboutToBeRemoved.Add(requestRoomOwnershipScan)
+end
+if Events and Events.OnObjectAdded and type(Events.OnObjectAdded.Add) == "function" then
+    Events.OnObjectAdded.Add(requestRoomOwnershipScan)
 end
 
 -- Load after RV.Server has been fully constructed.  The adapter is intentionally

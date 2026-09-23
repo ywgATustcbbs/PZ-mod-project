@@ -1,5 +1,6 @@
 # Project-local exclusions
 /.github/
+/.vs/
 /.rv-lua-parse/
 /.venv/
 .tmp-railroader-2.1/
@@ -10,7 +11,3 @@
 /testserver/
 /modinfos.json
 __pycache__/
-/.vs/PZ-mod-project.slnx/FileContentIndex
-/.vs/PZ-mod-project.slnx/v18
-/.vs/slnx.sqlite
-/.vs/slnx.sqlite-journal

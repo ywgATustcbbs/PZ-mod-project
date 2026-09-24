@@ -9,7 +9,7 @@
 ## 基线与只读来源
 
 - 当前基线的唯一事实源为 `game-decompiled/42.20.4/metadata.txt`；版本、BuildID、反编译元数据和复核结果只从此处读取。基线更新完成前不得在其他文档重复猜测数字或路径。
-- 必须先读取 `.github/copilot-instructions.md`。官方 Lua 快照 `official lua scripts/` 只读，作为 API/脚本 ground truth；目录职责为 `client/`（UI、交互、渲染、客户端表现）、`server/`（服务端玩法、世界、物品、载具、AI、配方）、`shared/`（常量、工具、共享数据定义）。
+- 官方 Lua 快照 `official lua scripts/` 只读，作为 API/脚本 ground truth；目录职责为 `client/`（UI、交互、渲染、客户端表现）、`server/`（服务端玩法、世界、物品、载具、AI、配方）、`shared/`（常量、工具、共享数据定义）。
 - `reference mods/` 只读，仅用于参考可复用代码和配置；禁止修改，禁止复制数据文件；需要导航时直接检查实际目录。
 - `game-decompiled/` 只读，仅用于接口核验和静态分析，不能替代运行时测试。
 - `broken/` 当前为空；只有实际存在的待修复模组才能列入此处，不保留虚构清单。
@@ -38,7 +38,7 @@ modinfos.json                         模组 metadata，只读、禁止全量读
 - 子 agent 只能使用自定义 agent `luna_worker`，具体实施由该子 agent 完成。除非必须复用上下文，每次任务指派新的子 agent；不得用内置 `default`、`worker` 或 `explorer` 代替。
 - 对任何涉及代码、配置、测试、项目分析或文件修改的任务，主 agent 必须先显式启动 `luna_worker`，并在其返回结果前不得直接实施任务或修改文件；纯粹的简短问答可不启动。
 - 启动失败、不可用、返回失败或任务边界不清时，主 agent 必须停止并报告，不得降级为主 agent 直接实施，也不得改用其他子 agent。
-- `gpt-5.6-luna` 只是模型名，不等于已经使用 `luna_worker`；委派时必须核对 agent 名称和返回的任务结果。
+- `gpt-6-luna` 只是模型名，不等于已经使用 `luna_worker`；委派时必须核对 agent 名称和返回的任务结果。
 - 主 agent 必须审核 `luna_worker` 返回的任务范围、证据、变更文件和测试/验证结果；最终报告必须注明委派状态、验证证据、变更文件和未解决问题，无法提供时不得宣称任务完成。
 - 本文件提供行为约束，不构成运行时硬门禁；若任务要求 fail-closed，必须另外配置 Hook 或外部编排器，拒绝未经过 `luna_worker` 的写入操作。
 - 子 agent 任务可能较长；没有明确卡死迹象时，主 agent 严禁中断任务。
@@ -47,7 +47,12 @@ modinfos.json                         模组 metadata，只读、禁止全量读
 - 严禁把客户端或服务器拆开单独测试；运行时测试必须走一键测试脚本定义的整体流程。
 - agent负责从项目根目录启动 `python testserver/run_test.py`，用户只负责客户端启动后的操作(如连接服务器、移动、点击等)、观察、反馈。
 - 禁止通过隐藏命令行窗口或隐藏控制台的方式启动测试服务器；一键测试启动的服务器控制台必须对用户可见。
-- 搜索或新增代码/脚本目录时，维护该目录的 `agent.md`（描述结构与职责）；代码变更同步更新对应说明。只做与任务直接相关的最小修改。
+
+- 全部编码任务强制
+1. Think before coding: 显式写出假设、分歧、取舍；不清楚先停再问
+2. Simplicity first: 只写解决当前问题的最少代码，禁止投机扩展
+3. Surgical changes: 只改必要内容，匹配现有风格，只清理自己造成的残留
+4. Goal-driven: 先定义成功条件与验证方式，改完必须验证
 
 ### RailroaderRVTest 开发期存档 schema 强制门
 

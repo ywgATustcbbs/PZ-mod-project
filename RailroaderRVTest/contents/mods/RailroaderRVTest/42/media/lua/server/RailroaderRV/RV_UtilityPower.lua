@@ -4,7 +4,6 @@
 -- binding identity, circuit policy and sequence; it never mirrors a second
 -- consumable fuel balance.
 
-local C = require("RailroaderRV/RV_Constants")
 local U = require("RailroaderRV/RV_UtilityConstants")
 local Store = require("RailroaderRV/RV_UtilityStore")
 local Water = require("RailroaderRV/RV_UtilityWater")

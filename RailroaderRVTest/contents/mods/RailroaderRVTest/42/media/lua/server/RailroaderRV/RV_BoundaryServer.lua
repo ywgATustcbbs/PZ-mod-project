@@ -32,6 +32,7 @@ RailroaderRV.BoundaryServer = RailroaderRV.BoundaryServer or {}
 local Boundary = RailroaderRV.BoundaryServer
 local C = RailroaderRV.Constants
 local OWNER = C.MOD_ID
+local exactKeys = Bitmap.hasExactKeys
 
 Boundary._states = Boundary._states or {}
 Boundary._registered = Boundary._registered or {}
@@ -62,17 +63,6 @@ local function integer(value)
     local result = number(value)
     if result == nil or math.floor(result) ~= result then return nil end
     return result
-end
-
-local function exactKeys(value, expected)
-    if type(value) ~= "table" then return false end
-    local allowed, count = {}, 0
-    for i = 1, #expected do allowed[expected[i]] = true end
-    for key in pairs(value) do
-        if not allowed[key] then return false end
-        count = count + 1
-    end
-    return count == #expected
 end
 
 local function call(target, method, ...)
@@ -465,10 +455,6 @@ function Boundary.boundaryForPlayer(player)
         return nil
     end
     return loaded, record, relation, validatedIdentity
-end
-
-function Boundary.managedContains(boundary, x, y, z)
-    return boundary ~= nil and Bitmap.containsScope(boundary.bitmap, x, y, z)
 end
 
 local function stateFor(player)

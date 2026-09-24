@@ -6,6 +6,7 @@
 -- save handling.
 
 local Constants = require("RailroaderRV/RV_Constants")
+local Layout = require("RailroaderRV/RV_Layout")
 local Bitmap = require("RailroaderRV/RV_Bitmap")
 local ServerUtil = require("RailroaderRV/RV_ServerUtil")
 local ServerWorld = require("RailroaderRV/RV_ServerWorld")
@@ -479,31 +480,25 @@ local function eachStructureSquare(cell, bounds, callback)
     if type(bounds) ~= "table" then
         return
     end
-    local function visit(x, y, z)
+
+    local scanBounds = {
+        wallMinX = ServerUtil.requiredInteger(bounds.wallMinX, "saved bounds wallMinX"),
+        wallMaxX = ServerUtil.requiredInteger(bounds.wallMaxX, "saved bounds wallMaxX"),
+        wallMinY = ServerUtil.requiredInteger(bounds.wallMinY, "saved bounds wallMinY"),
+        wallMaxY = ServerUtil.requiredInteger(bounds.wallMaxY, "saved bounds wallMaxY"),
+        z = ServerUtil.requiredInteger(bounds.z, "saved bounds z"),
+        roofMinX = ServerUtil.requiredInteger(bounds.roofMinX, "saved bounds roofMinX"),
+        roofMaxX = ServerUtil.requiredInteger(bounds.roofMaxX, "saved bounds roofMaxX"),
+        roofMinY = ServerUtil.requiredInteger(bounds.roofMinY, "saved bounds roofMinY"),
+        roofMaxY = ServerUtil.requiredInteger(bounds.roofMaxY, "saved bounds roofMaxY"),
+        roofZ = ServerUtil.requiredInteger(bounds.roofZ, "saved bounds roofZ"),
+    }
+    Layout.eachStructureCoordinate(scanBounds, function(x, y, z)
         local square = ServerWorld.getSquare(cell, x, y, z)
         if square then
             callback(square, x, y, z)
         end
-    end
-    local baseZ = ServerUtil.requiredInteger(bounds.z, "saved bounds z")
-    for x = ServerUtil.requiredInteger(bounds.wallMinX, "saved bounds wallMinX"),
-        ServerUtil.requiredInteger(bounds.wallMaxX, "saved bounds wallMaxX") do
-        for y = ServerUtil.requiredInteger(bounds.wallMinY, "saved bounds wallMinY"),
-            ServerUtil.requiredInteger(bounds.wallMaxY, "saved bounds wallMaxY") do
-            visit(x, y, baseZ)
-        end
-    end
-    -- The complete 7x41 wall rectangle already contains the 6x40 interior.
-    -- Do not add a second room loop: it only revisits the same base squares and
-    -- can hide an incomplete wall scan behind a de-duplication table.
-    local roofZ = ServerUtil.requiredInteger(bounds.roofZ, "saved bounds roofZ")
-    for x = ServerUtil.requiredInteger(bounds.roofMinX, "saved bounds roofMinX"),
-        ServerUtil.requiredInteger(bounds.roofMaxX, "saved bounds roofMaxX") do
-        for y = ServerUtil.requiredInteger(bounds.roofMinY, "saved bounds roofMinY"),
-            ServerUtil.requiredInteger(bounds.roofMaxY, "saved bounds roofMaxY") do
-            visit(x, y, roofZ)
-        end
-    end
+    end)
 end
 
 M.boundsFor = boundsFor

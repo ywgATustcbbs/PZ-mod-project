@@ -18,6 +18,7 @@ RailroaderRV.Client = RailroaderRV.Client or {}
 
 local Client = RailroaderRV.Client
 local C = RailroaderRV.Constants
+local Layout = require("RailroaderRV/RV_Layout")
 local MENU_KEY = "ContextMenu_RailroaderRVTest_Generate"
 local COMMAND_RELOCATE = "Relocate"
 local COMMAND_RELOCATE_ACK = "RelocateAck"
@@ -54,52 +55,8 @@ local function roomOwnershipGuardKey(rvId, generation, bitmapVersion)
         .. tostring(bitmapVersion)
 end
 
-local function finiteInteger(value)
-    local valueType = type(value)
-    local number
-    if valueType == "number" then
-        number = value
-    elseif valueType == "string" then
-        number = tonumber(value)
-    elseif value ~= nil then
-        -- Network table numbers may be Java Double values.  Passing those to
-        -- Kahlua's tonumber can select its String/radix overload, while the
-        -- guarded arithmetic conversion preserves the numeric value.
-        local converted, numeric = pcall(function()
-            return value + 0
-        end)
-        if converted and type(numeric) == "number" then
-            number = numeric
-        end
-    end
-    if type(number) ~= "number" or number ~= number or number == math.huge
-        or number == -math.huge or math.floor(number) ~= number then
-        return nil
-    end
-    return number
-end
-
-local function finiteNumber(value)
-    local valueType = type(value)
-    local number
-    if valueType == "number" then
-        number = value
-    elseif valueType == "string" then
-        number = tonumber(value)
-    elseif value ~= nil then
-        local converted, numeric = pcall(function()
-            return value + 0
-        end)
-        if converted and type(numeric) == "number" then
-            number = numeric
-        end
-    end
-    if type(number) ~= "number" or number ~= number
-        or number == math.huge or number == -math.huge then
-        return nil
-    end
-    return number
-end
+local finiteNumber = C.finiteNumber
+local finiteInteger = C.finiteInteger
 
 local function validRailroaderFinalHint(args)
     local generation = type(args) == "table" and finiteInteger(args.generation)
@@ -164,22 +121,10 @@ local function eachStructureSquare(cell, bounds, callback)
     if not cell or not bounds then
         return
     end
-    local function visit(x, y, z)
+    Layout.eachStructureCoordinate(bounds, function(x, y, z)
         local square = cell:getGridSquare(x, y, z)
         if square then callback(square, x, y, z) end
-    end
-    for x = bounds.wallMinX, bounds.wallMaxX do
-        for y = bounds.wallMinY, bounds.wallMaxY do
-            visit(x, y, bounds.z)
-        end
-    end
-    -- The complete 7x41 wall rectangle already contains the 6x40 interior.
-    -- Do not revisit that same base area through a redundant room loop.
-    for x = bounds.roofMinX, bounds.roofMaxX do
-        for y = bounds.roofMinY, bounds.roofMaxY do
-            visit(x, y, bounds.roofZ)
-        end
-    end
+    end)
 end
 
 local function squareCoordinates(square)

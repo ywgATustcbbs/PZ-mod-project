@@ -15,6 +15,19 @@ local C = RailroaderRV.Constants
 
 Layout.SCHEMA_VERSION = C.LAYOUT_SCHEMA_VERSION
 
+function Layout.eachStructureCoordinate(bounds, callback)
+    for x = bounds.wallMinX, bounds.wallMaxX do
+        for y = bounds.wallMinY, bounds.wallMaxY do
+            callback(x, y, bounds.z)
+        end
+    end
+    for x = bounds.roofMinX, bounds.roofMaxX do
+        for y = bounds.roofMinY, bounds.roofMaxY do
+            callback(x, y, bounds.roofZ)
+        end
+    end
+end
+
 local function point(x, y, z)
     return { x = x, y = y, z = z }
 end
@@ -270,14 +283,6 @@ function Layout.make(cx, cy, cz)
         bitmap.layers[z] = layer
     end
 
-    -- Keep the player-floor planning rectangle tied to the complete clear
-    -- footprint.  The room-specific floor remains the separate 6 x 40
-    -- interior contract below; do not materialize the large clear area as a
-    -- coordinate list.
-    local playerFloor = rectangle(
-        clear.minX, clear.maxX, clear.minY, clear.maxY, cz,
-        clear.minZ, clear.maxZ, true
-    )
     local interior = rectangle(
         cx + C.INTERIOR_MIN_OFFSET_X,
         cx + C.INTERIOR_MAX_OFFSET_X,

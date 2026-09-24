@@ -60,6 +60,8 @@ local function exactKeys(value, expected)
     return count == #expected
 end
 
+Bitmap.hasExactKeys = exactKeys
+
 local function dimensions(width, height)
     width = integer(width) or Bitmap.DEFAULT_WIDTH
     height = integer(height) or Bitmap.DEFAULT_HEIGHT

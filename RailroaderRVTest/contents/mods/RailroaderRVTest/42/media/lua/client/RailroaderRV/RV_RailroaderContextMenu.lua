@@ -15,29 +15,8 @@ local C = RailroaderRV.Constants
 
 Menu._rvUtilityMapping = Menu._rvUtilityMapping or nil
 
-local function finiteNumber(value)
-    local valueType = type(value)
-    local result
-    if valueType == "number" then
-        result = value
-    elseif valueType == "string" then
-        result = tonumber(value)
-    elseif value ~= nil then
-        local converted, numeric = pcall(function() return value + 0 end)
-        if converted and type(numeric) == "number" then result = numeric end
-    end
-    if type(result) ~= "number" or result ~= result
-        or result == math.huge or result == -math.huge then
-        return nil
-    end
-    return result
-end
-
-local function finiteInteger(value)
-    local result = finiteNumber(value)
-    if result == nil or math.floor(result) ~= result then return nil end
-    return result
-end
+local finiteNumber = C.finiteNumber
+local finiteInteger = C.finiteInteger
 
 local function text(key, fallback)
     local result = key
@@ -470,6 +449,22 @@ local function currentSquareMatches(player, x, y, z)
         and finiteInteger(squareZ) == math.floor(z)
 end
 
+local function playerStillAtTargetSquare(player, x, y, z)
+    if not player then return nil end
+    local okX, currentX = pcall(function() return player:getX() end)
+    local okY, currentY = pcall(function() return player:getY() end)
+    local okZ, currentZ = pcall(function() return player:getZ() end)
+    currentX, currentY, currentZ = finiteNumber(currentX),
+        finiteNumber(currentY), finiteNumber(currentZ)
+    if not okX or not okY or not okZ
+        or currentX == nil or currentY == nil or currentZ == nil then
+        return nil
+    end
+    return math.floor(currentX) == math.floor(x)
+        and math.floor(currentY) == math.floor(y)
+        and math.floor(currentZ) == math.floor(z)
+end
+
 local function scheduleCurrentSquareRefresh(player, x, y, z, relation)
     if not player then return end
     Menu._rvCurrentSquareRefresh = {
@@ -502,6 +497,13 @@ function Menu.onTick()
     local dead = false
     pcall(function() dead = player:isDead() end)
     if dead then
+        Menu._rvCurrentSquareRefresh = nil
+        return
+    end
+    -- This bounded refresh belongs only to its server-selected RV teleport.
+    -- If another system has since moved the player, leave that system's
+    -- current-square state alone instead of restoring this stale target.
+    if playerStillAtTargetSquare(player, pending.x, pending.y, pending.z) == false then
         Menu._rvCurrentSquareRefresh = nil
         return
     end

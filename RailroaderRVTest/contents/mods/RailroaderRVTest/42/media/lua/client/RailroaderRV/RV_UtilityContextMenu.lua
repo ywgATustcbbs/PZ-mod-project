@@ -1,7 +1,6 @@
 -- Client-side utility menu hooks.  Every option submits intent only; the
 -- server resolves the player, RV, object, tool, identity and FluidContainer.
 
-require("RailroaderRV/RV_Constants")
 local U = require("RailroaderRV/RV_UtilityConstants")
 local Catalog = require("RailroaderRV/RV_UtilityCatalog")
 local Client = require("RailroaderRV/RV_UtilityClient")

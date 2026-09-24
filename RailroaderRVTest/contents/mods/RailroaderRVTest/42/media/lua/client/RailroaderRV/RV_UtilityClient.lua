@@ -5,6 +5,12 @@
 
 require("RailroaderRV/RV_Constants")
 local U = require("RailroaderRV/RV_UtilityConstants")
+local UtilitySprite = require("RailroaderRV/RV_UtilitySprite")
+
+-- Register the same isolated blueprint/id pair before any complete utility
+-- add packet can arrive.  This does not rebind loaded objects; it only makes
+-- the client manager resolve the packet's registered sprite id.
+UtilitySprite.install()
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.UtilityClient = RailroaderRV.UtilityClient or {}
@@ -14,13 +20,11 @@ local C = RailroaderRV.Constants
 local requestSequence = 0
 local sessionNonce
 Client.snapshot = nil
-Client.lastAck = nil
 
 function Client.clearConnectionState()
     requestSequence = 0
     sessionNonce = nil
     Client.snapshot = nil
-    Client.lastAck = nil
     local rv = rawget(_G, "RailroaderRV")
     local menu = rv and rv.RailroaderContextMenu
     if menu and type(menu.clearUtilityMapping) == "function" then
@@ -51,17 +55,6 @@ local function localPlayer(playerNum)
     if type(getSpecificPlayer) ~= "function" then return nil end
     local ok, player = pcall(getSpecificPlayer, playerNum)
     return ok and player or nil
-end
-
-local function playerForObject(object)
-    if object and type(object.getSquare) == "function" then
-        local ok, square = pcall(function() return object:getSquare() end)
-        if ok and square and type(square.getMovingObjects) == "function" then
-            -- The menu caller supplies the player in normal use; this fallback
-            -- only keeps the public helper safe when called directly.
-        end
-    end
-    return localPlayer(0)
 end
 
 local function nextRequestId()
@@ -212,7 +205,6 @@ function Client.onServerCommand(module, command, args)
         return
     end
     if command ~= C.COMMAND_RV_UTILITY_ACK then return end
-    Client.lastAck = args
     local dashboard = RailroaderRV.UtilityDashboard
     if dashboard and type(dashboard.onAck) == "function" then
         pcall(dashboard.onAck, localPlayer(0), args)
@@ -223,8 +215,6 @@ function Client.onServerCommand(module, command, args)
 end
 
 Client.getSnapshot = function() return Client.snapshot end
-Client.getLastAck = function() return Client.lastAck end
-Client._sessionNonce = function() return sessionNonce end
 
 if Events and Events.OnServerCommand and type(Events.OnServerCommand.Add) == "function" then
     Events.OnServerCommand.Add(Client.onServerCommand)

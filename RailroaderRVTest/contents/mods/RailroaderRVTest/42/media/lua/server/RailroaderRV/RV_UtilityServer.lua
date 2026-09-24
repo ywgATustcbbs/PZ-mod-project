@@ -416,8 +416,4 @@ function M.initializeRecord(identity, context)
     return true, recordOrReason
 end
 
-function M.isLocked(identity)
-    return locks[key(identity)] == true
-end
-
 return M

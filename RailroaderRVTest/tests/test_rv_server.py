@@ -256,15 +256,13 @@ def main() -> int:
             )
 
         sink_test_gate = re.search(
-            r"sink\s*=\s*\{(?:(?!\n\s*\},).)*?runtimeTestEnabled\s*=\s*true,"
-            r"(?:(?!\n\s*\},).)*?runtimeValidated\s*=\s*false,",
+            r"sink\s*=\s*\{(?:(?!\n\s*\},).)*?runtimeTestEnabled\s*=\s*true,",
             utility_catalog,
             re.S,
         )
         other_test_gates = all(
             re.search(
-                rf"{name}\s*=\s*\{{(?:(?!\n\s*\}},).)*?runtimeTestEnabled\s*=\s*false,"
-                r"(?:(?!\n\s*\}},).)*?runtimeValidated\s*=\s*false,",
+                rf"{name}\s*=\s*\{{(?:(?!\n\s*\}},).)*?runtimeTestEnabled\s*=\s*false,",
                 utility_catalog,
                 re.S,
             )
@@ -273,10 +271,11 @@ def main() -> int:
         checks.true(
             sink_test_gate is not None
             and other_test_gates
+            and "runtimeValidated" not in utility_catalog
             and "function M.entryIsRuntimeTestEnabled" in utility_catalog
-            and "function M.entryIsValidated" in utility_catalog
+            and "function M.entryIsValidated" not in utility_catalog
             and "function M.isGeneratedSink" in utility_catalog,
-            "utility catalog does not separate the sink test allowlist from runtime validation",
+            "utility catalog retains a dead validation export or loses the sink test allowlist",
         )
         checks.true(
             "function M.isNativeSink" in utility_catalog
@@ -339,6 +338,27 @@ def main() -> int:
             "utility current-schema registry gate still requires the unachievable validation bit",
         )
 
+        detach_device = section(
+            utility_water,
+            r"local function detachDevice",
+            r"-- B42 raises this event before an IsoObject is detached",
+        )
+        checks.true(
+            detach_device is not None
+            and "if emergency then" not in detach_device
+            and "emergency" not in detach_device
+            and "function M.detachDevice" not in utility_water
+            and 'flushBeforeOverwrite(identity, "DETACH", context, execute)' in detach_device
+            and "restoreFixtureTag(fixture, nil)" in detach_device
+            and "record.water.registry[deviceId] = nil" in detach_device
+            and "record.water.proxyLedger[deviceId] = nil" in detach_device
+            and re.search(
+                r"\bdetachDevice\(identity,\s*context,\s*tag\.deviceId\)",
+                utility_water,
+            ) is not None,
+            "water fixture removal does not retain its ordinary detach transaction without the dead emergency path",
+        )
+
         checks.true(
             all(token in bitmap for token in (
                 "BITMAP_SCHEMA_VERSION", "newBitset", "toHex", "fromHex",
@@ -347,6 +367,38 @@ def main() -> int:
                 "local tz = t + offsets[l]",
             )),
             "shared RV bitmap contract is incomplete",
+        )
+        checks.true(
+            "local function exactKeys(value, expected)" in bitmap
+            and "if not allowed[key] then return false end" in bitmap
+            and "return count == #expected" in bitmap
+            and "Bitmap.hasExactKeys = exactKeys" in bitmap
+            and "local exactKeys = Bitmap.hasExactKeys" in boundary_server
+            and "not exactKeys(boundary," in boundary_server
+            and "not exactKeys(managed," in boundary_server
+            and "not exactKeys(edge, fields)" in boundary_server,
+            "bitmap and boundary schema validators do not share exact current-field rejection",
+        )
+        checks.true(
+            "function M.profileAdd" not in utility_catalog
+            and "function M.profileSubtract" not in utility_catalog
+            and "function M.entryIsValidated" not in utility_catalog
+            and "function Boundary.managedContains" not in boundary_server
+            and "function M.isLocked" not in utility_server
+            and "function M.setPlayerContext" not in utility_water
+            and "function M.emergencyQuarantine" not in utility_water
+            and "emergency" not in utility_water
+            and "local function fixtureTag" not in utility_water
+            and "local function playerForObject" not in utility_client
+            and "getLastAck" not in utility_client
+            and "_sessionNonce" not in utility_client
+            and "lastAck" not in utility_client
+            and "playerFloor" not in read_utf8(layout_path)
+            and 'require("RailroaderRV/RV_Constants")' not in read_utf8(utility_context_path)
+            and 'local C = require("RailroaderRV/RV_Constants")' not in read_utf8(
+                package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_UtilityPower.lua"
+            ),
+            "retired internal APIs, dead helpers, diagnostic state, or redundant requires remain",
         )
         checks.true(
             "x + 1" in bitmap and "y + 1" in bitmap
@@ -1287,7 +1339,7 @@ def main() -> int:
         boundary_gate = section(
             boundary_server,
             r"function Boundary.boundaryForPlayer",
-            r"function Boundary.managedContains",
+            r"local function stateFor",
         )
         checks.true(
             boundary_gate is not None
@@ -1632,8 +1684,10 @@ def main() -> int:
         if layout_path.is_file():
             layout = read_utf8(layout_path)
             checks.true(
-                "clear.minX, clear.maxX, clear.minY, clear.maxY" in layout,
-                "shared layout does not derive the player-floor contract from clear bounds",
+                "playerFloor" not in layout
+                and "local clear = rectangle(" in layout
+                and "clear = clear" in layout,
+                "shared layout retains a dead player-floor rectangle or loses its clear bounds",
             )
             checks.true(
                 "C.INTERIOR_MIN_OFFSET_X" in layout
@@ -2358,9 +2412,9 @@ def main() -> int:
                 )
 
         structure_scan = section(
-            server,
+            server_schema,
             r"local function eachStructureSquare",
-            r"local function clearInvalidRoomOwnershipReferences",
+            r"M\.boundsFor = boundsFor",
         )
         checks.true(
             structure_scan is not None,
@@ -2389,9 +2443,28 @@ def main() -> int:
                 and "roomMaxY" not in structure_scan
                 and "local seen" not in structure_scan
                 and "seen[key]" not in structure_scan
-                and "contains the 6x40 interior" in structure_scan,
-                "server stale-room scan redundantly loops/de-duplicates the interior instead of using the wall rectangle",
+                and "Layout.eachStructureCoordinate(scanBounds" in structure_scan
+                and "ServerWorld.getSquare(cell, x, y, z)" in structure_scan
+                and "ServerUtil.requiredInteger(bounds.wallMinX" in structure_scan
+                and "ServerUtil.requiredInteger(bounds.roofZ" in structure_scan,
+                "server stale-room scan does not share the coordinate traversal or retain strict server bounds and square access",
             )
+        structure_coordinates = section(
+            layout,
+            r"function Layout\.eachStructureCoordinate",
+            r"local function point",
+        )
+        checks.true(
+            structure_coordinates is not None
+            and "for x = bounds.wallMinX, bounds.wallMaxX do" in structure_coordinates
+            and "for y = bounds.wallMinY, bounds.wallMaxY do" in structure_coordinates
+            and "callback(x, y, bounds.z)" in structure_coordinates
+            and "for x = bounds.roofMinX, bounds.roofMaxX do" in structure_coordinates
+            and "for y = bounds.roofMinY, bounds.roofMaxY do" in structure_coordinates
+            and "callback(x, y, bounds.roofZ)" in structure_coordinates
+            and "roomMin" not in structure_coordinates,
+            "shared structure traversal does not cover only the wall and roof rectangles",
+        )
 
         server_room_clear = section(
             server,
@@ -2582,27 +2655,15 @@ def main() -> int:
         )
         if client_structure_scan is not None:
             checks.true(
-                all(
-                    field in client_structure_scan
-                    for field in (
-                        "wallMinX",
-                        "wallMaxX",
-                        "wallMinY",
-                        "wallMaxY",
-                        "roofMinX",
-                        "roofMaxX",
-                        "roofMinY",
-                        "roofMaxY",
-                        "roofZ",
-                    )
-                )
+                "Layout.eachStructureCoordinate(bounds" in client_structure_scan
+                and "cell:getGridSquare(x, y, z)" in client_structure_scan
                 and all(
                     field not in client_structure_scan
                     for field in ("roomMinX", "roomMaxX", "roomMinY", "roomMaxY")
                 )
                 and "local seen" not in client_structure_scan
-                and "contains the 6x40 interior" in client_structure_scan,
-                "client stale-room scan redundantly loops/de-duplicates the interior instead of using the wall rectangle",
+                and "for x =" not in client_structure_scan,
+                "client stale-room scan does not use the shared traversal and client square API",
             )
 
         client_room_begin = section(
@@ -2718,20 +2779,33 @@ def main() -> int:
             "GameServer.sendTeleport(" not in server,
             "server Lua calls GameServer.sendTeleport even though B42.20 does not expose it",
         )
-        client_integer = section(
-            client,
-            r"local function finiteInteger\(value\)",
-            r"local function localPlayerByOnlineId",
+        shared_number = section(
+            constants,
+            r"function C\.finiteNumber\(value\)",
+            r"function C\.finiteInteger",
         )
-        checks.true(client_integer is not None, "client relocation numeric validator is missing")
-        if client_integer is not None:
-            checks.true(
-                'valueType == "number"' in client_integer
-                and 'valueType == "string"' in client_integer
-                and "return value + 0" in client_integer
-                and "pcall" in client_integer,
-                "client relocation does not safely convert Java Double network values",
-            )
+        shared_integer = section(
+            constants,
+            r"function C\.finiteInteger\(value\)",
+            r"C\.MOD_ID",
+        )
+        checks.true(
+            shared_number is not None
+            and 'valueType == "number"' in shared_number
+            and 'valueType == "string"' in shared_number
+            and "return value + 0" in shared_number
+            and "pcall" in shared_number
+            and "number ~= number" in shared_number
+            and "math.huge" in shared_number
+            and shared_integer is not None
+            and "C.finiteNumber(value)" in shared_integer
+            and "math.floor(number) ~= number" in shared_integer
+            and "local finiteNumber = C.finiteNumber" in client
+            and "local finiteInteger = C.finiteInteger" in client
+            and "local finiteNumber = C.finiteNumber" in railroader_client
+            and "local finiteInteger = C.finiteInteger" in railroader_client,
+            "client adapters do not share Java-aware finite and integer conversion with NaN/infinity rejection",
+        )
         client_relocation = section(
             client,
             r"function Client\.onServerCommand",
@@ -2991,31 +3065,56 @@ def main() -> int:
                 'invoke(properties, "has", lightProperties.attachedFlag)' not in light_validate,
                 "player light validation still passes attachedW as a literal string",
             )
-        hidden_water = section(
+        hidden_component = section(
             utility_water,
             r"local function addFluidComponent",
-            r"local function fixtureTag",
+            r"objectAttached = function",
         )
-        checks.true(hidden_water is not None, "hidden usage/proxy object helper is missing")
-        if hidden_water is not None:
+        checks.true(hidden_component is not None, "hidden utility fluid component helper is missing")
+        if hidden_component is not None:
             checks.true(
-                "IsoObject" in hidden_water
-                and "IsoThumpable" in hidden_water
-                and "GameEntityFactory" in hidden_water
-                and "AddComponent" in hidden_water
-                and "CreateComponent" in hidden_water
-                and "object, true, component" in hidden_water
-                and "setDoRender" in hidden_water
-                and "setRainCatcher" in hidden_water,
-                "hidden water objects do not use ordinary objects with a server FluidContainer",
+                'rawget(_G, "GameEntityFactory")' in hidden_component
+                and "AddComponent" in hidden_component
+                and "CreateComponent" in hidden_component
+                and "object, true, component" in hidden_component
+                and "objectContainer(object)" in hidden_component,
+                "hidden utility objects do not mount and verify their current FluidContainer",
             )
+        hidden_attach = section(
+            utility_water,
+            r"local function attachObject",
+            r"local function addFluidComponent",
+        )
+        hidden_create = section(
+            utility_water,
+            r"local function makeObject",
+            r"local function fixtureInside",
+        )
+        checks.true(
+            hidden_attach is not None
+            and "transmitAddObjectToSquare" in hidden_attach,
+            "hidden utility object attach helper is missing",
+        )
+        if hidden_attach is not None:
             checks.true(
-                "attachObject" in hidden_water
-                and "deferSync" in hidden_water
-                and hidden_water.find("applyAmount") < hidden_water.find(
-                "transmitCompleteItemToClients"
-                ),
-                "hidden object component state is not finalized before its unique complete packet",
+                '"transmitAddObjectToSquare", object, -1' in hidden_attach
+                and "local before = objectAttached(square, object)" in hidden_attach
+                and "local after = objectAttached(square, object)" in hidden_attach
+                and "if after ~= true then return false end" in hidden_attach,
+                "hidden utility object attach does not send one add packet and verify square/index state",
+            )
+        checks.true(hidden_create is not None, "hidden utility object constructor helper is missing")
+        if hidden_create is not None:
+            checks.true(
+                "C.UTILITY_HIDDEN_OBJECT_CLASS" in hidden_create
+                and "Util.invokeClass(cls," in hidden_create
+                and "Util.classInstance(object, C.UTILITY_HIDDEN_OBJECT_CLASS)" in hidden_create
+                and "applyAmount(object, initial" in hidden_create
+                and "U.WATER_CAPACITY, true)" in hidden_create
+                and "attachObject(square, object)" in hidden_create
+                and hidden_create.find("applyAmount(object, initial")
+                < hidden_create.find("attachObject(square, object)"),
+                "IsoThumpable identity/tag/fluid projection is not finalized before square attachment",
             )
         checks.true(
             "validUtilityTag" in utility_water
@@ -3023,7 +3122,7 @@ def main() -> int:
             and "sameGenerationIdentity" in utility_water
             and "retired role/schema" in utility_water
             and 'validUtilityTag(oldTag, identity, "fixture", oldTag.deviceId)' in utility_water
-            and "proxyFingerprint = C.UTILITY_ROLE_PROXY" in utility_water
+            and "proxyFingerprint = hiddenObjectFingerprint(C.UTILITY_ROLE_PROXY," in utility_water
             and "proxyPostcondition" in utility_water
             and "objectFingerprint(found, C.UTILITY_ROLE_PROXY)" in utility_water,
             "utility object tags/postcondition do not enforce current identity and stable proxy fingerprint",
@@ -3090,10 +3189,13 @@ def main() -> int:
             "utility store does not expose trusted fresh-versus-persisted record metadata",
         )
         checks.true(
-            "local function objectAttached" in utility_water
+            "objectAttached = function(square, object)" in utility_water
             and "local function rollbackCreatedObject" in utility_water
             and "local function creationFailure" in utility_water
-            and "objectAttached(square, object) ~= false" in utility_water
+            and "if attached == false then return true end" in utility_water
+            and "if attached ~= true then return false end" in utility_water
+            and "removeObject and removeObject(object) == true" in utility_water
+            and "if object and not rollbackCreatedObject(square, object) then" in utility_water
             and "return creationFailure(square, object, U.REASONS.API_ERROR)" in utility_water,
             "hidden-object creation failure does not have an observable square rollback path",
         )
@@ -3115,7 +3217,7 @@ def main() -> int:
         initialize_record = section(
             utility_server,
             r"function M\.initializeRecord",
-            r"function M\.isLocked",
+            r"return M",
         )
         checks.true(
             initialize_record is not None

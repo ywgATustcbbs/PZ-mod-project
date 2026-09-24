@@ -10,6 +10,32 @@ RailroaderRV.Constants = RailroaderRV.Constants or {}
 
 local C = RailroaderRV.Constants
 
+function C.finiteNumber(value)
+    local valueType = type(value)
+    local number
+    if valueType == "number" then
+        number = value
+    elseif valueType == "string" then
+        number = tonumber(value)
+    elseif value ~= nil then
+        -- Network table numbers may be Java wrappers, so coerce them through
+        -- guarded arithmetic instead of tonumber's string overload.
+        local converted, numeric = pcall(function() return value + 0 end)
+        if converted and type(numeric) == "number" then number = numeric end
+    end
+    if type(number) ~= "number" or number ~= number
+        or number == math.huge or number == -math.huge then
+        return nil
+    end
+    return number
+end
+
+function C.finiteInteger(value)
+    local number = C.finiteNumber(value)
+    if number == nil or math.floor(number) ~= number then return nil end
+    return number
+end
+
 C.MOD_ID = "RailroaderRVTest"
 C.COMMAND_GENERATE = "Generate"
 C.COMMAND_FINAL_RELOCATE = "FinalRelocate"
@@ -35,7 +61,7 @@ C.RV_RELATION_SCHEMA_VERSION = 2
 C.BOUNDARY_SCHEMA_VERSION = 2
 C.LAYOUT_SCHEMA_VERSION = 5
 C.UTILITY_STORE_SCHEMA_VERSION = 3
-C.UTILITY_WATER_SCHEMA_VERSION = 3
+C.UTILITY_WATER_SCHEMA_VERSION = 4
 C.UTILITY_POWER_SCHEMA_VERSION = 2
 C.UTILITY_WATER_CAPACITY = 1000.0
 C.SAVE_REBUILD_REQUIRED = "RailroaderRVTest: 开发版本存档不兼容，请删除该测试存档并重建 (delete this test save and rebuild it)"
@@ -109,6 +135,13 @@ C.UTILITY_TANK_OFFSET = { x = 4, y = 0, z = 0 }
 C.UTILITY_PROXY_Z_OFFSET = 1
 C.UTILITY_ROLE_TANK = "rv_hidden_usage_tank"
 C.UTILITY_ROLE_PROXY = "rv_hidden_proxy"
+C.UTILITY_HIDDEN_OBJECT_CLASS = "IsoThumpable"
+C.UTILITY_HIDDEN_SPRITE_KEY = "RailroaderRVTest_utility_hidden"
+-- IsoSpriteManager:AddSprite(name, id) is required so the server's complete
+-- add packet resolves to the same isolated blueprint sprite in the client
+-- intMap. Keep the id outside normal tileset ranges and fail closed on any
+-- collision rather than mutating an unrelated sprite.
+C.UTILITY_HIDDEN_SPRITE_ID = 2147000000
 C.UTILITY_AUTO_REFILL_STATE = "DISABLED"
 C.UTILITY_AUTO_REFILL_PROVIDER = ""
 C.UTILITY_AUTO_REFILL_CHANNEL = ""
@@ -138,10 +171,10 @@ C.SPRITES = {
     -- tile is supplied by the required runtime dependency; do not replace it
     -- with either of BuildingCraft's system-house switches or a vanilla lamp.
     wallLamp = { sprite = "BuildingCraft_Light_17", northSprite = "BuildingCraft_Light_17" },
-    -- The utility objects are rendered off.  The sprite is only a construction
-    -- blueprint and is never registered in a global collection system.
-    utilityHidden = { sprite = "furniture_counters_01_0", northSprite = "furniture_counters_01_0" },
-    utilityProxy = { sprite = "furniture_counters_01_0", northSprite = "furniture_counters_01_0" },
+    -- The utility objects are rendered off.  Their isolated sprite is a
+    -- registered blueprint and must never alias ordinary furniture.
+    utilityHidden = { sprite = C.UTILITY_HIDDEN_SPRITE_KEY, northSprite = C.UTILITY_HIDDEN_SPRITE_KEY },
+    utilityProxy = { sprite = C.UTILITY_HIDDEN_SPRITE_KEY, northSprite = C.UTILITY_HIDDEN_SPRITE_KEY },
     generator = { sprite = "appliances_misc_01_0", northSprite = "appliances_misc_01_0" },
     counter = { sprite = "furniture_counters_01_0", northSprite = "furniture_counters_01_0" },
     sink = { sprite = "fixtures_sinks_01_0", northSprite = "fixtures_sinks_01_0" },

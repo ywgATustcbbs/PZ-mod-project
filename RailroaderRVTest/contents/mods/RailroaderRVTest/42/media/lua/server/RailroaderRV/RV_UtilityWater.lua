@@ -11,6 +11,12 @@ local Catalog = require("RailroaderRV/RV_UtilityCatalog")
 local Store = require("RailroaderRV/RV_UtilityStore")
 local Util = require("RailroaderRV/RV_ServerUtil")
 local World = require("RailroaderRV/RV_ServerWorld")
+local UtilitySprite = require("RailroaderRV/RV_UtilitySprite")
+
+-- Register the isolated blueprint before any utility object can be constructed.
+-- OnGameBoot retries this on manager rebuild; makeObject also gates creation
+-- on the same postcondition immediately before the complete add packet.
+UtilitySprite.install()
 
 local M = {}
 local runtimeObjects = {}
@@ -25,6 +31,7 @@ local fixtureSourceGone
 local quarantineLoadedEntry
 local quarantinePendingEntries
 local removeObject
+local objectAttached
 
 local function key(identity)
     return tostring(identity.rvId) .. ":" .. tostring(identity.generation)
@@ -108,11 +115,98 @@ local function objectContainer(object)
     return ok and container or nil
 end
 
+local function externalWaterMatches(object, role)
+    if role ~= C.UTILITY_ROLE_TANK and role ~= C.UTILITY_ROLE_PROXY then
+        return true
+    end
+    local expected = role == C.UTILITY_ROLE_TANK
+    local readOk, enabled = invoke(object, "getUsesExternalWaterSource")
+    if not readOk or enabled ~= expected then
+        -- This is an identity/safety mismatch, not a projection that may be
+        -- repaired.  A tank with false or a proxy with true could change the
+        -- native source graph, so all current-schema operations stop here.
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
+    return true
+end
+
 local function objectSprite(object)
     local spriteOk, sprite = invoke(object, "getSprite")
     if not spriteOk or not sprite then return "" end
     local nameOk, name = invoke(sprite, "getName")
     return nameOk and tostring(name or "") or ""
+end
+
+local function hiddenObjectFingerprint(role, sprite)
+    return tostring(role) .. ":" .. tostring(C.UTILITY_HIDDEN_OBJECT_CLASS)
+        .. ":" .. tostring(sprite) .. ":"
+end
+
+local function resolveNamedSprite(spriteName)
+    local managerClass = rawget(_G, "IsoSpriteManager")
+    local manager = managerClass and managerClass.instance
+    local lookupOk, sprite = invoke(manager, "getSprite", spriteName)
+    if not lookupOk or not sprite then return false, nil, "manager-lookup" end
+
+    local nameOk, name = invoke(sprite, "getName")
+    if not nameOk then return false, nil, "sprite-name-read" end
+    if name == nil then
+        -- IsoSpriteManager files a sprite in namedMap but does not assign the
+        -- lookup key to IsoSprite.name.  setName is a Java void call, so only
+        -- the invocation and the read-back below are authoritative.
+        local setNameOk = invoke(sprite, "setName", spriteName)
+        if not setNameOk then return false, nil, "sprite-name-set" end
+        nameOk, name = invoke(sprite, "getName")
+    end
+    if not nameOk or name == nil or tostring(name) ~= tostring(spriteName) then
+        return false, nil, "sprite-name-postcondition"
+    end
+    return true, sprite
+end
+
+local function bindNamedSprite(object, spriteName, expectedSprite)
+    -- setSpriteFromName resolves IsoSpriteManager.namedMap and therefore
+    -- reuses the named instance prepared above.  Its Java return is void.
+    -- This proves only the in-memory identity.  The available B42.20.0 source
+    -- shows that setSpriteFromName does not write IsoObject.spriteName; loaded
+    -- objects therefore must not be rebound here or treated as persistent just
+    -- because this postcondition passes.
+    local bindOk = invoke(object, "setSpriteFromName", spriteName)
+    if not bindOk then return false, "sprite-bind" end
+
+    local spriteOk, sprite = invoke(object, "getSprite")
+    local nameOk, name = invoke(sprite, "getName")
+    local objectNameOk, objectName = invoke(object, "getSpriteName")
+    if not spriteOk or not sprite or sprite ~= expectedSprite then
+        return false, "sprite-instance-postcondition"
+    end
+    if not nameOk or name == nil or tostring(name) ~= tostring(spriteName) then
+        return false, "sprite-name-postcondition"
+    end
+    if not objectNameOk or objectName == nil
+        or tostring(objectName) ~= tostring(spriteName) then
+        return false, "object-sprite-name-postcondition"
+    end
+    return true
+end
+
+local function printSpriteDiagnostics(object, role, expected, bindOk, bindResult)
+    local spriteOk, sprite = invoke(object, "getSprite")
+    local spriteNameOk, spriteName = invoke(sprite, "getName")
+    local objectSpriteNameOk, objectSpriteName = invoke(object, "getSpriteName")
+    local objectNameOk, objectName = invoke(object, "getName")
+    print("[RailroaderRVTest] utility sprite diagnostic role=" .. tostring(role)
+        .. " expected=" .. tostring(expected)
+        .. " bindOk=" .. tostring(bindOk)
+        .. " bindResult=" .. tostring(bindResult)
+        .. " getSpriteOk=" .. tostring(spriteOk)
+        .. " getSpritePresent=" .. tostring(sprite ~= nil)
+        .. " spriteGetNameOk=" .. tostring(spriteNameOk)
+        .. " spriteGetName=" .. tostring(spriteName)
+        .. " objectGetSpriteNameOk=" .. tostring(objectSpriteNameOk)
+        .. " objectGetSpriteName=" .. tostring(objectSpriteName)
+        .. " objectGetNameOk=" .. tostring(objectNameOk)
+        .. " objectGetName=" .. tostring(objectName))
 end
 
 local function objectFingerprint(object, role)
@@ -125,10 +219,12 @@ local function objectFingerprint(object, role)
     end
     role = tostring(role or "fixture")
     if role == C.UTILITY_ROLE_TANK or role == C.UTILITY_ROLE_PROXY then
-        -- Hidden utility object classes are fixed by role (IsoObject tank,
-        -- IsoThumpable proxy); retain the stable sprite/script identity while
-        -- avoiding a Java enum spelling difference across the two constructors.
-        return role .. ":" .. objectSprite(object) .. ":" .. scriptName
+        -- Both hidden utility mirrors are current-schema IsoThumpable objects.
+        -- Keep the Java class in the fingerprint so an old ordinary IsoObject
+        -- tank can never be adopted after the persistence path changes.
+        local className = Util.classInstance(object, C.UTILITY_HIDDEN_OBJECT_CLASS)
+            and C.UTILITY_HIDDEN_OBJECT_CLASS or "other"
+        return role .. ":" .. className .. ":" .. objectSprite(object) .. ":" .. scriptName
     end
     return role .. ":" .. tostring(typeOk and objectType or "")
         .. ":" .. objectSprite(object) .. ":" .. scriptName
@@ -343,61 +439,79 @@ local function squareObject(identity, x, y, z, role, deviceId, player)
             found = objects[i]
         end
     end
+    if found and (role == C.UTILITY_ROLE_TANK or role == C.UTILITY_ROLE_PROXY) then
+        -- Every loaded current-schema mirror must prove its native-source flag
+        -- before any caller can inspect, project, connect, or remove it.  A
+        -- bad flag is not a projection mismatch that this process may repair.
+        local externalOk = externalWaterMatches(found, role)
+        if externalOk ~= true then return nil, "invalid" end
+    end
     return found, found and "loaded" or "missing"
 end
 
-local function attachObject(square, object, special)
-    local indexOk, index = invoke(object, "getObjectIndex")
-    local attached = indexOk and Util.integer(index) ~= nil and Util.integer(index) >= 0
-    local attachedOk = attached
-    if not attached then
-        attachedOk = special and Util.callSucceeded(square, "AddSpecialObject", object)
-            or Util.callSucceeded(square, "AddTileObject", object)
+local function attachObject(square, object)
+    -- LGExtendedPlumbing's durable mirror path uses this API: it attaches the
+    -- IsoThumpable to the square and emits the one complete add packet in the
+    -- same operation.  Do not call AddSpecialObject/AddTileObject first and
+    -- then transmitCompleteItemToClients; that split path left the tank's
+    -- later object-change packet pointing at a client index that did not exist.
+    local before = objectAttached(square, object)
+    if before ~= false then return false end
+    if not Util.callSucceeded(square, "transmitAddObjectToSquare", object, -1) then
+        return false
     end
-    if not attachedOk then return false end
+    local after = objectAttached(square, object)
+    if after ~= true then return false end
     local finalOk, finalIndex = invoke(object, "getObjectIndex")
     if not finalOk or Util.integer(finalIndex) == nil or Util.integer(finalIndex) < 0 then return false end
     World.recalcSquare(square)
     return true
 end
 
-local function addFluidComponent(object)
+local function addFluidComponent(object, capacity)
     if objectContainer(object) then return true end
     local componentTypes = rawget(_G, "ComponentType")
     local fluidType = componentTypes and componentTypes.FluidContainer
     local factory = rawget(_G, "GameEntityFactory")
     if not fluidType or type(fluidType.CreateComponent) ~= "function"
         or not factory or type(factory.AddComponent) ~= "function" then
-        return false
+        return false, "component-api-missing"
     end
     local created, component = pcall(function()
         return fluidType:CreateComponent()
     end)
-    if not created or not component then return false end
-    local added = pcall(factory.AddComponent, object, true, component)
-    return added and objectContainer(object) ~= nil
+    if not created or not component then return false, "component-create" end
+    local capacityOk, capacityResult = invoke(component, "setCapacity", capacity)
+    if not capacityOk or capacityResult == false then return false, "component-capacity" end
+    local added, addError = pcall(factory.AddComponent, object, true, component)
+    if not added then return false, "component-add:" .. tostring(addError) end
+    if not objectContainer(object) then return false, "component-not-mounted" end
+    return true
 end
 
-local function objectAttached(square, object)
+objectAttached = function(square, object)
     if not square or not object then return false end
     local snapshotOk, objects = pcall(World.squareSnapshot, square)
     if not snapshotOk or type(objects) ~= "table" then return nil end
     for i = 1, #objects do
-        if objects[i] == object then return true end
+        if objects[i] == object then
+            local indexOk, index = invoke(object, "getObjectIndex")
+            index = indexOk and Util.integer(index) or nil
+            return index ~= nil and index >= 0
+        end
     end
-    local indexOk, index = invoke(object, "getObjectIndex")
-    if not indexOk then return nil end
-    index = Util.integer(index)
-    if index == nil then return nil end
-    return index >= 0
+    -- The square snapshot is authoritative for actual attachment.  A
+    -- non-negative object index on an object that is absent from this square
+    -- is exactly the stale-index shape that caused the client warning.
+    return false
 end
 
 local function rollbackCreatedObject(square, object)
     -- Constructors normally return an unattached object, but B42 can expose a
-    -- valid square/index before AddTileObject/AddSpecialObject reports its
-    -- result.  Remove only when the object is observable on that square; an
-    -- unattached constructor must not turn a harmless API failure into a
-    -- second removal failure.
+    -- valid square/index before transmitAddObjectToSquare reports its result.
+    -- Remove only when the object is observable on that square; an unattached
+    -- constructor must not turn a harmless API failure into a second removal
+    -- failure.
     if not square then
         local squareOk, objectSquare = invoke(object, "getSquare")
         square = squareOk and objectSquare or nil
@@ -415,22 +529,54 @@ local function creationFailure(square, object, reason)
     return false, reason
 end
 
+local function configureHiddenObject(object, role)
+    -- Mirror objects are deliberately invisible, non-interactive and
+    -- non-destructible.  `IsoThumpable` is still required for the native
+    -- external-water search on fixture proxies, but it must not become a
+    -- zombie target, a wall, a door, or a player-placeable container.
+    if not Util.callSucceeded(object, "setDoRender", false)
+        or not Util.callSucceeded(object, "setOutlineOnMouseover", false)
+        or not Util.callSucceeded(object, "setSpecialTooltip", false)
+        or not Util.callSucceeded(object, "setName", "")
+        or not Util.callSucceeded(object, "setCanPassThrough", true)
+        or not Util.callSucceeded(object, "setBlockAllTheSquare", false)
+        or not Util.callSucceeded(object, "setCrossSpeed", 1.0)
+        or not Util.callSucceeded(object, "setIsThumpable", false)
+        or not Util.callSucceeded(object, "setCanBarricade", false)
+        or not Util.callSucceeded(object, "setCanBePlastered", false)
+        or not Util.callSucceeded(object, "setIsDismantable", false)
+        or not Util.callSucceeded(object, "setIsHoppable", false)
+        or not Util.callSucceeded(object, "setIsContainer", false)
+        or not Util.callSucceeded(object, "setIsDoor", false)
+        or not Util.callSucceeded(object, "setIsDoorFrame", false)
+        or not Util.callSucceeded(object, "setMaxHealth", 10000)
+        or not Util.callSucceeded(object, "setHealth", 10000)
+        -- Keep the usage tank out of native source selection even if a future
+        -- layout brings a fixture close to its deterministic offset.  Proxies
+        -- must remain discoverable by the fixture's 3x3 search.
+        or not Util.callSucceeded(object, "setUsesExternalWaterSource",
+            role ~= C.UTILITY_ROLE_PROXY) then
+        return false
+    end
+    return true
+end
+
 local function applyAmount(object, amount, capacity, deferSync)
     local container = objectContainer(object)
     if not container then return false, U.REASONS.API_ERROR end
     local profile = { kind = amount <= U.PROFILE_EPSILON and "EMPTY" or "CLEAN",
         cleanAmount = clamp(amount, 0, capacity), taintedAmount = 0 }
     projectionGuard[object] = true
-    local applied = Catalog.applyProfile(container, capacity, profile)
+    local applied, applyReason = Catalog.applyProfile(container, capacity, profile)
     if not applied then
         projectionGuard[object] = nil
-        return false, U.REASONS.API_ERROR
+        return false, U.REASONS.API_ERROR, nil, "profile:" .. tostring(applyReason)
     end
     local amountOk, observed = invoke(container, "getAmount")
     observed = amountOk and Util.toNumber(observed) or nil
     if not finite(observed) or math.abs(observed - profile.cleanAmount) > U.PROFILE_EPSILON then
         projectionGuard[object] = nil
-        return false, U.REASONS.API_ERROR
+        return false, U.REASONS.API_ERROR, observed, "profile-postcondition"
     end
     if deferSync ~= true and not Util.callSucceeded(object, "sync") then
         projectionGuard[object] = nil
@@ -438,7 +584,7 @@ local function applyAmount(object, amount, capacity, deferSync)
         -- that observed amount so callers can advance their baseline and retry
         -- only the network acknowledgement, rather than charging the same
         -- delta again on the next settlement.
-        return false, U.REASONS.API_ERROR, observed
+        return false, U.REASONS.API_ERROR, observed, "object-sync"
     end
     projectionGuard[object] = nil
     return true, observed
@@ -451,25 +597,79 @@ local function makeObject(identity, context, x, y, z, role, token, fingerprint, 
     if not cellOk or not cell then return false, U.REASONS.TARGET_NOT_LOADED end
     local square = World.getSquare(cell, x, y, z)
     if not square then return false, U.REASONS.TARGET_NOT_LOADED end
+    local spriteReady, _, spriteReason = UtilitySprite.ensureHiddenSprites()
+    if not spriteReady then
+        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
+            .. " stage=isolated-sprite reason=" .. tostring(spriteReason))
+        return creationFailure(square, nil, U.REASONS.API_ERROR)
+    end
     local sprite = role == C.UTILITY_ROLE_PROXY and C.SPRITES.utilityProxy.sprite
         or C.SPRITES.utilityHidden.sprite
-    local cls = role == C.UTILITY_ROLE_PROXY and rawget(_G, "IsoThumpable") or rawget(_G, "IsoObject")
-    local args = role == C.UTILITY_ROLE_PROXY
-        and { { cell, square, sprite, false, nil } } or { { cell, square, sprite }, { square, sprite } }
-    local made, object = Util.invokeClass(cls, args)
-    if not made or not object or not addFluidComponent(object)
-        or objectFingerprint(object, role) ~= fingerprint then
+    local cls = rawget(_G, C.UTILITY_HIDDEN_OBJECT_CLASS)
+    local spriteOk, spriteObject, spriteReason = resolveNamedSprite(sprite)
+    if not spriteOk then
+        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
+            .. " stage=sprite-lookup reason=" .. tostring(spriteReason))
+        return creationFailure(square, nil, U.REASONS.API_ERROR)
+    end
+    -- Usage tank and fixture proxy deliberately share LG's durable
+    -- IsoThumpable constructor path.  The ordinary IsoObject/getNew path
+    -- produced a server-side object whose later SyncIsoObject index was not
+    -- present on the client.
+    local made, object = Util.invokeClass(cls, { { cell, square, sprite, false, nil } })
+    if not made or not object then
+        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
+            .. " stage=constructor")
         return creationFailure(square, object, U.REASONS.API_ERROR)
     end
-    Util.invoke(object, "setDoRender", false)
-    Util.invoke(object, "setUsesExternalWaterSource", false)
+    if not Util.classInstance(object, C.UTILITY_HIDDEN_OBJECT_CLASS) then
+        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
+            .. " stage=class")
+        return creationFailure(square, object, U.REASONS.API_ERROR)
+    end
+    local spriteBindOk, spriteBindReason = bindNamedSprite(object, sprite, spriteObject)
+    if not spriteBindOk then
+        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
+            .. " stage=sprite-bind reason=" .. tostring(spriteBindReason))
+        printSpriteDiagnostics(object, role, fingerprint, spriteBindOk, spriteBindReason)
+        return creationFailure(square, object, U.REASONS.API_ERROR)
+    end
+    local actualFingerprint = objectFingerprint(object, role)
+    if actualFingerprint ~= fingerprint then
+        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
+            .. " stage=fingerprint expected=" .. tostring(fingerprint)
+            .. " actual=" .. tostring(actualFingerprint))
+        printSpriteDiagnostics(object, role, fingerprint, spriteBindOk, spriteBindReason)
+        return creationFailure(square, object, U.REASONS.API_ERROR)
+    end
+    local componentOk, componentReason = addFluidComponent(object, U.WATER_CAPACITY)
+    if not componentOk then
+        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
+            .. " stage=fluid-component reason=" .. tostring(componentReason))
+        return creationFailure(square, object, U.REASONS.API_ERROR)
+    end
+    if not configureHiddenObject(object, role) then
+        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
+            .. " stage=safety")
+        return creationFailure(square, object, U.REASONS.API_ERROR)
+    end
+    local externalOk, externalReason = externalWaterMatches(object, role)
+    if externalOk ~= true then
+        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
+            .. " stage=external-water-flag")
+        return creationFailure(square, object, externalReason or C.SAVE_REBUILD_REQUIRED)
+    end
     local container = objectContainer(object)
-    if not container then return creationFailure(square, object, U.REASONS.API_ERROR) end
-    Util.invoke(container, "setRainCatcher", 0)
-    Util.invoke(container, "setInputLocked", true)
-    if role == C.UTILITY_ROLE_PROXY then
-        Util.invoke(object, "setCanPassThrough", true)
-        Util.invoke(object, "setIsThumpable", true)
+    if not container then
+        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
+            .. " stage=container")
+        return creationFailure(square, object, U.REASONS.API_ERROR)
+    end
+    if not Util.callSucceeded(container, "setRainCatcher", 0)
+        or not Util.callSucceeded(container, "setInputLocked", true) then
+        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
+            .. " stage=container-safety")
+        return creationFailure(square, object, U.REASONS.API_ERROR)
     end
     local tagOk = pcall(World.tagObject, object, identity.generation, role,
         World.withTagIdentity({ objectToken = token, objectFingerprint = fingerprint,
@@ -479,29 +679,38 @@ local function makeObject(identity, context, x, y, z, role, token, fingerprint, 
         rvId = identity.rvId, generation = identity.generation,
         bitmapVersion = identity.bitmapVersion, objectToken = token,
         objectFingerprint = fingerprint }) then
+        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
+            .. " stage=tag")
         return creationFailure(square, object, U.REASONS.API_ERROR)
     end
-    if not attachObject(square, object, role == C.UTILITY_ROLE_PROXY) then
-        return creationFailure(square, object, U.REASONS.API_ERROR)
-    end
-    -- The component is initialized after the object has a valid world index,
-    -- but before its one complete packet.  `deferSync` prevents an
-    -- object-index incremental packet from escaping before the client knows
-    -- this object.
-    local amountOk = applyAmount(object, initial, U.WATER_CAPACITY, true)
+    -- The component and clean-water projection are complete before the single
+    -- full add packet.  No object-index sync can escape for an object that the
+    -- client has not received yet.
+    local amountOk, amountReason, observedAmount, amountDetail = applyAmount(object, initial,
+        U.WATER_CAPACITY, true)
     if not amountOk then
+        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
+            .. " stage=amount reason=" .. tostring(amountDetail or amountReason)
+            .. " observed=" .. tostring(observedAmount))
         return creationFailure(square, object, U.REASONS.API_ERROR)
     end
-    if not Util.callSucceeded(object, "transmitCompleteItemToClients") then
+    if not attachObject(square, object) then
+        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
+            .. " stage=attach")
+        return creationFailure(square, object, U.REASONS.API_ERROR)
+    end
+    local postTag = objectTag(object)
+    if not validUtilityTag(postTag, identity, role, deviceId)
+        or postTag.objectToken ~= token
+        or postTag.objectFingerprint ~= fingerprint
+        or objectFingerprint(object, role) ~= fingerprint
+        or not objectContainer(object) then
+        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
+            .. " stage=post-attach")
         return creationFailure(square, object, U.REASONS.API_ERROR)
     end
     runtimeObjects[key(identity) .. ":" .. role .. ":" .. tostring(token)] = object
     return true, object
-end
-
-local function fixtureTag(object)
-    local data = World.objectModData(object)
-    return type(data) == "table" and data.RailroaderRVTest or nil
 end
 
 local function fixtureInside(object, context)
@@ -523,7 +732,9 @@ local function validCurrentFixture(entry, object, identity)
         and objectFingerprint(object, "fixture") == entry.fixtureFingerprint
 end
 
-local function readAmount(object)
+local function readAmount(object, role)
+    local externalOk, externalReason = externalWaterMatches(object, role)
+    if externalOk ~= true then return false, externalReason end
     local container = objectContainer(object)
     if not container then return false, U.REASONS.DEVICE_INVALID end
     local amountOk, amount = invoke(container, "getAmount")
@@ -540,9 +751,9 @@ end
 -- the same total amount, or unlock the container for an untracked refill.  A
 -- no-op projection is therefore allowed only when the public B42 profile and
 -- input-lock postconditions both match the requested clean-water mirror.
-local function projectionMatches(object, expectedAmount, expectedCapacity)
-    local readOk, state = readAmount(object)
-    if not readOk then return false end
+local function projectionMatches(object, expectedAmount, expectedCapacity, role)
+    local readOk, state = readAmount(object, role)
+    if not readOk then return false, state end
     expectedAmount = Util.toNumber(expectedAmount)
     expectedCapacity = Util.toNumber(expectedCapacity)
     if not finite(expectedAmount) or not finite(expectedCapacity)
@@ -588,6 +799,8 @@ local function usageObject(identity, context)
         or not objectContainer(object) then
         return false, C.SAVE_REBUILD_REQUIRED
     end
+    local externalOk = externalWaterMatches(object, C.UTILITY_ROLE_TANK)
+    if externalOk ~= true then return false, C.SAVE_REBUILD_REQUIRED end
     return true, object, record
 end
 
@@ -605,11 +818,13 @@ local function proxyObject(identity, entry, player)
         or tag.objectFingerprint ~= entry.proxyFingerprint
         or objectFingerprint(object, C.UTILITY_ROLE_PROXY) ~= entry.proxyFingerprint
         or not objectContainer(object) then return false, C.SAVE_REBUILD_REQUIRED end
+    local externalOk = externalWaterMatches(object, C.UTILITY_ROLE_PROXY)
+    if externalOk ~= true then return false, C.SAVE_REBUILD_REQUIRED end
     return true, object
 end
 
 local function collectProxyDelta(identity, record, entry, proxy)
-    local readOk, state = readAmount(proxy)
+    local readOk, state = readAmount(proxy, C.UTILITY_ROLE_PROXY)
     if not readOk then return false, state end
     local ledger = record.water.proxyLedger[entry.deviceId]
     local baseline = clamp(ledger.amount, 0, U.WATER_CAPACITY)
@@ -624,7 +839,7 @@ local function collectProxyDelta(identity, record, entry, proxy)
         and observed < baseline - U.PROFILE_EPSILON then
         local usageOk, usage = usageObject(identity, { player = runtimePlayers[key(identity)] })
         if not usageOk then return false, usage end
-        local usageStateOk, usageState = readAmount(usage)
+        local usageStateOk, usageState = readAmount(usage, C.UTILITY_ROLE_TANK)
         if not usageStateOk then return false, usageState end
         local nextUsage = clamp(usageState.amount - (baseline - observed), 0, U.WATER_CAPACITY)
         local projected, projectionReason, observedUsage = applyAmount(usage, nextUsage,
@@ -752,7 +967,7 @@ end
 local function settleUsageToCanonical(identity, record, context)
     local usageOk, usageOrReason = usageObject(identity, context)
     if not usageOk then return false, usageOrReason end
-    local stateOk, state = readAmount(usageOrReason)
+    local stateOk, state = readAmount(usageOrReason, C.UTILITY_ROLE_TANK)
     if not stateOk then return false, state end
     local snapshot = record.water.usageTankSnapshot
     local baseline = clamp(snapshot.amount, 0, U.WATER_CAPACITY)
@@ -800,7 +1015,15 @@ local function projectUsageToProxies(identity, record, context)
     end
     local usageAmount
     local usageNeedsSync = canonical.projectionPending == true
-    if not usageNeedsSync and projectionMatches(usage, canonical.amount, canonical.capacity) then
+    local usageMatches, usageMatchReason = projectionMatches(usage, canonical.amount,
+        canonical.capacity, C.UTILITY_ROLE_TANK)
+    if usageMatchReason == C.SAVE_REBUILD_REQUIRED then
+        canonical.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
+        canonical.state = U.WATER_STATE_REBUILD_REQUIRED
+        record.water.state = U.WATER_STATE_REBUILD_REQUIRED
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
+    if not usageNeedsSync and usageMatches then
         -- The usage object already mirrors canonical state, including its
         -- clean profile and input lock.  Reading it is enough; avoid the
         -- clear/refill/sync cycle on an idle tick.
@@ -835,6 +1058,19 @@ local function projectUsageToProxies(identity, record, context)
         if entry.status == U.STATUS_ACTIVE or entry.status == U.STATUS_NEEDS_RECONCILE then
             local proxyOk, proxyOrReason = proxyObject(identity, entry, context and context.player)
             if not proxyOk then
+                if proxyOrReason == C.SAVE_REBUILD_REQUIRED then
+                    entry.status = U.STATUS_REBUILD_REQUIRED
+                    local ledger = record.water.proxyLedger[deviceId]
+                    if ledger then ledger.status = U.STATUS_REBUILD_REQUIRED end
+                    canonical.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
+                    canonical.state = U.WATER_STATE_REBUILD_REQUIRED
+                    canonical.projectionPending = true
+                    canonical.pendingProjectionSequence = canonical.sequence
+                    canonical.pendingProjectionReason = C.SAVE_REBUILD_REQUIRED
+                    record.water.state = U.WATER_STATE_REBUILD_REQUIRED
+                    record.water.usageTankSnapshot.state = U.CHECKPOINT_UNSETTLED
+                    return false, C.SAVE_REBUILD_REQUIRED
+                end
                 entry.status = proxyOrReason == U.REASONS.TARGET_NOT_LOADED
                     and U.STATUS_DEFERRED or U.STATUS_NEEDS_RECONCILE
                 canonical.projectionPending = true
@@ -843,8 +1079,17 @@ local function projectUsageToProxies(identity, record, context)
             else
                 local applied, observed, localProxyAmount
                 local retrySync = entry.status == U.STATUS_NEEDS_RECONCILE
-                if not retrySync and projectionMatches(proxyOrReason, usageAmount,
-                    canonical.capacity) then
+                local proxyMatches, proxyMatchReason = projectionMatches(proxyOrReason,
+                    usageAmount, canonical.capacity, C.UTILITY_ROLE_PROXY)
+                if proxyMatchReason == C.SAVE_REBUILD_REQUIRED then
+                    entry.status = U.STATUS_REBUILD_REQUIRED
+                    record.water.proxyLedger[deviceId].status = U.STATUS_REBUILD_REQUIRED
+                    canonical.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
+                    canonical.state = U.WATER_STATE_REBUILD_REQUIRED
+                    record.water.state = U.WATER_STATE_REBUILD_REQUIRED
+                    return false, C.SAVE_REBUILD_REQUIRED
+                end
+                if not retrySync and proxyMatches then
                     -- This proxy already has the requested clean, locked
                     -- projection.  Its ledger still gets the current sequence
                     -- below without a redundant world write or network packet.
@@ -1006,6 +1251,7 @@ local function flushBeforeOverwrite(identity, operation, context, executeOperati
             end
             return false, settledReason
         end
+        local operationCommitted
         if executeOperation then
             local operationOk, operationReason = executeOperation(record)
             if not operationOk then
@@ -1014,11 +1260,23 @@ local function flushBeforeOverwrite(identity, operation, context, executeOperati
                 -- Persist that confirmed consumption boundary and reconcile
                 -- the remaining projections; never replay it on the next
                 -- flush merely because CONNECT/DETACH failed.
-                projectUsageToProxies(identity, record, context)
+                local projected, projectionReason = projectUsageToProxies(identity, record, context)
+                if not projected and projectionReason == C.SAVE_REBUILD_REQUIRED then
+                    quarantinePendingEntries(identity, record, context, projectionReason, true)
+                end
                 local settledCommitOk, settledCommitReason = Store.commit(record, identity)
                 if not settledCommitOk then return false, settledCommitReason, true end
+                if not projected and projectionReason == C.SAVE_REBUILD_REQUIRED then
+                    -- `committed` below records persistence of the earlier
+                    -- settlement only.  The requested operation callback
+                    -- failed, so callers must not treat its source as spent.
+                    return false, { committed = true, operationCommitted = false,
+                        record = record,
+                        reason = C.SAVE_REBUILD_REQUIRED, changed = true }
+                end
                 return false, operationReason
             end
+            operationCommitted = true
         end
         local projected, projectionReason = projectUsageToProxies(identity, record, context)
         if not projected and projectionReason == C.SAVE_REBUILD_REQUIRED then
@@ -1035,7 +1293,8 @@ local function flushBeforeOverwrite(identity, operation, context, executeOperati
             -- The canonical settlement/operation is already persisted.  Do
             -- not let callers compensate a source transaction after this
             -- boundary; only the remaining world projection is pending.
-            return false, { committed = true, record = record,
+            return false, { committed = true, operationCommitted = operationCommitted,
+                record = record,
                 reason = projectionReason, changed = true }
         end
         return true, { record = record, operation = operation, consumed = settledReason,
@@ -1048,10 +1307,6 @@ end
 
 function M.flushBeforeOverwrite(identity, operation, context, executeOperation)
     return flushBeforeOverwrite(identity, operation, context, executeOperation)
-end
-
-function M.setPlayerContext(identity, player)
-    if identity and player then runtimePlayers[key(identity)] = player end
 end
 
 function M.ensureUsageTank(identity, context, workingRecord, recordMeta)
@@ -1104,6 +1359,9 @@ function M.ensureUsageTank(identity, context, workingRecord, recordMeta)
             or tag.objectFingerprint ~= identityData.objectFingerprint
             or objectFingerprint(object, C.UTILITY_ROLE_TANK) ~= identityData.objectFingerprint
             or not objectContainer(object) then return false, C.SAVE_REBUILD_REQUIRED end
+        if externalWaterMatches(object, C.UTILITY_ROLE_TANK) ~= true then
+            return false, C.SAVE_REBUILD_REQUIRED
+        end
         if workingRecord ~= nil then
             local commitOk, commitReason = Store.commit(record, identity)
             if not commitOk then return false, commitReason end
@@ -1192,6 +1450,9 @@ local function proxyPostcondition(found, proxy)
         or foundTag.objectToken ~= proxyTag.objectToken
         or foundTag.objectFingerprint ~= proxyTag.objectFingerprint
         or objectFingerprint(found, C.UTILITY_ROLE_PROXY) ~= proxyTag.objectFingerprint then
+        return false
+    end
+    if externalWaterMatches(found, C.UTILITY_ROLE_PROXY) ~= true then
         return false
     end
     local foundX, foundY, foundZ = coords(found)
@@ -1421,6 +1682,10 @@ local function proxySquareEvidence(identity, record, x, y, z, player)
         local tag = objectTag(objects[i])
         if sameGenerationIdentity(tag, identity) and tag.role == C.UTILITY_ROLE_PROXY then
             count = count + 1
+            local externalOk = externalWaterMatches(objects[i], C.UTILITY_ROLE_PROXY)
+            if externalOk ~= true then
+                return "invalid"
+            end
             if completeProxyRegistration(record, identity, tag, x, y, z) then
                 complete = complete + 1
             else
@@ -1515,7 +1780,8 @@ function M.connectDevice(identity, context, hint)
         fixtureX = x, fixtureY = y, fixtureZ = z, fixtureToken = token,
         fixtureFingerprint = fingerprint, proxyX = proxyX, proxyY = proxyY,
         proxyZ = proxyZ, proxyToken = tostring(identity.rvId) .. ":proxy:" .. deviceId,
-        proxyFingerprint = C.UTILITY_ROLE_PROXY .. ":" .. C.SPRITES.utilityProxy.sprite .. ":",
+        proxyFingerprint = hiddenObjectFingerprint(C.UTILITY_ROLE_PROXY,
+            C.SPRITES.utilityProxy.sprite),
         registeredSequence = recordOrReason.water.canonicalTank.sequence + 1,
         status = U.STATUS_NEEDS_RECONCILE }
     local flushOk, result, commitFailed = flushBeforeOverwrite(identity, "CONNECT", context,
@@ -1529,11 +1795,12 @@ function M.connectDevice(identity, context, hint)
         local existing, status = squareObject(identity, proxyX, proxyY, proxyZ,
             C.UTILITY_ROLE_PROXY, deviceId, player)
         if status == "unloaded" then return false, U.REASONS.TARGET_NOT_LOADED end
+        if status == "invalid" then return false, C.SAVE_REBUILD_REQUIRED end
         local proxyState = proxySquareEvidence(identity, record, proxyX, proxyY, proxyZ, player)
         if proxyState == "unloaded" then return false, U.REASONS.TARGET_NOT_LOADED end
+        if proxyState == "invalid" then return false, C.SAVE_REBUILD_REQUIRED end
         if proxyState == "orphan" then return false, C.SAVE_REBUILD_REQUIRED end
         if proxyState == "registered" then return false, U.REASONS.DEVICE_CONFLICT end
-        if status == "invalid" then return false, C.SAVE_REBUILD_REQUIRED end
         if existing or status == "duplicate" then return false, C.SAVE_REBUILD_REQUIRED end
         local made, proxyOrReason = makeObject(identity, context, proxyX, proxyY, proxyZ,
             C.UTILITY_ROLE_PROXY, entry.proxyToken, entry.proxyFingerprint,
@@ -1577,6 +1844,9 @@ function M.connectDevice(identity, context, hint)
                 return false, C.SAVE_REBUILD_REQUIRED
             end
             return false, result
+        end
+        if result.reason == C.SAVE_REBUILD_REQUIRED then
+            return false, C.SAVE_REBUILD_REQUIRED
         end
         result = result.record
     else
@@ -1776,7 +2046,11 @@ function M.addWater(identity, context, entryPoint, sourceHint, requestMeta)
         local flushOk, detail, commitFailed = flushBeforeOverwrite(identity, "ADD_WATER",
             context, executeAdd)
         if not flushOk then
-            if type(detail) ~= "table" or detail.committed ~= true then
+            local sourceTransferCommitted = type(detail) == "table"
+                and detail.committed == true
+                and detail.operationCommitted == true
+                and transferResult ~= nil
+            if not sourceTransferCommitted then
                 local restored = restoreSourceOrRebuild(identity, itemOrReason, container,
                     before, detail)
                 -- A successful source transfer can be followed by a failed
@@ -1790,7 +2064,13 @@ function M.addWater(identity, context, entryPoint, sourceHint, requestMeta)
                 if not restored or transferResult or commitFailed then
                     return false, C.SAVE_REBUILD_REQUIRED
                 end
+                if type(detail) == "table" and detail.reason == C.SAVE_REBUILD_REQUIRED then
+                    return false, C.SAVE_REBUILD_REQUIRED
+                end
                 return false, detail
+            end
+            if detail.reason == C.SAVE_REBUILD_REQUIRED then
+                return false, C.SAVE_REBUILD_REQUIRED
             end
             record = detail.record
         else
@@ -1832,6 +2112,10 @@ function M.settleUnderGuard(identity, context)
         markCurrentWaterRebuild(identity, result)
         return false, C.SAVE_REBUILD_REQUIRED
     end
+    if not ok and type(result) == "table" and result.committed == true
+        and result.reason == C.SAVE_REBUILD_REQUIRED then
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
     if not ok then return false, result end
     return true, result
 end
@@ -1859,6 +2143,22 @@ function M.onWaterAmountChange(object)
         pendingWaterEvents[object] = true
         return
     end
+    if externalWaterMatches(object, C.UTILITY_ROLE_PROXY) ~= true then
+        -- Do not downgrade a current-schema flag mismatch to a reconcile
+        -- retry.  A proxy with external=true can enter the native source
+        -- graph, so this event path must take the same rebuild lock as the
+        -- square/projection validators and never auto-repair the flag.
+        pendingWaterEvents[object] = true
+        entry.status = U.STATUS_REBUILD_REQUIRED
+        local ledger = record.water.proxyLedger[tag.deviceId]
+        if type(ledger) == "table" then ledger.status = U.STATUS_REBUILD_REQUIRED end
+        record.water.canonicalTank.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
+        record.water.canonicalTank.state = U.WATER_STATE_REBUILD_REQUIRED
+        record.water.state = U.WATER_STATE_REBUILD_REQUIRED
+        local committed = Store.commit(record, identity)
+        if not committed then markCurrentWaterRebuild(identity, C.SAVE_REBUILD_REQUIRED) end
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
     if record.water.canonicalTank.faultPolicy == U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
         or record.water.canonicalTank.state == U.WATER_STATE_REBUILD_REQUIRED
         or record.water.state == U.WATER_STATE_REBUILD_REQUIRED
@@ -1871,10 +2171,19 @@ function M.onWaterAmountChange(object)
     local collected, reason, changed = collectProxyDelta(identity, record, entry, object)
     if not collected then
         pendingWaterEvents[object] = true
-        entry.status = reason == U.REASONS.TARGET_NOT_LOADED
-            and U.STATUS_DEFERRED or U.STATUS_NEEDS_RECONCILE
-        record.water.state = U.WATER_STATE_NEEDS_RECONCILE
-        if changed then
+        if reason == C.SAVE_REBUILD_REQUIRED then
+            entry.status = U.STATUS_REBUILD_REQUIRED
+            local ledger = record.water.proxyLedger[tag.deviceId]
+            if type(ledger) == "table" then ledger.status = U.STATUS_REBUILD_REQUIRED end
+            record.water.canonicalTank.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
+            record.water.canonicalTank.state = U.WATER_STATE_REBUILD_REQUIRED
+            record.water.state = U.WATER_STATE_REBUILD_REQUIRED
+        else
+            entry.status = reason == U.REASONS.TARGET_NOT_LOADED
+                and U.STATUS_DEFERRED or U.STATUS_NEEDS_RECONCILE
+            record.water.state = U.WATER_STATE_NEEDS_RECONCILE
+        end
+        if changed or reason == C.SAVE_REBUILD_REQUIRED then
             local committed, commitReason = Store.commit(record, identity)
             if not committed then markCurrentWaterRebuild(identity, commitReason) end
         end
@@ -1892,49 +2201,7 @@ function M.onWaterAmountChange(object)
     end
 end
 
-function M.detachDevice(identity, context, deviceId, emergency)
-    if emergency then
-        local recordOk, recordOrReason = Store.getRecord(identity, false)
-        if not recordOk then return false, recordOrReason end
-        local record = recordOrReason
-        local entry = record.water.registry[deviceId]
-        if not entry then return false, U.REASONS.DEVICE_INVALID end
-        local fixture, fixtureStatus = squareObject(identity, entry.fixtureX,
-            entry.fixtureY, entry.fixtureZ, "fixture", deviceId,
-            context and context.player)
-        local proxyOk, proxyOrReason = proxyObject(identity, entry,
-            context and context.player)
-        if fixtureStatus == "unloaded" or proxyOrReason == U.REASONS.TARGET_NOT_LOADED then
-            entry.status = U.STATUS_QUARANTINE_PENDING
-            record.water.canonicalTank.state = U.WATER_STATE_QUARANTINE_PENDING
-            record.water.state = U.WATER_STATE_QUARANTINE_PENDING
-            local deferredOk, deferredReason = Store.commit(record, identity)
-            return deferredOk, deferredOk and U.REASONS.TARGET_NOT_LOADED or deferredReason
-        end
-        entry.status = U.STATUS_QUARANTINE_PENDING
-        record.water.canonicalTank.state = U.WATER_STATE_QUARANTINE_PENDING
-        record.water.state = U.WATER_STATE_QUARANTINE_PENDING
-        suppressionGuard[key(identity)] = true
-        local fixtureRevoked = not fixture or setFixtureExternal(fixture, nil, false)
-        local proxyCleared = true
-        if proxyOk and proxyOrReason then
-            proxyCleared = applyAmount(proxyOrReason, 0, U.WATER_CAPACITY)
-            if proxyCleared then proxyCleared = removeObject(proxyOrReason) end
-        end
-        suppressionGuard[key(identity)] = nil
-        local sourceGone = fixture and fixtureSourceGone(fixture) or fixtureRevoked
-        if fixtureRevoked and proxyCleared and sourceGone then
-            entry.status = U.STATUS_SUSPENDED
-        else
-            entry.status = U.STATUS_REBUILD_REQUIRED
-        end
-        record.water.canonicalTank.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-        record.water.canonicalTank.state = U.WATER_STATE_REBUILD_REQUIRED
-        record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-        local commitOk, commitReason = Store.commit(record, identity)
-        return commitOk, commitOk and { record = record,
-            reason = U.REASONS.PROJECTION_PENDING } or commitReason
-    end
+local function detachDevice(identity, context, deviceId)
     local execute = function(record)
         local entry = record.water.registry[deviceId]
         if not entry then return false, U.REASONS.DEVICE_INVALID end
@@ -1977,6 +2244,10 @@ function M.detachDevice(identity, context, deviceId, emergency)
         markCurrentWaterRebuild(identity, result)
         return false, C.SAVE_REBUILD_REQUIRED
     end
+    if not accepted and type(result) == "table" and result.committed == true
+        and result.reason == C.SAVE_REBUILD_REQUIRED then
+        return false, C.SAVE_REBUILD_REQUIRED
+    end
     return accepted, result
 end
 
@@ -2012,7 +2283,7 @@ function M.onObjectAboutToBeRemoved(object)
     end
 
     local context = { player = runtimePlayers[key(identity)] }
-    local accepted, result = M.detachDevice(identity, context, tag.deviceId, false)
+    local accepted, result = detachDevice(identity, context, tag.deviceId)
     if accepted then
         pendingDetachedFixtures[pendingDetachedFixtureKey(identity, tag.deviceId)] = {
             oldObject = object, objectToken = tag.objectToken,
@@ -2043,10 +2314,6 @@ function M.onObjectAdded(object)
     local cleared, reason = clearPendingDetachedFixture(identity, object, tag)
     if reason then return false, reason end
     return cleared == true
-end
-
-function M.emergencyQuarantine(identity, context, deviceId)
-    return M.detachDevice(identity, context, deviceId, true)
 end
 
 function M.resolveObjectForPower(player, hint, allowRemote)

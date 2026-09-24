@@ -11,6 +11,11 @@ local Catalog = require("RailroaderRV/RV_UtilityCatalog")
 local M = {}
 local sessionPrepared = {}
 
+local function hiddenFingerprint(role, sprite)
+    return tostring(role) .. ":" .. tostring(C.UTILITY_HIDDEN_OBJECT_CLASS)
+        .. ":" .. tostring(sprite) .. ":"
+end
+
 local function integer(value)
     if type(value) == "string" then value = tonumber(value) end
     return type(value) == "number" and value == value
@@ -136,7 +141,9 @@ local function validUsageIdentity(value, identity)
         and identityMatches(value, identity) and integer(value.x) ~= nil
         and integer(value.y) ~= nil and integer(value.z) ~= nil
         and type(value.objectToken) == "string" and value.objectToken ~= ""
-        and type(value.objectFingerprint) == "string" and value.objectFingerprint ~= ""
+        and type(value.objectFingerprint) == "string"
+        and value.objectFingerprint == hiddenFingerprint(C.UTILITY_ROLE_TANK,
+            C.SPRITES.utilityHidden.sprite)
 end
 
 local function validUsageSnapshot(value, identity)
@@ -171,7 +178,9 @@ local function validRegistryEntry(value, identity)
         and value.fixtureFingerprint ~= "" and integer(value.proxyX) ~= nil
         and integer(value.proxyY) ~= nil and integer(value.proxyZ) ~= nil
         and type(value.proxyToken) == "string" and value.proxyToken ~= ""
-        and type(value.proxyFingerprint) == "string" and value.proxyFingerprint ~= ""
+        and type(value.proxyFingerprint) == "string"
+        and value.proxyFingerprint == hiddenFingerprint(C.UTILITY_ROLE_PROXY,
+            C.SPRITES.utilityProxy.sprite)
         and integer(value.registeredSequence) ~= nil and value.registeredSequence >= 1
         and (value.status == U.STATUS_ACTIVE or value.status == U.STATUS_NEEDS_RECONCILE
             or value.status == U.STATUS_DEFERRED or value.status == U.STATUS_QUARANTINE_PENDING
@@ -397,7 +406,8 @@ local function newWater(identity)
         usageTankIdentity = { role = C.UTILITY_ROLE_TANK, rvId = identity.rvId,
             generation = identity.generation, bitmapVersion = identity.bitmapVersion,
             x = x, y = y, z = z, objectToken = token,
-            objectFingerprint = C.UTILITY_ROLE_TANK .. ":" .. C.SPRITES.utilityHidden.sprite .. ":" },
+            objectFingerprint = hiddenFingerprint(C.UTILITY_ROLE_TANK,
+                C.SPRITES.utilityHidden.sprite) },
         usageTankSnapshot = { capacity = U.WATER_CAPACITY, amount = 0,
             baselineSequence = 0, usageSequence = 0, settledCanonicalSequence = 0,
             projectionSequence = 0, state = U.CHECKPOINT_SETTLED },

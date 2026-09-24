@@ -1,10 +1,7 @@
 -- Shared water-device and fluid-profile rules.
 --
--- runtimeTestEnabled is only an explicit development allowlist for entering
--- the compatibility-test path.  It is not evidence that the device passed
--- the complete B42/MP matrix; runtimeValidated remains false until that
--- matrix has actually been run.  The server never silently treats an
--- unverified device as generally supported outside that explicit path.
+-- runtimeTestEnabled is a development allowlist for the compatibility-test
+-- path.  It does not enable general water support.
 
 RailroaderRV = RailroaderRV or {}
 local C = require("RailroaderRV/RV_Constants")
@@ -17,7 +14,6 @@ M.DEVICE_CATALOG = {
     sink = {
         id = "sink", aliases = { "sink", "faucet", "washbasin" },
         runtimeTestEnabled = true,
-        runtimeValidated = false,
     },
     -- Native plumbing capability is intentionally a catalog entry rather than
     -- a name allowlist.  The entry is used as the current-schema deviceType
@@ -26,27 +22,22 @@ M.DEVICE_CATALOG = {
     nativeWaterDevice = {
         id = "nativeWaterDevice", aliases = {},
         runtimeTestEnabled = false,
-        runtimeValidated = false,
     },
     toilet = {
         id = "toilet", aliases = { "toilet", "wc" },
         runtimeTestEnabled = false,
-        runtimeValidated = false,
     },
     bathtub = {
         id = "bathtub", aliases = { "bathtub", "bath" },
         runtimeTestEnabled = false,
-        runtimeValidated = false,
     },
     shower = {
         id = "shower", aliases = { "shower" },
         runtimeTestEnabled = false,
-        runtimeValidated = false,
     },
     washingMachine = {
         id = "washingMachine", aliases = { "washingmachine", "washing_machine", "washer" },
         runtimeTestEnabled = false,
-        runtimeValidated = false,
     },
 }
 
@@ -172,34 +163,6 @@ function M.isAllowedProfile(value)
     return copy ~= nil and copy.kind == value.kind
 end
 
-function M.profileAdd(left, right, rightAmount, rightTotal)
-    left, right = M.copyProfile(left), M.copyProfile(right)
-    rightAmount, rightTotal = number(rightAmount), number(rightTotal)
-    if not left or not right or not finite(rightAmount) or not finite(rightTotal)
-        or rightAmount < 0 or rightTotal <= EPSILON or rightAmount > rightTotal + EPSILON then
-        return nil
-    end
-    local profileTotal = M.profileAmount(right)
-    if profileTotal == nil or math.abs(profileTotal - rightTotal) > EPSILON then
-        return nil
-    end
-    local ratio = math.min(1, math.max(0, rightAmount / rightTotal))
-    return profile(nil, left.cleanAmount + right.cleanAmount * ratio,
-        left.taintedAmount + right.taintedAmount * ratio)
-end
-
-function M.profileSubtract(value, amount)
-    value = M.copyProfile(value)
-    amount = number(amount)
-    if not value or not finite(amount) or amount < 0 then return nil end
-    local total = M.profileAmount(value)
-    if not finite(total) or amount > total + EPSILON then return nil end
-    if total <= EPSILON then return M.emptyProfile() end
-    local ratio = math.min(1, math.max(0, amount / total))
-    return profile(nil, value.cleanAmount * (1 - ratio),
-        value.taintedAmount * (1 - ratio))
-end
-
 function M.applyProfile(container, capacity, value)
     local amount = M.profileAmount(value)
     capacity = number(capacity)
@@ -208,12 +171,21 @@ function M.applyProfile(container, capacity, value)
         return false
     end
     local unlockCallOk, unlockResult = invoke(container, "setInputLocked", false)
-    if not unlockCallOk or unlockResult == false then return false end
+    if not unlockCallOk or unlockResult == false then return false, "set-input-unlocked" end
     local function failedProjection()
         -- Best-effort relock: a failed projection must not leave a device
         -- container open for an untracked native refill path.
         invoke(container, "setInputLocked", true)
         return false
+    end
+    -- A freshly-created FluidContainer starts with zero capacity.  B42's
+    -- removeFluid/Empty path can reject that state, so establish the current
+    -- schema capacity before clearing or projecting its contents.  Existing
+    -- containers use the same fixed capacity and remain equivalent.
+    local capacityCallOk, capacityResult = invoke(container, "setCapacity", capacity)
+    if not capacityCallOk or capacityResult == false then
+        failedProjection()
+        return false, "set-capacity"
     end
     local removeCallOk, removeResult = invoke(container, "removeFluid")
     local removeOk = removeCallOk and removeResult ~= false
@@ -221,30 +193,40 @@ function M.applyProfile(container, capacity, value)
         local emptyCallOk, emptyResult = invoke(container, "Empty")
         removeOk = emptyCallOk and emptyResult ~= false
     end
-    if not removeOk then return failedProjection() end
-    local capacityCallOk, capacityResult = invoke(container, "setCapacity", capacity)
-    if not capacityCallOk or capacityResult == false then return failedProjection() end
+    if not removeOk then
+        failedProjection()
+        return false, "clear-fluid"
+    end
     if value.cleanAmount > EPSILON then
         local fluid = rawget(_G, "FluidType") and FluidType.Water
-        if fluid == nil then return failedProjection() end
+        if fluid == nil then
+            failedProjection()
+            return false, "clean-fluid-type"
+        end
         local addCallOk, addResult = invoke(container, "addFluid", fluid, value.cleanAmount)
-        if not addCallOk or addResult == false then return failedProjection() end
+        if not addCallOk or addResult == false then
+            failedProjection()
+            return false, "add-clean-fluid"
+        end
     end
     if value.taintedAmount > EPSILON then
         local fluid = rawget(_G, "FluidType") and FluidType.TaintedWater
-        if fluid == nil then return failedProjection() end
+        if fluid == nil then
+            failedProjection()
+            return false, "tainted-fluid-type"
+        end
         local addCallOk, addResult = invoke(container, "addFluid", fluid, value.taintedAmount)
-        if not addCallOk or addResult == false then return failedProjection() end
+        if not addCallOk or addResult == false then
+            failedProjection()
+            return false, "add-tainted-fluid"
+        end
     end
     -- This property is a compatibility gate, not a source of authority.  A
     -- missing method makes the projection unverifiable and is handled by the
     -- caller as a NEEDS_INIT/API failure.
     local lockCallOk, lockResult = invoke(container, "setInputLocked", true)
-    return lockCallOk and lockResult ~= false
-end
-
-function M.entryIsValidated(entry)
-    return type(entry) == "table" and entry.runtimeValidated == true
+    if not lockCallOk or lockResult == false then return false, "set-input-locked" end
+    return true
 end
 
 function M.entryIsRuntimeTestEnabled(entry)

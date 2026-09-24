@@ -15,6 +15,11 @@ RailroaderRV.Bitmap = RailroaderRV.Bitmap or {}
 local Bitmap = RailroaderRV.Bitmap
 local C = RailroaderRV.Constants
 
+-- Bitmaps are immutable after generation/decoding. Cache the walk geometry
+-- outside the persisted bitmap so this never changes its wire schema.
+local walkBoundsCache = setmetatable({}, { __mode = "k" })
+local layerBits
+
 Bitmap.SCHEMA_VERSION = C.BITMAP_SCHEMA_VERSION
 Bitmap.DEFAULT_WIDTH = C.RV_MANAGED_WIDTH
 Bitmap.DEFAULT_HEIGHT = C.RV_MANAGED_HEIGHT
@@ -157,6 +162,99 @@ function Bitmap.containsScope(scope, x, y, z)
         and math.floor(z) >= minZ and math.floor(z) < maxZ
 end
 
+local function rowContains(bits, width, height, y, firstX, lastX)
+    for x = firstX, lastX do
+        if not rawGet(bits, bitIndex(width, x, y), width, height) then
+            return false
+        end
+    end
+    return true
+end
+
+-- Outer bounds reject empty space. Inner bounds are a verified all-walkable
+-- rectangle; only cells in the irregular band need an individual bit lookup.
+local function buildWalkBounds(bitmap, z)
+    if type(bitmap) ~= "table" then return nil end
+    z = integer(z)
+    if z == nil then return nil end
+    local cache = walkBoundsCache[bitmap]
+    if not cache then cache = {}; walkBoundsCache[bitmap] = cache end
+    if cache[z] ~= nil then return cache[z] or nil end
+    local layer = Bitmap.layer(bitmap, z)
+    local width, height = bitmap.width, bitmap.height
+    local bits = layerBits(layer, "walkBits", width, height)
+    if not bits then cache[z] = false; return nil end
+    local minX, maxX, minY, maxY = width, -1, height, -1
+    local bestX, bestY, bestWidth = nil, nil, 0
+    for y = 0, height - 1 do
+        local runStart = nil
+        for x = 0, width do
+            local active = x < width and rawGet(bits,
+                bitIndex(width, x, y), width, height)
+            if active then
+                if runStart == nil then runStart = x end
+                if x < minX then minX = x end
+                if x > maxX then maxX = x end
+                if y < minY then minY = y end
+                if y > maxY then maxY = y end
+            elseif runStart ~= nil then
+                if x - runStart > bestWidth then
+                    bestX, bestY, bestWidth = runStart, y, x - runStart
+                end
+                runStart = nil
+            end
+        end
+    end
+    if maxX < minX then cache[z] = false; return nil end
+    local top, bottom = bestY, bestY
+    while top > minY and rowContains(bits, width, height,
+        top - 1, bestX, bestX + bestWidth - 1) do top = top - 1 end
+    while bottom < maxY and rowContains(bits, width, height,
+        bottom + 1, bestX, bestX + bestWidth - 1) do bottom = bottom + 1 end
+    local originX, originY = bitmap.originX, bitmap.originY
+    local bounds = {
+        outer = { minX = originX + minX, maxX = originX + maxX + 1,
+            minY = originY + minY, maxY = originY + maxY + 1 },
+        inner = { minX = originX + bestX, maxX = originX + bestX + bestWidth,
+            minY = originY + top, maxY = originY + bottom + 1 },
+    }
+    cache[z] = bounds
+    return bounds
+end
+
+-- Call after a bitmap has been fully built or decoded. Tick-time queries only
+-- read the prepared per-layer entries and never scan walk bits on first use.
+function Bitmap.prepareWalkBounds(bitmap)
+    if type(bitmap) ~= "table" then return false end
+    local minZ, maxZ = integer(bitmap.minZ), integer(bitmap.maxZ)
+    if minZ == nil or maxZ == nil or maxZ <= minZ then return false end
+    for z = minZ, maxZ - 1 do buildWalkBounds(bitmap, z) end
+    return true
+end
+
+function Bitmap.walkBounds(bitmap, z)
+    if type(bitmap) ~= "table" then return nil end
+    z = integer(z)
+    if z == nil then return nil end
+    local cache = walkBoundsCache[bitmap]
+    return cache and (cache[z] or nil) or nil
+end
+
+function Bitmap.inAABB(box, x, y)
+    return box ~= nil and x >= box.minX and x < box.maxX
+        and y >= box.minY and y < box.maxY
+end
+
+function Bitmap.walkableFast(bitmap, x, y, z)
+    if not Bitmap.containsScope(bitmap, x, y, z) then return false, false end
+    local bounds = Bitmap.walkBounds(bitmap, math.floor(z))
+    if not bounds or not Bitmap.inAABB(bounds.outer, x, y) then
+        return false, false
+    end
+    if Bitmap.inAABB(bounds.inner, x, y) then return true, true end
+    return Bitmap.isActive(bitmap, x, y, z), false
+end
+
 function Bitmap.makeScope(originX, originY, minZ, maxZ, width, height)
     originX, originY = integer(originX), integer(originY)
     minZ, maxZ = integer(minZ), integer(maxZ)
@@ -192,7 +290,7 @@ function Bitmap.layer(bitmap, z)
     return bitmap.layers[z] or bitmap.layers[tostring(z)]
 end
 
-local function layerBits(layer, field, width, height)
+layerBits = function(layer, field, width, height)
     if type(layer) ~= "table" then return nil end
     local bits = layer[field]
     if type(bits) ~= "string" then return nil end
@@ -294,6 +392,7 @@ function Bitmap.encode(bitmap)
     if type(bitmap) ~= "table" or not Bitmap.validate(bitmap, false) then
         return nil
     end
+    Bitmap.prepareWalkBounds(bitmap)
     local result = {
         schemaVersion = bitmap.schemaVersion,
         bitmapVersion = bitmap.bitmapVersion,
@@ -343,6 +442,7 @@ function Bitmap.decode(encoded)
         if not layer then return nil end
         result.layers[z] = layer
     end
+    Bitmap.prepareWalkBounds(result)
     return result
 end
 

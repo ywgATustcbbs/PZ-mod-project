@@ -5,6 +5,9 @@ local Bitmap = ctx.Bitmap
 local Boundary = ctx.Boundary
 local C = ctx.C
 local exactKeys = ctx.exactKeys
+-- A registered boundary is immutable. Retain its decoded snapshot by source
+-- table so normal tick lookups compare only constant-size metadata.
+local sourceBoundaryCache = setmetatable({}, { __mode = "k" })
 
 local function number(value)
     if type(value) == "number" then return value end
@@ -21,6 +24,8 @@ local function integer(value)
     if result == nil or math.floor(result) ~= result then return nil end
     return result
 end
+
+Boundary._geometryEpoch = integer(Boundary._geometryEpoch) or 0
 
 local function call(target, method, ...)
     if target == nil or type(target[method]) ~= "function" then
@@ -71,11 +76,21 @@ local function identity(player)
 end
 
 local function playerPosition(player)
+    local okZ, z = call(player, "getZ")
+    z = number(z)
+    if not okZ or z == nil
+        or math.floor(z) < C.TELEPORT_Z + C.RV_MANAGED_MIN_Z_OFFSET
+        or math.floor(z) >= C.TELEPORT_Z + C.RV_MANAGED_MAX_Z_OFFSET then
+        return nil
+    end
     local okX, x = call(player, "getX")
     local okY, y = call(player, "getY")
-    local okZ, z = call(player, "getZ")
-    x, y, z = number(x), number(y), number(z)
-    if not okX or not okY or not okZ or not x or not y or not z then
+    x, y = number(x), number(y)
+    if not okX or not okY or x == nil or y == nil
+        or x < C.TELEPORT_X + C.RV_REGION_MIN_OFFSET_X
+        or x >= C.TELEPORT_X + C.RV_REGION_MIN_OFFSET_X + C.RV_REGION_SIZE
+        or y < C.TELEPORT_Y + C.RV_REGION_MIN_OFFSET_Y
+        or y >= C.TELEPORT_Y + C.RV_REGION_MIN_OFFSET_Y + C.RV_REGION_SIZE then
         return nil
     end
     return { x = x, y = y, z = z }
@@ -341,13 +356,82 @@ local function sameBoundary(left, right)
         and boundaryKey(left) == boundaryKey(right)
 end
 
+local function sourceCacheHit(boundary)
+    local source = sourceBoundaryCache[boundary]
+    if not source then return nil end
+    local loaded = source.loaded
+    if not loaded or Boundary._registered[boundaryKey(loaded)] ~= loaded then
+        return nil
+    end
+    local bitmap, managed = boundary.bitmap, boundary.managed
+    if boundary.schemaVersion ~= source.schemaVersion
+        or boundary.rvId ~= source.rvId
+        or boundary.generation ~= source.generation
+        or boundary.bitmapVersion ~= source.bitmapVersion
+        or boundary.bitmap ~= source.bitmap
+        or boundary.managed ~= source.managed
+        or boundary.shellEdges ~= source.shellEdges
+        or type(bitmap) ~= "table"
+        or bitmap.schemaVersion ~= source.bitmapSchemaVersion
+        or bitmap.bitmapVersion ~= source.encodedBitmapVersion
+        or bitmap.originX ~= source.originX
+        or bitmap.originY ~= source.originY
+        or bitmap.width ~= source.width
+        or bitmap.height ~= source.height
+        or bitmap.minZ ~= source.minZ
+        or bitmap.maxZ ~= source.maxZ
+        or bitmap.encoding ~= source.encoding
+        or bitmap.layers ~= source.layers
+        or type(managed) ~= "table"
+        or managed.originX ~= source.originX
+        or managed.originY ~= source.originY
+        or managed.width ~= source.width
+        or managed.height ~= source.height
+        or managed.minZ ~= source.minZ
+        or managed.maxZ ~= source.maxZ then
+        return nil
+    end
+    return source.loaded
+end
+
+local function rememberSourceBoundary(boundary, loaded)
+    local bitmap = boundary.bitmap
+    sourceBoundaryCache[boundary] = {
+        loaded = loaded,
+        schemaVersion = boundary.schemaVersion,
+        rvId = boundary.rvId,
+        generation = boundary.generation,
+        bitmapVersion = boundary.bitmapVersion,
+        bitmap = bitmap,
+        managed = boundary.managed,
+        shellEdges = boundary.shellEdges,
+        bitmapSchemaVersion = bitmap.schemaVersion,
+        encodedBitmapVersion = bitmap.bitmapVersion,
+        originX = bitmap.originX,
+        originY = bitmap.originY,
+        width = bitmap.width,
+        height = bitmap.height,
+        minZ = bitmap.minZ,
+        maxZ = bitmap.maxZ,
+        encoding = bitmap.encoding,
+        layers = bitmap.layers,
+    }
+end
+
+local function geometryChanged()
+    Boundary._geometryEpoch = (integer(Boundary._geometryEpoch) or 0) + 1
+end
+
 local function loadedBoundary(boundary)
+    local source = sourceCacheHit(boundary)
+    if source then return source end
     local bitmap, rvId, generation, bitmapVersion = decodeBoundary(boundary)
     if not bitmap then return nil end
     local key = boundaryKey({ rvId = rvId, generation = generation,
         bitmapVersion = bitmapVersion })
     local cached = Boundary._registered[key]
     if cached and sameBoundaryGeometry(cached, boundary, bitmap) then
+        rememberSourceBoundary(boundary, cached)
         return cached
     end
     if cached then
@@ -362,6 +446,8 @@ local function loadedBoundary(boundary)
         bitmap = bitmap, encoded = boundary, shellEdges = boundary.shellEdges or {},
     }
     Boundary._registered[key] = result
+    rememberSourceBoundary(boundary, result)
+    geometryChanged()
     return result
 end
 
@@ -385,8 +471,8 @@ function Boundary.registerGeneration(rvId, generation, boundary, record)
     return true
 end
 
-function Boundary.boundaryForPlayer(player)
-    local id = identity(player)
+function Boundary.boundaryForPlayer(player, knownIdentity, deferValidationMiss)
+    local id = knownIdentity or identity(player)
     if not id then return nil end
     -- The complete current-only map/record validator lives in the Railroader
     -- adapter.  Boundary must not maintain a second shallow ModData parser:
@@ -397,7 +483,10 @@ function Boundary.boundaryForPlayer(player)
     local validator = adapter and adapter.validateCurrentBoundaryPlayer
     if type(validator) ~= "function" then return nil end
     local hookOk, boundary, record, relation, validatedIdentity = pcall(
-        validator, player)
+        validator, player, id, deferValidationMiss == true)
+    if hookOk and boundary == nil and record == "validation-deferred" then
+        return nil, record
+    end
     if not hookOk or type(boundary) ~= "table"
         or type(record) ~= "table" or type(relation) ~= "table"
         or type(validatedIdentity) ~= "table"
@@ -414,8 +503,8 @@ function Boundary.boundaryForPlayer(player)
     return loaded, record, relation, validatedIdentity
 end
 
-local function stateFor(player)
-    local id = identity(player)
+local function stateFor(player, knownIdentity)
+    local id = knownIdentity or identity(player)
     if not id then return nil end
     local state = Boundary._states[id.key]
     if not state then
@@ -602,11 +691,19 @@ local function currentSquareMatches(player, position)
         and integer(z) == math.floor(position.z)
 end
 
-local function updatePlayer(player)
-    local boundary, _, _, id = Boundary.boundaryForPlayer(player)
+local function updatePlayer(player, position, knownIdentity, deferValidationMiss)
+    local boundary, _, _, id = Boundary.boundaryForPlayer(player,
+        knownIdentity, deferValidationMiss)
     if not boundary then return nil end
-    local state = stateFor(player)
+    local state = stateFor(player, id or knownIdentity)
     if not state then return nil end
+    local lastObserved = integer(state.lastObservedBoundaryTick)
+    if lastObserved == nil or Boundary._tick > lastObserved + 1 then
+        state.lastValid, state.lastPosition, state.invalidSegment = nil, nil, nil
+        state.nextValidRecordTick = nil
+        state.recoveryCooldown = 0
+    end
+    state.lastObservedBoundaryTick = Boundary._tick
     if state.boundaryReference ~= boundary
         or state.rvId ~= boundary.rvId
         or state.generation ~= boundary.generation
@@ -625,7 +722,6 @@ local function updatePlayer(player)
         Boundary.sendSnapshot(player, boundary, state)
     end
     if transitionActive(state) then return boundary end
-    local position = playerPosition(player)
     if not position then return boundary end
     -- Scope guard is intentionally before every correction path.  An inside
     -- relation alone never grants permission to touch a player outside this
@@ -636,15 +732,33 @@ local function updatePlayer(player)
     end
     if not currentSquareMatches(player, position) then return boundary end
     if Boundary._tick < (state.recoveryCooldown or 0) then return boundary end
-    local active = Bitmap.isActive(boundary.bitmap, position.x, position.y, position.z)
-    if active and state.lastPosition then
-        local segmentOk = Bitmap.segmentValid(boundary.bitmap,
-            state.lastPosition, position)
-        if not segmentOk then state.invalidSegment = true end
+    local active, inInner = Bitmap.walkableFast(boundary.bitmap,
+        position.x, position.y, position.z)
+    local previous = state.lastPosition
+    local sameCell = previous
+        and math.floor(previous.x) == math.floor(position.x)
+        and math.floor(previous.y) == math.floor(position.y)
+        and math.floor(previous.z) == math.floor(position.z)
+    if active and previous and not sameCell then
+        local bounds = inInner and Bitmap.walkBounds(boundary.bitmap,
+            math.floor(position.z))
+        local staysInside = bounds and math.floor(previous.z) == math.floor(position.z)
+            and Bitmap.inAABB(bounds.inner, previous.x, previous.y)
+        if not staysInside then
+            local segmentOk = Bitmap.segmentValid(boundary.bitmap,
+                previous, position)
+            if not segmentOk then state.invalidSegment = true end
+        end
     end
     if active and not state.invalidSegment then
-        state.lastValid = copyPosition(position)
-        state.lastPosition = copyPosition(position)
+        if not sameCell or Boundary._tick >= (state.nextValidRecordTick or 0) then
+            state.lastValid = copyPosition(position)
+            state.nextValidRecordTick = Boundary._tick + 10
+        end
+        if not previous or previous.x ~= position.x or previous.y ~= position.y
+            or previous.z ~= position.z then
+            state.lastPosition = copyPosition(position)
+        end
         return boundary
     end
     if not active or state.invalidSegment then
@@ -665,6 +779,7 @@ ctx.integer = integer
 ctx.call = call
 ctx.callGlobal = callGlobal
 ctx.identity = identity
+ctx.playerPosition = playerPosition
 ctx.playerCell = playerCell
 ctx.square = square
 ctx.decodeBoundary = decodeBoundary

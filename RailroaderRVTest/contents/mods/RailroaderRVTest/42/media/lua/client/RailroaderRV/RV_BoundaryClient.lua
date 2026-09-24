@@ -55,11 +55,23 @@ local function onlineId(player)
 end
 
 local function position(player)
+    local okZ, z = call(player, "getZ")
+    z = number(z)
+    if not okZ or z == nil
+        or math.floor(z) < C.TELEPORT_Z + C.RV_MANAGED_MIN_Z_OFFSET
+        or math.floor(z) >= C.TELEPORT_Z + C.RV_MANAGED_MAX_Z_OFFSET then
+        return nil
+    end
     local okX, x = call(player, "getX")
     local okY, y = call(player, "getY")
-    local okZ, z = call(player, "getZ")
-    x, y, z = number(x), number(y), number(z)
-    if not okX or not okY or not okZ or not x or not y or not z then return nil end
+    x, y = number(x), number(y)
+    if not okX or not okY or x == nil or y == nil
+        or x < C.TELEPORT_X + C.RV_REGION_MIN_OFFSET_X
+        or x >= C.TELEPORT_X + C.RV_REGION_MIN_OFFSET_X + C.RV_REGION_SIZE
+        or y < C.TELEPORT_Y + C.RV_REGION_MIN_OFFSET_Y
+        or y >= C.TELEPORT_Y + C.RV_REGION_MIN_OFFSET_Y + C.RV_REGION_SIZE then
+        return nil
+    end
     return { x = x, y = y, z = z }
 end
 
@@ -95,8 +107,7 @@ local function snapshotFresh(snapshot)
     return age >= 0 and age <= (integer(C.BOUNDARY_SNAPSHOT_TIMEOUT_TICKS) or 120)
 end
 
-local function snapshotForPlayer(player)
-    local id = onlineId(player)
+local function snapshotForPlayer(id)
     if id == nil then return nil end
     local current = states[id]
     if current and snapshotFresh(current.snapshot) then return current.snapshot end
@@ -150,6 +161,7 @@ local function clampToLastValid(player, snapshot, state, current)
     state.blocked = true
     state.blockedUntil = clientTick + BLOCK_HOLD_TICKS
     state.previous = copyPosition(target)
+    state.previousInInner = false
     return true
 end
 
@@ -189,6 +201,9 @@ function Client.onBitmap(args)
             and snapshot.bitmapVersion < old.bitmapVersion) then
         return
     end
+    -- Bounds scan the compact 100x100 bitmap once per managed z layer. Keep
+    -- that work on snapshot receipt so movement callbacks only read the cache.
+    Bitmap.prepareWalkBounds(snapshot.bitmap)
     snapshots[snapshot.rvId] = snapshot
     snapshot.receivedTick = clientTick
     local state = states[snapshot.onlineId] or {}
@@ -206,6 +221,7 @@ function Client.onBitmap(args)
     state.snapshot = snapshot
     state.lastCorrectionSequence = state.lastCorrectionSequence or 0
     state.previous = nil
+    state.previousInInner = nil
     state.blocked = false
     states[snapshot.onlineId] = state
 end
@@ -253,6 +269,7 @@ function Client.onCorrection(args)
         or not Bitmap.isActive(snapshot.bitmap, x, y, z) then return end
     state.lastCorrectionSequence = sequence
     state.previous = { x = x, y = y, z = z }
+    state.previousInInner = nil
     states[online] = state
     -- Keep the movement history coherent with the authoritative correction.
     -- teleportTo alone only writes the coordinates; a stale next/last pair can
@@ -274,9 +291,22 @@ end
 
 function Client.onPlayerUpdate(player)
     if not player or (type(player.isDead) == "function" and player:isDead()) then return end
+    local current = position(player)
+    if not current then
+        if next(states) ~= nil then
+            local id = onlineId(player)
+            local state = id and states[id]
+            if state then
+                state.previous = nil
+                state.previousInInner = nil
+                releaseBlock(player, state)
+            end
+        end
+        return
+    end
     local id = onlineId(player)
     if id == nil then return end
-    local snapshot = snapshotForPlayer(player)
+    local snapshot = snapshotForPlayer(id)
     local state = states[id]
     if not snapshot then
         if state then releaseBlock(player, state) end
@@ -284,44 +314,65 @@ function Client.onPlayerUpdate(player)
     end
     state = state or { snapshot = snapshot, lastCorrectionSequence = 0 }
     state.snapshot = snapshot
-    local current = position(player)
-    if not current then return end
     -- Scope guard precedes prediction.  The client is intentionally inert for
     -- positions outside its RV-local 100x100xZ region.
     if not Bitmap.containsScope(snapshot.bitmap, current.x, current.y, current.z) then
         state.previous = nil
+        state.previousInInner = nil
         releaseBlock(player, state)
         states[id] = state
         return
     end
     if clientTick < (state.blockedUntil or 0) then return end
-    local active = Bitmap.isActive(snapshot.bitmap, current.x, current.y, current.z)
-    local invalidSegment = active and state.previous
-        and not Bitmap.segmentValid(snapshot.bitmap, state.previous, current)
+    local previous = state.previous
+    if previous and previous.x == current.x and previous.y == current.y
+        and previous.z == current.z then
+        -- The exact last-valid position remains valid for this snapshot. A
+        -- stationary player needs no repeated bitmap lookup or segment walk.
+        releaseBlock(player, state)
+        states[id] = state
+        return
+    end
+    local active, inInner = Bitmap.walkableFast(snapshot.bitmap,
+        current.x, current.y, current.z)
+    local sameCell = previous
+        and math.floor(previous.x) == math.floor(current.x)
+        and math.floor(previous.y) == math.floor(current.y)
+        and math.floor(previous.z) == math.floor(current.z)
+    local staysInside = inInner and previous and state.previousInInner
+        and math.floor(previous.z) == math.floor(current.z)
+    local invalidSegment = active and previous and not sameCell and not staysInside
+        and not Bitmap.segmentValid(snapshot.bitmap, previous, current)
     if not active or invalidSegment then
         if not clampToLastValid(player, snapshot, state, current) then
             state.previous = nil
+            state.previousInInner = nil
         end
     else
-        state.previous = copyPosition(current)
+        if not previous or previous.x ~= current.x or previous.y ~= current.y
+            or previous.z ~= current.z then
+            state.previous = copyPosition(current)
+        end
+        state.previousInInner = inInner
         releaseBlock(player, state)
     end
     states[id] = state
 end
 
-local function activePlayers()
-    local result = {}
+local function updateActivePlayers()
     if type(getNumActivePlayers) ~= "function" or type(getSpecificPlayer) ~= "function" then
-        return result
+        return
     end
     local ok, count = pcall(getNumActivePlayers)
-    if not ok or type(count) ~= "number" then return result end
+    if not ok or type(count) ~= "number" then return end
     for playerNum = 0, count - 1 do
         local playerOk, player = pcall(getSpecificPlayer, playerNum)
-        if playerOk and player then result[#result + 1] = player end
+        if playerOk and player then Client.onPlayerUpdate(player) end
     end
-    return result
 end
+
+local hasRenderTick = Events and Events.OnRenderTick
+    and type(Events.OnRenderTick.Add) == "function"
 
 function Client.onTick()
     clientTick = clientTick + 1
@@ -332,23 +383,22 @@ function Client.onTick()
             releaseBlock(player, state)
         end
     end
-    local players = activePlayers()
-    for i = 1, #players do Client.onPlayerUpdate(players[i]) end
+    if next(snapshots) == nil then return end
+    -- RenderTick handles movement feedback when available. Poll from OnTick
+    -- only as a fallback, avoiding a second local-player scan each tick.
+    if not hasRenderTick then updateActivePlayers() end
 end
 
 function Client.onRenderTick()
     -- Render-tick prediction is bounded to active local players and uses the
     -- exact same canonical segment predicate as OnPlayerUpdate.  It improves
     -- input latency but never becomes a permission check.
-    local players = activePlayers()
-    for i = 1, #players do Client.onPlayerUpdate(players[i]) end
+    if next(snapshots) == nil then return end
+    updateActivePlayers()
 end
 
 if Events and Events.OnServerCommand and type(Events.OnServerCommand.Add) == "function" then
     Events.OnServerCommand.Add(Client.onServerCommand)
-end
-if Events and Events.OnPlayerUpdate and type(Events.OnPlayerUpdate.Add) == "function" then
-    Events.OnPlayerUpdate.Add(Client.onPlayerUpdate)
 end
 if Events and Events.OnTick and type(Events.OnTick.Add) == "function" then
     Events.OnTick.Add(Client.onTick)

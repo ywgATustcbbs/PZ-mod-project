@@ -20,10 +20,22 @@ local integer = ctx.integer
 local call = ctx.call
 local playerId = ctx.playerId
 local playerName = ctx.playerName
-local playerPosition = ctx.playerPosition
 local copyPosition = ctx.copyPosition
 local findTrain = ctx.findTrain
 local trainPosition = ctx.trainPosition
+
+local MAP_SCHEMA_VALIDATION_TTL_TICKS = 120
+local validatedMapCache
+local boundaryValidation
+
+local function invalidateBoundaryValidationCache()
+    validatedMapCache = nil
+    if boundaryValidation then
+        boundaryValidation.invalidate()
+    else
+        Adapter._boundaryValidationWarmPending = true
+    end
+end
 
 local function mapData()
     if not ModData then
@@ -75,14 +87,33 @@ local function mapData()
             error(C.SAVE_REBUILD_REQUIRED)
         end
     end
+    local mappingEpoch = Adapter._boundaryValidationEpoch or 0
+    local geometryEpoch = Boundary and Boundary._geometryEpoch or 0
+    local now = Adapter._ticks or 0
+    local cached = validatedMapCache
+    if type(cached) == "table" and cached.map == map
+        and cached.mappingEpoch == mappingEpoch
+        and cached.geometryEpoch == geometryEpoch
+        and now >= cached.validatedAtTick
+        and now - cached.validatedAtTick < MAP_SCHEMA_VALIDATION_TTL_TICKS then
+        return map
+    end
     if validateMapSchema and not validateMapSchema(map) then
         error(C.SAVE_REBUILD_REQUIRED)
     end
+    geometryEpoch = Boundary and Boundary._geometryEpoch or 0
+    validatedMapCache = { map = map, mappingEpoch = mappingEpoch,
+        geometryEpoch = geometryEpoch, validatedAtTick = now }
     return map
 end
 
-local function transmitMap()
+local function transmitMap(boundaryChanged)
     Adapter._mappingEpoch = (Adapter._mappingEpoch or 0) + 1
+    if boundaryChanged ~= false then
+        Adapter._boundaryValidationEpoch =
+            (Adapter._boundaryValidationEpoch or 0) + 1
+        invalidateBoundaryValidationCache()
+    end
     if ModData and type(ModData.transmit) == "function" then
         pcall(ModData.transmit, C.RV_MAP_KEY)
     end
@@ -98,17 +129,47 @@ local function rvRegion()
         maxY = minY + size, minZ = minZ, maxZ = maxZ }
 end
 
+local function playerPositionInRegion(player, region)
+    if not player or type(region) ~= "table" then return nil end
+    local zOk, z = call(player, "getZ")
+    z = zOk and number(z) or nil
+    local minZ, maxZ = number(region.minZ), number(region.maxZ)
+    if z == nil or minZ == nil or maxZ == nil
+        or math.floor(z) < math.floor(minZ)
+        or math.floor(z) >= math.floor(maxZ) then
+        return nil
+    end
+    local xOk, x = call(player, "getX")
+    x = xOk and number(x) or nil
+    local minX, maxX = number(region.minX), number(region.maxX)
+    if x == nil or minX == nil or maxX == nil or x < minX or x >= maxX then
+        return nil
+    end
+    local yOk, y = call(player, "getY")
+    y = yOk and number(y) or nil
+    local minY, maxY = number(region.minY), number(region.maxY)
+    if y == nil or minY == nil or maxY == nil or y < minY or y >= maxY then
+        return nil
+    end
+    return { x = x, y = y, z = z }
+end
+
 local function inRegion(position, region)
     if type(position) ~= "table" or type(region) ~= "table" then return false end
-    local x, y, z = number(position.x), number(position.y), number(position.z)
+    local z = number(position.z)
+    local minZ, maxZ = number(region.minZ), number(region.maxZ)
+    if z == nil or minZ == nil or maxZ == nil
+        or math.floor(z) < math.floor(minZ)
+        or math.floor(z) >= math.floor(maxZ) then
+        return false
+    end
+    local x, y = number(position.x), number(position.y)
     local minX, minY = number(region.minX), number(region.minY)
     local maxX, maxY = number(region.maxX), number(region.maxY)
-    local minZ, maxZ = number(region.minZ), number(region.maxZ)
-    if not x or not y or not z or not minX or not minY or not maxX or not maxY
-        or not minZ or not maxZ then return false end
+    if not x or not y or not minX or not minY or not maxX or not maxY then
+        return false
+    end
     return x >= minX and x < maxX and y >= minY and y < maxY
-        and math.floor(z) >= math.floor(minZ)
-        and math.floor(z) < math.floor(maxZ)
 end
 
 local function validRegion(region)
@@ -260,49 +321,24 @@ recordForLoco = function(map, locoId)
     return nil, nil
 end
 
--- BoundaryServer delegates its player lookup to this one narrow hook so it
--- cannot accidentally run a shallow/legacy map parser.  mapData() performs
--- the complete current-schema validation (including every mapping record and
--- both sides of every player relation) before this hook returns any geometry.
-function Adapter.validateCurrentBoundaryPlayer(player)
-    local identityId, name = playerId(player), playerName(player)
-    if identityId == nil or not name then return nil end
-    local mapOk, map = pcall(mapData)
-    if not mapOk or type(map) ~= "table" then return nil end
-    local relation = map.players[name]
-    if type(relation) ~= "table" or relation.inside ~= true
-        or integer(relation.onlineId) ~= identityId then
-        return nil
-    end
-    local record = recordForLoco(map, relation.locoId)
-    if not record or not validRecord(record) then return nil end
-    local rider = type(record.players) == "table" and record.players[name] or nil
-    if type(rider) ~= "table" or rider.inside ~= true
-        or integer(rider.onlineId) ~= identityId then
-        return nil
-    end
-    local server = RailroaderRV and RailroaderRV.Server
-    if not server
-        or type(server.currentRVManifestForBoundary) ~= "function"
-        or type(server.currentRVRecordGeometryConsistent) ~= "function" then
-        return nil
-    end
-    local manifestCallOk, manifestAccepted, manifest = pcall(
-        server.currentRVManifestForBoundary, record.rvId, record.generation,
-        record.bitmapVersion)
-    if not manifestCallOk or manifestAccepted ~= true
-        or type(manifest) ~= "table" then
-        return nil
-    end
-    local geometryCallOk, geometryConsistent = pcall(
-        server.currentRVRecordGeometryConsistent, record, manifest)
-    if not geometryCallOk or geometryConsistent ~= true then return nil end
-    return record.boundary, record, relation, {
-        username = name, onlineId = identityId,
-        key = tostring(identityId) .. ":" .. name,
-    }
-end
-
+boundaryValidation = require("RailroaderRV/RV_RailroaderServer_BoundaryValidation")({
+    Boundary = Boundary,
+    Adapter = Adapter,
+    mapData = mapData,
+    rvRegion = rvRegion,
+    playerPositionInRegion = playerPositionInRegion,
+    recordForLoco = recordForLoco,
+    validRecord = validRecord,
+    serverTransactionMutexStatus = serverTransactionMutexStatus,
+    integer = integer,
+    playerId = playerId,
+    playerName = playerName,
+    onlinePlayersSnapshot = function()
+        local snapshot = ctx.onlinePlayersSnapshot
+        if type(snapshot) == "function" then return snapshot() end
+        return {}
+    end,
+})
 local function roofRepairRoomKey(record)
     if type(record) ~= "table" or record.locoId == nil
         or record.rvId == nil or tostring(record.rvId) == ""
@@ -537,12 +573,8 @@ end
 -- vehicle-pose exit.  Coordinates outside the target 100x100 region are a
 -- separate outside-rv rejection and are never corrected by this adapter.
 local function recordAtPlayerCoordinate(map, player)
-    local position = playerPosition(player)
+    local position = playerPositionInRegion(player, rvRegion())
     if not position then return nil, nil, nil, "outside-rv" end
-    local target = rvRegion()
-    if not inRegion(position, target) then
-        return nil, nil, nil, "outside-rv"
-    end
     for key, record in pairs(map.locomotives or {}) do
         if type(record) == "table" and inRegion(position, record.region) then
             if not validMappingRecord(record) then
@@ -582,4 +614,5 @@ ctx.pruneRoofRepairRooms = pruneRoofRepairRooms
 ctx.armRoomOwnershipMonitor = armRoomOwnershipMonitor
 ctx.recordAtPlayerCoordinate = recordAtPlayerCoordinate
 ctx.recordForLoco = recordForLoco
+Adapter.invalidateBoundaryValidationCache = invalidateBoundaryValidationCache
 end

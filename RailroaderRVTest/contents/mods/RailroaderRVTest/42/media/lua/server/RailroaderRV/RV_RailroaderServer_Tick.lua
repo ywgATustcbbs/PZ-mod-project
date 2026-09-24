@@ -20,6 +20,7 @@ local commitGeneration = ctx.commitGeneration
 local validateGeneration = ctx.validateGeneration
 local processStatelessRelocationSentinel = ctx.processStatelessRelocationSentinel
 local repairInsidePlayers = ctx.repairInsidePlayers
+local pauseFollowUpWallRemovalDeadlines = ctx.pauseFollowUpWallRemovalDeadlines
 local clearRoofRepairRuntimeState = ctx.clearRoofRepairRuntimeState
 local cancelPendingWallRoofRepair = ctx.cancelPendingWallRoofRepair
 local expireQueuedWallRoofRepairs = ctx.expireQueuedWallRoofRepairs
@@ -59,6 +60,9 @@ local function processPendingWallRoofRepairs()
         return
     end
     if generationActive then
+        if pauseFollowUpWallRemovalDeadlines then
+            pauseFollowUpWallRemovalDeadlines(now)
+        end
         for roomKey, pending in pairs(pendingWallRoofRepairs) do
             if type(pending) == "table"
                 and pending.relocationPhase == "queued"
@@ -166,8 +170,10 @@ end
 
 function Adapter.OnTick()
     Adapter._ticks = (Adapter._ticks or 0) + 1
-    pruneRoofRepairDedupeState(Adapter._ticks)
-    pruneRoofRepairRooms(Adapter._ticks)
+    if Adapter._ticks % 30 == 0 then
+        pruneRoofRepairDedupeState(Adapter._ticks)
+        pruneRoofRepairRooms(Adapter._ticks)
+    end
     processPendingWallRoofRepairs()
     -- Run the stateless z=-15 safety net only after ordinary in-memory roof
     -- transactions have had their phase/claim opportunity for this tick.
@@ -189,23 +195,25 @@ function Adapter.OnTick()
     Adapter._schemaWarning = nil
     local map = mapOrReason
     local changed = false
-    for _, record in pairs(map.locomotives or {}) do
-        if type(record) == "table" and record.locoId ~= nil then
-            local train = findTrain(record.locoId)
-            local position = train and trainPose(train)
-            if position then
-                local old = record.locoPosition
-                if not old or old.x ~= position.x or old.y ~= position.y
-                    or old.z ~= position.z then
-                    record.locoPosition = position
-                    record.updatedAt = math.floor(os.time())
-                    changed = true
+    if Adapter._ticks % 120 == 0 then
+        for _, record in pairs(map.locomotives or {}) do
+            if type(record) == "table" and record.locoId ~= nil then
+                local train = findTrain(record.locoId)
+                local position = train and trainPose(train)
+                if position then
+                    local old = record.locoPosition
+                    if not old or old.x ~= position.x or old.y ~= position.y
+                        or old.z ~= position.z then
+                        record.locoPosition = position
+                        record.updatedAt = math.floor(os.time())
+                        changed = true
+                    end
                 end
             end
         end
     end
     repairInsidePlayers(map)
-    if changed then transmitMap() end
+    if changed then transmitMap(false) end
 end
 
 -- PZ loads files in this directory alphabetically, so this adapter can be
@@ -223,7 +231,12 @@ function Adapter.installTransactionHooks()
     end
     server.setRailroaderValidationHook(validateGeneration)
     server.setRailroaderCommitHook(commitGeneration)
-    server.setRailroaderFailureHook(restoreAfterGenerationFailure)
+    server.setRailroaderFailureHook(function(...)
+        if type(Adapter.invalidateBoundaryValidationCache) == "function" then
+            Adapter.invalidateBoundaryValidationCache()
+        end
+        return restoreAfterGenerationFailure(...)
+    end)
     return true
 end
 

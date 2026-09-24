@@ -613,17 +613,20 @@ local function sentinelReturnToRV(candidate, player, map)
     return true
 end
 
-local function warnSentinelPlayersAtTemporaryCell(reason)
+local function warnSentinelPlayersAtTemporaryCell(reason, knownSentinelPlayers)
     local safeReason = type(reason) == "string" and reason ~= "" and reason
         or C.SAVE_REBUILD_REQUIRED
-    local players = onlinePlayersSnapshot()
+    local players = knownSentinelPlayers or onlinePlayersSnapshot()
     for i = 1, #players do
         local player = players[i]
-        local identityKey = sentinelIdentity(player)
-        local position = playerPosition(player)
-        if identityKey and position
-            and math.floor(position.z) == RELOCATION_SENTINEL_Z then
-            sentinelWarn(identityKey, safeReason)
+        local isSentinel = knownSentinelPlayers ~= nil
+        if not isSentinel then
+            local zOk, z = call(player, "getZ")
+            isSentinel = zOk and integer(z) == RELOCATION_SENTINEL_Z
+        end
+        if isSentinel then
+            local identityKey = sentinelIdentity(player)
+            if identityKey then sentinelWarn(identityKey, safeReason) end
         end
     end
 end

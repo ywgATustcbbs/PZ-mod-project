@@ -10,9 +10,9 @@ local playerCell = ctx.playerCell
 local square = ctx.square
 local boundaryKey = ctx.boundaryKey
 local sameBoundary = ctx.sameBoundary
-local stateFor = ctx.stateFor
 local transitionActive = ctx.transitionActive
 local updatePlayer = ctx.updatePlayer
+local playerPosition = ctx.playerPosition
 
 local function collectionSnapshot(collection)
     local result = {}
@@ -50,10 +50,15 @@ local function squareObjects(square)
 end
 
 local function flushDirty()
+    local deferred = {}
     for key, action in pairs(Boundary._dirty) do
         Boundary._dirty[key] = nil
         local cell = playerCell(action.player)
-        local current = Boundary.boundaryForPlayer(action.player)
+        local current, status = Boundary.boundaryForPlayer(action.player,
+            action.identity, true)
+        if status == "validation-deferred" then
+            deferred[key] = action
+        end
         if cell and action.boundary and action.identity
             and sameBoundary(current, action.boundary) then
             local sq = square(cell, action.x, action.y, action.z)
@@ -63,6 +68,9 @@ local function flushDirty()
                 end
             end
         end
+    end
+    for key, action in pairs(deferred) do
+        Boundary._dirty[key] = Boundary._dirty[key] or action
     end
 end
 
@@ -114,7 +122,7 @@ local function cleanupForBoundary(boundary, player)
     end
     local cell = playerCell(player)
     if not cell then return end
-    local budget = 128
+    local budget = integer(C.BOUNDARY_CLEANUP_SQUARES_PER_STEP) or 64
     local bitmap = boundary.bitmap
     while budget > 0 and cursor.z < bitmap.maxZ do
         if cursor.y >= bitmap.originY + bitmap.height then
@@ -144,31 +152,36 @@ end
 function Boundary.onTick()
     Boundary._tick = Boundary._tick + 1
     local players = onlinePlayersSnapshot()
-    local activeBoundaries = {}
+    local cleanupInterval = integer(C.BOUNDARY_TICK_INTERVAL) or 1
+    local activeBoundaries = Boundary._tick % cleanupInterval == 0 and {} or nil
     for i = 1, #players do
         local player = players[i]
-        local id = identity(player)
-        if id then
-            local state = stateFor(player)
-            -- Roof relocation owns the player's boundary lease while the
-            -- authoritative object is intentionally in a different chunk.
-            -- Do not revalidate RV geometry or run cleanup through the remote
-            -- player's cell; those scans can stall the server tick before the
-            -- grouped roof state machine reaches its due ticks.  The lease is
-            -- extended by RV_Server before this callback and normal boundary
-            -- processing resumes after completeTransition.
-            if not state or not transitionActive(state) then
-                local boundary = updatePlayer(player)
-                if boundary then
-                    activeBoundaries[boundaryKey(boundary)] = {
-                        boundary = boundary, player = player,
+        local position = playerPosition(player)
+        if position then
+            local id = identity(player)
+            if id then
+                local state = Boundary._states[id.key]
+                if state then state.identity = id end
+                -- Roof relocation owns the player's boundary lease while the
+                -- authoritative object is intentionally in a different chunk.
+                -- Do not revalidate RV geometry or run cleanup through the remote
+                -- player's cell; those scans can stall the server tick before the
+                -- grouped roof state machine reaches its due ticks.  The lease is
+                -- extended by RV_Server before this callback and normal boundary
+                -- processing resumes after completeTransition.
+                if not state or not transitionActive(state) then
+                    local boundary = updatePlayer(player, position, id, true)
+                    if boundary and activeBoundaries then
+                        activeBoundaries[boundaryKey(boundary)] = {
+                            boundary = boundary, player = player,
+                        }
                     }
                 end
             end
         end
     end
     flushDirty()
-    if Boundary._tick % (integer(C.BOUNDARY_TICK_INTERVAL) or 1) == 0 then
+    if activeBoundaries then
         for _, item in pairs(activeBoundaries) do cleanupForBoundary(item.boundary, item.player) end
     end
     for key, builder in pairs(Boundary._builders) do

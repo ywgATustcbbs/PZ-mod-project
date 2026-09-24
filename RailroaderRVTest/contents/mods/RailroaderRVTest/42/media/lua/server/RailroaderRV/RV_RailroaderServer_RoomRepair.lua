@@ -28,14 +28,15 @@ local function insidePlayersForRecord(...) return ctx.insidePlayersForRecord(...
 local function scheduleRoofRepair(...) return ctx.scheduleRoofRepair(...) end
 local function observeRoomTransitions(...) return ctx.observeRoomTransitions(...) end
 local function serverTransactionMutexStatus(...) return ctx.serverTransactionMutexStatus(...) end
+local number = ctx.number
 local integer = ctx.integer
 local call = ctx.call
 local playerId = ctx.playerId
 local playerName = ctx.playerName
 local playerDead = ctx.playerDead
-local playerPosition = ctx.playerPosition
 local copyPosition = ctx.copyPosition
 local mapData = ctx.mapData
+local rvRegion = ctx.rvRegion
 local inRegion = ctx.inRegion
 local validRecord = ctx.validRecord
 local roofRepairRoomKey = ctx.roofRepairRoomKey
@@ -52,6 +53,31 @@ local sentinelRecordCandidate = ctx.sentinelRecordCandidate
 local sentinelReturnToRV = ctx.sentinelReturnToRV
 local warnSentinelPlayersAtTemporaryCell = ctx.warnSentinelPlayersAtTemporaryCell
 
+local function playerPositionInRegion(player, region)
+    if not player or type(region) ~= "table" then return nil end
+    local zOk, z = call(player, "getZ")
+    z = zOk and number(z) or nil
+    local minZ, maxZ = number(region.minZ), number(region.maxZ)
+    if z == nil or minZ == nil or maxZ == nil
+        or math.floor(z) < math.floor(minZ)
+        or math.floor(z) >= math.floor(maxZ) then
+        return nil
+    end
+    local xOk, x = call(player, "getX")
+    x = xOk and number(x) or nil
+    local minX, maxX = number(region.minX), number(region.maxX)
+    if x == nil or minX == nil or maxX == nil or x < minX or x >= maxX then
+        return nil
+    end
+    local yOk, y = call(player, "getY")
+    y = yOk and number(y) or nil
+    local minY, maxY = number(region.minY), number(region.maxY)
+    if y == nil or minY == nil or maxY == nil or y < minY or y >= maxY then
+        return nil
+    end
+    return { x = x, y = y, z = z }
+end
+
 local function processStatelessRelocationSentinel()
     local now = Adapter._ticks or 0
     if RELOCATION_SENTINEL_INTERVAL_TICKS == nil
@@ -61,22 +87,28 @@ local function processStatelessRelocationSentinel()
     local players = onlinePlayersSnapshot()
     local present = {}
     local sentinelPlayers = {}
+    local pruneAbsent = now % 60 == 0
     for i = 1, #players do
         local player = players[i]
-        local identityKey = sentinelIdentity(player)
-        local position = playerPosition(player)
-        if identityKey then
-            present[identityKey] = true
-            if position and math.floor(position.z) == RELOCATION_SENTINEL_Z then
-                sentinelPlayers[#sentinelPlayers + 1] = player
+        local zOk, z = call(player, "getZ")
+        local atSentinel = zOk and integer(z) == RELOCATION_SENTINEL_Z
+        if atSentinel or pruneAbsent then
+            local identityKey = sentinelIdentity(player)
+            if identityKey then
+                if pruneAbsent then present[identityKey] = true end
+                if atSentinel then
+                    sentinelPlayers[#sentinelPlayers + 1] = player
+                end
             end
         end
     end
-    for identityKey in pairs(relocationSentinelCooldown) do
-        if not present[identityKey] then
-            relocationSentinelCooldown[identityKey] = nil
-            relocationSentinelWarnings[identityKey] = nil
-            relocationSentinelBusy[identityKey] = nil
+    if pruneAbsent then
+        for identityKey in pairs(relocationSentinelCooldown) do
+            if not present[identityKey] then
+                relocationSentinelCooldown[identityKey] = nil
+                relocationSentinelWarnings[identityKey] = nil
+                relocationSentinelBusy[identityKey] = nil
+            end
         end
     end
     if #sentinelPlayers == 0 then return end
@@ -85,7 +117,8 @@ local function processStatelessRelocationSentinel()
         or type(server.currentRVManifestForRelocation) ~= "function"
         or type(server.isGenerationTransactionActive) ~= "function"
         or type(server.isRoofRepairTransactionActive) ~= "function" then
-        warnSentinelPlayersAtTemporaryCell(C.SAVE_REBUILD_REQUIRED)
+        warnSentinelPlayersAtTemporaryCell(C.SAVE_REBUILD_REQUIRED,
+            sentinelPlayers)
         return
     end
     local generationCallOk, generationActive = pcall(
@@ -94,7 +127,8 @@ local function processStatelessRelocationSentinel()
         server.isRoofRepairTransactionActive, nil)
     if not generationCallOk or type(generationActive) ~= "boolean"
         or not roofCallOk or type(roofActive) ~= "boolean" then
-        warnSentinelPlayersAtTemporaryCell(C.SAVE_REBUILD_REQUIRED)
+        warnSentinelPlayersAtTemporaryCell(C.SAVE_REBUILD_REQUIRED,
+            sentinelPlayers)
         return
     end
     -- Ordinary transactions own the managed scope while they are moving or
@@ -104,7 +138,8 @@ local function processStatelessRelocationSentinel()
     if generationActive or roofActive then return end
     local mapOk, map = pcall(mapData)
     if not mapOk or type(map) ~= "table" then
-        warnSentinelPlayersAtTemporaryCell(mapOk and map or C.SAVE_REBUILD_REQUIRED)
+        warnSentinelPlayersAtTemporaryCell(
+            mapOk and map or C.SAVE_REBUILD_REQUIRED, sentinelPlayers)
         return
     end
     for i = 1, #sentinelPlayers do
@@ -191,70 +226,74 @@ end
 local function repairInsidePlayers(map)
     local present = {}
     local observedRooms = {}
+    local boundaryPlayers = {}
     local players = onlinePlayersSnapshot()
+    local area = rvRegion()
     for i = 1, #players do
         local player = players[i]
-        local name = playerName(player)
-        local relation = name and map.players[name] or nil
-        if type(relation) == "table" and relation.inside == true then
-            local record = recordForLoco(map, relation.locoId)
-            local position = playerPosition(player)
-            if record and validRecord(record) and position
-                and inRegion(position, record.region) then
-                local roomKey = roofRepairRoomKey(record)
-                local presenceKey = roomKey and name
-                    and (name .. ":" .. roomKey) or nil
-                if presenceKey then present[presenceKey] = true end
-                if roomKey then
-                    local observed = observedRooms[roomKey]
-                    if not observed then
-                        observed = {
-                            record = record,
-                            inRoom = nil,
-                            hasRoom = false,
-                            hasRoomDef = false,
-                            roomStateAvailable = false,
-                        }
-                        observedRooms[roomKey] = observed
-                    end
-                    local roomState = authoritativeRoomState(player)
-                    if roomState then
-                        if observed.inRoom == nil then
-                            observed.inRoom = roomState.inRoom
-                        else
-                            observed.inRoom = observed.inRoom or roomState.inRoom
+        local position = playerPositionInRegion(player, area)
+        if position then
+            boundaryPlayers[#boundaryPlayers + 1] = player
+            local name = playerName(player)
+            local relation = name and map.players[name] or nil
+            if type(relation) == "table" and relation.inside == true then
+                local record = recordForLoco(map, relation.locoId)
+                if record and validRecord(record)
+                    and inRegion(position, record.region) then
+                    local roomKey = roofRepairRoomKey(record)
+                    local presenceKey = roomKey and name
+                        and (name .. ":" .. roomKey) or nil
+                    if presenceKey then present[presenceKey] = true end
+                    if roomKey then
+                        local observed = observedRooms[roomKey]
+                        if not observed then
+                            observed = {
+                                record = record,
+                                inRoom = nil,
+                                hasRoom = false,
+                                hasRoomDef = false,
+                                roomStateAvailable = false,
+                            }
+                            observedRooms[roomKey] = observed
                         end
-                        observed.hasRoom = observed.hasRoom or roomState.hasRoom
-                        observed.hasRoomDef = observed.hasRoomDef
-                            or roomState.hasRoomDef
-                        observed.roomStateAvailable = true
+                        local roomState = authoritativeRoomState(player)
+                        if roomState then
+                            if observed.inRoom == nil then
+                                observed.inRoom = roomState.inRoom
+                            else
+                                observed.inRoom = observed.inRoom or roomState.inRoom
+                            end
+                            observed.hasRoom = observed.hasRoom or roomState.hasRoom
+                            observed.hasRoomDef = observed.hasRoomDef
+                                or roomState.hasRoomDef
+                            observed.roomStateAvailable = true
+                        end
                     end
-                end
-                local currentOnlineId = playerId(player)
-                local reconnect = currentOnlineId ~= nil
-                    and relation.onlineId ~= nil
-                    and tostring(currentOnlineId) ~= tostring(relation.onlineId)
-                local firstPresence = presenceKey == nil
-                    or roofRepairPlayers[presenceKey] ~= true
-                local monitorReady = false
-                if presenceKey then
-                    monitorReady = roomMonitorPlayers[presenceKey] == player
-                    if not monitorReady then
-                        monitorReady = armRoomOwnershipMonitor(player, record,
+                    local currentOnlineId = playerId(player)
+                    local reconnect = currentOnlineId ~= nil
+                        and relation.onlineId ~= nil
+                        and tostring(currentOnlineId) ~= tostring(relation.onlineId)
+                    local firstPresence = presenceKey == nil
+                        or roofRepairPlayers[presenceKey] ~= true
+                    local monitorReady = false
+                    if presenceKey then
+                        monitorReady = roomMonitorPlayers[presenceKey] == player
+                        if not monitorReady then
+                            monitorReady = armRoomOwnershipMonitor(player, record,
+                                reconnect and "reconnect" or "presence")
+                            if monitorReady then
+                                roomMonitorPlayers[presenceKey] = player
+                            end
+                        end
+                    end
+                    -- A wall-removal transaction owns the player until its return
+                    -- ACK. Do not run presence repair while the player is relocated.
+                    if monitorReady and not (roomKey
+                        and pendingWallRoofRepairs[roomKey] ~= nil) then
+                        repairRoofForPlayer(player, record,
+                            firstPresence or reconnect,
                             reconnect and "reconnect" or "presence")
-                        if monitorReady then
-                            roomMonitorPlayers[presenceKey] = player
-                        end
                     end
-                end
-                -- A wall-removal transaction owns the player until its return
-                -- ACK.  Do not run the ordinary presence repair concurrently
-                -- while that player is temporarily relocated; the transaction
-                -- itself performs the delayed 5/10/15-tick attempts.
-                if monitorReady and not (roomKey
-                    and pendingWallRoofRepairs[roomKey] ~= nil) then
-                    repairRoofForPlayer(player, record, firstPresence or reconnect,
-                        reconnect and "reconnect" or "presence")
                 end
             end
         end
@@ -267,6 +306,9 @@ local function repairInsidePlayers(map)
     end
     for presenceKey in pairs(roomMonitorPlayers) do
         if not present[presenceKey] then roomMonitorPlayers[presenceKey] = nil end
+    end
+    if type(Adapter.prewarmCurrentBoundaryPlayers) == "function" then
+        Adapter.prewarmCurrentBoundaryPlayers(map, boundaryPlayers)
     end
 end
 
@@ -380,6 +422,22 @@ local function rememberFollowUpWallRemoval(record, roomKey, eventKey,
     print("[RailroaderRVTest] wall removal follow-up queued room=" .. roomKey
         .. " event=" .. eventKey)
     return true
+end
+
+local function pauseFollowUpWallRemovalDeadlines(now)
+    if next(followUpWallRemovalEvents) == nil then return end
+    now = integer(now) or (Adapter._ticks or 0)
+    for _, events in pairs(followUpWallRemovalEvents) do
+        if type(events) == "table" then
+            for _, event in pairs(events) do
+                local expiresAt = type(event) == "table"
+                    and integer(event.expiresAtTick) or nil
+                if expiresAt and now <= expiresAt then
+                    event.waitingForGeneration = true
+                end
+            end
+        end
+    end
 end
 
 -- Both legal server-side removal paths pass the authoritative IsoThumpable
@@ -513,28 +571,30 @@ insidePlayersForRecord = function(map, record)
         or type(record.players) ~= "table" then return result end
     local wanted = tostring(record.rvId or record.locoId)
     local players = onlinePlayersSnapshot()
+    local area = rvRegion()
     for i = 1, #players do
         local player = players[i]
-        local name = playerName(player)
-        local relation = name and map.players[name] or nil
-        local rider = name and record.players[name] or nil
-        local position = playerPosition(player)
-        local currentOnlineId = playerId(player)
-        if not playerDead(player)
-            and type(relation) == "table" and relation.inside == true
-            and type(rider) == "table" and rider.inside == true
-            and tostring(relation.locoId) == wanted
-            and integer(relation.onlineId) == integer(rider.onlineId)
-            and position and inRegion(position, record.region)
-            and (currentOnlineId == nil
-                or integer(relation.onlineId) == currentOnlineId)
-            and (currentOnlineId == nil
-                or integer(rider.onlineId) == currentOnlineId) then
-            result[#result + 1] = {
-                player = player,
-                identityKey = tostring(relation.onlineId) .. ":" .. tostring(name),
-                originalPosition = copyPosition(position),
-            }
+        local position = playerPositionInRegion(player, area)
+        if position and inRegion(position, record.region) then
+            local name = playerName(player)
+            local relation = name and map.players[name] or nil
+            local rider = name and record.players[name] or nil
+            local currentOnlineId = playerId(player)
+            if not playerDead(player)
+                and type(relation) == "table" and relation.inside == true
+                and type(rider) == "table" and rider.inside == true
+                and tostring(relation.locoId) == wanted
+                and integer(relation.onlineId) == integer(rider.onlineId)
+                and (currentOnlineId == nil
+                    or integer(relation.onlineId) == currentOnlineId)
+                and (currentOnlineId == nil
+                    or integer(rider.onlineId) == currentOnlineId) then
+                result[#result + 1] = {
+                    player = player,
+                    identityKey = tostring(relation.onlineId) .. ":" .. tostring(name),
+                    originalPosition = copyPosition(position),
+                }
+            end
         end
     end
     return result
@@ -603,4 +663,5 @@ ctx.repairInsidePlayers = repairInsidePlayers
 ctx.rememberFollowUpWallRemoval = rememberFollowUpWallRemoval
 ctx.scheduleRoofRepair = scheduleRoofRepair
 ctx.insidePlayersForRecord = insidePlayersForRecord
+ctx.pauseFollowUpWallRemovalDeadlines = pauseFollowUpWallRemovalDeadlines
 end

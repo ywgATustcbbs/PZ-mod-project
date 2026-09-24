@@ -4,8 +4,102 @@ local C = ctx.C
 local Layout = ctx.Layout
 local roomOwnershipGuards = ctx.roomOwnershipGuards
 local ROOM_OWNERSHIP_MIN_TICKS = ctx.ROOM_OWNERSHIP_MIN_TICKS
-local ROOM_OWNERSHIP_STABLE_TICKS = ctx.ROOM_OWNERSHIP_STABLE_TICKS
-local ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS = ctx.ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS
+local ROOM_OWNERSHIP_REACTIVE_SCAN_INTERVAL_TICKS = 5
+local ROOM_OWNERSHIP_EVENT_RESCAN_COUNT = 3
+local ROOM_OWNERSHIP_EVENT_SCAN_COOLDOWN_TICKS =
+    (ROOM_OWNERSHIP_EVENT_RESCAN_COUNT + 1)
+        * ROOM_OWNERSHIP_REACTIVE_SCAN_INTERVAL_TICKS
+
+-- TEMPORARY PerfTrace counters for correlating room ownership work with CPU
+-- samples. Remove after the diagnostic capture is complete.
+local PERF_TRACE_WINDOW_SECONDS = 10
+local function perfWindowStart()
+    local ok, windowStart = pcall(function()
+        if type(os) ~= "table" or type(os.time) ~= "function" then return nil end
+        local now = os.time()
+        if type(now) ~= "number" or now ~= now
+            or now <= -math.huge or now >= math.huge then
+            return nil
+        end
+        return math.floor(now / PERF_TRACE_WINDOW_SECONDS)
+            * PERF_TRACE_WINDOW_SECONDS
+    end)
+    if not ok or type(windowStart) ~= "number" then return nil end
+    return windowStart
+end
+
+local initialPerfWindowStart = perfWindowStart()
+local perfTraceEnabled = initialPerfWindowStart ~= nil
+
+local function perfNowMs()
+    if not perfTraceEnabled then return nil end
+    local ok, value = pcall(function()
+        if type(getTimestampMs) == "function" then return getTimestampMs() end
+        return nil
+    end)
+    if ok and type(value) == "number" and value == value
+        and value > -math.huge and value < math.huge then
+        return value
+    end
+    return nil
+end
+
+local perfTrace = {
+    windowStart = initialPerfWindowStart,
+    lastTick = 0,
+    tickCalls = 0,
+    guardsVisited = 0,
+    localSquareReads = 0,
+    localRoomInspections = 0,
+    localCleared = 0,
+    fullScanCalls = 0,
+    fullScanCoordinates = 0,
+    fullScanLoadedSquares = 0,
+    fullScanCleared = 0,
+    fullScanErrors = 0,
+    fullScanMsTotal = 0,
+    fullScanMsMax = 0,
+    fullScanTimed = 0,
+}
+
+local function recordFullScanTime(startedAt)
+    if type(startedAt) ~= "number" then return end
+    local finishedAt = perfNowMs()
+    if type(finishedAt) ~= "number" then return end
+    local elapsed = math.max(0, finishedAt - startedAt)
+    perfTrace.fullScanMsTotal = perfTrace.fullScanMsTotal + elapsed
+    perfTrace.fullScanMsMax = math.max(perfTrace.fullScanMsMax, elapsed)
+    perfTrace.fullScanTimed = perfTrace.fullScanTimed + 1
+end
+
+local function emitRoomOwnershipPerfTrace(tick)
+    if not perfTraceEnabled then return end
+    local windowStart = perfWindowStart()
+    if windowStart == nil then
+        perfTraceEnabled = false
+        return
+    end
+    if windowStart == perfTrace.windowStart then return end
+    print("[RailroaderRVTest][PerfTrace] client/roomguard win="
+        .. tostring(perfTrace.windowStart)
+        .. " t=" .. tostring(tick)
+        .. " gv=" .. tostring(perfTrace.guardsVisited)
+        .. " lp=" .. tostring(perfTrace.localSquareReads)
+        .. " li=" .. tostring(perfTrace.localRoomInspections)
+        .. " lc=" .. tostring(perfTrace.localCleared)
+        .. " fs=" .. tostring(perfTrace.fullScanCalls)
+        .. " xy=" .. tostring(perfTrace.fullScanCoordinates)
+        .. " hit=" .. tostring(perfTrace.fullScanLoadedSquares)
+        .. " clr=" .. tostring(perfTrace.fullScanCleared)
+        .. " err=" .. tostring(perfTrace.fullScanErrors)
+        .. " ms=" .. string.format("%.2f/%.2f/%d",
+            perfTrace.fullScanMsTotal, perfTrace.fullScanMsMax,
+            perfTrace.fullScanTimed))
+    for key, value in pairs(perfTrace) do
+        if key ~= "windowStart" then perfTrace[key] = 0 end
+    end
+    perfTrace.windowStart = windowStart
+end
 
 local function roomOwnershipGuardKey(rvId, generation, bitmapVersion)
     return tostring(rvId) .. ":" .. tostring(generation) .. ":"
@@ -79,8 +173,16 @@ local function eachStructureSquare(cell, bounds, callback)
         return
     end
     Layout.eachStructureCoordinate(bounds, function(x, y, z)
-        local square = cell:getGridSquare(x, y, z)
-        if square then callback(square, x, y, z) end
+        if perfTraceEnabled then
+            perfTrace.fullScanCoordinates = perfTrace.fullScanCoordinates + 1
+        end
+        local squareOk, square = pcall(function()
+            return cell:getGridSquare(x, y, z)
+        end)
+        if perfTraceEnabled and squareOk and square then
+            perfTrace.fullScanLoadedSquares = perfTrace.fullScanLoadedSquares + 1
+        end
+        callback(squareOk and square or nil, x, y, z)
     end)
 end
 
@@ -122,15 +224,30 @@ local function inspectRoomOwnershipSquare(square)
 end
 
 local function refreshInvalidRoomOwnership(guard)
+    if perfTraceEnabled then
+        perfTrace.fullScanCalls = perfTrace.fullScanCalls + 1
+    end
+    local startedAt = perfNowMs()
     local cell = getCell()
-    if not cell then return false, 0 end
+    if not cell then
+        if perfTraceEnabled then
+            perfTrace.fullScanErrors = perfTrace.fullScanErrors + 1
+        end
+        recordFullScanTime(startedAt)
+        return false, 0
+    end
     local scanOk = true
+    local coverageComplete = true
     local cleared = 0
     local seen = {}
     local function inspect(square, x, y, z)
         local key = tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
         if seen[key] then return end
         seen[key] = true
+        if not square then
+            coverageComplete = false
+            return
+        end
         local inspected, reset = inspectRoomOwnershipSquare(square)
         if not inspected then
             scanOk = false
@@ -140,7 +257,14 @@ local function refreshInvalidRoomOwnership(guard)
     end
     eachStructureSquare(cell, guard.oldBounds, inspect)
     eachStructureSquare(cell, guard.newBounds, inspect)
-    return scanOk, cleared
+    if perfTraceEnabled and (not scanOk or not coverageComplete) then
+        perfTrace.fullScanErrors = perfTrace.fullScanErrors + 1
+    end
+    if perfTraceEnabled then
+        perfTrace.fullScanCleared = perfTrace.fullScanCleared + cleared
+    end
+    recordFullScanTime(startedAt)
+    return scanOk and coverageComplete, cleared
 end
 
 local function refreshCurrentPlayerRoomOwnership(guard)
@@ -155,6 +279,9 @@ local function refreshCurrentPlayerRoomOwnership(guard)
     for playerNum = 0, count - 1 do
         local playerOk, player = pcall(getSpecificPlayer, playerNum)
         if playerOk and player and type(player.getCurrentSquare) == "function" then
+            if perfTraceEnabled then
+                perfTrace.localSquareReads = perfTrace.localSquareReads + 1
+            end
             local squareOk, square = pcall(function()
                 return player:getCurrentSquare()
             end)
@@ -167,11 +294,19 @@ local function refreshCurrentPlayerRoomOwnership(guard)
                     local key = tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
                     if not seen[key] then
                         seen[key] = true
+                        if perfTraceEnabled then
+                            perfTrace.localRoomInspections =
+                                perfTrace.localRoomInspections + 1
+                        end
                         local inspected, reset = inspectRoomOwnershipSquare(square)
                         if not inspected then
                             scanOk = false
                         else
                             cleared = cleared + reset
+                            if perfTraceEnabled then
+                                perfTrace.localCleared =
+                                    perfTrace.localCleared + reset
+                            end
                         end
                     end
                 end
@@ -191,14 +326,75 @@ local function objectCoordinates(object)
     return squareCoordinates(target)
 end
 
+local function scheduleRoomOwnershipScan(guard, delayedRetries)
+    local delayedRetryCount = delayedRetries or 0
+    local allowGuardScan = true
+    if delayedRetryCount > 0 then
+        local cooldownUntil = guard.eventScanCooldownUntil or -1
+        if ctx.clientTick <= cooldownUntil then
+            allowGuardScan = false
+        else
+            -- Object callbacks in this fixed window merge into one bounded
+            -- delayed-recheck batch; later callbacks cannot refill its budget.
+            guard.eventScanCooldownUntil = ctx.clientTick
+                + ROOM_OWNERSHIP_EVENT_SCAN_COOLDOWN_TICKS
+        end
+    end
+
+    if allowGuardScan then
+        local nextTick = ctx.clientTick + 1
+        if guard.lastReactiveScanTick ~= nil then
+            nextTick = math.max(nextTick,
+                guard.lastReactiveScanTick
+                    + ROOM_OWNERSHIP_REACTIVE_SCAN_INTERVAL_TICKS)
+        end
+
+        local retries = guard.scanRetryRemaining or 0
+        local scanPending = guard.scanRequested == true or retries > 0
+        if not scanPending then
+            guard.scanRetryRemaining = delayedRetryCount
+        elseif retries == 0 and delayedRetryCount > 0 then
+            guard.scanRetryRemaining = delayedRetryCount
+        end
+
+        guard.scanRequested = true
+        if guard.nextScanTick == nil or nextTick < guard.nextScanTick then
+            guard.nextScanTick = nextTick
+        end
+    end
+
+    -- If the bounded transaction scan window was exhausted while client
+    -- chunks were still arriving, a later matching world/local trigger opens
+    -- one fresh bounded window. Unloaded data alone never counts as success.
+    local pendingFinal = ctx.pendingFinalRelocation
+    local args = type(pendingFinal) == "table" and pendingFinal.args
+    local pendingPhase = pendingFinal
+        and (pendingFinal.teleported and "post" or "pre")
+    local triggerRetryKey = pendingPhase
+        and (pendingPhase .. "TriggerRetryUsed")
+    if type(args) == "table" and pendingFinal.failed == true
+        and pendingFinal.failedPhase == pendingPhase
+        and pendingFinal[triggerRetryKey] ~= true
+        and tostring(args.rvId) == tostring(guard.rvId)
+        and finiteInteger(args.generation) == guard.generation
+        and finiteInteger(args.bitmapVersion) == guard.bitmapVersion then
+        pendingFinal.failed = false
+        pendingFinal.failedPhase = nil
+        pendingFinal[triggerRetryKey] = true
+        pendingFinal[pendingPhase .. "ScanAttempts"] = 0
+        pendingFinal[pendingPhase .. "NextScanTick"] = ctx.clientTick
+        print("[RailroaderRVTest] final relocation " .. pendingPhase
+            .. " room scan resumed after a matching repair trigger")
+    end
+end
+
 local function requestRoomOwnershipScan(object)
     local x, y, z = objectCoordinates(object)
     if x == nil then return end
     for _, guard in pairs(roomOwnershipGuards) do
         if coordinatesInBounds(x, y, z, guard.oldBounds)
             or coordinatesInBounds(x, y, z, guard.newBounds) then
-            guard.scanRequested = true
-            guard.nextScanTick = ctx.clientTick
+            scheduleRoomOwnershipScan(guard, ROOM_OWNERSHIP_EVENT_RESCAN_COUNT)
         end
     end
 end
@@ -238,31 +434,52 @@ local function beginRoomOwnershipRefresh(args)
         oldBounds = oldBounds,
         newBounds = newBounds,
         ticks = 0,
-        stableTicks = 0,
         totalCleared = 0,
         monitorReady = false,
         scanRequested = false,
+        scanRetryRemaining = 0,
+        currentCheckErrorLatched = false,
+        eventScanCooldownUntil = -1,
     }
     -- Arm immediately, before any ordered removal/rebuild packets that follow
     -- this broadcast server command are applied.
     local guard = roomOwnershipGuards[key]
     local scanOk, cleared = refreshInvalidRoomOwnership(guard)
     guard.totalCleared = cleared
-    guard.lastScanStable = scanOk and cleared == 0
-    guard.stableTicks = guard.lastScanStable
-        and ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS or 0
-    guard.nextScanTick = ctx.clientTick + ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS
+    guard.lastFullScanComplete = scanOk
+    guard.lastReactiveScanTick = ctx.clientTick
+    if not scanOk then
+        -- This packet can arrive before client chunks or IsoRegions are ready.
+        -- Retry only this incomplete setup a bounded number of times; there is
+        -- no recurring whole-footprint timer.
+        guard.scanRequested = true
+        guard.scanRetryRemaining = 2
+        guard.nextScanTick = ctx.clientTick
+            + ROOM_OWNERSHIP_REACTIVE_SCAN_INTERVAL_TICKS
+    end
 end
 
-local function finalTargetRoomIsValid(x, y, z)
+local function finalTargetSquare(x, y, z)
     local cell = getCell()
     if not cell then
-        return false
+        return nil
     end
     local squareCallOk, square = pcall(function()
         return cell:getGridSquare(math.floor(x), math.floor(y), z)
     end)
-    if not squareCallOk or not square then
+    if not squareCallOk then
+        return nil
+    end
+    return square
+end
+
+local function finalTargetSquareIsLoaded(x, y, z)
+    return finalTargetSquare(x, y, z) ~= nil
+end
+
+local function finalTargetRoomIsValid(x, y, z)
+    local square = finalTargetSquare(x, y, z)
+    if not square then
         -- The server waits for the complete footprint, but the client may
         -- still be streaming its local cell. Keep the player at staging and
         -- retry the synchronous check on a later command/tick.
@@ -299,42 +516,58 @@ local function finalTargetRoomIsValid(x, y, z)
 end
 
 local function updateRoomOwnershipGuards()
+    emitRoomOwnershipPerfTrace(perfTrace.lastTick)
+    if perfTraceEnabled then
+        perfTrace.tickCalls = perfTrace.tickCalls + 1
+        perfTrace.lastTick = ctx.clientTick
+    end
     for generation, guard in pairs(roomOwnershipGuards) do
+        if perfTraceEnabled then
+            perfTrace.guardsVisited = perfTrace.guardsVisited + 1
+        end
         guard.ticks = guard.ticks + 1
         local currentScanOk, currentCleared = refreshCurrentPlayerRoomOwnership(guard)
-        if not currentScanOk or currentCleared > 0 then
-            guard.lastScanStable = false
-            guard.stableTicks = 0
-            guard.scanRequested = true
+        if not currentScanOk then
+            if not guard.currentCheckErrorLatched then
+                guard.currentCheckErrorLatched = true
+                scheduleRoomOwnershipScan(guard, 0)
+                print("[RailroaderRVTest] client current-square room check failed; "
+                    .. "queued one full scan generation="
+                    .. tostring(generation))
+            end
+        else
+            -- A successful local check rearms edge detection for a future,
+            -- separate API failure. A persistent failure cannot queue a sweep
+            -- on every tick.
+            guard.currentCheckErrorLatched = false
         end
-        if guard.scanRequested or ctx.clientTick >= (guard.nextScanTick or 0) then
+        if currentScanOk and currentCleared > 0 then
+            scheduleRoomOwnershipScan(guard, 0)
+        end
+        if guard.scanRequested
+            and ctx.clientTick >= (guard.nextScanTick or 0) then
+            guard.scanRequested = false
             local scanOk, cleared = refreshInvalidRoomOwnership(guard)
             guard.totalCleared = guard.totalCleared + cleared
-            guard.lastScanStable = scanOk and cleared == 0
-            guard.scanRequested = not scanOk or cleared > 0
-            guard.nextScanTick = ctx.clientTick + ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS
-            if guard.lastScanStable then
-                -- stableTicks represents successful full scans, expressed in
-                -- the configured fallback interval, not elapsed ticks since
-                -- the last scan.
-                guard.stableTicks = guard.stableTicks
-                    + ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS
+            guard.lastFullScanComplete = scanOk
+            guard.lastReactiveScanTick = ctx.clientTick
+            if (guard.scanRetryRemaining or 0) > 0 then
+                guard.scanRetryRemaining = guard.scanRetryRemaining - 1
+                guard.scanRequested = true
+                guard.nextScanTick = ctx.clientTick
+                    + ROOM_OWNERSHIP_REACTIVE_SCAN_INTERVAL_TICKS
             else
-                guard.stableTicks = 0
+                guard.nextScanTick = nil
             end
         end
-        -- The warm-up/stable tail is diagnostic only.  This monitor is kept
-        -- for the lifetime of the current identity because a later wall or
-        -- floor removal may deliver another region rebuild after the initial
-        -- generation has been READY for a long time.  OnTick runs after
-        -- IsoRegions.update and before the next player update, so clearing the
-        -- exact invalid reference here prevents ParameterFirearmRoomSize from
-        -- observing IsoRoom.getRoomDef()==nil.
+        -- Keep the guard for the lifetime of this identity: a later wall or
+        -- floor change can invalidate a room after generation has been READY.
+        -- The current-square check runs each tick; full scans are scheduled
+        -- only by a local repair/error or a relevant object event.
         if not guard.monitorReady
-            and guard.ticks >= ROOM_OWNERSHIP_MIN_TICKS
-            and guard.stableTicks >= ROOM_OWNERSHIP_STABLE_TICKS then
+            and guard.ticks >= ROOM_OWNERSHIP_MIN_TICKS then
             guard.monitorReady = true
-            print("[RailroaderRVTest] client room ownership monitor active generation="
+            print("[RailroaderRVTest] client room ownership guard active generation="
                 .. tostring(generation) .. " cleared=" .. tostring(guard.totalCleared))
         end
     end
@@ -347,6 +580,7 @@ ctx.localPlayerByOnlineId = localPlayerByOnlineId
 ctx.refreshInvalidRoomOwnership = refreshInvalidRoomOwnership
 ctx.requestRoomOwnershipScan = requestRoomOwnershipScan
 ctx.beginRoomOwnershipRefresh = beginRoomOwnershipRefresh
+ctx.finalTargetSquareIsLoaded = finalTargetSquareIsLoaded
 ctx.finalTargetRoomIsValid = finalTargetRoomIsValid
 ctx.updateRoomOwnershipGuards = updateRoomOwnershipGuards
 ctx.finiteNumber = finiteNumber

@@ -21,6 +21,55 @@ Client._tick = clientTick
 
 local BLOCK_HOLD_TICKS = 3
 
+-- TEMPORARY PerfTrace counters for correlating client callbacks with CPU
+-- samples. Remove after the diagnostic capture is complete.
+local PERF_TRACE_WINDOW_SECONDS = 10
+local function perfWindowStart()
+    local ok, windowStart = pcall(function()
+        if type(os) ~= "table" or type(os.time) ~= "function" then return nil end
+        local now = os.time()
+        if type(now) ~= "number" or now ~= now
+            or now <= -math.huge or now >= math.huge then
+            return nil
+        end
+        return math.floor(now / PERF_TRACE_WINDOW_SECONDS)
+            * PERF_TRACE_WINDOW_SECONDS
+    end)
+    if not ok or type(windowStart) ~= "number" then return nil end
+    return windowStart
+end
+
+local initialPerfWindowStart = perfWindowStart()
+local perfTraceEnabled = initialPerfWindowStart ~= nil
+local perfTrace = {
+    windowStart = initialPerfWindowStart,
+    onTick = 0,
+    onTickActive = 0,
+    onRenderTick = 0,
+    onRenderActive = 0,
+}
+
+local function emitBoundaryPerfTrace(tick)
+    if not perfTraceEnabled then return end
+    local windowStart = perfWindowStart()
+    if windowStart == nil then
+        perfTraceEnabled = false
+        return
+    end
+    if windowStart == perfTrace.windowStart then return end
+    print("[RailroaderRVTest][PerfTrace] client/boundary win="
+        .. tostring(perfTrace.windowStart)
+        .. " t=" .. tostring(tick)
+        .. " ot=" .. tostring(perfTrace.onTick)
+        .. " ota=" .. tostring(perfTrace.onTickActive)
+        .. " ort=" .. tostring(perfTrace.onRenderTick)
+        .. " orta=" .. tostring(perfTrace.onRenderActive))
+    for key in pairs(perfTrace) do
+        if key ~= "windowStart" then perfTrace[key] = 0 end
+    end
+    perfTrace.windowStart = windowStart
+end
+
 local function hasEntries(value)
     for _ in pairs(value) do return true end
     return false
@@ -380,8 +429,10 @@ local hasRenderTick = Events and Events.OnRenderTick
     and type(Events.OnRenderTick.Add) == "function"
 
 function Client.onTick()
+    emitBoundaryPerfTrace(clientTick)
     clientTick = clientTick + 1
     Client._tick = clientTick
+    if perfTraceEnabled then perfTrace.onTick = perfTrace.onTick + 1 end
     for id, state in pairs(states) do
         local player = localPlayerByOnlineId(id)
         if player and state.blocked and clientTick >= (state.blockedUntil or 0) then
@@ -389,16 +440,25 @@ function Client.onTick()
         end
     end
     if not hasEntries(snapshots) then return end
+    if perfTraceEnabled then
+        perfTrace.onTickActive = perfTrace.onTickActive + 1
+    end
     -- RenderTick handles movement feedback when available. Poll from OnTick
     -- only as a fallback, avoiding a second local-player scan each tick.
     if not hasRenderTick then updateActivePlayers() end
 end
 
 function Client.onRenderTick()
+    if perfTraceEnabled then
+        perfTrace.onRenderTick = perfTrace.onRenderTick + 1
+    end
     -- Render-tick prediction is bounded to active local players and uses the
     -- exact same canonical segment predicate as OnPlayerUpdate.  It improves
     -- input latency but never becomes a permission check.
     if not hasEntries(snapshots) then return end
+    if perfTraceEnabled then
+        perfTrace.onRenderActive = perfTrace.onRenderActive + 1
+    end
     updateActivePlayers()
 end
 

@@ -17,6 +17,102 @@ local players = {}
 local mappingSyncState = {}
 local lastTick = -1
 
+-- TEMPORARY PerfTrace counters for correlating utility work with CPU
+-- samples. Remove after the diagnostic capture is complete.
+local PERF_TRACE_WINDOW_SECONDS = 10
+local function perfWindowStart()
+    local ok, windowStart = pcall(function()
+        if type(os) ~= "table" or type(os.time) ~= "function" then return nil end
+        local now = os.time()
+        if type(now) ~= "number" or now ~= now
+            or now <= -math.huge or now >= math.huge then
+            return nil
+        end
+        return math.floor(now / PERF_TRACE_WINDOW_SECONDS)
+            * PERF_TRACE_WINDOW_SECONDS
+    end)
+    if not ok or type(windowStart) ~= "number" then return nil end
+    return windowStart
+end
+
+local initialPerfWindowStart = perfWindowStart()
+local perfTraceEnabled = initialPerfWindowStart ~= nil
+local function perfNowMs()
+    if not perfTraceEnabled then return nil end
+    local ok, value = pcall(function()
+        if type(getTimestampMs) == "function" then return getTimestampMs() end
+        return nil
+    end)
+    if ok and type(value) == "number" and value == value
+        and value > -math.huge and value < math.huge then
+        return value
+    end
+    return nil
+end
+
+local perfTrace = {
+    windowStart = initialPerfWindowStart,
+    lastTick = 0,
+    calls = 0,
+    uniqueTicks = 0,
+    duplicateTicks = 0,
+    busySkips = 0,
+    dueTicks = 0,
+    mappingSyncs = 0,
+    records = 0,
+    failures = 0,
+    workMsTotal = 0,
+    workMsMax = 0,
+    workTimed = 0,
+    mappingMsTotal = 0,
+    mappingMsMax = 0,
+    mappingTimed = 0,
+}
+
+local function addPerfTime(prefix, startedAt)
+    if not perfTraceEnabled then return end
+    if type(startedAt) ~= "number" then return end
+    local finishedAt = perfNowMs()
+    if type(finishedAt) ~= "number" then return end
+    local elapsed = math.max(0, finishedAt - startedAt)
+    local totalKey = prefix .. "MsTotal"
+    local maxKey = prefix .. "MsMax"
+    local timedKey = prefix .. "Timed"
+    perfTrace[totalKey] = perfTrace[totalKey] + elapsed
+    perfTrace[maxKey] = math.max(perfTrace[maxKey], elapsed)
+    perfTrace[timedKey] = perfTrace[timedKey] + 1
+end
+
+local function emitUtilityPerfTrace(tick)
+    if not perfTraceEnabled then return end
+    local windowStart = perfWindowStart()
+    if windowStart == nil then
+        perfTraceEnabled = false
+        return
+    end
+    if windowStart == perfTrace.windowStart then return end
+    print("[RailroaderRVTest][PerfTrace] server/utility win="
+        .. tostring(perfTrace.windowStart)
+        .. " t=" .. tostring(tick)
+        .. " calls=" .. tostring(perfTrace.calls)
+        .. " uniq=" .. tostring(perfTrace.uniqueTicks)
+        .. " dup=" .. tostring(perfTrace.duplicateTicks)
+        .. " due=" .. tostring(perfTrace.dueTicks)
+        .. " busy=" .. tostring(perfTrace.busySkips)
+        .. " sync=" .. tostring(perfTrace.mappingSyncs)
+        .. " rec=" .. tostring(perfTrace.records)
+        .. " err=" .. tostring(perfTrace.failures)
+        .. " ms=" .. string.format("%.2f/%.2f/%d",
+            perfTrace.workMsTotal, perfTrace.workMsMax, perfTrace.workTimed)
+        .. " mapms=" .. string.format("%.2f/%.2f/%d",
+            perfTrace.mappingMsTotal, perfTrace.mappingMsMax,
+            perfTrace.mappingTimed))
+    for key in pairs(perfTrace) do
+        if key ~= "windowStart" then perfTrace[key] = 0 end
+    end
+    perfTrace.windowStart = windowStart
+end
+
 local function key(identity)
     return tostring(identity.rvId) .. ":" .. tostring(identity.generation)
         .. ":" .. tostring(identity.bitmapVersion)
@@ -341,22 +437,57 @@ local function syncUtilityMappings()
 end
 
 function M.onTick(tick)
-    if lastTick == tick then return end
+    emitUtilityPerfTrace(perfTrace.lastTick)
+    if perfTraceEnabled then
+        perfTrace.calls = perfTrace.calls + 1
+        perfTrace.lastTick = tick
+    end
+    if lastTick == tick then
+        if perfTraceEnabled then
+            perfTrace.duplicateTicks = perfTrace.duplicateTicks + 1
+        end
+        return
+    end
     lastTick = tick
-    if tick % 30 == 0 then syncUtilityMappings() end
-    if serviceBusy() then return end
+    if perfTraceEnabled then
+        perfTrace.uniqueTicks = perfTrace.uniqueTicks + 1
+    end
+    if tick % 30 == 0 then
+        local mappingStartedAt = perfNowMs()
+        if perfTraceEnabled then
+            perfTrace.mappingSyncs = perfTrace.mappingSyncs + 1
+        end
+        syncUtilityMappings()
+        addPerfTime("mapping", mappingStartedAt)
+    end
+    if serviceBusy() then
+        if perfTraceEnabled then
+            perfTrace.busySkips = perfTrace.busySkips + 1
+        end
+        return
+    end
     if tick % U.WATER_SETTLEMENT_INTERVAL ~= 0 then return end
+    if perfTraceEnabled then
+        perfTrace.dueTicks = perfTrace.dueTicks + 1
+    end
+    local workStartedAt = perfNowMs()
     local recordsOk, recordsOrReason = Store.allRecords()
     if not recordsOk then
+        if perfTraceEnabled then perfTrace.failures = perfTrace.failures + 1 end
         print("[RailroaderRVTest] utility schema gate: " .. stableReason(recordsOrReason))
+        addPerfTime("work", workStartedAt)
         return
     end
     for i = 1, #recordsOrReason do
+        if perfTraceEnabled then perfTrace.records = perfTrace.records + 1 end
         local item = recordsOrReason[i]
         local identity = item.identity
         local contextOk, contextOrReason = authoritativeTickContext(identity,
             players[key(identity)])
         if not contextOk then
+            if perfTraceEnabled then
+                perfTrace.failures = perfTrace.failures + 1
+            end
             print("[RailroaderRVTest] utility tick rejected rv=" .. tostring(identity.rvId)
                 .. " reason=" .. stableReason(contextOrReason))
         else
@@ -372,11 +503,15 @@ function M.onTick(tick)
                 return false, detail
             end)
             if not accepted and result ~= U.REASONS.BUSY then
+                if perfTraceEnabled then
+                    perfTrace.failures = perfTrace.failures + 1
+                end
                 print("[RailroaderRVTest] utility tick rejected rv=" .. tostring(identity.rvId)
                     .. " reason=" .. stableReason(result))
             end
         end
     end
+    addPerfTime("work", workStartedAt)
 end
 
 function M.snapshotForPlayer(player)

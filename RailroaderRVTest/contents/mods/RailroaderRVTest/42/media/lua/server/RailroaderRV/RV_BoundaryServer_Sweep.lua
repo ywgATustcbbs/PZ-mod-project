@@ -14,6 +14,88 @@ local transitionActive = ctx.transitionActive
 local updatePlayer = ctx.updatePlayer
 local playerPosition = ctx.playerPosition
 
+-- TEMPORARY PerfTrace counters for correlating server cleanup with CPU
+-- samples. Remove after the diagnostic capture is complete.
+local PERF_TRACE_WINDOW_SECONDS = 10
+local function perfWindowStart()
+    local ok, windowStart = pcall(function()
+        if type(os) ~= "table" or type(os.time) ~= "function" then return nil end
+        local now = os.time()
+        if type(now) ~= "number" or now ~= now
+            or now <= -math.huge or now >= math.huge then
+            return nil
+        end
+        return math.floor(now / PERF_TRACE_WINDOW_SECONDS)
+            * PERF_TRACE_WINDOW_SECONDS
+    end)
+    if not ok or type(windowStart) ~= "number" then return nil end
+    return windowStart
+end
+
+local initialPerfWindowStart = perfWindowStart()
+local perfTraceEnabled = initialPerfWindowStart ~= nil
+local function perfNowMs()
+    if not perfTraceEnabled then return nil end
+    local ok, value = pcall(function()
+        if type(getTimestampMs) == "function" then return getTimestampMs() end
+        return nil
+    end)
+    if ok and type(value) == "number" and value == value
+        and value > -math.huge and value < math.huge then
+        return value
+    end
+    return nil
+end
+
+local perfTrace = {
+    windowStart = initialPerfWindowStart,
+    onTick = 0,
+    cleanupBatches = 0,
+    cellLookups = 0,
+    loadedSquares = 0,
+    unloadedStops = 0,
+    objectsAudited = 0,
+    cleanupMsTotal = 0,
+    cleanupMsMax = 0,
+    cleanupTimed = 0,
+}
+
+local function finishCleanupTiming(startedAt)
+    if type(startedAt) ~= "number" then return end
+    local finishedAt = perfNowMs()
+    if type(finishedAt) ~= "number" then return end
+    local elapsed = math.max(0, finishedAt - startedAt)
+    perfTrace.cleanupMsTotal = perfTrace.cleanupMsTotal + elapsed
+    perfTrace.cleanupMsMax = math.max(perfTrace.cleanupMsMax, elapsed)
+    perfTrace.cleanupTimed = perfTrace.cleanupTimed + 1
+end
+
+local function emitBoundaryPerfTrace(tick)
+    if not perfTraceEnabled then return end
+    local windowStart = perfWindowStart()
+    if windowStart == nil then
+        perfTraceEnabled = false
+        return
+    end
+    if windowStart == perfTrace.windowStart then return end
+    print("[RailroaderRVTest][PerfTrace] server/boundary win="
+        .. tostring(perfTrace.windowStart)
+        .. " t=" .. tostring(tick)
+        .. " ot=" .. tostring(perfTrace.onTick)
+        .. " cb=" .. tostring(perfTrace.cleanupBatches)
+        .. " sq=" .. tostring(perfTrace.cellLookups)
+        .. " hit=" .. tostring(perfTrace.loadedSquares)
+        .. " miss=" .. tostring(perfTrace.unloadedStops)
+        .. " obj=" .. tostring(perfTrace.objectsAudited)
+        .. " ms=" .. string.format("%.2f/%.2f/%d",
+            perfTrace.cleanupMsTotal, perfTrace.cleanupMsMax,
+            perfTrace.cleanupTimed))
+    for key in pairs(perfTrace) do
+        if key ~= "windowStart" then perfTrace[key] = 0 end
+    end
+    perfTrace.windowStart = windowStart
+end
+
 local function collectionSnapshot(collection)
     local result = {}
     if collection == nil then return result end
@@ -124,6 +206,10 @@ local function cleanupForBoundary(boundary, player)
     if not cell then return end
     local budget = integer(C.BOUNDARY_CLEANUP_SQUARES_PER_STEP) or 64
     local bitmap = boundary.bitmap
+    local startedAt = perfNowMs()
+    if perfTraceEnabled then
+        perfTrace.cleanupBatches = perfTrace.cleanupBatches + 1
+    end
     while budget > 0 and cursor.z < bitmap.maxZ do
         if cursor.y >= bitmap.originY + bitmap.height then
             cursor.x, cursor.y = bitmap.originX, bitmap.originY
@@ -131,13 +217,29 @@ local function cleanupForBoundary(boundary, player)
         elseif cursor.x >= bitmap.originX + bitmap.width then
             cursor.x, cursor.y = bitmap.originX, cursor.y + 1
         else
+            if perfTraceEnabled then
+                perfTrace.cellLookups = perfTrace.cellLookups + 1
+            end
             local sq = square(cell, cursor.x, cursor.y, cursor.z)
             -- Leave the cursor on an unloaded square.  Advancing past it would
             -- make the bounded cleanup silently skip that cell forever, while
             -- forcing a load would violate the RV-local, already-loaded-only
             -- cleanup contract.
-            if not sq then return end
-            for _, object in ipairs(squareObjects(sq)) do
+            if not sq then
+                if perfTraceEnabled then
+                    perfTrace.unloadedStops = perfTrace.unloadedStops + 1
+                end
+                finishCleanupTiming(startedAt)
+                return
+            end
+            if perfTraceEnabled then
+                perfTrace.loadedSquares = perfTrace.loadedSquares + 1
+            end
+            local objects = squareObjects(sq)
+            if perfTraceEnabled then
+                perfTrace.objectsAudited = perfTrace.objectsAudited + #objects
+            end
+            for _, object in ipairs(objects) do
                 Boundary.auditObject(object, nil, boundary)
             end
             cursor.x = cursor.x + 1
@@ -147,10 +249,13 @@ local function cleanupForBoundary(boundary, player)
     if cursor.z >= bitmap.maxZ then
         cursor.completedTick = Boundary._tick
     end
+    finishCleanupTiming(startedAt)
 end
 
 function Boundary.onTick()
+    emitBoundaryPerfTrace(Boundary._tick)
     Boundary._tick = Boundary._tick + 1
+    if perfTraceEnabled then perfTrace.onTick = perfTrace.onTick + 1 end
     local players = onlinePlayersSnapshot()
     local cleanupInterval = integer(C.BOUNDARY_TICK_INTERVAL) or 1
     local activeBoundaries = Boundary._tick % cleanupInterval == 0 and {} or nil

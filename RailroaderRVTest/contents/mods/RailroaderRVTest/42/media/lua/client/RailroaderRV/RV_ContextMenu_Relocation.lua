@@ -19,10 +19,13 @@ local localPlayerByOnlineId = ctx.localPlayerByOnlineId
 local refreshInvalidRoomOwnership = ctx.refreshInvalidRoomOwnership
 local requestRoomOwnershipScan = ctx.requestRoomOwnershipScan
 local beginRoomOwnershipRefresh = ctx.beginRoomOwnershipRefresh
+local finalTargetSquareIsLoaded = ctx.finalTargetSquareIsLoaded
 local finalTargetRoomIsValid = ctx.finalTargetRoomIsValid
 local updateRoomOwnershipGuards = ctx.updateRoomOwnershipGuards
 local finiteNumber = ctx.finiteNumber
 local finiteInteger = ctx.finiteInteger
+local FINAL_RELOCATION_SCAN_RETRY_TICKS = 10
+local FINAL_RELOCATION_SCAN_MAX_ATTEMPTS = 4
 
 function Client.requestGenerate(playerObj)
     if not playerObj then return end
@@ -52,8 +55,44 @@ function Client.onFillWorldObjectContextMenu(playerNum, context, worldObjects, t
     context:addOption(getText(MENU_KEY), playerObj, Client.requestGenerate)
 end
 
-local function tryApplyFinalRelocation(args)
+local function tryFinalRelocationGuardScan(guard, pending, phase)
+    local completeKey = phase .. "ScanComplete"
+    if pending[completeKey] then return true end
+    if pending.failed then return false end
+
+    local attemptsKey = phase .. "ScanAttempts"
+    local nextTickKey = phase .. "NextScanTick"
+    if ctx.clientTick < (pending[nextTickKey] or 0) then
+        return false
+    end
+
+    pending[attemptsKey] = (pending[attemptsKey] or 0) + 1
+    local scanCallOk, scanOk = pcall(refreshInvalidRoomOwnership, guard)
+    if scanCallOk and scanOk == true then
+        pending[completeKey] = true
+        return true
+    end
+
+    if pending[attemptsKey] >= FINAL_RELOCATION_SCAN_MAX_ATTEMPTS then
+        -- Never teleport or acknowledge a transaction whose footprint was
+        -- only partially loaded. A later matching object/local repair trigger
+        -- can open one new bounded window; otherwise the server token deadline
+        -- owns rollback.
+        pending.failed = true
+        pending.failedPhase = phase
+        print("[RailroaderRVTest] final relocation " .. phase
+            .. " room scan incomplete after " .. tostring(pending[attemptsKey])
+            .. " attempts; final ACK blocked until a matching repair trigger")
+    else
+        pending[nextTickKey] = ctx.clientTick
+            + FINAL_RELOCATION_SCAN_RETRY_TICKS
+    end
+    return false
+end
+
+local function tryApplyFinalRelocation(args, pending)
     if type(args) ~= "table" then return false end
+    if type(pending) ~= "table" or pending.failed then return false end
     local token = args.token
     local rvId = args.rvId
     local generation = finiteInteger(args.generation)
@@ -74,44 +113,60 @@ local function tryApplyFinalRelocation(args)
         or guard.bitmapVersion ~= bitmapVersion then
         return false
     end
-    -- The network handler performs this synchronously before teleportTo.  This
-    -- is deliberately not an OnTick-only repair: the player stays at the safe
-    -- staging square until this exact scan has removed every
-    -- room!=nil && RoomDef==nil reference in the old/new footprints.
-    local scanCallOk, scanOk = pcall(refreshInvalidRoomOwnership, guard)
-    if not scanCallOk or scanOk ~= true then
-        return false
-    end
-    if not finalTargetRoomIsValid(x, y, z) then
+    -- A persistent current-square API failure is latched by the guard monitor.
+    -- Do not complete a final relocation transaction until a later local check
+    -- succeeds and clears that uncertainty.
+    if guard.currentCheckErrorLatched == true then
         return false
     end
     local playerObj = localPlayerByOnlineId(onlineId)
     if not playerObj or playerObj:isDead() then
         return false
     end
-    local teleported, teleportResult = pcall(function()
-        playerObj:teleportTo(x, y, z)
-    end)
-    if not teleported or teleportResult == false then return false end
-    -- IsoGameCharacter:teleportTo(float,float,int) floors x/y in B42.20.
-    -- Restore the server-selected half-cell center with the official setters;
-    -- otherwise the exact-coordinate proof below can never pass and no final
-    -- token ACK can be sent.
-    local exactCallOk = pcall(function()
-        playerObj:setX(x)
-        playerObj:setY(y)
-        playerObj:setZ(z)
-        playerObj:setLastX(x)
-        playerObj:setLastY(y)
-    end)
-    if not exactCallOk then return false end
-    if type(playerObj.setCurrentSquareFromPosition) == "function" then
-        -- teleportTo updates coordinates only. Use the official three-argument
-        -- IsoMovingObject overload to refresh the client cache.  Do not write
-        -- Java IsoPlayer fields from Lua; the server's temporary west-neighbour
-        -- floor transaction remains the authoritative roof repair.
-        pcall(function() playerObj:setCurrentSquareFromPosition(x, y, z) end)
+
+    -- Wait for the selected destination square before the transaction scan.
+    -- While streaming is incomplete, OnTick performs only this O(1) lookup.
+    if not pending.teleported then
+        if not finalTargetSquareIsLoaded(x, y, z) then
+            return false
+        end
+        -- Full pre-scan happens only after the destination is ready. If any
+        -- footprint square is still unloaded, retry at a bounded interval.
+        if not tryFinalRelocationGuardScan(guard, pending, "pre") then
+            return false
+        end
+        if not finalTargetRoomIsValid(x, y, z) then
+            return false
+        end
+        local teleported, teleportResult = pcall(function()
+            return playerObj:teleportTo(x, y, z)
+        end)
+        if not teleported or teleportResult == false then
+            pending.failed = true
+            return false
+        end
+        pending.teleported = true
+        -- IsoGameCharacter:teleportTo(float,float,int) floors x/y in B42.20.
+        -- Restore the server-selected half-cell center with the official
+        -- setters before checking the transaction's post-move proof.
+        local exactCallOk = pcall(function()
+            playerObj:setX(x)
+            playerObj:setY(y)
+            playerObj:setZ(z)
+            playerObj:setLastX(x)
+            playerObj:setLastY(y)
+        end)
+        if not exactCallOk then
+            pending.failed = true
+            return false
+        end
+        if type(playerObj.setCurrentSquareFromPosition) == "function" then
+            -- teleportTo updates coordinates only. Use the official three-
+            -- argument IsoMovingObject overload to refresh the client cache.
+            pcall(function() playerObj:setCurrentSquareFromPosition(x, y, z) end)
+        end
     end
+
     local xOk, currentX = pcall(function() return playerObj:getX() end)
     local yOk, currentY = pcall(function() return playerObj:getY() end)
     local zOk, currentZ = pcall(function() return playerObj:getZ() end)
@@ -121,12 +176,17 @@ local function tryApplyFinalRelocation(args)
         or finiteNumber(currentZ) ~= z then
         return false
     end
-    -- Re-run the guard scan after the actual move.  This is part of the ACK
-    -- proof, so a client readiness/room-cache failure naturally reaches the
-    -- server timeout rollback rather than claiming READY.
-    local postScanOk, postScan = pcall(refreshInvalidRoomOwnership, guard)
-    if not postScanOk or postScan ~= true
-        or not finalTargetRoomIsValid(x, y, z) then
+
+    -- The post-scan is a separate transaction stage and is never repeated on
+    -- every wait tick. Incomplete coverage retries at a bounded interval; no
+    -- final ACK is sent until the full footprint and target room both verify.
+    if not pending.postScanComplete then
+        if not finalTargetSquareIsLoaded(x, y, z)
+            or not tryFinalRelocationGuardScan(guard, pending, "post") then
+            return false
+        end
+    end
+    if not finalTargetRoomIsValid(x, y, z) then
         return false
     end
     return true
@@ -154,7 +214,7 @@ local function applyFinalRelocation(args)
     -- Try in the command callback itself, before the player can enter the
     -- engine update/audio path. If the guard packet has not been installed yet,
     -- OnTick retries while the player remains at staging.
-    if tryApplyFinalRelocation(args) then
+    if tryApplyFinalRelocation(args, ctx.pendingFinalRelocation) then
         ctx.pendingFinalRelocation.applied = true
         if sendFinalRelocationAck(localPlayerByOnlineId(
                 finiteInteger(args.onlineId)), args.token) then
@@ -323,7 +383,8 @@ function Client.onTick()
             ctx.pendingFinalRelocation = nil
         else
             if not finalPending.applied then
-                finalPending.applied = tryApplyFinalRelocation(finalPending.args)
+                finalPending.applied = tryApplyFinalRelocation(
+                    finalPending.args, finalPending)
             end
             if finalPending.applied then
                 local args = finalPending.args

@@ -116,12 +116,11 @@ local ROOF_REPAIR_TEMP_Z = Constants.RELOCATION_SENTINEL_Z
 local GENERATION_STAGING_Z = Constants.RELOCATION_SENTINEL_Z
 
 -- IsoRegions does not expose a Lua callback for completion of its asynchronous
--- dynamic-room rebuild. Keep scanning the small wall+roof footprint for a
--- bounded period, and require a stable tail before retiring each guard.
+-- dynamic-room rebuild. Room ownership guards use nearby-player probes and
+-- bounded, event-triggered rechecks instead of periodic full-footprint scans.
 local ROOM_OWNERSHIP_MIN_TICKS = 1800
 local ROOM_OWNERSHIP_STABLE_TICKS = 120
 local ROOM_OWNERSHIP_MAX_TICKS = 7200
-local ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS = 30
 
 local WORLD_MIN_Z = -32
 local WORLD_MAX_Z = 31
@@ -179,7 +178,6 @@ local ctx = {
     ROOM_OWNERSHIP_MIN_TICKS = ROOM_OWNERSHIP_MIN_TICKS,
     ROOM_OWNERSHIP_STABLE_TICKS = ROOM_OWNERSHIP_STABLE_TICKS,
     ROOM_OWNERSHIP_MAX_TICKS = ROOM_OWNERSHIP_MAX_TICKS,
-    ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS = ROOM_OWNERSHIP_SCAN_INTERVAL_TICKS,
     WORLD_MIN_Z = WORLD_MIN_Z,
     WORLD_MAX_Z = WORLD_MAX_Z,
 }

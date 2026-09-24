@@ -49,7 +49,13 @@
 
 ## RoomDef 清理的证据与未知影响
 
-代码实际处理的精确条件是：`square:getRoom()` 成功且非 nil，随后 `square:getRoomDef()` 成功但为 nil；只有这个状态才调用 `setRoomID(-1)`，并要求复查 `getRoom()` 已变为 nil。合法房间不会被清除。该检查位于客户端 [`RV_ContextMenu_RoomOwnership.lua`](contents/mods/RailroaderRVTest/42/media/lua/client/RailroaderRV/RV_ContextMenu_RoomOwnership.lua#L110) 和服务端 [`RV_Server_RoomOwnership.lua`](contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RV_Server_RoomOwnership.lua#L36)。模块注释把成因归因于 IsoRegions 延后退休房间引用，并指出 `ParameterFirearmRoomSize` 可能读取失效引用；这是代码作者的防护理由，本次没有从符合项目要求的 Java 基线独立验证这一点。
+代码实际处理的精确条件是：`square:getRoom()` 成功且非 nil，随后 `square:getRoomDef()` 成功但为 nil；只有这个状态才调用 `setRoomID(-1)`，并要求复查 `getRoom()` 已变为 nil。合法房间不会被清除。该检查位于客户端 [`RV_ContextMenu_RoomOwnership.lua`](contents/mods/RailroaderRVTest/42/media/lua/client/RailroaderRV/RV_ContextMenu_RoomOwnership.lua#L110) 和服务端 [`RV_Server_RoomOwnership.lua`](contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RV_Server_RoomOwnership.lua#L36)。
+
+Git 历史补充了这项防护的设计理由。当前可见历史从 `9c5a220`（2026-09-10，`chore: initialize project repository`）开始；`git log --all --oneline --reverse` 没有更早的父提交，因此无法追溯这段逻辑在仓库初始化之前如何引入。该初始提交中的 `RailroaderRVTest/README.md`（当时第 11–23 行）称，重复生成会由 B42 动态房间流程移除旧 `IsoRoom` 并重建 `RoomDef`；`WorldRegionToMetaGrid.removeIsoRoom` 清空旧 `IsoRoom` 的 `RoomDef` 后，部分方格可能暂时保留旧 room ID，玩家之后走到该格可能触发 `ParameterFirearmRoomSize` 异常。因此代码只对 `room ~= nil && RoomDef == nil` 调用 `setRoomID(-1)`，并保留有效房间。初始提交中的服务端注释（`RV_Server.lua` 当时第 1145–1158 行）也明确写出该状态及复查条件。
+
+后续提交 `d2d9506`（2026-09-13，`feat: enforce current RV schema and refresh workflow`）说明了客户端 guard 为什么改为常驻：即使首次生成已稳定，之后墙或地板被移除仍可能触发新的异步房间重建；如果 guard 在静稳期后退出，下一次玩家更新仍可能读到 `RoomDef=nil`。该提交因此保留当前 RV identity 的客户端监视器，并为进入已生成 RV 或重连的客户端重新布防。这解释的是客户端 guard 的生命周期设计，不应推成服务端 tick guard 也同时常驻。
+
+上述 README 和提交注释记录的是作者当时的风险判断与设计动机，不是运行时异常栈、游戏崩溃复现或独立验证的引擎行为。历史中的测试代码断言清理条件和代码结构；它没有复现 `ParameterFirearmRoomSize` 异常。具体行为的证据边界见下方日志与影响说明。
 
 可确认的事实：
 
@@ -67,3 +73,24 @@
 2. final relocation 目标未加载的重试路径是否会实际重复扫描 527/1,054 格；需要在运行时分别计数 final-pending 尝试数、room-ownership 扫描数、扫描坐标数及耗时。
 3. `cleared=240` 的历史数量来自哪些坐标和楼层；若主要是 240 个 base interior 格，则边界-only 策略会漏掉已观察到的内部失效实例。屋顶 240 格是否也出现过同类引用，目前日志没有分布证据。
 4. 服务端 `OnTick` 与 `Adapter.OnTick` 是两个每 tick 回调；需要 profile 后再决定是 footprint 扫描、对象事件风暴、boundary object audit、事务重试还是其他原生流送成本占主导。
+
+## 2026-09-25 一键测试：周期轨迹与 CPU 采样
+
+### 测试流程与观察
+
+本轮由用户在新存档中完成整体测试：房车生成前先地图传送到远处、再回机车旁，区域约 1 秒加载；首次进入并退出房车后，再次传送到远处，直到目标 ready 约 73.7 秒。该结果确认本轮复现了 RV 首次生成之后冷区域加载显著变慢的现象。
+
+### 采样结果
+
+- 服务端日志显示，`02:14:40.202–02:15:46.897` 之间 server tick 只前进 1 tick；同一时段服务端进程 CPU 使用约为一个逻辑处理器。客户端 tick 在这段时间仍持续推进。
+- RoomDef、boundary 和 utility 的周期性 `[PerfTrace]` 汇总在服务端 tick 停滞时一并停止；对应观测窗口中记录的周期全 footprint 扫描数为 0。因此这些被埋点的周期工作没有在该窗口持续执行，现有记录不能把 tick 停滞归因于它们。
+- 首次生成阶段的 RoomDef 扫描记录为：服务端 3,162 个格子、约 9 ms；客户端 5,797 个格子、约 11 ms。这些是扫描代码记录的单次经过时间，不涵盖整个生成事务或 Java/引擎工作。
+- Utility 约每 30 tick 对未加载目标重试一次失败，单次 wall 时间约 0.4 秒。它是可继续观察的周期调用，但 tick 停滞期间其日志也停止，当前证据不支持它解释分钟级加载延迟。
+- CPU 频率计数器全程报告 4,501 MHz；该计数器结果不足以证明处理器实际频率全程稳定。记录到的磁盘延迟峰值为 18.12 ms。
+- 目前没有定位到具体的服务端 CPU 热点或导致 server tick 停滞的调用栈。客户端继续 tick、服务端进程仍消耗约一个逻辑核，只能说明两端当时的进度不同，不能据此推定根因。
+
+### 临时决定与证据保存
+
+用户决定将本性能问题标记为**暂不处理**。此结论表示根因尚未定位、性能问题未解决；本轮的周期诊断埋点暂时保留，供后续与 CPU 采样时间对照。以后实际修复该性能问题时，再移除这些临时埋点。
+
+本轮 CPU 频率 CSV 位于 `Z:\RailroaderRVTestCache\perf\cpu_frequency_samples.csv`；事件 CSV 位于同目录的 `cpu_frequency_events.csv`。服务端日志为 `Z:\RailroaderRVTestCache\server\Logs\2026-09-25_02-09_DebugLog-server.txt`，客户端日志为 `Z:\RailroaderRVTestCache\client\Logs\logs_2026-09-25\2026-09-25_02-09_DebugLog.txt`。Z 盘是易失 RAM 磁盘，文件可能被重启或人工清理移除；这些路径仅作当前证据位置记录，不保证长期留存，也不纳入版本控制。

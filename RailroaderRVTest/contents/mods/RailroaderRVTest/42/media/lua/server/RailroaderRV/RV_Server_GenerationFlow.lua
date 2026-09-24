@@ -238,7 +238,10 @@ local function generateForPlayer(player, prepared)
         -- Remove only objects owned by a prior generation before taking the
         -- new generation lock in persistent state.
         removeOldGeneration(cell, manifest)
-        refreshServerRoomOwnershipGuard(roomOwnershipGuard, "after-remove")
+        -- The loaded-area gate covers the base footprint and walls, but upper
+        -- squares may be nil until buildGeneration reaches ensureRoofSquare.
+        -- Keep the player at staging and defer the complete transaction scan
+        -- until the roof loop has materialized the entire upper footprint.
         manifest.schemaVersion = Constants.MANIFEST_SCHEMA_VERSION
         manifest.techVersion = Constants.TECH_VERSION
         manifest.generation = generation
@@ -270,7 +273,7 @@ local function generateForPlayer(player, prepared)
             -- repair the square after the player enters the room.
             local refreshOk, refreshError = pcall(
                 refreshServerRoomOwnershipGuard, roomOwnershipGuard,
-                "before-final-relocate")
+                "before-final-relocate", true)
             if not refreshOk then
                 buildOk = false
                 buildError = refreshError
@@ -303,7 +306,7 @@ local function generateForPlayer(player, prepared)
             -- generator, utility object or roof as a half-built cabin.
             local rollbackOk, rollbackError = pcall(function()
                 removeGeneration(cell, bounds, generation, manifest.rvId,
-                    manifest.bitmapVersion)
+                    manifest.bitmapVersion, manifest.phase)
             end)
             if rollbackOk then
                 manifest.rollback = "COMPLETE"

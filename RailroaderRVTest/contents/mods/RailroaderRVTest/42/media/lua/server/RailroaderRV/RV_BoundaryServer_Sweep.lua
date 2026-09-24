@@ -1,0 +1,182 @@
+-- RV_BoundaryServer: Sweep responsibilities.
+return function(ctx)
+local Boundary = ctx.Boundary
+local C = ctx.C
+local integer = ctx.integer
+local call = ctx.call
+local callGlobal = ctx.callGlobal
+local identity = ctx.identity
+local playerCell = ctx.playerCell
+local square = ctx.square
+local boundaryKey = ctx.boundaryKey
+local sameBoundary = ctx.sameBoundary
+local stateFor = ctx.stateFor
+local transitionActive = ctx.transitionActive
+local updatePlayer = ctx.updatePlayer
+
+local function collectionSnapshot(collection)
+    local result = {}
+    if collection == nil then return result end
+    local sizeOk, size = call(collection, "size")
+    size = sizeOk and integer(size) or nil
+    if size ~= nil then
+        for i = 0, size - 1 do
+            local ok, object = call(collection, "get", i)
+            if ok and object then result[#result + 1] = object end
+        end
+    elseif type(collection) == "table" then
+        for _, object in pairs(collection) do
+            if object then result[#result + 1] = object end
+        end
+    end
+    return result
+end
+
+local function squareObjects(square)
+    local result, seen = {}, {}
+    local names = { "getObjects", "getSpecialObjects", "getWorldObjects",
+        "getStaticMovingObjects", "getMovingObjects", "getDeadBodys" }
+    for i = 1, #names do
+        local ok, collection = call(square, names[i])
+        if ok then
+            for _, object in ipairs(collectionSnapshot(collection)) do
+                if not seen[object] then seen[object] = true; result[#result + 1] = object end
+            end
+        end
+    end
+    local floorOk, floor = call(square, "getFloor")
+    if floorOk and floor and not seen[floor] then result[#result + 1] = floor end
+    return result
+end
+
+local function flushDirty()
+    for key, action in pairs(Boundary._dirty) do
+        Boundary._dirty[key] = nil
+        local cell = playerCell(action.player)
+        local current = Boundary.boundaryForPlayer(action.player)
+        if cell and action.boundary and action.identity
+            and sameBoundary(current, action.boundary) then
+            local sq = square(cell, action.x, action.y, action.z)
+            if sq then
+                for _, object in ipairs(squareObjects(sq)) do
+                    Boundary.auditObject(object, action.player, action.boundary)
+                end
+            end
+        end
+    end
+end
+
+local function onlinePlayersSnapshot()
+    local result = {}
+    local ok, players = callGlobal("getOnlinePlayers")
+    if ok and players then
+        local sizeOk, size = call(players, "size")
+        size = sizeOk and integer(size) or nil
+        if size ~= nil then
+            for i = 0, size - 1 do
+                local playerOk, player = call(players, "get", i)
+                if playerOk and player then result[#result + 1] = player end
+            end
+        elseif type(players) == "table" then
+            for _, player in pairs(players) do if player then result[#result + 1] = player end end
+        end
+    end
+    if #result == 0 then
+        local playerOk, player = callGlobal("getPlayer")
+        if player then result[1] = player end
+    end
+    return result
+end
+
+local function cleanupForBoundary(boundary, player)
+    local key = boundaryKey(boundary)
+    local cursor = Boundary._cleanups[key]
+    if cursor and cursor.completedTick ~= nil then
+        local rescanTicks = integer(C.BOUNDARY_CLEANUP_RESCAN_TICKS) or 600
+        if Boundary._tick - cursor.completedTick < rescanTicks then
+            cursor.player = player
+            cursor.boundary = boundary
+            return
+        end
+        cursor.x, cursor.y, cursor.z = boundary.bitmap.originX,
+            boundary.bitmap.originY, boundary.bitmap.minZ
+        cursor.completedTick = nil
+    elseif not cursor then
+        cursor = { player = player, boundary = boundary,
+            x = boundary.bitmap.originX, y = boundary.bitmap.originY,
+            z = boundary.bitmap.minZ, completedTick = nil }
+        Boundary._cleanups[key] = cursor
+    else
+        -- Any online member of this RV can provide the authoritative cell;
+        -- do not restart a shared cursor when player iteration order changes.
+        cursor.player = player
+        cursor.boundary = boundary
+    end
+    local cell = playerCell(player)
+    if not cell then return end
+    local budget = 128
+    local bitmap = boundary.bitmap
+    while budget > 0 and cursor.z < bitmap.maxZ do
+        if cursor.y >= bitmap.originY + bitmap.height then
+            cursor.x, cursor.y = bitmap.originX, bitmap.originY
+            cursor.z = cursor.z + 1
+        elseif cursor.x >= bitmap.originX + bitmap.width then
+            cursor.x, cursor.y = bitmap.originX, cursor.y + 1
+        else
+            local sq = square(cell, cursor.x, cursor.y, cursor.z)
+            -- Leave the cursor on an unloaded square.  Advancing past it would
+            -- make the bounded cleanup silently skip that cell forever, while
+            -- forcing a load would violate the RV-local, already-loaded-only
+            -- cleanup contract.
+            if not sq then return end
+            for _, object in ipairs(squareObjects(sq)) do
+                Boundary.auditObject(object, nil, boundary)
+            end
+            cursor.x = cursor.x + 1
+            budget = budget - 1
+        end
+    end
+    if cursor.z >= bitmap.maxZ then
+        cursor.completedTick = Boundary._tick
+    end
+end
+
+function Boundary.onTick()
+    Boundary._tick = Boundary._tick + 1
+    local players = onlinePlayersSnapshot()
+    local activeBoundaries = {}
+    for i = 1, #players do
+        local player = players[i]
+        local id = identity(player)
+        if id then
+            local state = stateFor(player)
+            -- Roof relocation owns the player's boundary lease while the
+            -- authoritative object is intentionally in a different chunk.
+            -- Do not revalidate RV geometry or run cleanup through the remote
+            -- player's cell; those scans can stall the server tick before the
+            -- grouped roof state machine reaches its due ticks.  The lease is
+            -- extended by RV_Server before this callback and normal boundary
+            -- processing resumes after completeTransition.
+            if not state or not transitionActive(state) then
+                local boundary = updatePlayer(player)
+                if boundary then
+                    activeBoundaries[boundaryKey(boundary)] = {
+                        boundary = boundary, player = player,
+                    }
+                end
+            end
+        end
+    end
+    flushDirty()
+    if Boundary._tick % (integer(C.BOUNDARY_TICK_INTERVAL) or 1) == 0 then
+        for _, item in pairs(activeBoundaries) do cleanupForBoundary(item.boundary, item.player) end
+    end
+    for key, builder in pairs(Boundary._builders) do
+        if not builder or Boundary._tick > (builder.expires or 0) then
+            Boundary._builders[key] = nil
+        end
+    end
+end
+
+
+end

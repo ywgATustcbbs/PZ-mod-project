@@ -4,11 +4,11 @@
 -- display-only snapshots from the server; every button sends an operation
 -- intent and an item id for server-side revalidation.
 
-pcall(require, "ISUI/ISCollapsableWindow")
-pcall(require, "ISUI/ISButton")
-pcall(require, "ISUI/ISLabel")
-pcall(require, "ISUI/ISProgressBar")
-pcall(require, "ISUI/ISContextMenu")
+require("ISUI/ISCollapsableWindow")
+require("ISUI/ISButton")
+require("ISUI/ISLabel")
+require("ISUI/ISProgressBar")
+require("ISUI/ISContextMenu")
 
 local Client = require("RailroaderRV/RV_UtilityClient")
 local U = require("RailroaderRV/RV_UtilityConstants")
@@ -18,22 +18,16 @@ RailroaderRV.UtilityDashboard = RailroaderRV.UtilityDashboard or {}
 local Dashboard = RailroaderRV.UtilityDashboard
 
 local function tr(key, fallback)
-    local value = fallback
-    if type(getText) == "function" then
-        local ok, translated = pcall(getText, key)
-        if ok and translated and translated ~= key and translated ~= "" then
-            value = translated
-        end
-    end
-    return value
+    local translated = getText(key)
+    return translated and translated ~= key and translated ~= ""
+        and translated or fallback
 end
 
 local function utilityMapping()
     local rv = rawget(_G, "RailroaderRV")
     local menu = rv and rv.RailroaderContextMenu
     if menu and type(menu.getUtilityMapping) == "function" then
-        local ok, mapping = pcall(menu.getUtilityMapping)
-        if ok then return mapping end
+        return menu.getUtilityMapping()
     end
     return nil
 end
@@ -69,14 +63,11 @@ local function collectionItems(collection)
     local result = {}
     if not collection then return result end
     if type(collection.size) == "function" and type(collection.get) == "function" then
-        local ok, size = pcall(function() return collection:size() end)
-        if ok and number(size) then
-            for i = 0, size - 1 do
-                local itemOk, item = pcall(function() return collection:get(i) end)
-                if itemOk and item then result[#result + 1] = item end
-            end
-            return result
+        for i = 0, collection:size() - 1 do
+            local item = collection:get(i)
+            if item then result[#result + 1] = item end
         end
+        return result
     end
     if type(collection) == "table" then
         for _, item in pairs(collection) do
@@ -89,8 +80,7 @@ end
 local function inventoryItems(inventory, result, seen)
     if not inventory or seen[inventory] then return end
     seen[inventory] = true
-    local ok, collection = pcall(function() return inventory:getItems() end)
-    if not ok then return end
+    local collection = inventory:getItems()
     for _, item in ipairs(collectionItems(collection)) do
         result[#result + 1] = item
         -- Most inventory items are not containers.  Calling a Java method
@@ -101,27 +91,25 @@ local function inventoryItems(inventory, result, seen)
             return item and item.getInventory
         end)
         if methodOk and type(getInventory) == "function" then
-            local nestedOk, nested = pcall(function() return item:getInventory() end)
-            if nestedOk and nested then inventoryItems(nested, result, seen) end
+            local nested = item:getInventory()
+            if nested then inventoryItems(nested, result, seen) end
         end
     end
 end
 
 local function fluidAmount(item, fluid)
     if not item or type(item.getFluidContainer) ~= "function" then return nil end
-    local ok, container = pcall(function() return item:getFluidContainer() end)
-    if not ok or not container or type(container.contains) ~= "function" then return nil end
-    local containsOk, contains = pcall(function() return container:contains(fluid) end)
-    if not containsOk or contains ~= true then return nil end
-    local amountOk, amount = pcall(function() return container:getAmount() end)
-    amount = amountOk and number(amount) or nil
+    local container = item:getFluidContainer()
+    if not container or type(container.contains) ~= "function" then return nil end
+    if container:contains(fluid) ~= true then return nil end
+    local amount = number(container:getAmount())
     return amount and amount > (U.PROFILE_EPSILON or 0.000001) and amount or nil
 end
 
 local function itemLabel(item)
     if item and type(item.getName) == "function" then
-        local ok, name = pcall(function() return item:getName() end)
-        if ok and name then return tostring(name) end
+        local name = item:getName()
+        if name then return tostring(name) end
     end
     return "Item"
 end
@@ -129,8 +117,7 @@ end
 local function localPlayer(player)
     if player then return player end
     if type(getSpecificPlayer) ~= "function" then return nil end
-    local ok, value = pcall(getSpecificPlayer, 0)
-    return ok and value or nil
+    return getSpecificPlayer(0)
 end
 
 local Window = nil
@@ -404,10 +391,8 @@ function Dashboard.onConnectionReset()
     local instance = Dashboard.instance
     Dashboard.instance = nil
     if not instance then return end
-    pcall(function()
-        instance:setVisible(false)
-        instance:removeFromUIManager()
-    end)
+    instance:setVisible(false)
+    instance:removeFromUIManager()
 end
 
 function Dashboard.show(player)
@@ -421,16 +406,8 @@ function Dashboard.show(player)
         Dashboard.instance:refresh()
         return true
     end
-    local screenWidth, screenHeight = 1280, 720
-    if type(getCore) == "function" then
-        local ok, core = pcall(getCore)
-        if ok and core then
-            local widthOk, width = pcall(function() return core:getScreenWidth() end)
-            local heightOk, height = pcall(function() return core:getScreenHeight() end)
-            if widthOk and number(width) then screenWidth = width end
-            if heightOk and number(height) then screenHeight = height end
-        end
-    end
+    local core = getCore()
+    local screenWidth, screenHeight = core:getScreenWidth(), core:getScreenHeight()
     local window = Window:new((screenWidth - 440) / 2, (screenHeight - 330) / 2, player)
     window:initialise()
     window:addToUIManager()

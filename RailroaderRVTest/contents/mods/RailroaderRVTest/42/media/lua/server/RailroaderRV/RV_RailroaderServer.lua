@@ -112,10 +112,7 @@ local function number(value)
         local converted, numeric = pcall(function() return value + 0 end)
         if converted and type(numeric) == "number" then result = numeric end
     end
-    if type(result) ~= "number" or result ~= result
-        or result == math.huge or result == -math.huge then
-        return nil
-    end
+    if type(result) ~= "number" then return nil end
     return result
 end
 

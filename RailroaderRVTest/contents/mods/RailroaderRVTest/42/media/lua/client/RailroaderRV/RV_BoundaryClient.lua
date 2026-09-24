@@ -22,19 +22,11 @@ Client._tick = clientTick
 local BLOCK_HOLD_TICKS = 3
 
 local function number(value)
-    if type(value) == "number" then
-        if value == value and value ~= math.huge and value ~= -math.huge then
-            return value
-        end
-        return nil
-    end
+    if type(value) == "number" then return value end
     if type(value) == "string" then return tonumber(value) end
     if value ~= nil then
         local ok, result = pcall(function() return value + 0 end)
-        if ok and type(result) == "number" and result == result
-            and result ~= math.huge and result ~= -math.huge then
-            return result
-        end
+        if ok and type(result) == "number" then return result end
     end
     return nil
 end

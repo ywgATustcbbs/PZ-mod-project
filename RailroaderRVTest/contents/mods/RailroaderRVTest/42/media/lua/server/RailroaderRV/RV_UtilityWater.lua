@@ -22,14 +22,10 @@ local M = {}
 local runtimeObjects = {}
 local runtimePlayers = {}
 local accountingGuard = {}
-local projectionGuard = {}
-local suppressionGuard = {}
 local tokenSequence = 0
-local pendingWaterEvents = {}
 local pendingDetachedFixtures = {}
 local fixtureSourceGone
-local quarantineLoadedEntry
-local quarantinePendingEntries
+local retireEntry
 local removeObject
 local objectAttached
 
@@ -39,8 +35,7 @@ local function key(identity)
 end
 
 local function finite(value)
-    value = Util.toNumber(value)
-    return value ~= nil and value == value and value ~= math.huge and value ~= -math.huge
+    return Util.toNumber(value) ~= nil
 end
 
 local function sameValue(left, right)
@@ -57,7 +52,6 @@ end
 
 local function clamp(value, low, high)
     value = Util.toNumber(value) or 0
-    if not finite(value) then value = 0 end
     return math.max(low, math.min(high, value))
 end
 
@@ -523,9 +517,7 @@ local function rollbackCreatedObject(square, object)
 end
 
 local function creationFailure(square, object, reason)
-    if object and not rollbackCreatedObject(square, object) then
-        return false, C.SAVE_REBUILD_REQUIRED
-    end
+    if object then rollbackCreatedObject(square, object) end
     return false, reason
 end
 
@@ -566,27 +558,22 @@ local function applyAmount(object, amount, capacity, deferSync)
     if not container then return false, U.REASONS.API_ERROR end
     local profile = { kind = amount <= U.PROFILE_EPSILON and "EMPTY" or "CLEAN",
         cleanAmount = clamp(amount, 0, capacity), taintedAmount = 0 }
-    projectionGuard[object] = true
     local applied, applyReason = Catalog.applyProfile(container, capacity, profile)
     if not applied then
-        projectionGuard[object] = nil
         return false, U.REASONS.API_ERROR, nil, "profile:" .. tostring(applyReason)
     end
     local amountOk, observed = invoke(container, "getAmount")
     observed = amountOk and Util.toNumber(observed) or nil
     if not finite(observed) or math.abs(observed - profile.cleanAmount) > U.PROFILE_EPSILON then
-        projectionGuard[object] = nil
         return false, U.REASONS.API_ERROR, observed, "profile-postcondition"
     end
     if deferSync ~= true and not Util.callSucceeded(object, "sync") then
-        projectionGuard[object] = nil
         -- Catalog.applyProfile has already changed the local object.  Return
         -- that observed amount so callers can advance their baseline and retry
         -- only the network acknowledgement, rather than charging the same
         -- delta again on the next settlement.
         return false, U.REASONS.API_ERROR, observed, "object-sync"
     end
-    projectionGuard[object] = nil
     return true, observed
 end
 
@@ -620,11 +607,6 @@ local function makeObject(identity, context, x, y, z, role, token, fingerprint, 
     if not made or not object then
         print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
             .. " stage=constructor")
-        return creationFailure(square, object, U.REASONS.API_ERROR)
-    end
-    if not Util.classInstance(object, C.UTILITY_HIDDEN_OBJECT_CLASS) then
-        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
-            .. " stage=class")
         return creationFailure(square, object, U.REASONS.API_ERROR)
     end
     local spriteBindOk, spriteBindReason = bindNamedSprite(object, sprite, spriteObject)
@@ -697,16 +679,6 @@ local function makeObject(identity, context, x, y, z, role, token, fingerprint, 
     if not attachObject(square, object) then
         print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
             .. " stage=attach")
-        return creationFailure(square, object, U.REASONS.API_ERROR)
-    end
-    local postTag = objectTag(object)
-    if not validUtilityTag(postTag, identity, role, deviceId)
-        or postTag.objectToken ~= token
-        or postTag.objectFingerprint ~= fingerprint
-        or objectFingerprint(object, role) ~= fingerprint
-        or not objectContainer(object) then
-        print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
-            .. " stage=post-attach")
         return creationFailure(square, object, U.REASONS.API_ERROR)
     end
     runtimeObjects[key(identity) .. ":" .. role .. ":" .. tostring(token)] = object
@@ -790,7 +762,11 @@ local function usageObject(identity, context)
     if status == "duplicate" or status == "invalid" then
         return false, C.SAVE_REBUILD_REQUIRED
     end
-    if not object then return false, C.SAVE_REBUILD_REQUIRED end
+    if not object then
+        local created, result = M.ensureUsageTank(identity, context)
+        if not created then return false, result end
+        return true, result, record
+    end
     local tag = objectTag(object)
     if not validUtilityTag(tag, identity, C.UTILITY_ROLE_TANK, nil)
         or tag.objectToken ~= i.objectToken
@@ -823,58 +799,23 @@ local function proxyObject(identity, entry, player)
     return true, object
 end
 
-local function collectProxyDelta(identity, record, entry, proxy)
+local function collectProxyDelta(record, entry, proxy)
     local readOk, state = readAmount(proxy, C.UTILITY_ROLE_PROXY)
     if not readOk then return false, state end
     local ledger = record.water.proxyLedger[entry.deviceId]
     local baseline = clamp(ledger.amount, 0, U.WATER_CAPACITY)
     local observed = clamp(state.amount, 0, U.WATER_CAPACITY)
-    if observed > baseline + U.PROFILE_EPSILON then
-        record.water.canonicalTank.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-        record.water.canonicalTank.state = U.WATER_STATE_REBUILD_REQUIRED
-        record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-        return false, U.REASONS.INPUT_NOT_SUPPORTED
+    local consumed = math.max(0, baseline - observed)
+    if consumed > U.PROFILE_EPSILON then
+        local canonical = record.water.canonicalTank
+        canonical.amount = clamp(canonical.amount - consumed, 0, canonical.capacity)
+        canonical.sequence = canonical.sequence + 1
     end
-    if not suppressionGuard[key(identity)] and not projectionGuard[proxy]
-        and observed < baseline - U.PROFILE_EPSILON then
-        local usageOk, usage = usageObject(identity, { player = runtimePlayers[key(identity)] })
-        if not usageOk then return false, usage end
-        local usageStateOk, usageState = readAmount(usage, C.UTILITY_ROLE_TANK)
-        if not usageStateOk then return false, usageState end
-        local nextUsage = clamp(usageState.amount - (baseline - observed), 0, U.WATER_CAPACITY)
-        local projected, projectionReason, observedUsage = applyAmount(usage, nextUsage,
-            U.WATER_CAPACITY)
-        if not projected then
-            if observedUsage ~= nil then
-                -- The local usage tank is already lower even when its sync
-                -- acknowledgement failed.  Advance its usage sequence and
-                -- the proxy baseline, but keep snapshot.amount at the last
-                -- settled value so the canonical settlement charges this
-                -- confirmed local delta exactly once on retry.
-                record.water.usageTankSnapshot.usageSequence =
-                    record.water.usageTankSnapshot.usageSequence + 1
-                record.water.usageTankSnapshot.state = U.CHECKPOINT_UNSETTLED
-                record.water.canonicalTank.projectionPending = true
-                record.water.canonicalTank.pendingProjectionSequence =
-                    record.water.canonicalTank.sequence
-                record.water.canonicalTank.pendingProjectionReason = U.REASONS.API_ERROR
-                ledger.amount = observed
-                ledger.capacity = U.WATER_CAPACITY
-                ledger.baselineSequence = record.water.usageTankSnapshot.usageSequence
-                ledger.usageSequence = record.water.usageTankSnapshot.usageSequence
-                return false, projectionReason, true
-            end
-            return false, projectionReason, false
-        end
-        record.water.usageTankSnapshot.usageSequence =
-            record.water.usageTankSnapshot.usageSequence + 1
-        record.water.usageTankSnapshot.state = U.CHECKPOINT_UNSETTLED
-    end
+    -- A proxy above its saved baseline is simply rebased. This can happen
+    -- after a server interruption between projection and persistence.
     ledger.amount = observed
     ledger.capacity = U.WATER_CAPACITY
-    ledger.baselineSequence = record.water.usageTankSnapshot.usageSequence
-    ledger.usageSequence = record.water.usageTankSnapshot.usageSequence
-    return true, nil, false
+    return true, consumed, consumed > U.PROFILE_EPSILON
 end
 
 local function collectAllLoadedProxyDeltas(identity, record, context)
@@ -889,7 +830,7 @@ local function collectAllLoadedProxyDeltas(identity, record, context)
                 record.water.state = U.WATER_STATE_DEFERRED
             elseif not fixture or not validCurrentFixture(entry, fixture, identity) then
                 local normalDetach = fixture == nil and fixtureStatus == "missing"
-                local quarantined, quarantineReason, quarantineChanged = quarantineLoadedEntry(identity,
+                local quarantined, quarantineReason, quarantineChanged = retireEntry(identity,
                     record, entry, context,
                     U.REASONS.DEVICE_NOT_CURRENT, normalDetach)
                 if not quarantined then return false, quarantineReason, quarantineChanged == true end
@@ -900,13 +841,13 @@ local function collectAllLoadedProxyDeltas(identity, record, context)
                     entry.status = U.STATUS_DEFERRED
                     record.water.state = U.WATER_STATE_DEFERRED
                 else
-                    local quarantined, quarantineReason, quarantineChanged = quarantineLoadedEntry(
+                    local quarantined, quarantineReason, quarantineChanged = retireEntry(
                         identity, record, entry, context, proxyOrReason)
                     if not quarantined then return false, quarantineReason,
                         quarantineChanged == true end
                 end
             else
-                local deltaOk, deltaReason, deltaChanged = collectProxyDelta(identity, record,
+                local deltaOk, deltaReason, deltaChanged = collectProxyDelta(record,
                     entry, proxyOrReason)
                 if not deltaOk then return false, deltaReason, deltaChanged == true end
                 count = count + 1
@@ -939,19 +880,19 @@ local function reactivateDeferredEntries(identity, record, context)
                     record.water.proxyLedger[entry.deviceId].status = U.STATUS_NEEDS_RECONCILE
                     changed = true
                 elseif proxyOrReason ~= U.REASONS.TARGET_NOT_LOADED then
-                    local quarantined, quarantineReason = quarantineLoadedEntry(identity,
+                    local quarantined, quarantineReason = retireEntry(identity,
                         record, entry, context, proxyOrReason)
                     if not quarantined then return false, quarantineReason end
                     changed = true
                 end
             elseif not fixture then
-                local quarantined, quarantineReason = quarantineLoadedEntry(identity, record,
+                local quarantined, quarantineReason = retireEntry(identity, record,
                     entry, context, U.REASONS.DEVICE_NOT_CURRENT,
                     fixtureStatus == "missing")
                 if not quarantined then return false, quarantineReason end
                 changed = true
             else
-                local quarantined, quarantineReason = quarantineLoadedEntry(identity, record,
+                local quarantined, quarantineReason = retireEntry(identity, record,
                     entry, context, U.REASONS.DEVICE_NOT_CURRENT)
                 if not quarantined then return false, quarantineReason end
                 changed = true
@@ -964,202 +905,76 @@ local function reactivateDeferredEntries(identity, record, context)
     return true, changed
 end
 
-local function settleUsageToCanonical(identity, record, context)
-    local usageOk, usageOrReason = usageObject(identity, context)
-    if not usageOk then return false, usageOrReason end
-    local stateOk, state = readAmount(usageOrReason, C.UTILITY_ROLE_TANK)
-    if not stateOk then return false, state end
-    local snapshot = record.water.usageTankSnapshot
-    local baseline = clamp(snapshot.amount, 0, U.WATER_CAPACITY)
-    local observed = clamp(state.amount, 0, U.WATER_CAPACITY)
-    if observed > baseline + U.PROFILE_EPSILON then
-        record.water.canonicalTank.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-        record.water.canonicalTank.state = U.WATER_STATE_REBUILD_REQUIRED
-        record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-        return false, U.REASONS.INPUT_NOT_SUPPORTED
-    end
-    local consumed = math.max(0, baseline - observed)
-    if consumed > U.PROFILE_EPSILON then
-        local canonical = record.water.canonicalTank
-        canonical.amount = clamp(canonical.amount - consumed, 0, canonical.capacity)
-        canonical.sequence = canonical.sequence + 1
-        snapshot.settledCanonicalSequence = canonical.sequence
-        snapshot.state = U.CHECKPOINT_UNSETTLED
-    end
-    snapshot.amount = observed
-    snapshot.baselineSequence = snapshot.usageSequence
-    return true, consumed
-end
-
 local function projectUsageToProxies(identity, record, context)
-    local usageOk, usage = usageObject(identity, context)
     local canonical = record.water.canonicalTank
+    local usageOk, usage = usageObject(identity, context)
     if not usageOk then
         canonical.projectionPending = true
         canonical.pendingProjectionSequence = canonical.sequence
         canonical.pendingProjectionReason = tostring(usage)
-        if usage == U.REASONS.TARGET_NOT_LOADED then
-            canonical.state = U.WATER_STATE_DEFERRED
-            record.water.state = U.WATER_STATE_DEFERRED
-            record.water.usageTankSnapshot.state = U.CHECKPOINT_DEFERRED
-        elseif usage == C.SAVE_REBUILD_REQUIRED then
-            canonical.state = U.WATER_STATE_REBUILD_REQUIRED
-            record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-            canonical.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-        else
-            canonical.state = U.WATER_STATE_NEEDS_RECONCILE
-            record.water.state = U.WATER_STATE_NEEDS_RECONCILE
-            record.water.usageTankSnapshot.state = U.CHECKPOINT_UNSETTLED
-        end
+        canonical.state = usage == U.REASONS.TARGET_NOT_LOADED
+            and U.WATER_STATE_DEFERRED or U.WATER_STATE_NEEDS_RECONCILE
+        record.water.state = canonical.state
         return false, usage
     end
-    local usageAmount
-    local usageNeedsSync = canonical.projectionPending == true
-    local usageMatches, usageMatchReason = projectionMatches(usage, canonical.amount,
-        canonical.capacity, C.UTILITY_ROLE_TANK)
-    if usageMatchReason == C.SAVE_REBUILD_REQUIRED then
-        canonical.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-        canonical.state = U.WATER_STATE_REBUILD_REQUIRED
-        record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-        return false, C.SAVE_REBUILD_REQUIRED
-    end
-    if not usageNeedsSync and usageMatches then
-        -- The usage object already mirrors canonical state, including its
-        -- clean profile and input lock.  Reading it is enough; avoid the
-        -- clear/refill/sync cycle on an idle tick.
-        usageAmount = canonical.amount
-    else
-        local usageWriteOk, observedUsage, localUsageAmount = applyAmount(usage,
-            canonical.amount, canonical.capacity)
-        usageAmount = observedUsage
-        if not usageWriteOk then
+    if canonical.projectionPending
+        or not projectionMatches(usage, canonical.amount, canonical.capacity,
+            C.UTILITY_ROLE_TANK) then
+        local applied, _, localAmount = applyAmount(usage, canonical.amount,
+            canonical.capacity)
+        if not applied then
+            if localAmount ~= nil then record.water.usageTankSnapshot.amount = localAmount end
             canonical.projectionPending = true
             canonical.pendingProjectionSequence = canonical.sequence
             canonical.pendingProjectionReason = U.REASONS.API_ERROR
             canonical.state = U.WATER_STATE_NEEDS_RECONCILE
-            record.water.state = U.WATER_STATE_NEEDS_RECONCILE
-            record.water.usageTankSnapshot.state = U.CHECKPOINT_UNSETTLED
-            if localUsageAmount ~= nil then
-                -- Preserve the locally written amount and retry only sync.
-                record.water.usageTankSnapshot.amount = localUsageAmount
-                usageAmount = localUsageAmount
-            else
-                canonical.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-                canonical.state = U.WATER_STATE_REBUILD_REQUIRED
-                record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-            end
-            return false, canonical.state == U.WATER_STATE_REBUILD_REQUIRED
-                and C.SAVE_REBUILD_REQUIRED or U.REASONS.API_ERROR
+            record.water.state = canonical.state
+            return false, U.REASONS.API_ERROR
         end
     end
-    record.water.usageTankSnapshot.amount = usageAmount
-    record.water.usageTankSnapshot.projectionSequence = canonical.sequence
+    record.water.usageTankSnapshot.amount = canonical.amount
+
+    local pending = false
     for deviceId, entry in pairs(record.water.registry) do
         if entry.status == U.STATUS_ACTIVE or entry.status == U.STATUS_NEEDS_RECONCILE then
-            local proxyOk, proxyOrReason = proxyObject(identity, entry, context and context.player)
+            local proxyOk, proxy = proxyObject(identity, entry, context and context.player)
             if not proxyOk then
-                if proxyOrReason == C.SAVE_REBUILD_REQUIRED then
-                    entry.status = U.STATUS_REBUILD_REQUIRED
-                    local ledger = record.water.proxyLedger[deviceId]
-                    if ledger then ledger.status = U.STATUS_REBUILD_REQUIRED end
-                    canonical.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-                    canonical.state = U.WATER_STATE_REBUILD_REQUIRED
-                    canonical.projectionPending = true
-                    canonical.pendingProjectionSequence = canonical.sequence
-                    canonical.pendingProjectionReason = C.SAVE_REBUILD_REQUIRED
-                    record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-                    record.water.usageTankSnapshot.state = U.CHECKPOINT_UNSETTLED
-                    return false, C.SAVE_REBUILD_REQUIRED
-                end
-                entry.status = proxyOrReason == U.REASONS.TARGET_NOT_LOADED
+                entry.status = proxy == U.REASONS.TARGET_NOT_LOADED
                     and U.STATUS_DEFERRED or U.STATUS_NEEDS_RECONCILE
-                canonical.projectionPending = true
-                canonical.pendingProjectionSequence = canonical.sequence
-                canonical.pendingProjectionReason = tostring(proxyOrReason)
+                record.water.proxyLedger[deviceId].status = entry.status
+                pending = true
             else
-                local applied, observed, localProxyAmount
-                local retrySync = entry.status == U.STATUS_NEEDS_RECONCILE
-                local proxyMatches, proxyMatchReason = projectionMatches(proxyOrReason,
-                    usageAmount, canonical.capacity, C.UTILITY_ROLE_PROXY)
-                if proxyMatchReason == C.SAVE_REBUILD_REQUIRED then
-                    entry.status = U.STATUS_REBUILD_REQUIRED
-                    record.water.proxyLedger[deviceId].status = U.STATUS_REBUILD_REQUIRED
-                    canonical.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-                    canonical.state = U.WATER_STATE_REBUILD_REQUIRED
-                    record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-                    return false, C.SAVE_REBUILD_REQUIRED
+                local applied, amount, localAmount = true, canonical.amount, nil
+                if entry.status ~= U.STATUS_ACTIVE
+                    or not projectionMatches(proxy, canonical.amount, canonical.capacity,
+                        C.UTILITY_ROLE_PROXY) then
+                    applied, amount, localAmount = applyAmount(proxy, canonical.amount,
+                        canonical.capacity)
                 end
-                if not retrySync and proxyMatches then
-                    -- This proxy already has the requested clean, locked
-                    -- projection.  Its ledger still gets the current sequence
-                    -- below without a redundant world write or network packet.
-                    applied, observed = true, usageAmount
-                else
-                    applied, observed, localProxyAmount = applyAmount(proxyOrReason,
-                        usageAmount, canonical.capacity)
-                end
-                if not applied then
-                    entry.status = U.STATUS_NEEDS_RECONCILE
-                    record.water.proxyLedger[deviceId].status = U.STATUS_NEEDS_RECONCILE
-                    if localProxyAmount ~= nil then
-                        -- Catalog.applyProfile succeeded locally but object
-                        -- sync failed.  Advance the baseline to the observed
-                        -- world amount so retry cannot count this projection
-                        -- as fresh consumption.
-                        local ledger = record.water.proxyLedger[deviceId]
-                        ledger.amount = localProxyAmount
-                        ledger.capacity = canonical.capacity
-                        ledger.baselineSequence = record.water.usageTankSnapshot.usageSequence
-                        ledger.usageSequence = record.water.usageTankSnapshot.usageSequence
-                    else
-                        canonical.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-                        canonical.state = U.WATER_STATE_REBUILD_REQUIRED
-                        record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-                        record.water.proxyLedger[deviceId].status = U.STATUS_REBUILD_REQUIRED
-                        entry.status = U.STATUS_REBUILD_REQUIRED
-                        break
-                    end
-                    canonical.projectionPending = true
-                    canonical.pendingProjectionSequence = canonical.sequence
-                    canonical.pendingProjectionReason = U.REASONS.API_ERROR
-                else
-                    entry.status = U.STATUS_ACTIVE
+                if applied then
                     local ledger = record.water.proxyLedger[deviceId]
-                    ledger.amount = observed
+                    ledger.amount = amount
                     ledger.capacity = canonical.capacity
-                    ledger.baselineSequence = record.water.usageTankSnapshot.usageSequence
-                    ledger.usageSequence = record.water.usageTankSnapshot.usageSequence
-                    ledger.projectionSequence = canonical.sequence
                     ledger.status = U.STATUS_ACTIVE
+                    entry.status = U.STATUS_ACTIVE
+                else
+                    entry.status = U.STATUS_NEEDS_RECONCILE
+                    local ledger = record.water.proxyLedger[deviceId]
+                    ledger.status = entry.status
+                    if localAmount ~= nil then ledger.amount = localAmount end
+                    pending = true
                 end
             end
+        elseif entry.status == U.STATUS_DEFERRED then
+            pending = true
         end
     end
-    local pending = false
-    for _, entry in pairs(record.water.registry) do
-        if entry.status ~= U.STATUS_ACTIVE then pending = true break end
-    end
     canonical.projectionPending = pending
-    if pending then
-        canonical.pendingProjectionSequence = canonical.sequence
-        canonical.pendingProjectionReason = canonical.pendingProjectionReason or U.REASONS.PROJECTION_PENDING
-        record.water.state = U.WATER_STATE_NEEDS_RECONCILE
-        record.water.usageTankSnapshot.state = U.CHECKPOINT_UNSETTLED
-    else
-        canonical.pendingProjectionSequence = nil
-        canonical.pendingProjectionReason = nil
-        canonical.state = U.WATER_STATE_ACTIVE
-        record.water.state = U.WATER_STATE_ACTIVE
-        record.water.usageTankSnapshot.state = U.CHECKPOINT_SETTLED
-        record.water.usageTankSnapshot.settledCanonicalSequence = canonical.sequence
-        canonical.checkpoint = { canonicalSequence = canonical.sequence,
-            usageSequence = record.water.usageTankSnapshot.usageSequence,
-            usageAmount = usageAmount, state = U.CHECKPOINT_SETTLED }
-    end
-    if canonical.state == U.WATER_STATE_REBUILD_REQUIRED then
-        return false, C.SAVE_REBUILD_REQUIRED
-    end
-    return not pending, pending and U.REASONS.PROJECTION_PENDING or usageAmount
+    canonical.pendingProjectionSequence = pending and canonical.sequence or nil
+    canonical.pendingProjectionReason = pending and U.REASONS.PROJECTION_PENDING or nil
+    canonical.state = pending and U.WATER_STATE_NEEDS_RECONCILE or U.WATER_STATE_ACTIVE
+    record.water.state = canonical.state
+    return not pending, pending and U.REASONS.PROJECTION_PENDING or canonical.amount
 end
 
 local function flushBeforeOverwrite(identity, operation, context, executeOperation)
@@ -1170,160 +985,51 @@ local function flushBeforeOverwrite(identity, operation, context, executeOperati
         local recordOk, recordOrReason = Store.getRecord(identity, false)
         if not recordOk then return false, recordOrReason end
         local record = recordOrReason
-        local canonical = record.water.canonicalTank
         local beforeWater = Store.copyWater(record.water)
-        local hasPendingQuarantine = canonical.state == U.WATER_STATE_QUARANTINE_PENDING
-            or record.water.state == U.WATER_STATE_QUARANTINE_PENDING
-        if not hasPendingQuarantine then
-            for _, entry in pairs(record.water.registry) do
-                if entry.status == U.STATUS_QUARANTINE_PENDING then
-                    hasPendingQuarantine = true
-                    break
-                end
-            end
-        end
-        if hasPendingQuarantine then
-            local quarantineOk, quarantineReason = quarantinePendingEntries(identity, record,
-                context, U.REASONS.PROJECTION_PENDING, false)
-            local quarantineCommitOk, quarantineCommitReason = Store.commit(record, identity)
-            if not quarantineCommitOk then return false, quarantineCommitReason, true end
-            if not quarantineOk then return false, quarantineReason end
-            return false, C.SAVE_REBUILD_REQUIRED
-        end
-        if canonical.faultPolicy == U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-            or canonical.state == U.WATER_STATE_REBUILD_REQUIRED
-            or record.water.state == U.WATER_STATE_REBUILD_REQUIRED then
-            return false, C.SAVE_REBUILD_REQUIRED
-        end
+
         local reactivated, reactivateReason = reactivateDeferredEntries(identity, record, context)
-        if not reactivated then
-            return false, reactivateReason
-        end
-        local collected, collectReason, collectChanged = collectAllLoadedProxyDeltas(identity,
-            record, context)
-        if canonical.faultPolicy == U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-            or canonical.state == U.WATER_STATE_REBUILD_REQUIRED
-            or record.water.state == U.WATER_STATE_REBUILD_REQUIRED then
-            quarantinePendingEntries(identity, record, context, collectReason, true)
-            local quarantineCommitOk, quarantineCommitReason = Store.commit(record, identity)
-            if not quarantineCommitOk then return false, quarantineCommitReason, true end
-            return false, C.SAVE_REBUILD_REQUIRED
-        end
-        if not collected then
-            if collectReason == C.SAVE_REBUILD_REQUIRED then
-                local quarantineOk, quarantineReason = quarantinePendingEntries(identity, record,
-                    context, collectReason, true)
-                local quarantineCommitOk, quarantineCommitReason = Store.commit(record, identity)
-                if not quarantineCommitOk then return false, quarantineCommitReason, true end
-                if not quarantineOk then return false, quarantineReason end
-                return false, C.SAVE_REBUILD_REQUIRED
-            elseif collectReason == U.REASONS.TARGET_NOT_LOADED then
-                if canonical.state ~= U.WATER_STATE_QUARANTINE_PENDING
-                    and record.water.state ~= U.WATER_STATE_QUARANTINE_PENDING then
-                    canonical.state = U.WATER_STATE_DEFERRED
-                    record.water.state = U.WATER_STATE_DEFERRED
-                end
-                record.water.usageTankSnapshot.state = U.CHECKPOINT_DEFERRED
-                local deferredCommitOk, deferredCommitReason = Store.commit(record, identity)
-                if not deferredCommitOk then return false, deferredCommitReason, true end
-            elseif collectChanged then
-                record.water.state = U.WATER_STATE_NEEDS_RECONCILE
-                local pendingCommitOk, pendingCommitReason = Store.commit(record, identity)
-                if not pendingCommitOk then return false, pendingCommitReason, true end
-            end
-            return false, collectReason
-        end
-        local settled, settledReason = settleUsageToCanonical(identity, record, context)
-        if not settled then
-            if settledReason == C.SAVE_REBUILD_REQUIRED then
-                local quarantineOk, quarantineReason = quarantinePendingEntries(identity, record,
-                    context, settledReason, true)
-                local quarantineCommitOk, quarantineCommitReason = Store.commit(record, identity)
-                if not quarantineCommitOk then return false, quarantineCommitReason, true end
-                if not quarantineOk then return false, quarantineReason end
-                return false, C.SAVE_REBUILD_REQUIRED
-            elseif settledReason == U.REASONS.TARGET_NOT_LOADED then
-                canonical.state = U.WATER_STATE_DEFERRED
-                record.water.state = U.WATER_STATE_DEFERRED
-                record.water.usageTankSnapshot.state = U.CHECKPOINT_DEFERRED
-                local deferredCommitOk, deferredCommitReason = Store.commit(record, identity)
-                if not deferredCommitOk then return false, deferredCommitReason, true end
-            end
-            return false, settledReason
-        end
-        local operationCommitted
+        if not reactivated then return false, reactivateReason end
+        local collected, collectReason = collectAllLoadedProxyDeltas(identity, record, context)
+        if not collected then return false, collectReason end
+
+        local operationCommitted = false
         if executeOperation then
             local operationOk, operationReason = executeOperation(record)
             if not operationOk then
-                -- Collection/settlement may already have changed U, proxy
-                -- baselines, and C before a structural operation rejects.
-                -- Persist that confirmed consumption boundary and reconcile
-                -- the remaining projections; never replay it on the next
-                -- flush merely because CONNECT/DETACH failed.
-                local projected, projectionReason = projectUsageToProxies(identity, record, context)
-                if not projected and projectionReason == C.SAVE_REBUILD_REQUIRED then
-                    quarantinePendingEntries(identity, record, context, projectionReason, true)
-                end
-                local settledCommitOk, settledCommitReason = Store.commit(record, identity)
-                if not settledCommitOk then return false, settledCommitReason, true end
-                if not projected and projectionReason == C.SAVE_REBUILD_REQUIRED then
-                    -- `committed` below records persistence of the earlier
-                    -- settlement only.  The requested operation callback
-                    -- failed, so callers must not treat its source as spent.
-                    return false, { committed = true, operationCommitted = false,
-                        record = record,
-                        reason = C.SAVE_REBUILD_REQUIRED, changed = true }
+                if not sameValue(beforeWater, record.water) then
+                    local saved, saveReason = Store.commit(record, identity)
+                    if not saved then return false, saveReason, true end
                 end
                 return false, operationReason
             end
             operationCommitted = true
         end
+
         local projected, projectionReason = projectUsageToProxies(identity, record, context)
-        if not projected and projectionReason == C.SAVE_REBUILD_REQUIRED then
-            quarantinePendingEntries(identity, record, context, projectionReason, true)
-        end
         local changed = not sameValue(beforeWater, record.water)
-        if not changed then
-            return true, { record = record, operation = operation, consumed = settledReason,
-                changed = false }
+        if changed then
+            local saved, saveReason = Store.commit(record, identity)
+            if not saved then return false, saveReason, true end
         end
-        local commitOk, commitReason = Store.commit(record, identity)
-        if not commitOk then return false, commitReason, true end
         if not projected then
-            -- The canonical settlement/operation is already persisted.  Do
-            -- not let callers compensate a source transaction after this
-            -- boundary; only the remaining world projection is pending.
-            return false, { committed = true, operationCommitted = operationCommitted,
-                record = record,
-                reason = projectionReason, changed = true }
+            if operationCommitted then
+                return false, { committed = true, operationCommitted = true,
+                    record = record, reason = projectionReason, changed = changed }
+            end
+            return false, projectionReason
         end
-        return true, { record = record, operation = operation, consumed = settledReason,
-            changed = true }
+        return true, { record = record, operation = operation,
+            changed = changed }
     end)
     accountingGuard[identityKey] = nil
     if not ok then return false, tostring(accepted) end
     return accepted, detail, commitFailed
 end
 
-function M.flushBeforeOverwrite(identity, operation, context, executeOperation)
-    return flushBeforeOverwrite(identity, operation, context, executeOperation)
-end
-
-function M.ensureUsageTank(identity, context, workingRecord, recordMeta)
+function M.ensureUsageTank(identity, context, workingRecord)
     local record
-    local recordFresh = false
     if workingRecord ~= nil then
-        if type(recordMeta) ~= "table" or type(recordMeta.fresh) ~= "boolean" then
-            return false, C.SAVE_REBUILD_REQUIRED
-        end
-        for field in pairs(recordMeta) do
-            if field ~= "fresh" then return false, C.SAVE_REBUILD_REQUIRED end
-        end
-        if not Store.validateRecord(workingRecord, identity) then
-            return false, C.SAVE_REBUILD_REQUIRED
-        end
         record = workingRecord
-        recordFresh = recordMeta.fresh
     else
         local recordOk, recordOrReason = Store.getRecord(identity, false)
         if not recordOk then return false, recordOrReason end
@@ -1339,19 +1045,8 @@ function M.ensureUsageTank(identity, context, workingRecord, recordMeta)
         -- a replacement beside it.
         return false, C.SAVE_REBUILD_REQUIRED
     end
-    if recordFresh and object then
-        -- A fresh current-schema record may not adopt a pre-existing world
-        -- utility object.  The pair is a partial write or an unknown prior
-        -- transaction; do not infer ownership, delete it, or repair it.
-        return false, C.SAVE_REBUILD_REQUIRED
-    end
-    if not recordFresh and not object then
-        -- A persisted record with no expected usage object needs the full
-        -- loaded U/P, baseline and checkpoint recovery proof from the plan.
-        -- Until that independent recovery transaction exists, fail closed;
-        -- never recreate from canonical and risk duplicating settled water.
-        return false, C.SAVE_REBUILD_REQUIRED
-    end
+    -- Recreate a missing projected tank from the saved balance after an
+    -- interrupted save. Some consumption may be lost.
     if object then
         local tag = objectTag(object)
         if not validUtilityTag(tag, identity, C.UTILITY_ROLE_TANK, nil)
@@ -1373,13 +1068,9 @@ function M.ensureUsageTank(identity, context, workingRecord, recordMeta)
         identityData.objectFingerprint, record.water.canonicalTank.amount)
     if not made then return false, created end
     record.water.usageTankSnapshot.amount = record.water.canonicalTank.amount
-    record.water.usageTankSnapshot.projectionSequence = record.water.canonicalTank.sequence
-    record.water.usageTankSnapshot.state = U.CHECKPOINT_SETTLED
     local commitOk, commitReason = Store.commit(record, identity)
     if not commitOk then
-        if not rollbackCreatedObject(nil, created) then
-            return false, C.SAVE_REBUILD_REQUIRED
-        end
+        rollbackCreatedObject(nil, created)
         return false, commitReason
     end
     return true, created
@@ -1499,27 +1190,6 @@ removeObject = function(object)
     return accepted
 end
 
-local function markCurrentWaterRebuild(identity, reason)
-    local recordOk, recordOrReason = Store.getRecord(identity, false)
-    if not recordOk then return false end
-    local record = recordOrReason
-    local canonical = record.water.canonicalTank
-    -- A rebuild lock must also revoke every currently loaded external source;
-    -- otherwise native plumbing can keep feeding a proxy after accounting has
-    -- stopped.  The helper leaves unloaded entries pending for retry.
-    quarantinePendingEntries(identity, record,
-        { player = runtimePlayers[key(identity)] }, reason, true)
-    canonical.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-    canonical.state = U.WATER_STATE_REBUILD_REQUIRED
-    canonical.projectionPending = true
-    canonical.pendingProjectionSequence = canonical.sequence
-    canonical.pendingProjectionReason = tostring(reason or U.REASONS.API_ERROR)
-    record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-    record.water.usageTankSnapshot.state = U.CHECKPOINT_UNSETTLED
-    local committed = Store.commit(record, identity)
-    return committed == true
-end
-
 fixtureSourceGone = function(object)
     if not object then return true end
     if not Util.callSucceeded(object, "doFindExternalWaterSource") then return false end
@@ -1527,126 +1197,37 @@ fixtureSourceGone = function(object)
     return findOk and found == nil
 end
 
-quarantineLoadedEntry = function(identity, record, entry, context, reason, normalDetach)
-    local identityKey = key(identity)
-    local cleanDetach = normalDetach == true
-    if not cleanDetach then
-        entry.status = U.STATUS_QUARANTINE_PENDING
-        record.water.canonicalTank.state = U.WATER_STATE_QUARANTINE_PENDING
-        record.water.state = U.WATER_STATE_QUARANTINE_PENDING
-    end
+-- Remove a disconnected or replaced fixture without locking the whole RV's
+-- water balance. A loaded source is disconnected before its proxy is removed.
+retireEntry = function(identity, record, entry, context, reason, normalDetach)
     local fixture, fixtureStatus = squareObject(identity, entry.fixtureX,
         entry.fixtureY, entry.fixtureZ, "fixture", entry.deviceId,
         context and context.player)
-    local rawProxy, rawProxyStatus = squareObject(identity, entry.proxyX, entry.proxyY,
-        entry.proxyZ, C.UTILITY_ROLE_PROXY, entry.deviceId, context and context.player)
-    local proxyOk, proxy = proxyObject(identity, entry, context and context.player)
-    if fixtureStatus == "unloaded" or rawProxyStatus == "unloaded"
-        or proxy == U.REASONS.TARGET_NOT_LOADED then
-        entry.status = U.STATUS_QUARANTINE_PENDING
-        record.water.canonicalTank.state = U.WATER_STATE_QUARANTINE_PENDING
-        record.water.state = U.WATER_STATE_QUARANTINE_PENDING
-        return false, U.REASONS.TARGET_NOT_LOADED, true
+    local proxy, proxyStatus = squareObject(identity, entry.proxyX, entry.proxyY,
+        entry.proxyZ, C.UTILITY_ROLE_PROXY, entry.deviceId,
+        context and context.player)
+    if fixtureStatus == "unloaded" or proxyStatus == "unloaded" then
+        entry.status = U.STATUS_DEFERRED
+        return true, U.REASONS.TARGET_NOT_LOADED, true
     end
-    if fixtureStatus == "invalid" or rawProxyStatus == "invalid"
-        or proxy == C.SAVE_REBUILD_REQUIRED then
-        entry.status = U.STATUS_REBUILD_REQUIRED
-        record.water.canonicalTank.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-        record.water.canonicalTank.state = U.WATER_STATE_REBUILD_REQUIRED
-        record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-        return false, C.SAVE_REBUILD_REQUIRED
+    if fixtureStatus == "invalid" or fixtureStatus == "duplicate"
+        or proxyStatus == "invalid" or proxyStatus == "duplicate" then
+        entry.status = U.STATUS_NEEDS_RECONCILE
+        return true, reason, true
     end
-    if cleanDetach and not fixture then
-        -- Collect the proxy's final delta while the hidden object is still
-        -- available.  The following usage settlement will charge canonical
-        -- once, then this entry can be removed as an ordinary detach.
-        if proxyOk and proxy then
-            local deltaOk, deltaReason, deltaChanged = collectProxyDelta(identity, record, entry,
-                proxy)
-            if not deltaOk then return false, deltaReason, deltaChanged == true end
-        end
+    if normalDetach and not fixture and proxy then
+        collectProxyDelta(record, entry, proxy)
     end
-    suppressionGuard[identityKey] = true
     local revoked = not fixture or setFixtureExternal(fixture, nil, false)
-    local cleared = true
-    if proxyOk and proxy then
-        cleared = applyAmount(proxy, 0, U.WATER_CAPACITY)
-        if cleared then cleared = removeObject(proxy) end
-    end
-    suppressionGuard[identityKey] = nil
-    local sourceGone = fixture and fixtureSourceGone(fixture) or revoked
-    if revoked and cleared and sourceGone then
-        if cleanDetach then
-            record.water.registry[entry.deviceId] = nil
-            record.water.proxyLedger[entry.deviceId] = nil
-        else
-            entry.status = U.STATUS_SUSPENDED
-        end
+    local cleared = not proxy or (applyAmount(proxy, 0, U.WATER_CAPACITY)
+        and removeObject(proxy))
+    if revoked and cleared and (not fixture or fixtureSourceGone(fixture)) then
+        record.water.registry[entry.deviceId] = nil
+        record.water.proxyLedger[entry.deviceId] = nil
     else
-        -- Keep the cleanup request retryable even after the enclosing water
-        -- record enters its rebuild lock.  A status-only lock must not leave a
-        -- still-enabled native source behind forever.
-        entry.status = U.STATUS_QUARANTINE_PENDING
-        record.water.canonicalTank.state = U.WATER_STATE_QUARANTINE_PENDING
-        record.water.state = U.WATER_STATE_QUARANTINE_PENDING
-        return false, U.REASONS.POSTCONDITION_FAILED, true
+        entry.status = U.STATUS_NEEDS_RECONCILE
     end
-    if cleanDetach then
-        return true, reason
-    end
-    record.water.canonicalTank.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-    record.water.canonicalTank.state = U.WATER_STATE_REBUILD_REQUIRED
-    record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-    return true, reason
-end
-
--- Run the physical shutdown for every loaded proxy when a shared usage tank
--- or another structural prerequisite is unavailable.  Persisted rebuild state
--- is a business-operation lock, not a reason to skip this cleanup; unloaded
--- entries remain QUARANTINE_PENDING for the next loaded-square retry.
-quarantinePendingEntries = function(identity, record, context, reason, allEntries)
-    local pending = false
-    local attempted = false
-    local pendingReason
-    for _, entry in pairs(record.water.registry) do
-        if (allEntries == true and entry.status ~= U.STATUS_SUSPENDED)
-            or entry.status == U.STATUS_QUARANTINE_PENDING then
-            attempted = true
-            local quarantineOk, quarantineReason = quarantineLoadedEntry(identity, record,
-                entry, context, reason, false)
-            if not quarantineOk then
-                if entry.status == U.STATUS_QUARANTINE_PENDING
-                    or quarantineReason == U.REASONS.TARGET_NOT_LOADED then
-                    pending = true
-                    pendingReason = quarantineReason
-                else
-                    entry.status = U.STATUS_REBUILD_REQUIRED
-                    record.water.canonicalTank.faultPolicy =
-                        U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-                    record.water.canonicalTank.state = U.WATER_STATE_REBUILD_REQUIRED
-                    record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-                    pendingReason = quarantineReason
-                end
-            end
-        end
-    end
-    if pending then
-        record.water.canonicalTank.state = U.WATER_STATE_QUARANTINE_PENDING
-        record.water.state = U.WATER_STATE_QUARANTINE_PENDING
-        return false, pendingReason or U.REASONS.TARGET_NOT_LOADED
-    end
-    if not attempted then
-        record.water.canonicalTank.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-        record.water.canonicalTank.state = U.WATER_STATE_REBUILD_REQUIRED
-        record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-        return true
-    end
-    if attempted then
-        record.water.canonicalTank.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-        record.water.canonicalTank.state = U.WATER_STATE_REBUILD_REQUIRED
-        record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-    end
-    return true
+    return true, reason, true
 end
 
 local function objectDeviceId(record, object)
@@ -1711,16 +1292,6 @@ end
 function M.connectDevice(identity, context, hint)
     local recordOk, recordOrReason = Store.getRecord(identity, false)
     if not recordOk then return false, recordOrReason end
-    local water = recordOrReason.water
-    if water.canonicalTank.faultPolicy == U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-        or water.canonicalTank.state == U.WATER_STATE_REBUILD_REQUIRED
-        or water.state == U.WATER_STATE_REBUILD_REQUIRED then
-        return false, C.SAVE_REBUILD_REQUIRED
-    end
-    if water.canonicalTank.state == U.WATER_STATE_QUARANTINE_PENDING
-        or water.state == U.WATER_STATE_QUARANTINE_PENDING then
-        return false, U.REASONS.PROJECTION_PENDING
-    end
     local player = context and context.player
     if not player or not hasPipeWrench(player) then return false, U.REASONS.MISSING_TOOL end
     local objectOk, objectOrReason = objectAtHint(player, hint)
@@ -1784,7 +1355,7 @@ function M.connectDevice(identity, context, hint)
             C.SPRITES.utilityProxy.sprite),
         registeredSequence = recordOrReason.water.canonicalTank.sequence + 1,
         status = U.STATUS_NEEDS_RECONCILE }
-    local flushOk, result, commitFailed = flushBeforeOverwrite(identity, "CONNECT", context,
+    local flushOk, result = flushBeforeOverwrite(identity, "CONNECT", context,
         function(record)
         local function rollbackCreatedProxy(proxy)
             local disabled = not proxy or setFixtureExternal(object, proxy, false)
@@ -1814,17 +1385,12 @@ function M.connectDevice(identity, context, hint)
         record.water.registry[deviceId] = entry
         record.water.proxyLedger[deviceId] = { deviceId = deviceId,
             amount = record.water.usageTankSnapshot.amount, capacity = U.WATER_CAPACITY,
-            baselineSequence = record.water.usageTankSnapshot.usageSequence,
-            usageSequence = record.water.usageTankSnapshot.usageSequence,
-            projectionSequence = 0, status = U.STATUS_NEEDS_RECONCILE }
+            status = U.STATUS_NEEDS_RECONCILE }
         return true
         end)
     if not flushOk then
         if type(result) ~= "table" or result.committed ~= true then
-            -- A failed commit/projection boundary must not leave a newly
-            -- created current proxy or fixture source behind the rejected
-            -- registry transaction.  Consumption already committed before a
-            -- partial-projection result is deliberately not compensated.
+            -- A rejected connection must release a proxy created by this call.
             local createdProxy = runtimeObjects[key(identity) .. ":"
                 .. C.UTILITY_ROLE_PROXY .. ":" .. tostring(entry.proxyToken)]
             if createdProxy then
@@ -1832,21 +1398,10 @@ function M.connectDevice(identity, context, hint)
                 local removed = removeObject(createdProxy)
                 local restored = restoreFixtureTag(object, oldTag)
                 if not (disabled and removed and restored) then
-                    return false, C.SAVE_REBUILD_REQUIRED
+                    return false, U.REASONS.POSTCONDITION_FAILED
                 end
             end
-            if commitFailed then
-                -- A failed final commit may have observed/settled usage before
-                -- the registry transaction.  The root snapshot is restored by
-                -- Store; persist a current-only rebuild lock when possible so
-                -- a retry cannot consume that same world delta twice.
-                markCurrentWaterRebuild(identity, result)
-                return false, C.SAVE_REBUILD_REQUIRED
-            end
             return false, result
-        end
-        if result.reason == C.SAVE_REBUILD_REQUIRED then
-            return false, C.SAVE_REBUILD_REQUIRED
         end
         result = result.record
     else
@@ -1909,50 +1464,8 @@ local function restoreSource(item, container, target)
         and syncItem(item)
 end
 
--- A source rollback failure means that the source transaction boundary is no
--- longer knowable. Keep the current record fail-closed instead of allowing a
--- later retry to consume the item again or continue with an unaccounted
--- canonical change.
-local function markSourceBoundaryRebuild(identity, reason)
-    local recordOk, recordOrReason = Store.getRecord(identity, false)
-    if not recordOk then return false end
-    local record = recordOrReason
-    local canonical = record.water.canonicalTank
-    canonical.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-    canonical.state = U.WATER_STATE_REBUILD_REQUIRED
-    canonical.projectionPending = true
-    canonical.pendingProjectionSequence = canonical.sequence
-    canonical.pendingProjectionReason = tostring(reason or U.REASONS.API_ERROR)
-    record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-    record.water.usageTankSnapshot.state = U.CHECKPOINT_UNSETTLED
-    local committed = Store.commit(record, identity)
-    return committed == true
-end
 
-local function restoreSourceOrRebuild(identity, item, container, target, reason)
-    if restoreSource(item, container, target) then return true end
-    markSourceBoundaryRebuild(identity, reason)
-    return false
-end
-
-local function trimRequestLedger(ledger)
-    local count = 0
-    for _ in pairs(ledger) do count = count + 1 end
-    while count >= 64 do
-        local oldestKey, oldestSequence
-        for requestKey, request in pairs(ledger) do
-            local sequence = Util.integer(request.sequence) or math.huge
-            if oldestSequence == nil or sequence < oldestSequence then
-                oldestKey, oldestSequence = requestKey, sequence
-            end
-        end
-        if oldestKey == nil then break end
-        ledger[oldestKey] = nil
-        count = count - 1
-    end
-end
-
-function M.addWater(identity, context, entryPoint, sourceHint, requestMeta)
+function M.addWater(identity, context, entryPoint, sourceHint)
     entryPoint = entryPoint or U.ENTRY_INTERNAL
     if entryPoint ~= U.ENTRY_INTERNAL and entryPoint ~= U.ENTRY_LOCOMOTIVE then
         return false, U.REASONS.INVALID_REQUEST
@@ -1960,23 +1473,6 @@ function M.addWater(identity, context, entryPoint, sourceHint, requestMeta)
     local recordOk, recordOrReason = Store.getRecord(identity, false)
     if not recordOk then return false, recordOrReason end
     local record = recordOrReason
-    if record.water.canonicalTank.faultPolicy == U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-        or record.water.canonicalTank.state == U.WATER_STATE_REBUILD_REQUIRED
-        or record.water.state == U.WATER_STATE_REBUILD_REQUIRED then
-        return false, C.SAVE_REBUILD_REQUIRED
-    end
-    if record.water.canonicalTank.state == U.WATER_STATE_QUARANTINE_PENDING
-        or record.water.state == U.WATER_STATE_QUARANTINE_PENDING then
-        return false, U.REASONS.PROJECTION_PENDING
-    end
-    if requestMeta and record.water.requestLedger[requestMeta.key] then
-        local previous = record.water.requestLedger[requestMeta.key]
-        return previous.status == "COMMITTED", { record = record,
-            sequence = previous.sequence, plannedTransfer = previous.plannedTransfer,
-            confirmedTransfer = previous.confirmedCanonical,
-            confirmedCanonical = previous.confirmedCanonical,
-            projectionPending = record.water.canonicalTank.projectionPending }
-    end
     local sourceOk, itemOrReason, container, sourceAmount = resolveSource(
         context and context.player, sourceHint)
     if not sourceOk then return false, itemOrReason end
@@ -2025,9 +1521,7 @@ function M.addWater(identity, context, entryPoint, sourceHint, requestMeta)
     elseif entryPoint == U.ENTRY_LOCOMOTIVE and not loadedOk then
         local executeOk, executeReason = executeAdd(record)
         if not executeOk then
-            if not restoreSourceOrRebuild(identity, itemOrReason, container, before, executeReason) then
-                return false, C.SAVE_REBUILD_REQUIRED
-            end
+            restoreSource(itemOrReason, container, before)
             return false, executeReason
         end
         record.water.canonicalTank.projectionPending = true
@@ -2035,64 +1529,23 @@ function M.addWater(identity, context, entryPoint, sourceHint, requestMeta)
         record.water.canonicalTank.pendingProjectionReason = "LOCOMOTIVE_ADD_UNLOADED"
         record.water.canonicalTank.state = U.WATER_STATE_DEFERRED
         record.water.state = U.WATER_STATE_DEFERRED
-        record.water.usageTankSnapshot.state = U.CHECKPOINT_DEFERRED
         local commitOk, commitReason = Store.commit(record, identity)
         if not commitOk then
             restoreSource(itemOrReason, container, before)
-            markSourceBoundaryRebuild(identity, commitReason)
-            return false, C.SAVE_REBUILD_REQUIRED
+            return false, commitReason
         end
     else
-        local flushOk, detail, commitFailed = flushBeforeOverwrite(identity, "ADD_WATER",
+        local flushOk, detail = flushBeforeOverwrite(identity, "ADD_WATER",
             context, executeAdd)
         if not flushOk then
-            local sourceTransferCommitted = type(detail) == "table"
-                and detail.committed == true
-                and detail.operationCommitted == true
-                and transferResult ~= nil
-            if not sourceTransferCommitted then
-                local restored = restoreSourceOrRebuild(identity, itemOrReason, container,
-                    before, detail)
-                -- A successful source transfer can be followed by a failed
-                -- canonical commit. The result is not enough to know whether
-                -- the world save accepted it, so quarantine even when source
-                -- restoration happened to succeed.
-                if transferResult then
-                    markSourceBoundaryRebuild(identity, detail)
-                end
-                if commitFailed then markCurrentWaterRebuild(identity, detail) end
-                if not restored or transferResult or commitFailed then
-                    return false, C.SAVE_REBUILD_REQUIRED
-                end
-                if type(detail) == "table" and detail.reason == C.SAVE_REBUILD_REQUIRED then
-                    return false, C.SAVE_REBUILD_REQUIRED
-                end
+            if type(detail) == "table" and detail.operationCommitted == true then
+                record = detail.record
+            else
+                restoreSource(itemOrReason, container, before)
                 return false, detail
             end
-            if detail.reason == C.SAVE_REBUILD_REQUIRED then
-                return false, C.SAVE_REBUILD_REQUIRED
-            end
-            record = detail.record
         else
             record = detail.record
-        end
-    end
-    if requestMeta then
-        trimRequestLedger(record.water.requestLedger)
-        record.water.requestLedger[requestMeta.key] = {
-            requestId = requestMeta.requestId, sessionNonce = requestMeta.sessionNonce,
-            entryPoint = entryPoint, operation = U.OP_ADD_WATER, status = "COMMITTED",
-            plannedTransfer = transferResult.plannedTransfer,
-            confirmedSource = transferResult.confirmedSource,
-            confirmedCanonical = transferResult.confirmedTransfer,
-            sequence = record.water.canonicalTank.sequence }
-        local ledgerOk, ledgerReason = Store.commit(record, identity)
-        if not ledgerOk then
-            -- Canonical/source changes were already committed before the
-            -- idempotency ledger write. Never retry an ambiguous source
-            -- transaction; lock this current record for manual rebuild.
-            markSourceBoundaryRebuild(identity, ledgerReason)
-            return false, C.SAVE_REBUILD_REQUIRED
         end
     end
     return true, { record = record, sequence = record.water.canonicalTank.sequence,
@@ -2107,97 +1560,25 @@ function M.settleUnderGuard(identity, context)
         return false, U.REASONS.RV_NOT_FOUND
     end
     runtimePlayers[key(identity)] = context.player or runtimePlayers[key(identity)]
-    local ok, result, commitFailed = flushBeforeOverwrite(identity, "SETTLEMENT", context, nil)
-    if commitFailed then
-        markCurrentWaterRebuild(identity, result)
-        return false, C.SAVE_REBUILD_REQUIRED
-    end
-    if not ok and type(result) == "table" and result.committed == true
-        and result.reason == C.SAVE_REBUILD_REQUIRED then
-        return false, C.SAVE_REBUILD_REQUIRED
-    end
-    if not ok then return false, result end
-    return true, result
+    return flushBeforeOverwrite(identity, "SETTLEMENT", context, nil)
 end
 
--- B42 emits this callback for the common native transfer path.  Collect the
--- proxy delta immediately while the fixed-tick collector remains the fallback
--- for direct FluidContainer mutations or an event whose object is unavailable.
+-- Native callbacks collect consumption promptly; the periodic pass catches
+-- changes made without a callback.
 function M.onWaterAmountChange(object)
     local tag = object and objectTag(object)
     if type(tag) ~= "table" or tag.role ~= C.UTILITY_ROLE_PROXY then return end
     local identity = { rvId = tostring(tag.rvId), generation = tag.generation,
         bitmapVersion = tag.bitmapVersion }
-    if not validUtilityTag(tag, identity, C.UTILITY_ROLE_PROXY, tag.deviceId) then
-        pendingWaterEvents[object] = true
-        return
-    end
-    local identityKey = key(identity)
-    if accountingGuard[identityKey] then
-        pendingWaterEvents[object] = true
-        return
-    end
+    if not validUtilityTag(tag, identity, C.UTILITY_ROLE_PROXY, tag.deviceId)
+        or accountingGuard[key(identity)] then return end
     local recordOk, record = Store.getRecord(identity, false)
     local entry = recordOk and record.water.registry[tag.deviceId] or nil
-    if not recordOk or not entry then
-        pendingWaterEvents[object] = true
-        return
-    end
-    if externalWaterMatches(object, C.UTILITY_ROLE_PROXY) ~= true then
-        -- Do not downgrade a current-schema flag mismatch to a reconcile
-        -- retry.  A proxy with external=true can enter the native source
-        -- graph, so this event path must take the same rebuild lock as the
-        -- square/projection validators and never auto-repair the flag.
-        pendingWaterEvents[object] = true
-        entry.status = U.STATUS_REBUILD_REQUIRED
-        local ledger = record.water.proxyLedger[tag.deviceId]
-        if type(ledger) == "table" then ledger.status = U.STATUS_REBUILD_REQUIRED end
-        record.water.canonicalTank.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-        record.water.canonicalTank.state = U.WATER_STATE_REBUILD_REQUIRED
-        record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-        local committed = Store.commit(record, identity)
-        if not committed then markCurrentWaterRebuild(identity, C.SAVE_REBUILD_REQUIRED) end
-        return false, C.SAVE_REBUILD_REQUIRED
-    end
-    if record.water.canonicalTank.faultPolicy == U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-        or record.water.canonicalTank.state == U.WATER_STATE_REBUILD_REQUIRED
-        or record.water.state == U.WATER_STATE_REBUILD_REQUIRED
-        or record.water.canonicalTank.state == U.WATER_STATE_QUARANTINE_PENDING
-        or record.water.state == U.WATER_STATE_QUARANTINE_PENDING then
-        pendingWaterEvents[object] = true
-        return
-    end
+    if not entry or externalWaterMatches(object, C.UTILITY_ROLE_PROXY) ~= true then return end
     local beforeWater = Store.copyWater(record.water)
-    local collected, reason, changed = collectProxyDelta(identity, record, entry, object)
-    if not collected then
-        pendingWaterEvents[object] = true
-        if reason == C.SAVE_REBUILD_REQUIRED then
-            entry.status = U.STATUS_REBUILD_REQUIRED
-            local ledger = record.water.proxyLedger[tag.deviceId]
-            if type(ledger) == "table" then ledger.status = U.STATUS_REBUILD_REQUIRED end
-            record.water.canonicalTank.faultPolicy = U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD
-            record.water.canonicalTank.state = U.WATER_STATE_REBUILD_REQUIRED
-            record.water.state = U.WATER_STATE_REBUILD_REQUIRED
-        else
-            entry.status = reason == U.REASONS.TARGET_NOT_LOADED
-                and U.STATUS_DEFERRED or U.STATUS_NEEDS_RECONCILE
-            record.water.state = U.WATER_STATE_NEEDS_RECONCILE
-        end
-        if changed or reason == C.SAVE_REBUILD_REQUIRED then
-            local committed, commitReason = Store.commit(record, identity)
-            if not committed then markCurrentWaterRebuild(identity, commitReason) end
-        end
-        return
-    end
-    if sameValue(beforeWater, record.water) then
-        pendingWaterEvents[object] = nil
-        return
-    end
-    pendingWaterEvents[object] = nil
-    local committed, commitReason = Store.commit(record, identity)
-    if not committed then
-        markCurrentWaterRebuild(identity, commitReason)
-        pendingWaterEvents[object] = true
+    local collected = collectProxyDelta(record, entry, object)
+    if collected and not sameValue(beforeWater, record.water) then
+        Store.commit(record, identity)
     end
 end
 
@@ -2205,49 +1586,35 @@ local function detachDevice(identity, context, deviceId)
     local execute = function(record)
         local entry = record.water.registry[deviceId]
         if not entry then return false, U.REASONS.DEVICE_INVALID end
-        local function detachFailure(reason)
-            entry.status = U.STATUS_QUARANTINE_PENDING
-            record.water.canonicalTank.state = U.WATER_STATE_QUARANTINE_PENDING
-            record.water.state = U.WATER_STATE_QUARANTINE_PENDING
-            return false, reason
-        end
         local proxyOk, proxy = proxyObject(identity, entry, context and context.player)
-        if not proxyOk then return detachFailure(proxy) end
+        if not proxyOk then return false, proxy end
         local fixture, fixtureStatus = squareObject(identity, entry.fixtureX, entry.fixtureY,
             entry.fixtureZ, "fixture", deviceId, context and context.player)
         if fixtureStatus == "unloaded" then
-            return detachFailure(U.REASONS.TARGET_NOT_LOADED)
+            return false, U.REASONS.TARGET_NOT_LOADED
         end
-        if fixtureStatus == "invalid" then return detachFailure(C.SAVE_REBUILD_REQUIRED) end
-        if not fixture then return detachFailure(U.REASONS.DEVICE_INVALID) end
+        if fixtureStatus == "invalid" then return false, U.REASONS.DEVICE_INVALID end
+        if not fixture then return false, U.REASONS.DEVICE_INVALID end
         if not setFixtureExternal(fixture, proxy, false) then
-            return detachFailure(U.REASONS.POSTCONDITION_FAILED)
+            return false, U.REASONS.POSTCONDITION_FAILED
         end
         if not applyAmount(proxy, 0, U.WATER_CAPACITY) or not removeObject(proxy) then
-            return detachFailure(U.REASONS.POSTCONDITION_FAILED)
+            return false, U.REASONS.POSTCONDITION_FAILED
         end
         if not fixtureSourceGone(fixture) then
-            return detachFailure(U.REASONS.POSTCONDITION_FAILED)
+            return false, U.REASONS.POSTCONDITION_FAILED
         end
         -- A normal detach releases the current utility tag as well as the
         -- proxy/registry row.  Leaving the device id behind would make a
         -- later explicit reconnect look like an orphaned current object.
         if not restoreFixtureTag(fixture, nil) then
-            return detachFailure(U.REASONS.POSTCONDITION_FAILED)
+            return false, U.REASONS.POSTCONDITION_FAILED
         end
         record.water.registry[deviceId] = nil
         record.water.proxyLedger[deviceId] = nil
         return true
     end
-    local accepted, result, commitFailed = flushBeforeOverwrite(identity, "DETACH", context, execute)
-    if commitFailed then
-        markCurrentWaterRebuild(identity, result)
-        return false, C.SAVE_REBUILD_REQUIRED
-    end
-    if not accepted and type(result) == "table" and result.committed == true
-        and result.reason == C.SAVE_REBUILD_REQUIRED then
-        return false, C.SAVE_REBUILD_REQUIRED
-    end
+    local accepted, result = flushBeforeOverwrite(identity, "DETACH", context, execute)
     return accepted, result
 end
 
@@ -2277,7 +1644,6 @@ function M.onObjectAboutToBeRemoved(object)
         and record.water.registry[tag.deviceId]
     if type(entry) ~= "table"
         or entry.status == U.STATUS_SUSPENDED
-        or entry.status == U.STATUS_REBUILD_REQUIRED
         or not validCurrentFixture(entry, object, identity) then
         return false
     end

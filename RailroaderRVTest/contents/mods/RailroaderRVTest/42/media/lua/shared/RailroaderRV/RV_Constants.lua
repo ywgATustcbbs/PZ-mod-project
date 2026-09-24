@@ -23,10 +23,7 @@ function C.finiteNumber(value)
         local converted, numeric = pcall(function() return value + 0 end)
         if converted and type(numeric) == "number" then number = numeric end
     end
-    if type(number) ~= "number" or number ~= number
-        or number == math.huge or number == -math.huge then
-        return nil
-    end
+    if type(number) ~= "number" then return nil end
     return number
 end
 

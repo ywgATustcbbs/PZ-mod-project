@@ -1,8 +1,7 @@
 -- Current-only persistence for the water/power utility layer.
 --
--- The store intentionally has no migration, alias, fallback, or conversion
--- path.  A non-empty container must exactly match this file's schema or the
--- current RV operation is rejected with SAVE_REBUILD_REQUIRED.
+-- Current records retain the same identity and version gates. Obsolete water
+-- checkpoint fields are discarded when an existing record is read.
 
 local C = require("RailroaderRV/RV_Constants")
 local U = require("RailroaderRV/RV_UtilityConstants")
@@ -18,15 +17,12 @@ end
 
 local function integer(value)
     if type(value) == "string" then value = tonumber(value) end
-    return type(value) == "number" and value == value
-        and value ~= math.huge and value ~= -math.huge
-        and math.floor(value) == value and value or nil
+    return type(value) == "number" and math.floor(value) == value and value or nil
 end
 
 local function number(value)
     if type(value) == "string" then value = tonumber(value) end
-    return type(value) == "number" and value == value
-        and value ~= math.huge and value ~= -math.huge and value or nil
+    return type(value) == "number" and value or nil
 end
 
 local function exactKeys(value, keys)
@@ -92,46 +88,16 @@ local function autoRefillIdentityMatches(value, identity)
         and integer(value.generation) == integer(identity.generation)
 end
 
-local function validCheckpoint(value)
-    return exactKeys(value, { "canonicalSequence", "usageSequence", "usageAmount", "state" })
-        and integer(value.canonicalSequence) ~= nil and value.canonicalSequence >= 0
-        and integer(value.usageSequence) ~= nil and value.usageSequence >= 0
-        and finite(value.usageAmount) and value.usageAmount >= 0
-        and value.usageAmount <= U.WATER_CAPACITY
-        and (value.state == U.CHECKPOINT_SETTLED
-            or value.state == U.CHECKPOINT_UNSETTLED
-            or value.state == U.CHECKPOINT_DEFERRED)
-end
-
 local function validCanonical(value)
-    local keys = { "capacity", "amount", "sequence", "state", "projectionPending",
+    local allowed = { "capacity", "amount", "sequence", "state", "projectionPending",
         "pendingProjectionSequence", "pendingProjectionReason", "faultPolicy", "checkpoint" }
-    local required = { "capacity", "amount", "sequence", "state", "projectionPending",
-        "faultPolicy", "checkpoint" }
-    if not exactKeysWithOptional(value, keys, required) or not finite(value.capacity)
-        or value.capacity ~= U.WATER_CAPACITY or not finite(value.amount)
-        or value.amount < 0 or value.amount > value.capacity
-        or integer(value.sequence) == nil or value.sequence < 0
-        or type(value.projectionPending) ~= "boolean"
-        or not validCheckpoint(value.checkpoint)
-        or (value.state ~= U.WATER_STATE_ACTIVE
-            and value.state ~= U.WATER_STATE_NEEDS_RECONCILE
-            and value.state ~= U.WATER_STATE_DEFERRED
-            and value.state ~= U.WATER_STATE_QUARANTINE_PENDING
-            and value.state ~= U.WATER_STATE_REBUILD_REQUIRED)
-        or (value.faultPolicy ~= U.FAULT_NONE
-            and value.faultPolicy ~= U.FAULT_UNCONFIRMED_CONSUMPTION_REBUILD) then
-        return false
-    end
-    if value.projectionPending then
-        if integer(value.pendingProjectionSequence) == nil
-            or value.pendingProjectionSequence < 0
-            or type(value.pendingProjectionReason) ~= "string"
-            or value.pendingProjectionReason == "" then return false end
-    elseif value.pendingProjectionSequence ~= nil or value.pendingProjectionReason ~= nil then
-        return false
-    end
-    return true
+    local required = { "capacity", "amount", "sequence", "state", "projectionPending" }
+    return exactKeysWithOptional(value, allowed, required)
+        and type(value.capacity) == "number" and value.capacity == U.WATER_CAPACITY
+        and type(value.amount) == "number" and value.amount >= 0
+        and value.amount <= value.capacity
+        and integer(value.sequence) ~= nil and value.sequence >= 0
+        and type(value.projectionPending) == "boolean"
 end
 
 local function validUsageIdentity(value, identity)
@@ -146,20 +112,13 @@ local function validUsageIdentity(value, identity)
             C.SPRITES.utilityHidden.sprite)
 end
 
-local function validUsageSnapshot(value, identity)
-    local keys = { "capacity", "amount", "baselineSequence", "usageSequence",
+local function validUsageSnapshot(value)
+    local allowed = { "capacity", "amount", "baselineSequence", "usageSequence",
         "settledCanonicalSequence", "projectionSequence", "state" }
-    return exactKeys(value, keys) and finite(value.capacity)
-        and value.capacity == U.WATER_CAPACITY and finite(value.amount)
-        and value.amount >= 0 and value.amount <= value.capacity
-        and integer(value.baselineSequence) ~= nil and value.baselineSequence >= 0
-        and integer(value.usageSequence) ~= nil and value.usageSequence >= 0
-        and integer(value.settledCanonicalSequence) ~= nil
-        and value.settledCanonicalSequence >= 0
-        and integer(value.projectionSequence) ~= nil and value.projectionSequence >= 0
-        and (value.state == U.CHECKPOINT_SETTLED
-            or value.state == U.CHECKPOINT_UNSETTLED
-            or value.state == U.CHECKPOINT_DEFERRED)
+    return exactKeysWithOptional(value, allowed, { "capacity", "amount" })
+        and type(value.capacity) == "number" and value.capacity == U.WATER_CAPACITY
+        and type(value.amount) == "number" and value.amount >= 0
+        and value.amount <= value.capacity
 end
 
 local function validRegistryEntry(value, identity)
@@ -188,35 +147,13 @@ local function validRegistryEntry(value, identity)
 end
 
 local function validProxyLedger(value, deviceId)
-    local keys = { "deviceId", "amount", "capacity", "baselineSequence", "usageSequence",
-        "projectionSequence", "status" }
-    return exactKeys(value, keys) and tostring(value.deviceId) == tostring(deviceId)
-        and finite(value.amount) and value.amount >= 0 and finite(value.capacity)
-        and value.capacity == U.WATER_CAPACITY
-        and integer(value.baselineSequence) ~= nil and value.baselineSequence >= 0
-        and integer(value.usageSequence) ~= nil and value.usageSequence >= 0
-        and integer(value.projectionSequence) ~= nil and value.projectionSequence >= 0
-        and (value.status == U.STATUS_ACTIVE or value.status == U.STATUS_NEEDS_RECONCILE
-            or value.status == U.STATUS_DEFERRED or value.status == U.STATUS_QUARANTINE_PENDING
-            or value.status == U.STATUS_SUSPENDED or value.status == U.STATUS_REBUILD_REQUIRED)
-end
-
-local function validRequest(value, key)
-    local keys = { "requestId", "sessionNonce", "entryPoint", "operation", "status",
-        "plannedTransfer", "confirmedSource", "confirmedCanonical", "sequence" }
-    return exactKeys(value, keys) and type(value.requestId) == "string"
-        and value.requestId ~= "" and type(value.sessionNonce) == "string"
-        and value.sessionNonce ~= "" and type(value.entryPoint) == "string"
-        and (value.entryPoint == U.ENTRY_INTERNAL or value.entryPoint == U.ENTRY_LOCOMOTIVE)
-        and value.operation == U.OP_ADD_WATER
-        and (value.status == "COMMITTED" or value.status == "REJECTED"
-            or value.status == U.STATUS_REBUILD_REQUIRED)
-        and finite(value.plannedTransfer) and value.plannedTransfer >= 0
-        and finite(value.confirmedSource) and value.confirmedSource >= 0
-        and finite(value.confirmedCanonical) and value.confirmedCanonical >= 0
-        and integer(value.sequence) ~= nil and value.sequence >= 0
-        and tostring(value.sessionNonce) .. ":" .. tostring(value.entryPoint) .. ":"
-            .. tostring(value.requestId) == tostring(key)
+    local allowed = { "deviceId", "amount", "capacity", "baselineSequence",
+        "usageSequence", "projectionSequence", "status" }
+    local required = { "deviceId", "amount", "capacity", "status" }
+    return exactKeysWithOptional(value, allowed, required)
+        and tostring(value.deviceId) == tostring(deviceId)
+        and type(value.amount) == "number" and value.amount >= 0
+        and type(value.capacity) == "number" and value.capacity == U.WATER_CAPACITY
 end
 
 local function validAutoRefill(value, identity)
@@ -235,35 +172,24 @@ local function validWater(value, identity)
     local keys = { "schemaVersion", "canonicalTank", "usageTankIdentity",
         "usageTankSnapshot", "registry", "proxyLedger", "requestLedger",
         "autoRefill", "state" }
-    if not exactKeys(value, keys) or integer(value.schemaVersion) ~= U.WATER_SCHEMA_VERSION
+    local required = { "schemaVersion", "canonicalTank", "usageTankIdentity",
+        "usageTankSnapshot", "registry", "proxyLedger", "autoRefill", "state" }
+    if not exactKeysWithOptional(value, keys, required)
+        or integer(value.schemaVersion) ~= U.WATER_SCHEMA_VERSION
         or not validCanonical(value.canonicalTank)
         or not validUsageIdentity(value.usageTankIdentity, identity)
-        or not validUsageSnapshot(value.usageTankSnapshot, identity)
+        or not validUsageSnapshot(value.usageTankSnapshot)
         or type(value.registry) ~= "table" or type(value.proxyLedger) ~= "table"
-        or type(value.requestLedger) ~= "table" or not validAutoRefill(value.autoRefill, identity)
+        or not validAutoRefill(value.autoRefill, identity)
         or (value.state ~= U.WATER_STATE_ACTIVE and value.state ~= U.WATER_STATE_NEEDS_RECONCILE
             and value.state ~= U.WATER_STATE_DEFERRED
             and value.state ~= U.WATER_STATE_QUARANTINE_PENDING
             and value.state ~= U.WATER_STATE_REBUILD_REQUIRED) then return false end
-    if value.canonicalTank.checkpoint.canonicalSequence > value.canonicalTank.sequence
-        or value.usageTankSnapshot.settledCanonicalSequence > value.canonicalTank.sequence
-        or value.canonicalTank.checkpoint.usageSequence > value.usageTankSnapshot.usageSequence
-        or value.usageTankSnapshot.baselineSequence > value.usageTankSnapshot.usageSequence
-        or value.usageTankSnapshot.projectionSequence > value.canonicalTank.sequence
-        or (value.canonicalTank.checkpoint.state == U.CHECKPOINT_SETTLED
-            and value.usageTankSnapshot.state == U.CHECKPOINT_SETTLED
-            and math.abs(value.canonicalTank.checkpoint.usageAmount
-                - value.usageTankSnapshot.amount) > U.PROFILE_EPSILON) then
-        return false
-    end
     local count = 0
     for deviceId, entry in pairs(value.registry) do
         if type(deviceId) ~= "string" or not validRegistryEntry(entry, identity)
             or tostring(entry.deviceId) ~= deviceId
-            or not validProxyLedger(value.proxyLedger[deviceId], deviceId)
-            or value.proxyLedger[deviceId].baselineSequence > value.usageTankSnapshot.usageSequence
-            or value.proxyLedger[deviceId].usageSequence > value.usageTankSnapshot.usageSequence
-            or value.proxyLedger[deviceId].projectionSequence > value.canonicalTank.sequence then
+            or not validProxyLedger(value.proxyLedger[deviceId], deviceId) then
             return false
         end
         count = count + 1
@@ -275,13 +201,7 @@ local function validWater(value, identity)
         proxyCount = proxyCount + 1
     end
     if count ~= proxyCount then return false end
-    local requestCount = 0
-    for requestKey, request in pairs(value.requestLedger) do
-        if type(requestKey) ~= "string" or not validRequest(request, requestKey) then return false end
-        if request.sequence > value.canonicalTank.sequence then return false end
-        requestCount = requestCount + 1
-    end
-    return requestCount <= 64
+    return true
 end
 
 local function validGenerator(value, identity)
@@ -337,22 +257,6 @@ local function readRoot()
     return value
 end
 
--- Restore only the live root that this commit touched.  The snapshot is
--- either nil (no ModData container existed) or an exact current/fresh table.
--- A restoration failure is itself fail-closed: callers cannot safely infer
--- whether an ambiguous write reached the save layer.
-local function restoreRoot(snapshot)
-    if not ModData or type(ModData.get) ~= "function" then return snapshot == nil end
-    local ok, value = pcall(ModData.get, U.STORE_KEY)
-    if not ok then return false end
-    if value == nil then return snapshot == nil end
-    if type(value) ~= "table" then return false end
-    for key in pairs(value) do value[key] = nil end
-    if snapshot ~= nil then
-        for key, nested in pairs(snapshot) do value[key] = copyTable(nested) end
-    end
-    return true
-end
 
 local function root(allowCreate)
     local value = readRoot()
@@ -396,10 +300,7 @@ local function newWater(identity)
         .. ":" .. tostring(y) .. ":" .. tostring(z)
     local canonical = { capacity = U.WATER_CAPACITY, amount = 0, sequence = 0,
         state = U.WATER_STATE_ACTIVE, projectionPending = false,
-        pendingProjectionSequence = nil, pendingProjectionReason = nil,
-        faultPolicy = U.FAULT_NONE,
-        checkpoint = { canonicalSequence = 0, usageSequence = 0,
-            usageAmount = 0, state = U.CHECKPOINT_SETTLED } }
+        pendingProjectionSequence = nil, pendingProjectionReason = nil }
     return {
         schemaVersion = U.WATER_SCHEMA_VERSION,
         canonicalTank = canonical,
@@ -408,10 +309,8 @@ local function newWater(identity)
             x = x, y = y, z = z, objectToken = token,
             objectFingerprint = hiddenFingerprint(C.UTILITY_ROLE_TANK,
                 C.SPRITES.utilityHidden.sprite) },
-        usageTankSnapshot = { capacity = U.WATER_CAPACITY, amount = 0,
-            baselineSequence = 0, usageSequence = 0, settledCanonicalSequence = 0,
-            projectionSequence = 0, state = U.CHECKPOINT_SETTLED },
-        registry = {}, proxyLedger = {}, requestLedger = {},
+        usageTankSnapshot = { capacity = U.WATER_CAPACITY, amount = 0 },
+        registry = {}, proxyLedger = {},
         autoRefill = { providerId = C.UTILITY_AUTO_REFILL_PROVIDER,
             channelId = C.UTILITY_AUTO_REFILL_CHANNEL, rvId = identity.rvId,
             generation = identity.generation, schemaVersion = U.WATER_SCHEMA_VERSION,
@@ -443,57 +342,81 @@ function M.getRecord(identity, allowCreate)
     if not ok then return false, C.SAVE_REBUILD_REQUIRED end
     local id = tostring(identity.rvId)
     local record
-    local recordFresh = false
     if value == nil or empty(value) then
         if allowCreate ~= true then return false, C.SAVE_REBUILD_REQUIRED end
         record = newRecord(identity)
-        recordFresh = true
     else
         local persisted = value.records[id]
         if persisted == nil then
             if allowCreate ~= true then return false, C.SAVE_REBUILD_REQUIRED end
             record = newRecord(identity)
-            recordFresh = true
         else
             if not validRecord(persisted, identity) then
                 return false, C.SAVE_REBUILD_REQUIRED
             end
             record = copyTable(persisted)
+            local water = record.water
+            water.requestLedger = nil
+            water.canonicalTank.checkpoint = nil
+            water.canonicalTank.faultPolicy = nil
+            local snapshot = water.usageTankSnapshot
+            snapshot.baselineSequence = nil
+            snapshot.usageSequence = nil
+            snapshot.settledCanonicalSequence = nil
+            snapshot.projectionSequence = nil
+            snapshot.state = nil
+            for _, ledger in pairs(water.proxyLedger) do
+                ledger.baselineSequence = nil
+                ledger.usageSequence = nil
+                ledger.projectionSequence = nil
+                if ledger.status == U.STATUS_QUARANTINE_PENDING
+                    or ledger.status == U.STATUS_REBUILD_REQUIRED
+                    or ledger.status == U.STATUS_SUSPENDED then
+                    ledger.status = U.STATUS_NEEDS_RECONCILE
+                end
+            end
+            for _, entry in pairs(water.registry) do
+                if entry.status == U.STATUS_QUARANTINE_PENDING
+                    or entry.status == U.STATUS_REBUILD_REQUIRED
+                    or entry.status == U.STATUS_SUSPENDED then
+                    entry.status = U.STATUS_NEEDS_RECONCILE
+                end
+            end
+            if water.state == U.WATER_STATE_QUARANTINE_PENDING
+                or water.state == U.WATER_STATE_REBUILD_REQUIRED then
+                water.state = U.WATER_STATE_NEEDS_RECONCILE
+            end
+            if water.canonicalTank.state == U.WATER_STATE_QUARANTINE_PENDING
+                or water.canonicalTank.state == U.WATER_STATE_REBUILD_REQUIRED then
+                water.canonicalTank.state = U.WATER_STATE_NEEDS_RECONCILE
+            end
         end
     end
     if not validRecord(record, identity) then return false, C.SAVE_REBUILD_REQUIRED end
     local preparedKey = id .. ":" .. tostring(identity.generation) .. ":"
         .. tostring(identity.bitmapVersion)
     if not sessionPrepared[preparedKey] then
-        -- A process-local reconnect starts in reconcile mode.  It never changes
-        -- fields or attempts a legacy conversion; loaded objects are handled by
-        -- RV_UtilityWater before the next projection.
+        -- A process-local reconnect refreshes loaded projections from the
+        -- saved balance before the next water operation.
         record.water.state = U.WATER_STATE_NEEDS_RECONCILE
         record.water.canonicalTank.state = U.WATER_STATE_NEEDS_RECONCILE
         sessionPrepared[preparedKey] = true
     end
-    return true, record, recordFresh
+    return true, record
 end
 
 function M.commit(record, identity)
     local gateOk, gateReason = currentIdentityGate(identity)
     if not gateOk then return false, gateReason end
     if not validRecord(record, identity) then return false, C.SAVE_REBUILD_REQUIRED end
-    local beforeOk, beforeRoot = pcall(readRoot)
-    if not beforeOk then return false, C.SAVE_REBUILD_REQUIRED end
-    local before = beforeRoot == nil and nil or copyTable(beforeRoot)
     local ok, value = pcall(root, true)
-    if not ok then
-        if not restoreRoot(before) then return false, C.SAVE_REBUILD_REQUIRED end
-        return false, C.SAVE_REBUILD_REQUIRED
-    end
+    if not ok then return false, C.SAVE_REBUILD_REQUIRED end
     -- Keep the caller's working copy detached even after a successful commit;
     -- later mutations must require another explicit commit.
     value.records[tostring(identity.rvId)] = copyTable(record)
     if ModData and type(ModData.transmit) == "function" then
         local sent, result = pcall(ModData.transmit, U.STORE_KEY)
         if not sent or result == false then
-            if not restoreRoot(before) then return false, C.SAVE_REBUILD_REQUIRED end
             return false, U.REASONS.CANONICAL_COMMIT_FAILED
         end
     end
@@ -514,10 +437,6 @@ function M.allRecords()
         result[#result + 1] = { identity = identity, record = copyTable(record) }
     end
     return true, result
-end
-
-function M.validateRecord(record, identity)
-    return validRecord(record, identity)
 end
 
 function M.copyWater(water)

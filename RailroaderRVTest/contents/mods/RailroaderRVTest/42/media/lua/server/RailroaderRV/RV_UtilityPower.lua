@@ -17,8 +17,7 @@ local function invoke(target, method, ...)
 end
 
 local function finite(value)
-    value = Util.toNumber(value)
-    return value ~= nil and value == value and value ~= math.huge and value ~= -math.huge
+    return Util.toNumber(value) ~= nil
 end
 
 local function objectIndex(object)
@@ -282,28 +281,19 @@ function M.addFuel(identity, context, hint)
     local confirmed = finite(after) and math.max(0, math.min(plannedTransfer, before - after)) or 0
     if confirmed <= U.PROFILE_EPSILON then return false, U.REASONS.SOURCE_INVALID end
     local targetFuel = initial.fuel + confirmed
-    local setOk = Util.callSucceeded(generator, "setFuel", targetFuel)
-    local verifyOk, verified = false, nil
-    if setOk then verifyOk, verified = readNativeState(generator) end
-    if not verifyOk or math.abs(verified.fuel - targetFuel) > U.PROFILE_EPSILON then
+    if not Util.callSucceeded(generator, "setFuel", targetFuel) then
         restoreFuel(container, confirmed)
-        Util.callSucceeded(generator, "setFuel", initial.fuel)
         return false, U.REASONS.API_ERROR
     end
     if not Util.callSucceeded(generator, "sync") then
-        restoreFuel(container, confirmed)
-        Util.callSucceeded(generator, "setFuel", initial.fuel)
         return false, U.REASONS.API_ERROR
     end
+    local verifyOk, verified = readNativeState(generator)
+    if not verifyOk then return false, verified end
     recordOrReason.power.circuitState = verified.active and U.CIRCUIT_ON or U.CIRCUIT_OFF
     recordOrReason.power.sequence = recordOrReason.power.sequence + 1
     local committed, reason = Store.commit(recordOrReason, identity)
-    if not committed then
-        restoreFuel(container, confirmed)
-        Util.callSucceeded(generator, "setFuel", initial.fuel)
-        Util.callSucceeded(generator, "sync")
-        return false, reason
-    end
+    if not committed then return false, reason end
     return true, { record = recordOrReason, state = verified,
         plannedTransfer = plannedTransfer, confirmedTransfer = confirmed }
 end

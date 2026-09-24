@@ -284,11 +284,8 @@ function M.handleCommand(player, args)
         if args.operation == U.OP_CONNECT_WATER_DEVICE then
             accepted, detail = Water.connectDevice(identity, context, args.targetHint)
         elseif args.operation == U.OP_ADD_WATER then
-            local requestKey = tostring(args.sessionNonce) .. ":" .. tostring(args.entryPoint)
-                .. ":" .. tostring(args.requestId)
             accepted, detail = Water.addWater(identity, context, args.entryPoint,
-                args.sourceHint, { key = requestKey, requestId = args.requestId,
-                    sessionNonce = args.sessionNonce })
+                args.sourceHint)
         elseif args.operation == U.OP_ADD_FUEL then
             accepted, detail = Power.addFuel(identity, context, args.sourceHint)
         elseif args.operation == U.OP_REQUEST_SNAPSHOT then
@@ -394,7 +391,7 @@ end
 function M.initializeRecord(identity, context)
     print("[RailroaderRVTest] utility init begin rv=" .. tostring(identity and identity.rvId)
         .. " generation=" .. tostring(identity and identity.generation))
-    local recordOk, recordOrReason, recordFresh = Store.getRecord(identity, true)
+    local recordOk, recordOrReason = Store.getRecord(identity, true)
     if not recordOk then
         print("[RailroaderRVTest] utility init failed stage=get-record reason="
             .. tostring(recordOrReason))
@@ -403,8 +400,7 @@ function M.initializeRecord(identity, context)
     -- Pass the isolated fresh/current working record through the usage-tank
     -- creation transaction.  Water commits this same record only after the
     -- object postcondition succeeds; Store never exposes a live ModData row.
-    local tankOk, tankOrReason = Water.ensureUsageTank(identity, context, recordOrReason,
-        { fresh = recordFresh })
+    local tankOk, tankOrReason = Water.ensureUsageTank(identity, context, recordOrReason)
     if not tankOk then
         print("[RailroaderRVTest] utility init failed stage=usage-tank reason="
             .. tostring(tankOrReason))

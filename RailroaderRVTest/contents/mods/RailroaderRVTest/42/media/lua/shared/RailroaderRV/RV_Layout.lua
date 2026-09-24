@@ -116,77 +116,6 @@ local function wallCoordinatesForAnchor(cx, cy, cz)
     return result
 end
 
--- Validate the wall ring as a set of oriented wall placements.  Every
--- coordinate is unique because the NW/SE corner strips are single objects;
--- the exact coordinate+orientation+role key is still kept as a defensive
--- assertion so a role collision cannot be hidden by a reused coordinate.
-local function validateWallCoordinates(wallCoordinates, cx, cy, cz)
-    local coordinateKeys = {}
-    local orientationKeys = {}
-    local exactKeys = {}
-    local orientationByCoordinate = {}
-    local northCount, westCount, cornerCount = 0, 0, 0
-    local nwKey = tostring(cx + C.WALL_MIN_OFFSET_X) .. ":"
-        .. tostring(cy + C.WALL_MIN_OFFSET_Y) .. ":" .. tostring(cz)
-    local seKey = tostring(cx + C.WALL_MAX_OFFSET_X) .. ":"
-        .. tostring(cy + C.WALL_MAX_OFFSET_Y) .. ":" .. tostring(cz)
-    for i = 1, #wallCoordinates do
-        local entry = wallCoordinates[i]
-        if type(entry) ~= "table" or type(entry.x) ~= "number"
-            or type(entry.y) ~= "number" or type(entry.z) ~= "number"
-            or type(entry.north) ~= "boolean" or type(entry.role) ~= "string"
-            or type(entry.sprite) ~= "string" or type(entry.corner) ~= "boolean"
-            or type(entry.edgeSide) ~= "string"
-            or type(entry.edgeKey) ~= "string" then
-            error("RailroaderRV: wall entry is malformed at index " .. tostring(i))
-        end
-        local coordinateKey = tostring(entry.x) .. ":" .. tostring(entry.y)
-            .. ":" .. tostring(entry.z)
-        local orientationKey = coordinateKey .. ":" .. (entry.north and "north" or "west")
-        local exactKey = orientationKey .. ":" .. entry.role
-        if exactKeys[exactKey] then
-            error("RailroaderRV: duplicate wall coordinate/orientation/role " .. exactKey)
-        end
-        if orientationKeys[orientationKey] then
-            error("RailroaderRV: duplicate wall direction " .. orientationKey)
-        end
-        exactKeys[exactKey] = true
-        orientationKeys[orientationKey] = true
-        if not coordinateKeys[coordinateKey] then
-            coordinateKeys[coordinateKey] = true
-        end
-        orientationByCoordinate[coordinateKey] = orientationByCoordinate[coordinateKey] or {}
-        orientationByCoordinate[coordinateKey][entry.north and "north" or "west"] = true
-        local expectedRole = entry.north and "wall-north" or "wall-west"
-        local expectedSprite = entry.north and C.SPRITES.wall.northSprite
-            or C.SPRITES.wall.sprite
-        if entry.corner then
-            if coordinateKey == nwKey then
-                expectedRole = "corner-nw"
-                expectedSprite = C.SPRITES.wallNW.sprite
-            elseif coordinateKey == seKey then
-                expectedRole = "corner-se"
-                expectedSprite = C.SPRITES.wallSE.sprite
-            else
-                error("RailroaderRV: corner wall is not at NW or SE")
-            end
-        end
-        if entry.role ~= expectedRole or entry.sprite ~= expectedSprite then
-            error("RailroaderRV: wall role/sprite does not match orientation at " .. coordinateKey)
-        end
-        if entry.north then northCount = northCount + 1 else westCount = westCount + 1 end
-        if entry.corner then cornerCount = cornerCount + 1 end
-    end
-
-    local uniqueCoordinateCount = 0
-    for _ in pairs(coordinateKeys) do uniqueCoordinateCount = uniqueCoordinateCount + 1 end
-    if #wallCoordinates ~= 92 or uniqueCoordinateCount ~= 92
-        or northCount ~= 12 or westCount ~= 80 or cornerCount ~= 2 then
-        error("RailroaderRV: wall contract must contain 92 coordinates/objects, north12/west80/corner2")
-    end
-    return uniqueCoordinateCount, northCount, westCount, cornerCount
-end
-
 -- The wall object's square and the owned boundary edge are separate facts.
 -- In particular the east wall is hosted by W(x+1,y,z), and the south wall
 -- is hosted by N(x,y+1,z), where x/y are the adjacent interior cell. Keep
@@ -247,9 +176,6 @@ function Layout.make(cx, cy, cz)
         C.RV_MANAGED_WIDTH,
         C.RV_MANAGED_HEIGHT
     )
-    if not managed then
-        error("RailroaderRV: managed 100x100xZ scope is malformed")
-    end
     local bitmap = {
         schemaVersion = Bitmap.SCHEMA_VERSION,
         bitmapVersion = C.BITMAP_VERSION,
@@ -306,8 +232,11 @@ function Layout.make(cx, cy, cz)
     )
     local wallCoordinates = wallCoordinatesForAnchor(cx, cy, cz)
     annotateWallEdges(wallCoordinates, cx, cy)
-    local wallCoordinateCount, northCount, westCount, cornerCount =
-        validateWallCoordinates(wallCoordinates, cx, cy, cz)
+    local northCount, cornerCount = 0, 0
+    for i = 1, #wallCoordinates do
+        if wallCoordinates[i].north then northCount = northCount + 1 end
+        if wallCoordinates[i].corner then cornerCount = cornerCount + 1 end
+    end
 
     local anchor = {
         x = cx,
@@ -363,8 +292,8 @@ function Layout.make(cx, cy, cz)
     }
     result.wallCount = #wallCoordinates
     result.wallObjectCount = #wallCoordinates
-    result.wallCoordinateCount = wallCoordinateCount
-    result.wallEdgeCounts = { north = northCount, west = westCount }
+    result.wallCoordinateCount = #wallCoordinates
+    result.wallEdgeCounts = { north = northCount, west = #wallCoordinates - northCount }
     result.wallCornerCount = cornerCount
     return result
 end

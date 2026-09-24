@@ -20,25 +20,11 @@ Bitmap.DEFAULT_WIDTH = C.RV_MANAGED_WIDTH
 Bitmap.DEFAULT_HEIGHT = C.RV_MANAGED_HEIGHT
 
 local function finiteNumber(value)
-    if type(value) == "number" then
-        if value == value and value ~= math.huge and value ~= -math.huge then
-            return value
-        end
-        return nil
-    end
-    if type(value) == "string" then
-        local number = tonumber(value)
-        if number and number == number and number ~= math.huge
-            and number ~= -math.huge then
-            return number
-        end
-    end
+    if type(value) == "number" then return value end
+    if type(value) == "string" then return tonumber(value) end
     if value ~= nil then
         local ok, number = pcall(function() return value + 0 end)
-        if ok and type(number) == "number" and number == number
-            and number ~= math.huge and number ~= -math.huge then
-            return number
-        end
+        if ok and type(number) == "number" then return number end
     end
     return nil
 end

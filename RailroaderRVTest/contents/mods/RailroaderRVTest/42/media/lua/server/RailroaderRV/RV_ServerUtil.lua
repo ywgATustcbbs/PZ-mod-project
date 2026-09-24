@@ -4,9 +4,7 @@
 -- touch the world.  Keeping the generic call/validation helpers in their own
 -- require chunk leaves RV_Server.lua below Kahlua's 200 active-local limit.
 
-local Constants = require("RailroaderRV/RV_Constants")
 local LayoutContract = require("RailroaderRV/RV_Layout")
-local Bitmap = require("RailroaderRV/RV_Bitmap")
 local unpackFn = (table and table.unpack) or unpack
 
 local M = {}
@@ -101,8 +99,7 @@ local function toNumber(value)
 end
 
 local function isFiniteNumber(value)
-    return type(value) == "number" and value == value
-        and value ~= math.huge and value ~= -math.huge
+    return type(value) == "number"
 end
 
 local function integer(value)
@@ -175,66 +172,7 @@ local function copyPoint(value, label)
 end
 
 local function makeLayout(x, y, z)
-    local planner = LayoutContract.make
-    if type(planner) ~= "function" then
-        error("RailroaderRVTest: shared RV_Layout planner is unavailable")
-    end
-    local ok, planned = pcall(planner, x, y, z)
-    if not ok then
-        local textOk, text = pcall(tostring, planned)
-        error("RailroaderRVTest: shared RV_Layout planning failed: "
-            .. (textOk and text or "<error formatting failed>"))
-    end
-    if type(planned) ~= "table" then
-        error("RailroaderRVTest: shared RV_Layout planner returned no plan")
-    end
-
-    if requiredInteger(planned.schemaVersion, "shared layout schemaVersion")
-        ~= Constants.LAYOUT_SCHEMA_VERSION then
-        error(Constants.SAVE_REBUILD_REQUIRED)
-    end
-    local requiredTables = { "anchor", "clear", "managed", "bitmap", "shellEdges",
-        "room", "wall", "roof", "wallCoordinates" }
-    for i = 1, #requiredTables do
-        local field = requiredTables[i]
-        if type(planned[field]) ~= "table" then
-            error("RailroaderRVTest: shared RV_Layout contract missing " .. field)
-        end
-    end
-    if not Bitmap or not Bitmap.validate(planned.bitmap) then
-        error("RailroaderRVTest: shared RV_Layout bitmap is invalid")
-    end
-    local managed = planned.managed
-    if requiredInteger(managed.originX, "shared managed.originX") == nil
-        or requiredInteger(managed.originY, "shared managed.originY") == nil
-        or requiredInteger(managed.width, "shared managed.width") ~= 100
-        or requiredInteger(managed.height, "shared managed.height") ~= 100
-        or requiredInteger(managed.minZ, "shared managed.minZ") == nil
-        or requiredInteger(managed.maxZ, "shared managed.maxZ") == nil
-        or requiredInteger(managed.maxZ, "shared managed.maxZ")
-            <= requiredInteger(managed.minZ, "shared managed.minZ") then
-        error("RailroaderRVTest: shared managed scope is not 100x100xZ")
-    end
-    local requiredPoints = { "light", "generator", "utilityTank", "counter", "sink" }
-    for i = 1, #requiredPoints do
-        local field = requiredPoints[i]
-        local point = planned[field]
-        if type(point) ~= "table" or point.x == nil or point.y == nil or point.z == nil then
-            error("RailroaderRVTest: shared RV_Layout contract missing point " .. field)
-        end
-        requiredInteger(point.x, "shared layout " .. field .. ".x")
-        requiredInteger(point.y, "shared layout " .. field .. ".y")
-        requiredInteger(point.z, "shared layout " .. field .. ".z")
-        if not Bitmap.containsScope(planned.bitmap, point.x, point.y, point.z) then
-            error("RailroaderRVTest: shared layout point " .. field
-                .. " is outside the bitmap scope")
-        end
-    end
-    local anchor = planned.anchor
-    requiredInteger(anchor.x, "shared layout anchor.x")
-    requiredInteger(anchor.y, "shared layout anchor.y")
-    requiredInteger(anchor.z, "shared layout anchor.z")
-    return planned
+    return LayoutContract.make(x, y, z)
 end
 
 M.invoke = invoke

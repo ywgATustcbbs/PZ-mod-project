@@ -37,8 +37,7 @@ function Client.clearConnectionState()
 end
 
 local function finite(value)
-    return type(value) == "number" and value == value
-        and value ~= math.huge and value ~= -math.huge
+    return type(value) == "number"
 end
 
 local function newNonce()

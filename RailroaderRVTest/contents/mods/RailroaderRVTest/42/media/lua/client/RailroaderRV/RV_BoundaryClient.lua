@@ -21,6 +21,11 @@ Client._tick = clientTick
 
 local BLOCK_HOLD_TICKS = 3
 
+local function hasEntries(value)
+    for _ in pairs(value) do return true end
+    return false
+end
+
 local function number(value)
     if type(value) == "number" then return value end
     if type(value) == "string" then return tonumber(value) end
@@ -293,7 +298,7 @@ function Client.onPlayerUpdate(player)
     if not player or (type(player.isDead) == "function" and player:isDead()) then return end
     local current = position(player)
     if not current then
-        if next(states) ~= nil then
+        if hasEntries(states) then
             local id = onlineId(player)
             local state = id and states[id]
             if state then
@@ -383,7 +388,7 @@ function Client.onTick()
             releaseBlock(player, state)
         end
     end
-    if next(snapshots) == nil then return end
+    if not hasEntries(snapshots) then return end
     -- RenderTick handles movement feedback when available. Poll from OnTick
     -- only as a fallback, avoiding a second local-player scan each tick.
     if not hasRenderTick then updateActivePlayers() end
@@ -393,7 +398,7 @@ function Client.onRenderTick()
     -- Render-tick prediction is bounded to active local players and uses the
     -- exact same canonical segment predicate as OnPlayerUpdate.  It improves
     -- input latency but never becomes a permission check.
-    if next(snapshots) == nil then return end
+    if not hasEntries(snapshots) then return end
     updateActivePlayers()
 end
 

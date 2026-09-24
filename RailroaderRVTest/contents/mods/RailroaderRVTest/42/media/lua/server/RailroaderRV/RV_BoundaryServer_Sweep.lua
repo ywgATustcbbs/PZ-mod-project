@@ -175,7 +175,7 @@ function Boundary.onTick()
                         activeBoundaries[boundaryKey(boundary)] = {
                             boundary = boundary, player = player,
                         }
-                    }
+                    end
                 end
             end
         end

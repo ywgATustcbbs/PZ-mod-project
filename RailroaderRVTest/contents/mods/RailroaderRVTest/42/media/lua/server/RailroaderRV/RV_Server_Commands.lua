@@ -1,5 +1,6 @@
 -- RV_Server: Commands responsibilities.
 return function(ctx)
+local RemovalTrace = require("RailroaderRV/RV_Server_ObjectRemovalTrace")
 local COMMAND_MODULE = ctx.COMMAND_MODULE
 local COMMAND_RELOCATE_ACK = ctx.COMMAND_RELOCATE_ACK
 local COMMAND_FINAL_RELOCATE_ACK = ctx.COMMAND_FINAL_RELOCATE_ACK
@@ -17,6 +18,7 @@ local RELOCATION_POST_ACK_TICKS = ctx.RELOCATION_POST_ACK_TICKS
 local RELOCATION_TIMEOUT_TICKS = ctx.RELOCATION_TIMEOUT_TICKS
 local notifyFailure = ctx.notifyFailure
 local requestRoomOwnershipScan = ctx.requestRoomOwnershipScan
+local requestRoomOwnershipRemovalScan = ctx.requestRoomOwnershipRemovalScan
 local processServerRoomOwnershipGuards = ctx.processServerRoomOwnershipGuards
 local generationDisconnected = ctx.generationDisconnected
 local pauseGenerationForDisconnect = ctx.pauseGenerationForDisconnect
@@ -40,6 +42,7 @@ local processRoofRepairRelocationGroup = ctx.processRoofRepairRelocationGroup
 
 function RV.Server.OnTick()
     ctx.serverTick = ctx.serverTick + 1
+    RemovalTrace.onTick(ctx.serverTick)
     -- Extend the token-scoped boundary lease before Boundary.onTick runs.  The
     -- roof transaction may temporarily place the player outside the active
     -- bitmap while the engine settles room state; correction must stay paused
@@ -202,6 +205,9 @@ function RV.Server.OnClientCommand(module, command, player, args)
     -- validator log them as malformed Generate requests.
     if module == COMMAND_MODULE
         and (command == COMMAND_RV_ENTER or command == COMMAND_RV_EXIT) then
+        RemovalTrace.lifecycle("request",
+            command == COMMAND_RV_ENTER and "EnterRV" or "ExitRV",
+            "received", ctx.serverTick)
         return
     end
     if module == COMMAND_MODULE and command == COMMAND_FINAL_RELOCATE_ACK then
@@ -277,7 +283,7 @@ if Boundary and Events and Events.OnObjectAdded
 end
 if Events and Events.OnObjectAboutToBeRemoved
     and type(Events.OnObjectAboutToBeRemoved.Add) == "function" then
-    Events.OnObjectAboutToBeRemoved.Add(requestRoomOwnershipScan)
+    Events.OnObjectAboutToBeRemoved.Add(requestRoomOwnershipRemovalScan)
 end
 if Events and Events.OnObjectAdded and type(Events.OnObjectAdded.Add) == "function" then
     Events.OnObjectAdded.Add(requestRoomOwnershipScan)

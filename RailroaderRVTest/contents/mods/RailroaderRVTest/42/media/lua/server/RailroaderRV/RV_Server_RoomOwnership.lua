@@ -1,5 +1,6 @@
 -- RV_Server: RoomOwnership responsibilities.
 return function(ctx)
+local RemovalTrace = require("RailroaderRV/RV_Server_ObjectRemovalTrace")
 local COMMAND_MODULE = ctx.COMMAND_MODULE
 local COMMAND_REFRESH_ROOM_OWNERSHIP = ctx.COMMAND_REFRESH_ROOM_OWNERSHIP
 local COMMAND_RV_TELEPORT = ctx.COMMAND_RV_TELEPORT
@@ -309,15 +310,27 @@ local function scheduleRoomOwnershipScan(guard, cell)
     guard.scanDueTick = ctx.serverTick + ROOM_OWNERSHIP_RECHECK_DELAYS[1]
 end
 
-local function requestRoomOwnershipScan(object)
+local function requestRoomOwnershipScan(object, includeOutcome)
+    local hit = false
     local x, y, z, cell = objectCoordinates(object)
-    if x == nil then return end
+    if x == nil then
+        if includeOutcome then return nil end
+        return
+    end
     for _, guard in pairs(roomOwnershipGuards) do
         if coordinatesInRoomOwnershipBounds(x, y, z, guard.oldBounds)
             or coordinatesInRoomOwnershipBounds(x, y, z, guard.newBounds) then
+            hit = true
             scheduleRoomOwnershipScan(guard, cell)
         end
     end
+    if includeOutcome then return hit end
+end
+
+local function requestRoomOwnershipRemovalScan(object)
+    local traceStartedAt = RemovalTrace.begin("roomguard")
+    local hit = requestRoomOwnershipScan(object, true)
+    RemovalTrace.finish("roomguard", traceStartedAt, hit)
 end
 
 local function onlinePlayersSnapshot()
@@ -828,6 +841,7 @@ end
 ctx.notifyFailure = notifyFailure
 ctx.removeOldGeneration = removeOldGeneration
 ctx.requestRoomOwnershipScan = requestRoomOwnershipScan
+ctx.requestRoomOwnershipRemovalScan = requestRoomOwnershipRemovalScan
 ctx.registerServerRoomOwnershipGuard = registerServerRoomOwnershipGuard
 ctx.refreshServerRoomOwnershipGuard = refreshServerRoomOwnershipGuard
 ctx.processServerRoomOwnershipGuards = processServerRoomOwnershipGuards

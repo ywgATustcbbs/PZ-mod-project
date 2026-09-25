@@ -94,3 +94,80 @@ Git 历史补充了这项防护的设计理由。当前可见历史从 `9c5a220`
 用户决定将本性能问题标记为**暂不处理**。此结论表示根因尚未定位、性能问题未解决；本轮的周期诊断埋点暂时保留，供后续与 CPU 采样时间对照。以后实际修复该性能问题时，再移除这些临时埋点。
 
 本轮 CPU 频率 CSV 位于 `Z:\RailroaderRVTestCache\perf\cpu_frequency_samples.csv`；事件 CSV 位于同目录的 `cpu_frequency_events.csv`。服务端日志为 `Z:\RailroaderRVTestCache\server\Logs\2026-09-25_02-09_DebugLog-server.txt`，客户端日志为 `Z:\RailroaderRVTestCache\client\Logs\logs_2026-09-25\2026-09-25_02-09_DebugLog.txt`。Z 盘是易失 RAM 磁盘，文件可能被重启或人工清理移除；这些路径仅作当前证据位置记录，不保证长期留存，也不纳入版本控制。
+
+## 2026-09-25 调查续篇：JFR 与服务端停滞
+
+此前记录的“暂不处理”已由用户授权恢复调查；现有性能证据仍不足以把根因归属到单一实现。
+
+### 证据与时序
+
+- 原始 JFR：`%LOCALAPPDATA%\RailroaderRVTest\profiles\rv_teleport_25924_20260925T043354777227+0800.jfr`（2,192,029 bytes）；关联 .events.csv、.summary.txt、.threads.txt、.session.json。日志备份：`%LOCALAPPDATA%\RailroaderRVTest\profiles\logs_2026-09-25_0426`。
+- 只为本次调查在 `%LOCALAPPDATA%\RailroaderRVTest\tools\azul-zulu-25.0.1-25.30.17.0` 安装了一次性 JDK 25.0.1 x64，归档 SHA-256：`72844ba8dddf9259ab9cfda9d515d0c850179705f74278a75973d73f0c5b2d2b`。jcmd、jstack attach 成功，短 JFR start/stop 与读取校验成功；游戏 JRE 未修改。一键测试的可见控制台流程正常，服务端最终 exit code 为 0。
+- JFR 录制开始于 `04:33:54.777 +08:00`，停止请求为 `04:37:23.062 +08:00`。事件 CSV 的人工提示标记是 `04:34:50.830`，ready 反馈是 `04:37:22.970`；它们都不等于实际点击时刻或独立确认的恢复时刻。
+- 服务端 [PerfTrace] 在 `04:34:57.638` 记录 `f=2231/t=2230`，下次在 `04:36:04.397` 记录 `f=2232/t=2231`：间隔 66.759 秒只前进一 tick。服务端该窗口 boundary `sq=0`、roomguard `fs=0`；停滞前 utility 记录的单次最大耗时为 426 ms。客户端同期 tick 继续推进。
+
+### JFR 样本
+
+- 该 66.759 秒窗口有 6,312 个 jdk.ExecutionSample：6,306 个在线程 main，6,305 个含 ServerMap.preupdate，6,240 个含 ErosionMain.LoadGridsquare，6,234 个含 IsoGridSquare.RemoveTileObject；其中 NatureBush.replaceExistingObject 为 4,336 个，NatureTrees.replaceExistingObject 为 1,898 个。
+- 代表样本 `04:35:30.004334300 +08:00` 的栈为 KahluaThread.luaMainloop → LuaCaller.protectedCallVoid → Event.trigger → LuaEventManager.triggerEvent → IsoGridSquare.RemoveTileObject → NatureBush.replaceExistingObject → ErosionWorld.validateSpawn → ErosionMain.LoadGridsquare → IsoChunk.doLoadGridsquare → ServerCell.RecalcAll2/Load2 → ServerMap.preupdate → GameServer.main。同一 Erosion 栈在 `04:34:47.998809600` 已出现，早于人工提示标记。
+- 录制最初 50 秒，IngameState.update 出现在 786 个样本中的 724 个；从服务端 PerfTrace 恢复记录至 ready 反馈的窗口，出现在 1,080 个样本中的 1,030 个，ServerMap.preupdate 为 1/1,080。停滞窗口 ThreadCPULoad 的 6 个 main 记录平均约占整机 3.04%；以 32 个逻辑处理器折算约为一核。NativeMethodSample 的 FileSystemWatchService 栈停在 GetQueuedCompletionStatus 等待路径，不作为 CPU 热点解释。
+
+### 结论边界与后续
+
+JFR 能看到进入 LuaEventManager.triggerEvent 的 Java 调用栈，但看不到 Lua 事件名、具体回调函数和各回调耗时，因此不能拆分引擎 Erosion 与 RV/官方监听器的工作份额，也不能确认停滞由管理员点击触发。当前证据不证明周期扫描是根因，不据此提出玩法修复。
+
+待用户恢复运行时测试后，最小后续验证是在准确标记实际点击的同时，分别记录 RV 三个 OnObjectAboutToBeRemoved 处理器的调用次数和累计耗时，再与同轮 JFR 对齐；本轮未实施。
+
+## 2026-09-25 全周期续篇：对象移除监听器与服务端 tick 停滞
+
+### 归档与时序
+
+- 原始归档位于 `%LOCALAPPDATA%\RailroaderRVTest\profiles\RailroaderRVTest_20260925_121058_+0800_PID30052_1e909e12.jfr` 及同前缀 `_timeline.jsonl`；服务端/客户端日志位于 `%LOCALAPPDATA%\RailroaderRVTest\logs\RailroaderRVTest_20260925_121058_+0800_PID30052_1e909e12_logs`。JFR 为 3,907,707 bytes；`jfr summary` 读取成功，录制从 12:10:58 到 12:19:50 +08，持续 532 秒。该证据来自可见控制台的一键整体测试，服务器退出码为 0；本次审计未启动新测试。
+- 时间线中的点击时间 `12:17:00`、黑屏 `12:17:15–12:18:25` 是用户报告估值。服务端 `2026-09-25_12-07_admin.txt:2` 记录管理员远传命令于 `12:17:15.076` 执行；客户端 chat 记录于 `12:17:15.130` 收到远传消息。此前 RV 阶段为 `EnterRV` 请求 `12:14:11.258`、mapping 进入 `12:14:16.679`、`ExitRV` 完成 `12:14:25.798`。
+- 服务端周期日志从 `12:17:22.079` 的 `t=4589` 到 `12:18:18.414` 的 `t=4591`，间隔 56.335 秒只前进 2 tick；对应窗口 roomguard `fs=0`、boundary `sq=0`。客户端 10 秒汇总仍约增加 599–600 tick，约 60 tick/s。
+
+### JFR 样本
+
+- JFR 全程有 11,601 个 `jdk.ExecutionSample`。按 `jfr print --exact --events jdk.ExecutionSample --stack-depth 64` 逐事件分析，并以服务端 tick 两条日志的 `[12:17:22.079, 12:18:18.414] +08` 为含端点的窗口，得到 5,323 个样本，其中 `main` 线程 5,279 个。`jfr print --json` 的时间戳明确带 `+08:00`；stack-depth 64 与 128 的计数相同。对每个样本按栈中是否包含目标帧计一次：`ServerMap.preupdate` 5,242，`ErosionMain.LoadGridsquare` 5,188，`IsoGridSquare.RemoveTileObject` 5,178，`LuaEventManager.triggerEvent` 5,224，`NatureBush.replaceExistingObject` 2,863，`NatureTrees.replaceExistingObject` 2,316。另一份同窗口独立统计给出 main 5,248、Erosion 5,157、RemoveTileObject 5,147、LuaEvent 5,175、NatureBush 2,871、NatureTrees 2,277；统计口径差异尚未解释，以下判断不依赖分项的精确值。
+- 代表样本 `12:17:22.607614800` 的主线程栈经过 `KahluaThread.luaMainloop → Event.trigger → LuaEventManager.triggerEvent → IsoGridSquare.RemoveTileObject → NatureBush.replaceExistingObject → ErosionWorld.validateSpawn → ErosionMain.LoadGridsquare → IsoChunk.doLoadGridsquare → ServerCell.RecalcAll2/Load2 → ServerMap.preupdate → GameServer.main`。JFR 能确认该调用路径在停滞窗口内反复采到，但不显示 Lua 事件名，也无法分配具体 Lua 回调的时间。
+
+### RV 对象移除计时与静态候选
+
+- 服务端 `[PerfTrace] server/object-remove` 在 `12:17:15.661–12:18:18.409` 记录 shell-roof-repair 2,171 次、2,171 次成功计时，累计 61,427 ms、单次最大 51 ms；首末跨度 62,748 ms。完整的约 10 秒窗口分别测得约 9.3–9.9 秒、332–355 次。同期 utility-fixture 累计 21 ms，room-ownership 累计 45 ms，均 2,171 次且 room-ownership `hit=0`。进入 RV 的对象流阶段三者各 23,046 次，shell-roof-repair 为 183 ms（utility 88 ms、room-ownership 216 ms）。
+- 临时计时器以 `getTimestampMs()` 记录回调开始/结束之间的墙钟经过时间，在聚合输出前已结束计量。该值不是精确 CPU 时间；时钟单调性没有独立验证；若回调重入，累计耗时会包含嵌套区间。
+- 静态路径候选见 [`RV_RailroaderServer_RoomRepair.lua`](contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RV_RailroaderServer_RoomRepair.lua#L451)：每次对象移除先读取 map、遍历 locomotive records、检查 `validRecord`，再调用 `Boundary.isCurrentShellWall`。该判定见 [`RV_BoundaryServer_Objects.lua`](contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RV_BoundaryServer_Objects.lua#L141)：先解码 boundary，再检查 `IsoThumpable` 类型，所以普通植被对象也会经过前置校验。现有计时没有拆出 mapData、validRecord、boundary decode 各自耗时，也没有拆分其他监听器在 JFR 样本中的份额。
+
+### 结论边界与下一步
+
+多份证据支持：Erosion 对象移除活动期间，RV shell-roof-repair 监听器承担了高开销，是这次服务端停滞的强候选因素；目前不能把耗时归到单个子步骤，也不能断言它独自解释全部 56 秒 tick 间隔。若继续评估玩法改动，先对 `mapData`、`validRecord`、`isCurrentShellWall` 分段计时并检查重入，再据实评估是否可将非候选对象的廉价类型/身份筛选前移；保留当前 schema 与身份拒绝语义。本轮没有修改玩法逻辑。
+
+## 2026-09-25 P0 单客户端运行时复核
+
+### 运行范围与归档
+
+- 本次用户授权的一键整体运行时测试已经结束。会话元数据记载入口为从项目根目录运行 `python testserver/run_test.py`，服务器 PID 为 28400，客户端 PID 为 25848，客户端数为 1；按测试记录，服务器控制台可见。本次审计只离线读取归档，没有启动新测试。
+- 原始 JFR：`%LOCALAPPDATA%\RailroaderRVTest\profiles\RailroaderRVTest_20260925_145731_+0800_PID28400_P0.jfr`，4,121,872 bytes。直接对该文件运行 `jfr summary` 成功：1 chunk，开始时间 `2026-09-25 06:57:31 UTC`（`14:57:31 +08`），持续 446 秒，包含 8,139 个 `jdk.ExecutionSample`。该 summary 是采样事件总量，不是方法调用数或 CPU 时间。
+- 双端日志归档目录：`%LOCALAPPDATA%\RailroaderRVTest\logs\RailroaderRVTest_20260925_145731_PID28400_P0_logs`。关键来源为 `server/2026-09-25_14-55_admin.txt`、`server/2026-09-25_14-55_DebugLog-server.txt`、`client/2026-09-25_14-56_DebugLog.txt`；JFR summary 与会话/时间线分析文件在同一 `profiles` 目录。
+
+### RV 阶段与传送观察
+
+- 首次进入/退出的客户端请求分别记在 `client/2026-09-25_14-56_DebugLog.txt:1297,1310`。服务端 `CycleTrace` EnterRV 时间为 `14:59:57.913`（日志行显示 `.914`，`ms` 字段为 `.913`；`DebugLog-server.txt:2314`）；`generation committed READY` 为 `15:00:04.109`（`:2372`）；Exit 完成为 `15:00:07.292`（`ms` 字段；`:2377`）。
+- 管理员日志确认第一次传送发生在 `15:01:31.072`，目标 `10348,12636,0`（`admin.txt:2`）。用户确认这是本次未到过的冷区域，黑屏约 1 秒；先前报的 `15:00:30` 是误记。第二次在 `15:03:06.192` 传至 `10276,9064,0`（`:3`），用户说该地点似乎也未到过。第三次 `15:03:23.443` 返回起始区域（`:4`），只作为辅助返回，不计作冷目标主结果。
+- JFR 窗口边界明确为第一次 `[15:01:25,15:01:40)`、第二次 `[15:03:00,15:03:15)`。双方一致的栈帧成员统计为第一次 `ServerMap.preupdate=41`、`ErosionMain.LoadGridsquare=7`，第二次分别为 `41`、`34`；两个窗口均确有 `IsoGridSquare.RemoveTileObject` 栈样本。这里的帧计数表示样本栈中包含该帧，不是 Lua/Java 调用次数或耗时。归档分析记录中，管理员命令后 2 秒窗口的 main 采样最大间隔分别为 `0.363 s`、`0.304 s`。JFR 采样不能观测用户看到的黑屏帧，也不能由栈样本分配引擎、RV 与官方监听器各自耗时。
+
+### 对象移除监听器与相邻周期
+
+服务端 `[PerfTrace] server/object-remove` 原始行（`DebugLog-server.txt:2540–2542, 2652–2654`）给出下列聚合值。`ms` 是诊断计时的累计经过时间 / 单次最大经过时间 / 调用数，属于墙钟经过时间，不是 CPU 时间。
+
+| 冷目标时间窗 | shell-roof-repair | utility-fixture | room-ownership | shell-roof-repair 过滤结果 |
+|---|---:|---:|---:|---|
+| `15:01:31.577–15:01:32.738` | 717 次，6 ms / 1 ms | 717 次，1 ms / 1 ms | 717 次，5 ms / 1 ms，`hit=0` | `objectRemoveTotal=aboutToRemoveTotal=cheapReject=717`；`candidate=0`、`strictMatch=0`、`repairQueued=0` |
+| `15:03:06.896–15:03:08.927` | 3,100 次，27 ms / 1 ms | 3,100 次，14 ms / 1 ms | 3,100 次，32 ms / 1 ms，`hit=0` | `objectRemoveTotal=aboutToRemoveTotal=cheapReject=3100`；`candidate=0`、`strictMatch=0`、`repairQueued=0` |
+
+相邻 `server/boundary` 周期摘要分别为 `15:01:30.019 → 15:01:40.089`，tick `2033 → 2123`（+90，`st` 差 10.069 秒；`DebugLog-server.txt:2494,2537`），以及 `15:03:00.092 → 15:03:10.097`，tick `2836 → 2924`（+88，10.005 秒；`:2588,2649`）。它们是周期汇总，不能给出单个 tick 的最大停顿。客户端相邻 10 秒周期约增加 597–600 tick（`client/DebugLog.txt:1355–1356,1365–1366,1399–1400,1403–1404`），约 60 tick/s；这与用户报告的短暂黑屏不是同一种观测。
+
+### 结论边界与剩余工作
+
+- 本次两个传送窗口没有复现旧记录中的服务端 `56.335 s` 仅前进 2 tick 的停滞，也没有复现旧窗口 `shell-roof-repair` 2,171 次、累计 61,427 ms、单次最大 51 ms 的耗时。旧窗口与本次目标位置、会话及跨会话冷热缓存条件不同或未知，因此本次结果不能称为同条件终验，也不能据此宣布根因已解决。
+- `UTILITY_TARGET_NOT_LOADED` 仍在 RV 退出后周期重试。两个目标前后各约 10 秒的 utility 汇总累计经过时间为 `1.3–1.5 s`（通常 3 次失败重试；`DebugLog-server.txt:2496,2539,2590,2651`），应与分钟级 tick 停滞分开看待。
+- 本轮单客户端结果未覆盖多人负载，也未实测合法拆除 shell 墙/屋顶的修复流程。P0 范围记录为 `RV_RailroaderServer_RoomRepair.lua` 与 `RV_Server_ObjectRemovalTrace.lua`；诊断埋点继续保留，P1/P2/P3 尚未实施。当前证据支持先停在 P0 并等待更广测试；它没有验证这些未覆盖场景。

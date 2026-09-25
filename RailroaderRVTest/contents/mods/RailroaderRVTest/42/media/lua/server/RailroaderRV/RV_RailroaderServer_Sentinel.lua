@@ -1,5 +1,6 @@
 -- RV_RailroaderServer: Sentinel responsibilities.
 return function(ctx)
+local RemovalTrace = require("RailroaderRV/RV_Server_ObjectRemovalTrace")
 local Boundary = ctx.Boundary
 local Bitmap = ctx.Bitmap
 local Adapter = ctx.Adapter
@@ -60,6 +61,9 @@ function Adapter.OnClientCommand(module, command, player, args)
         ok, result, reason = pcall(exitPlayer, player)
     end
     if not ok then result, reason = false, result end
+    RemovalTrace.lifecycle("request",
+        command == C.COMMAND_RV_ENTER and "EnterRV" or "ExitRV",
+        result == true and "accepted" or "rejected", ctx.serverTick)
     if result ~= true then
         print("[RailroaderRVTest] Railroader RV command rejected: "
             .. tostring(reason or "unknown reason"))

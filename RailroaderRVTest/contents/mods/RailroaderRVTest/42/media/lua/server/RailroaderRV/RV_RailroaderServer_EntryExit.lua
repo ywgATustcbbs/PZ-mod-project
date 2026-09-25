@@ -1,5 +1,6 @@
 -- RV_RailroaderServer: EntryExit responsibilities.
 return function(ctx)
+local RemovalTrace = require("RailroaderRV/RV_Server_ObjectRemovalTrace")
 local processIsServer = ctx.processIsServer
 local Boundary = ctx.Boundary
 local Adapter = ctx.Adapter
@@ -237,6 +238,7 @@ local function markPlayerOutside(map, record, key, player, position, seat, role)
         rider.exitPosition = copyPosition(position)
         record.players[name] = rider
     end
+    RemovalTrace.lifecycle("mapping", "inside", "exited", ctx.serverTick)
 end
 
 local function markPlayerInside(map, record, key, player, sourcePosition,
@@ -263,6 +265,7 @@ local function markPlayerInside(map, record, key, player, sourcePosition,
         role = sourceRole, seat = sourceSeat,
         enterPosition = enterPosition,
     }
+    RemovalTrace.lifecycle("mapping", "inside", "entered", ctx.serverTick)
 end
 
 local function otherGeneratedRecord(map, locoId)
@@ -350,6 +353,7 @@ local function enterExisting(player, train, record, key, sourceRole,
     if not moved then
         map.players[playerName(player)] = oldRelation
         record.players = oldRiders
+        RemovalTrace.lifecycle("mapping", "inside", "restored", ctx.serverTick)
         if removedRole == "driver" then
             putDriver(train, player, onlineId)
         elseif removedRole == "passenger" and removedSeat ~= nil then
@@ -370,6 +374,8 @@ local function enterExisting(player, train, record, key, sourceRole,
     -- retried by OnTick without rejecting the successful teleport.
     repairRoofForPlayer(player, record, true, "existing-entry")
     transmitMap()
+    RemovalTrace.lifecycle("mapping", "sync", "sent", ctx.serverTick)
+    RemovalTrace.lifecycle("entry", "RV", "complete", ctx.serverTick)
     return true
 end
 
@@ -541,6 +547,7 @@ local function commitGeneration(player, data, prepared)
     -- mapping commit hook before that final client proof.
     repairRoofForPlayer(player, record, true, "generation-entry")
     transmitMap()
+    RemovalTrace.lifecycle("mapping", "sync", "sent", ctx.serverTick)
     return true
 end
 
@@ -606,6 +613,8 @@ local function exitPlayer(player)
             Boundary.clearPlayer(player)
         end
         transmitMap()
+        RemovalTrace.lifecycle("mapping", "sync", "sent", ctx.serverTick)
+        RemovalTrace.lifecycle("exit", "RV", "complete", ctx.serverTick)
         return true
     end
     local onlineId = playerId(player)
@@ -666,6 +675,8 @@ local function exitPlayer(player)
         Boundary.clearPlayer(player)
     end
     transmitMap()
+    RemovalTrace.lifecycle("mapping", "sync", "sent", ctx.serverTick)
+    RemovalTrace.lifecycle("exit", "RV", "complete", ctx.serverTick)
     return true
 end
 

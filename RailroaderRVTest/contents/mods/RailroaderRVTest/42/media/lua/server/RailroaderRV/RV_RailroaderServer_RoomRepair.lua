@@ -1,9 +1,11 @@
 -- RV_RailroaderServer: RoomRepair responsibilities.
 return function(ctx)
+local RemovalTrace = require("RailroaderRV/RV_Server_ObjectRemovalTrace")
 local processIsServer = ctx.processIsServer
 local Boundary = ctx.Boundary
 local Adapter = ctx.Adapter
 local C = ctx.C
+local OWNER = C.MOD_ID
 local roofRepairPlayers = ctx.roofRepairPlayers
 local roomMonitorPlayers = ctx.roomMonitorPlayers
 local pendingWallRoofRepairs = ctx.pendingWallRoofRepairs
@@ -31,6 +33,7 @@ local function serverTransactionMutexStatus(...) return ctx.serverTransactionMut
 local number = ctx.number
 local integer = ctx.integer
 local call = ctx.call
+local callGlobal = ctx.callGlobal
 local playerId = ctx.playerId
 local playerName = ctx.playerName
 local playerDead = ctx.playerDead
@@ -447,14 +450,58 @@ end
 -- removeFromSquare.  OnDestroyIsoThumpable is retained for direct thumpable
 -- destruction paths and uses the same strict matcher.  Never infer ownership
 -- from a coordinate, action name, or client payload.
+local function cheapShellWallCandidate(object)
+    if not object then return false end
+    local squareOk, hostSquare = call(object, "getSquare")
+    if not squareOk or not hostSquare then return false end
+
+    local typeOk, isThumpable = callGlobal("instanceof", object, "IsoThumpable")
+    if not typeOk or isThumpable ~= true then return false end
+    local indexOk, objectIndex = call(object, "getObjectIndex")
+    objectIndex = indexOk and integer(objectIndex) or nil
+    if objectIndex == nil or objectIndex < 0 then return false end
+
+    local dataOk, data = call(object, "getModData")
+    if not dataOk or type(data) ~= "table" then return false end
+    local nested = data.RailroaderRVTest
+    local rvId = data.rvId ~= nil and tostring(data.rvId) or nil
+    if type(nested) ~= "table"
+        or tostring(data.owner) ~= OWNER
+        or tostring(nested.owner) ~= OWNER
+        or rvId == nil or rvId == ""
+        or rvId ~= tostring(nested.rvId) then
+        return false
+    end
+    local generation = integer(data.generation)
+    local bitmapVersion = integer(data.bitmapVersion)
+    if generation == nil or generation ~= integer(nested.generation)
+        or bitmapVersion == nil
+        or bitmapVersion ~= integer(nested.bitmapVersion) then
+        return false
+    end
+
+    local role = nested.role
+    return role == "wall-north" or role == "wall-west"
+        or role == "corner-nw" or role == "corner-se"
+end
+
 local function queueWallRoofRepairForObject(object, source)
     if not processIsServer() or not Boundary
         or type(Boundary.isCurrentShellWall) ~= "function" then
+        RemovalTrace.count("shellrepair", "preconditionReject")
         return false
     end
+    local cheapCheckOk, isCandidate = pcall(cheapShellWallCandidate, object)
+    if not cheapCheckOk or not isCandidate then
+        RemovalTrace.count("shellrepair", "cheapReject")
+        return false
+    end
+    RemovalTrace.count("shellrepair", "candidate")
+
     local mapOk, map = pcall(mapData)
     if not mapOk or type(map) ~= "table" then return false end
     local match
+    local strictMatched = false
     for _, record in pairs(map.locomotives or {}) do
         local wallOk, isCurrentWall = false, false
         if type(record) == "table" and record.rvId ~= nil
@@ -463,6 +510,10 @@ local function queueWallRoofRepairForObject(object, source)
                 object, record.boundary)
         end
         if wallOk and isCurrentWall == true then
+            if not strictMatched then
+                RemovalTrace.count("shellrepair", "strictMatch")
+                strictMatched = true
+            end
             if match then
                 -- A duplicate current identity is not a reason to guess which
                 -- mapping owns the object.  Leave the removal untouched and
@@ -539,6 +590,7 @@ local function queueWallRoofRepairForObject(object, source)
     local scheduled = scheduleRoofRepair(map, match, source, eventKey,
         coordinateKey)
     if scheduled then
+        RemovalTrace.count("shellrepair", "repairQueued")
         print("[RailroaderRVTest] wall removal matched room=" .. roomKey
             .. " source=" .. tostring(source or "object-about-to-be-removed"))
         print("[RailroaderRVTest] wall roof repair queued room=" .. roomKey
@@ -550,7 +602,10 @@ local function queueWallRoofRepairForObject(object, source)
 end
 
 function Adapter.onObjectAboutToBeRemoved(object)
+    local traceStartedAt = RemovalTrace.begin("shellrepair")
+    RemovalTrace.count("shellrepair", "aboutToRemoveTotal")
     queueWallRoofRepairForObject(object, "object-about-to-be-removed")
+    RemovalTrace.finish("shellrepair", traceStartedAt)
 end
 
 -- Some direct IsoThumpable destruction paths expose the object through the
@@ -558,7 +613,10 @@ end
 -- covered by OnObjectAboutToBeRemoved above; this second hook is intentionally
 -- a strict, de-duplicated supplement rather than a client-command path.
 function Adapter.onDestroyIsoThumpable(object, _playerObj)
+    local traceStartedAt = RemovalTrace.begin("shellrepair")
+    RemovalTrace.count("shellrepair", "destroyThumpableTotal")
     queueWallRoofRepairForObject(object, "destroy-iso-thumpable")
+    RemovalTrace.finish("shellrepair", traceStartedAt)
 end
 
 -- Capture every live, current-schema player in the RV managed region before a

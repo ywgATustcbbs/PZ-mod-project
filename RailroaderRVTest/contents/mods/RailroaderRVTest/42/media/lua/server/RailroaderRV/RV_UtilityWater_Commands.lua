@@ -1,5 +1,6 @@
 -- RV_UtilityWater: Commands responsibilities.
 return function(ctx)
+local RemovalTrace = require("RailroaderRV/RV_Server_ObjectRemovalTrace")
 local C = ctx.C
 local U = ctx.U
 local Catalog = ctx.Catalog
@@ -248,26 +249,40 @@ end
 -- missing/invalid tags, records, entries, or transaction gates are ignored
 -- and remain subject to the normal loaded-square audit/rebuild rules.
 function M.onObjectAboutToBeRemoved(object)
+    local traceStartedAt = RemovalTrace.begin("utility")
     local tag = object and objectTag(object)
-    if type(tag) ~= "table" or tag.role ~= "fixture" then return false end
+    if type(tag) ~= "table" or tag.role ~= "fixture" then
+        RemovalTrace.finish("utility", traceStartedAt)
+        return false
+    end
     local identity = { rvId = tag.rvId, generation = tag.generation,
         bitmapVersion = tag.bitmapVersion }
-    if not validUtilityTag(tag, identity, "fixture", tag.deviceId) then return false end
+    if not validUtilityTag(tag, identity, "fixture", tag.deviceId) then
+        RemovalTrace.finish("utility", traceStartedAt)
+        return false
+    end
 
     local rv = rawget(_G, "RailroaderRV")
     local server = rv and rv.Server
     if server and type(server.isGenerationTransactionActive) == "function" then
         local gateOk, busy = pcall(server.isGenerationTransactionActive)
-        if not gateOk or busy == true then return false end
+        if not gateOk or busy == true then
+            RemovalTrace.finish("utility", traceStartedAt)
+            return false
+        end
     end
 
     local recordOk, record = Store.getRecord(identity, false)
-    if not recordOk or type(record) ~= "table" then return false end
+    if not recordOk or type(record) ~= "table" then
+        RemovalTrace.finish("utility", traceStartedAt)
+        return false
+    end
     local entry = record.water and record.water.registry
         and record.water.registry[tag.deviceId]
     if type(entry) ~= "table"
         or entry.status == U.STATUS_SUSPENDED
         or not validCurrentFixture(entry, object, identity) then
+        RemovalTrace.finish("utility", traceStartedAt)
         return false
     end
 
@@ -285,6 +300,7 @@ function M.onObjectAboutToBeRemoved(object)
             .. tostring(identity.rvId) .. " device=" .. tostring(tag.deviceId)
             .. " reason=" .. tostring(result))
     end
+    RemovalTrace.finish("utility", traceStartedAt)
     return accepted, result
 end
 

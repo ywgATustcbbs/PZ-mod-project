@@ -1,5 +1,7 @@
 {
     "ContextMenu_RailroaderRVTest_Generate": "Test Generate RV",
+    "ContextMenu_RailroaderRVTest_BuildLayout": "Prepare RV layout",
+    "ContextMenu_RailroaderRVTest_FinishLayout": "Finish RV layout",
     "ContextMenu_RailroaderRVTest_Enter": "Enter RV",
     "ContextMenu_RailroaderRVTest_Exit": "Exit RV",
     "ContextMenu_RailroaderRVTest_UtilityDashboard": "RV utility panel",

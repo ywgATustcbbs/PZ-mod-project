@@ -12,6 +12,7 @@ local RV = ctx.RV
 local ServerSchema = ctx.ServerSchema
 local UtilityServer = ctx.UtilityServer
 local UtilityWater = ctx.UtilityWater
+local LayoutBuilder = ctx.LayoutBuilder
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local RELOCATION_MIN_TICKS = ctx.RELOCATION_MIN_TICKS
 local RELOCATION_POST_ACK_TICKS = ctx.RELOCATION_POST_ACK_TICKS
@@ -208,6 +209,21 @@ function RV.Server.OnClientCommand(module, command, player, args)
         RemovalTrace.lifecycle("request",
             command == COMMAND_RV_ENTER and "EnterRV" or "ExitRV",
             "received", ctx.serverTick)
+        return
+    end
+    if command == Constants.COMMAND_LAYOUT_BUILD
+        or command == Constants.COMMAND_LAYOUT_FINISH then
+        local builderOk, accepted, reason = pcall(LayoutBuilder.handleCommand,
+            command, player, args)
+        if not builderOk then
+            reason = safeErrorText(accepted)
+            accepted = false
+        end
+        if accepted ~= true then
+            notifyFailure(player, reason or "layout-builder request rejected")
+            print("[RailroaderRVTest] layout-builder request rejected: "
+                .. safeErrorText(reason or "unspecified reason"))
+        end
         return
     end
     if module == COMMAND_MODULE and command == COMMAND_FINAL_RELOCATE_ACK then

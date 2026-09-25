@@ -1,5 +1,7 @@
 {
     "ContextMenu_RailroaderRVTest_Generate": "测试生成房车",
+    "ContextMenu_RailroaderRVTest_BuildLayout": "制作房车",
+    "ContextMenu_RailroaderRVTest_FinishLayout": "结束建造",
     "ContextMenu_RailroaderRVTest_Enter": "进入房车",
     "ContextMenu_RailroaderRVTest_Exit": "退出房车",
     "ContextMenu_RailroaderRVTest_UtilityDashboard": "房车水电系统面板",

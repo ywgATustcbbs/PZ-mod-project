@@ -72,5 +72,6 @@ local ctx = {
 
 require("RailroaderRV/RV_ContextMenu_RoomOwnership")(ctx)
 require("RailroaderRV/RV_ContextMenu_Relocation")(ctx)
+require("RailroaderRV/RV_ContextMenu_LayoutBuilder")(ctx)
 
 return Client

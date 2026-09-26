@@ -175,21 +175,6 @@ local function requestExit(player)
     sendClientCommand(player, C.MOD_ID, C.COMMAND_RV_EXIT, {})
 end
 
--- The server sends this stable reason code for every current-schema gate
--- failure.  Keep the rendered text local and ASCII-only: B42 can render
--- replacement characters for non-ASCII halo text.  Do not render arbitrary
--- server reason text as UI.
-local SAVE_REBUILD_REQUIRED_REASON = "SAVE_REBUILD_REQUIRED"
-local SAVE_REBUILD_REQUIRED_HALO = "Delete this test save and rebuild it"
-
-local function showSaveRebuildRequired(onlineId)
-    local player = localPlayerByOnlineId(onlineId)
-    if not player or type(player.setHaloNote) ~= "function" then return end
-    pcall(function()
-        player:setHaloNote(SAVE_REBUILD_REQUIRED_HALO, 255, 255, 255, 5000)
-    end)
-end
-
 local function addExit(playerNum, context, test)
     local label = text("ContextMenu_RailroaderRVTest_Exit", "Exit RV")
     if optionAlreadyExists(context, label) then return true end
@@ -655,9 +640,6 @@ function Menu.OnServerCommand(module, command, args)
         or type(args) ~= "table" then return end
     local onlineId = finiteInteger(args.onlineId)
     if args.ok == false then
-        if args.reason == SAVE_REBUILD_REQUIRED_REASON then
-            showSaveRebuildRequired(onlineId)
-        end
         if args.reason then print("[RailroaderRVTest] " .. tostring(args.reason)) end
         return
     end

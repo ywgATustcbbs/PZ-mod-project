@@ -1,117 +1,17 @@
--- Utility protocol facade.  RV_Server owns the actual event registration and
--- calls this module once per command/tick, so every RV settles under one
--- process-local guard and the inner water function never re-acquires it.
+-- Utility protocol facade. RV_Server owns event registration and calls this
+-- module for server-validated generator intents and mapping sync.
 
 local C = require("RailroaderRV/RV_Constants")
 local U = require("RailroaderRV/RV_UtilityConstants")
 local Store = require("RailroaderRV/RV_UtilityStore")
-local Water = require("RailroaderRV/RV_UtilityWater")
 local Power = require("RailroaderRV/RV_UtilityPower")
 local Util = require("RailroaderRV/RV_ServerUtil")
 
 local M = {}
-local inWaterSettlement = {}
-local locks = inWaterSettlement
+local locks = {}
 local sessions = {}
-local players = {}
 local mappingSyncState = {}
 local lastTick = -1
-
--- TEMPORARY PerfTrace counters for correlating utility work with CPU
--- samples. Remove after the diagnostic capture is complete.
-local PERF_TRACE_WINDOW_SECONDS = 10
-local function perfWindowStart()
-    local ok, windowStart = pcall(function()
-        if type(os) ~= "table" or type(os.time) ~= "function" then return nil end
-        local now = os.time()
-        if type(now) ~= "number" or now ~= now
-            or now <= -math.huge or now >= math.huge then
-            return nil
-        end
-        return math.floor(now / PERF_TRACE_WINDOW_SECONDS)
-            * PERF_TRACE_WINDOW_SECONDS
-    end)
-    if not ok or type(windowStart) ~= "number" then return nil end
-    return windowStart
-end
-
-local initialPerfWindowStart = perfWindowStart()
-local perfTraceEnabled = initialPerfWindowStart ~= nil
-local function perfNowMs()
-    if not perfTraceEnabled then return nil end
-    local ok, value = pcall(function()
-        if type(getTimestampMs) == "function" then return getTimestampMs() end
-        return nil
-    end)
-    if ok and type(value) == "number" and value == value
-        and value > -math.huge and value < math.huge then
-        return value
-    end
-    return nil
-end
-
-local perfTrace = {
-    windowStart = initialPerfWindowStart,
-    lastTick = 0,
-    calls = 0,
-    uniqueTicks = 0,
-    duplicateTicks = 0,
-    busySkips = 0,
-    dueTicks = 0,
-    mappingSyncs = 0,
-    records = 0,
-    failures = 0,
-    workMsTotal = 0,
-    workMsMax = 0,
-    workTimed = 0,
-    mappingMsTotal = 0,
-    mappingMsMax = 0,
-    mappingTimed = 0,
-}
-
-local function addPerfTime(prefix, startedAt)
-    if not perfTraceEnabled then return end
-    if type(startedAt) ~= "number" then return end
-    local finishedAt = perfNowMs()
-    if type(finishedAt) ~= "number" then return end
-    local elapsed = math.max(0, finishedAt - startedAt)
-    local totalKey = prefix .. "MsTotal"
-    local maxKey = prefix .. "MsMax"
-    local timedKey = prefix .. "Timed"
-    perfTrace[totalKey] = perfTrace[totalKey] + elapsed
-    perfTrace[maxKey] = math.max(perfTrace[maxKey], elapsed)
-    perfTrace[timedKey] = perfTrace[timedKey] + 1
-end
-
-local function emitUtilityPerfTrace(tick)
-    if not perfTraceEnabled then return end
-    local windowStart = perfWindowStart()
-    if windowStart == nil then
-        perfTraceEnabled = false
-        return
-    end
-    if windowStart == perfTrace.windowStart then return end
-    print("[RailroaderRVTest][PerfTrace] server/utility win="
-        .. tostring(perfTrace.windowStart)
-        .. " t=" .. tostring(tick)
-        .. " calls=" .. tostring(perfTrace.calls)
-        .. " uniq=" .. tostring(perfTrace.uniqueTicks)
-        .. " dup=" .. tostring(perfTrace.duplicateTicks)
-        .. " due=" .. tostring(perfTrace.dueTicks)
-        .. " busy=" .. tostring(perfTrace.busySkips)
-        .. " sync=" .. tostring(perfTrace.mappingSyncs)
-        .. " rec=" .. tostring(perfTrace.records)
-        .. " err=" .. tostring(perfTrace.failures)
-        .. " ms=" .. string.format("%.2f/%.2f/%d",
-            perfTrace.workMsTotal, perfTrace.workMsMax, perfTrace.workTimed)
-        .. " mapms=" .. string.format("%.2f/%.2f/%d",
-            perfTrace.mappingMsTotal, perfTrace.mappingMsMax,
-            perfTrace.mappingTimed))
-    for key in pairs(perfTrace) do
-        if key ~= "windowStart" then perfTrace[key] = 0 end
-    end
-    perfTrace.windowStart = windowStart
-end
 
 local function key(identity)
     return tostring(identity.rvId) .. ":" .. tostring(identity.generation)
@@ -129,8 +29,8 @@ local function playerKey(player)
 end
 
 local function stableReason(reason)
-    if tostring(reason):find(C.SAVE_REBUILD_REQUIRED, 1, true) then
-        return U.REASON_SAVE_REBUILD_REQUIRED
+    if tostring(reason):find(C.INVALID_RV_DATA, 1, true) then
+        return U.REASON_INVALID_RV_DATA
     end
     if reason == "outside-rv" then return U.REASONS.OUTSIDE_RV end
     if reason == "unmapped-rv" then return U.REASONS.RV_NOT_FOUND end
@@ -160,7 +60,7 @@ local function resolveRV(player)
     if type(identity.rvId) ~= "string" or identity.rvId == ""
         or Util.integer(identity.generation) == nil
         or Util.integer(identity.bitmapVersion) ~= C.BITMAP_VERSION then
-        return false, U.REASON_SAVE_REBUILD_REQUIRED
+        return false, U.REASON_INVALID_RV_DATA
     end
     context.player = player
     return true, context
@@ -195,7 +95,7 @@ end
 local function validRequest(args)
     if type(args) ~= "table" then return false, U.REASONS.INVALID_REQUEST end
     local allowed = { requestId = true, sessionNonce = true, operation = true,
-        targetHint = true, sourceHint = true, entryPoint = true }
+        targetHint = true, sourceHint = true }
     for field in pairs(args) do if not allowed[field] then return false, U.REASONS.INVALID_REQUEST end end
     if not validText(args.requestId, U.MAX_REQUEST_ID_LENGTH)
         or not validText(args.sessionNonce, U.MAX_NONCE_LENGTH)
@@ -203,17 +103,11 @@ local function validRequest(args)
         or not validHint(args.targetHint) or not validHint(args.sourceHint) then
         return false, U.REASONS.INVALID_REQUEST
     end
-    if args.operation == U.OP_ADD_WATER
-        and args.entryPoint ~= U.ENTRY_INTERNAL and args.entryPoint ~= U.ENTRY_LOCOMOTIVE then
-        return false, U.REASONS.INVALID_REQUEST
-    end
     return true
 end
 
 local function knownOperation(operation)
-    return operation == U.OP_CONNECT_WATER_DEVICE or operation == U.OP_ADD_WATER
-        or operation == U.OP_ADD_FUEL
-        or operation == U.OP_REQUEST_SNAPSHOT
+    return operation == U.OP_ADD_FUEL or operation == U.OP_REQUEST_SNAPSHOT
         or operation == U.OP_CONNECT_GENERATOR or operation == U.OP_START_GENERATOR
         or operation == U.OP_STOP_GENERATOR or operation == U.OP_REPAIR_GENERATOR
 end
@@ -244,9 +138,6 @@ local function acknowledge(player, requestId, accepted, result)
         payload.reason = U.REASONS.OK
         if type(result) == "table" then
             payload.sequence = result.sequence
-            payload.canonicalAmount = result.record and result.record.water
-                and result.record.water.canonicalTank
-                and result.record.water.canonicalTank.amount or result.canonicalAmount
             payload.plannedTransfer = result.plannedTransfer
             payload.confirmedTransfer = result.confirmedTransfer
             payload.projectionPending = result.projectionPending
@@ -286,25 +177,8 @@ end
 local function broadcast(context, record)
     local identity = context.identity
     local payload = Store.snapshot(record)
-    payload.water = Store.copyWater(record.water)
     payload.power = Power.snapshot(record, identity, context)
     send(context.player, C.COMMAND_RV_UTILITY_SNAPSHOT, payload)
-    players[key(identity)] = context.player
-end
-
-local function authoritativeTickContext(identity, player)
-    local rv = rawget(_G, "RailroaderRV")
-    local server = rv and rv.Server
-    if not server or type(server.validateCurrentUtilityIdentity) ~= "function" then
-        return false, U.REASONS.RV_NOT_FOUND
-    end
-    local ok, accepted, value = pcall(server.validateCurrentUtilityIdentity, identity)
-    if not ok or accepted ~= true or type(value) ~= "table"
-        or type(value.record) ~= "table" then
-        return false, stableReason((not ok and accepted) or value
-            or U.REASONS.RV_NOT_FOUND)
-    end
-    return true, { identity = identity, player = player, record = value.record }
 end
 
 function M.handleCommand(player, args)
@@ -359,30 +233,11 @@ function M.handleCommand(player, args)
         return false, reason
     end
     local identity = context.identity
-    if args.operation == U.OP_ADD_WATER then
-        -- The entry point is an intent label, never a permission grant.  The
-        -- authoritative resolver already classified the player as inside the
-        -- RV or beside its locomotive; bind the two labels to that result so
-        -- a client cannot request the deferred locomotive path from inside or
-        -- bypass the loaded usage-tank requirement from outside.
-        if (args.entryPoint == U.ENTRY_INTERNAL and context.locomotiveSide == true)
-            or (args.entryPoint == U.ENTRY_LOCOMOTIVE and context.locomotiveSide ~= true) then
-            local reason = U.REASONS.PERMISSION
-            acknowledge(player, args.requestId, false, reason)
-            remember(session, args.requestId, { ok = false, reason = reason })
-            return false, reason
-        end
-    end
     local guardOk, guardReason = withGuard(identity, function()
         local recordOk, recordOrReason = Store.getRecord(identity, false)
         if not recordOk then return false, recordOrReason end
         local accepted, detail
-        if args.operation == U.OP_CONNECT_WATER_DEVICE then
-            accepted, detail = Water.connectDevice(identity, context, args.targetHint)
-        elseif args.operation == U.OP_ADD_WATER then
-            accepted, detail = Water.addWater(identity, context, args.entryPoint,
-                args.sourceHint)
-        elseif args.operation == U.OP_ADD_FUEL then
+        if args.operation == U.OP_ADD_FUEL then
             accepted, detail = Power.addFuel(identity, context, args.sourceHint)
         elseif args.operation == U.OP_REQUEST_SNAPSHOT then
             accepted, detail = true, { record = recordOrReason }
@@ -423,10 +278,6 @@ local function syncUtilityMappings()
                 local syncOk, accepted, identity = pcall(adapter.syncUtilityMapping, player)
                 if syncOk and accepted == true and type(identity) == "table" then
                     mappingSyncState[recipientKey] = { player = player, epoch = epoch }
-                    -- A replacement player object after reconnect becomes the tick
-                    -- recipient only after the same authoritative resolver accepted
-                    -- it; no client-provided identity enters this cache.
-                    players[key(identity)] = player
                 end
             end
         end
@@ -437,81 +288,11 @@ local function syncUtilityMappings()
 end
 
 function M.onTick(tick)
-    emitUtilityPerfTrace(perfTrace.lastTick)
-    if perfTraceEnabled then
-        perfTrace.calls = perfTrace.calls + 1
-        perfTrace.lastTick = tick
-    end
     if lastTick == tick then
-        if perfTraceEnabled then
-            perfTrace.duplicateTicks = perfTrace.duplicateTicks + 1
-        end
         return
     end
     lastTick = tick
-    if perfTraceEnabled then
-        perfTrace.uniqueTicks = perfTrace.uniqueTicks + 1
-    end
-    if tick % 30 == 0 then
-        local mappingStartedAt = perfNowMs()
-        if perfTraceEnabled then
-            perfTrace.mappingSyncs = perfTrace.mappingSyncs + 1
-        end
-        syncUtilityMappings()
-        addPerfTime("mapping", mappingStartedAt)
-    end
-    if serviceBusy() then
-        if perfTraceEnabled then
-            perfTrace.busySkips = perfTrace.busySkips + 1
-        end
-        return
-    end
-    if tick % U.WATER_SETTLEMENT_INTERVAL ~= 0 then return end
-    if perfTraceEnabled then
-        perfTrace.dueTicks = perfTrace.dueTicks + 1
-    end
-    local workStartedAt = perfNowMs()
-    local recordsOk, recordsOrReason = Store.allRecords()
-    if not recordsOk then
-        if perfTraceEnabled then perfTrace.failures = perfTrace.failures + 1 end
-        print("[RailroaderRVTest] utility schema gate: " .. stableReason(recordsOrReason))
-        addPerfTime("work", workStartedAt)
-        return
-    end
-    for i = 1, #recordsOrReason do
-        if perfTraceEnabled then perfTrace.records = perfTrace.records + 1 end
-        local item = recordsOrReason[i]
-        local identity = item.identity
-        local contextOk, contextOrReason = authoritativeTickContext(identity,
-            players[key(identity)])
-        if not contextOk then
-            if perfTraceEnabled then
-                perfTrace.failures = perfTrace.failures + 1
-            end
-            print("[RailroaderRVTest] utility tick rejected rv=" .. tostring(identity.rvId)
-                .. " reason=" .. stableReason(contextOrReason))
-        else
-            local context = contextOrReason
-            local accepted, result = withGuard(identity, function()
-                local settled, detail = Water.settleUnderGuard(identity, context)
-                if settled then
-                    if context.player and (type(detail) ~= "table" or detail.changed ~= false) then
-                        broadcast(context, detail.record)
-                    end
-                    return true, detail
-                end
-                return false, detail
-            end)
-            if not accepted and result ~= U.REASONS.BUSY then
-                if perfTraceEnabled then
-                    perfTrace.failures = perfTrace.failures + 1
-                end
-                print("[RailroaderRVTest] utility tick rejected rv=" .. tostring(identity.rvId)
-                    .. " reason=" .. stableReason(result))
-            end
-        end
-    end
-    addPerfTime("work", workStartedAt)
+    if type(tick) == "number" and tick % 30 == 0 then syncUtilityMappings() end
 end
 
 function M.snapshotForPlayer(player)
@@ -523,6 +304,13 @@ function M.snapshotForPlayer(player)
     return true, record
 end
 
+function M.validateGenerationUtilityState(identity)
+    if type(Store.validateGenerationUtilityState) ~= "function" then
+        return false, C.INVALID_RV_DATA
+    end
+    return Store.validateGenerationUtilityState(identity)
+end
+
 function M.initializeRecord(identity, context)
     print("[RailroaderRVTest] utility init begin rv=" .. tostring(identity and identity.rvId)
         .. " generation=" .. tostring(identity and identity.generation))
@@ -532,14 +320,11 @@ function M.initializeRecord(identity, context)
             .. tostring(recordOrReason))
         return false, recordOrReason
     end
-    -- Pass the isolated fresh/current working record through the usage-tank
-    -- creation transaction.  Water commits this same record only after the
-    -- object postcondition succeeds; Store never exposes a live ModData row.
-    local tankOk, tankOrReason = Water.ensureUsageTank(identity, context, recordOrReason)
-    if not tankOk then
-        print("[RailroaderRVTest] utility init failed stage=usage-tank reason="
-            .. tostring(tankOrReason))
-        return false, tankOrReason
+    local committed, commitReason = Store.commit(recordOrReason, identity)
+    if not committed then
+        print("[RailroaderRVTest] utility init failed stage=commit reason="
+            .. tostring(commitReason))
+        return false, commitReason
     end
     print("[RailroaderRVTest] utility init committed rv=" .. tostring(identity.rvId)
         .. " generation=" .. tostring(identity.generation))

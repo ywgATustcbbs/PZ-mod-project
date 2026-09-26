@@ -415,7 +415,6 @@ function Bitmap.decode(encoded)
     if not exactKeys(encoded, { "schemaVersion", "bitmapVersion", "originX",
         "originY", "width", "height", "minZ", "maxZ", "layers",
         "encoding" }) then return nil end
-    if encoded.version ~= nil then return nil end
     if encoded.encoding ~= "hex" then return nil end
     local schemaVersion = integer(encoded.schemaVersion)
     if schemaVersion ~= Bitmap.SCHEMA_VERSION then return nil end
@@ -424,6 +423,16 @@ function Bitmap.decode(encoded)
     if not scope then return nil end
     local bitmapVersion = integer(encoded.bitmapVersion)
     if bitmapVersion ~= C.BITMAP_VERSION then return nil end
+    if type(encoded.layers) ~= "table" then return nil end
+    local layerCount = 0
+    for z in pairs(encoded.layers) do
+        if type(z) ~= "number" or math.floor(z) ~= z
+            or z < scope.minZ or z >= scope.maxZ then
+            return nil
+        end
+        layerCount = layerCount + 1
+    end
+    if layerCount ~= scope.maxZ - scope.minZ then return nil end
     local result = {
         schemaVersion = schemaVersion,
         bitmapVersion = bitmapVersion,
@@ -433,7 +442,7 @@ function Bitmap.decode(encoded)
         layers = {}, encoding = "bytes",
     }
     for z = scope.minZ, scope.maxZ - 1 do
-        local encodedLayer = Bitmap.layer(encoded, z)
+        local encodedLayer = encoded.layers[z]
         if not exactKeys(encodedLayer, { "walkBits", "buildBits", "encoding" }) then
             return nil
         end

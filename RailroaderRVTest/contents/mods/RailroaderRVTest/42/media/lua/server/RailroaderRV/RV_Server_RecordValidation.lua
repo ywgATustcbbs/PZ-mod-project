@@ -45,7 +45,7 @@ function RV.Server.currentRVManifestForRelocation(rvId, generation,
     bitmapVersion)
     local manifestOk, manifest = pcall(manifestTable)
     if not manifestOk or type(manifest) ~= "table" then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local schemaOk = pcall(requireCurrentManifest, manifest, false)
     if not schemaOk or manifest.state ~= "READY"
@@ -56,7 +56,7 @@ function RV.Server.currentRVManifestForRelocation(rvId, generation,
         or tostring(manifest.boundary.rvId) ~= tostring(rvId)
         or ServerUtil.integer(manifest.boundary.generation) ~= ServerUtil.integer(generation)
         or ServerUtil.integer(manifest.boundary.bitmapVersion) ~= ServerUtil.integer(bitmapVersion) then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     return true, manifest
 end
@@ -69,7 +69,7 @@ function RV.Server.currentRVManifestForBoundary(rvId, generation,
     bitmapVersion)
     local manifestOk, manifest = pcall(manifestTable)
     if not manifestOk or type(manifest) ~= "table" then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local schemaOk = pcall(requireCurrentManifest, manifest, false)
     if not schemaOk
@@ -77,7 +77,7 @@ function RV.Server.currentRVManifestForBoundary(rvId, generation,
         or tostring(manifest.rvId) ~= tostring(rvId)
         or ServerUtil.integer(manifest.generation) ~= ServerUtil.integer(generation)
         or ServerUtil.integer(manifest.bitmapVersion) ~= ServerUtil.integer(bitmapVersion) then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     return true, manifest
 end
@@ -130,15 +130,15 @@ function RV.Server.currentRVRecordGeometryConsistent(record, manifest)
         "bitmapVersion", "managed", "bitmap", "shellEdges" }
     local shellFields = { "edgeKey", "rvId", "generation", "bitmapVersion",
         "hostX", "hostY", "z", "axis", "side", "objectX", "objectY",
-        "objectZ", "role", "corner", "replacementAllowed" }
+        "objectZ", "role", "corner", "replacementAllowed",
+        "templateIndex", "templateIndices", "sprite", "north" }
     local boundsShellFields = { "edgeKey", "hostX", "hostY", "z", "axis",
         "side", "objectX", "objectY", "objectZ", "role", "corner",
-        "replacementAllowed" }
+        "replacementAllowed", "templateIndex", "templateIndices", "sprite", "north" }
     local regionFields = { "minX", "minY", "maxX", "maxY", "minZ", "maxZ" }
 
     if type(record) ~= "table" or type(manifest) ~= "table"
         or record.generated ~= true
-        or record.version ~= nil or manifest.version ~= nil
         or type(record.boundary) ~= "table"
         or type(manifest.boundary) ~= "table"
         or type(manifest.bounds) ~= "table"
@@ -160,6 +160,8 @@ function RV.Server.currentRVRecordGeometryConsistent(record, manifest)
         or ServerUtil.integer(record.boundarySchemaVersion) ~= Constants.BOUNDARY_SCHEMA_VERSION
         or ServerUtil.integer(manifest.schemaVersion) ~= Constants.MANIFEST_SCHEMA_VERSION
         or manifest.techVersion ~= Constants.TECH_VERSION
+        or ServerUtil.integer(manifest.templateVersion)
+            ~= Constants.CAPTURED_TEMPLATE_VERSION
         or ServerUtil.integer(manifest.boundarySchemaVersion)
             ~= Constants.BOUNDARY_SCHEMA_VERSION
         or ServerUtil.integer(record.boundary.schemaVersion)
@@ -225,6 +227,35 @@ function RV.Server.currentRVRecordGeometryConsistent(record, manifest)
         return false
     end
 
+    local function integerArraysEqual(left, right)
+        if type(left) ~= "table" or type(right) ~= "table"
+            or #left < 1 or #left ~= #right then
+            return false
+        end
+        local leftCount, rightCount = 0, 0
+        for key in pairs(left) do
+            leftCount = leftCount + 1
+            if type(key) ~= "number" or key < 1 or math.floor(key) ~= key
+                or key > #left or ServerUtil.integer(left[key]) == nil then
+                return false
+            end
+        end
+        for key in pairs(right) do
+            rightCount = rightCount + 1
+            if type(key) ~= "number" or key < 1 or math.floor(key) ~= key
+                or key > #right or ServerUtil.integer(right[key]) == nil then
+                return false
+            end
+        end
+        if leftCount ~= #left or rightCount ~= #right then return false end
+        for i = 1, #left do
+            if ServerUtil.integer(left[i]) ~= ServerUtil.integer(right[i]) then
+                return false
+            end
+        end
+        return true
+    end
+
     local function shellSetEqual(left, right)
         if type(left) ~= "table" or type(right) ~= "table" then return false end
         local leftCount, rightCount = 0, 0
@@ -239,7 +270,12 @@ function RV.Server.currentRVRecordGeometryConsistent(record, manifest)
             end
             for i = 1, #shellFields do
                 local field = shellFields[i]
-                if edge[field] ~= other[field] then return false end
+                if field ~= "templateIndices" and edge[field] ~= other[field] then
+                    return false
+                end
+            end
+            if not integerArraysEqual(edge.templateIndices, other.templateIndices) then
+                return false
             end
         end
         for _ in pairs(right) do rightCount = rightCount + 1 end
@@ -282,7 +318,12 @@ function RV.Server.currentRVRecordGeometryConsistent(record, manifest)
         end
         for i = 1, #boundsShellFields do
             local field = boundsShellFields[i]
-            if edge[field] ~= boundEdge[field] then return false end
+            if field ~= "templateIndices" and edge[field] ~= boundEdge[field] then
+                return false
+            end
+        end
+        if not integerArraysEqual(edge.templateIndices, boundEdge.templateIndices) then
+            return false
         end
     end
     local boundaryCount, boundsCount = 0, 0
@@ -355,26 +396,26 @@ end
 function RV.Server.validateCurrentRVRecord(record)
     if type(record) ~= "table" or type(record.rvId) ~= "string"
         or record.rvId == "" then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local manifestCallOk, manifestAccepted, manifestOrReason = pcall(
         RV.Server.currentRVManifestForRelocation, record.rvId,
         record.generation, record.bitmapVersion)
     if not manifestCallOk or manifestAccepted ~= true
         or type(manifestOrReason) ~= "table" then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local geometryCallOk, consistent = pcall(
         RV.Server.currentRVRecordGeometryConsistent, record, manifestOrReason)
     if not geometryCallOk or consistent ~= true then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     return true, manifestOrReason
 end
 
--- Re-run the official add-floor/remove-floor neighbour invalidation after an
--- existing RV entry or reconnect.  The current manifest gate must pass before
--- any persisted bounds are handed to the repair helper.
+-- Rebuild the captured south-window floor's room/roof neighbours after an
+-- existing RV entry or reconnect. The current manifest gate must pass before
+-- persisted geometry or generation identity reaches the repair helper.
 function RV.Server.repairRoofVisuals(player)
     if not RoofRepair then
         return false, "roof repair module is unavailable"
@@ -386,7 +427,7 @@ function RV.Server.repairRoofVisuals(player)
     local manifest = manifestOrError
     local schemaOk = pcall(requireCurrentManifest, manifest, false)
     if not schemaOk then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local identityOk, identityOrReason = playerIdentity(player)
     if not identityOk then return false, identityOrReason end
@@ -398,7 +439,11 @@ function RV.Server.repairRoofVisuals(player)
     })
     if not contextOk then return false, contextOrReason end
     local bounds = manifest.bounds
-    local ok, result, reason = pcall(RoofRepair.run, player, bounds)
+    local ok, result, reason = pcall(RoofRepair.run, player, bounds, {
+        rvId = manifest.rvId,
+        generation = manifest.generation,
+        bitmapVersion = manifest.bitmapVersion,
+    })
     if not ok then return false, safeErrorText(result) end
     return result == true, reason
 end
@@ -406,19 +451,18 @@ end
 -- Re-arm a client's persistent stale-room monitor when it enters an already
 -- generated RV or appears after reconnect.  The mapping record is checked for
 -- the current schema/identity, while the manifest remains the sole source of
--- the bounds sent over the wire.  No client state or persisted legacy geometry
--- participates in this command.
+-- the bounds sent over the wire.  No client state or caller-supplied bounds
+-- participate in this command.
 function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
-    if type(record) ~= "table" or record.version ~= nil
+    if type(record) ~= "table"
         or record.generated ~= true
         or record.locoId == nil or tostring(record.locoId) == ""
         or record.rvId == nil or tostring(record.rvId) ~= tostring(record.locoId)
         or type(record.boundary) ~= "table"
-        or record.boundary.version ~= nil
         or type(record.boundary.managed) ~= "table"
         or type(record.boundary.bitmap) ~= "table"
         or type(record.boundary.shellEdges) ~= "table" then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local recordSchemaVersion = ServerUtil.toNumber(record.schemaVersion)
     local recordBoundarySchemaVersion = ServerUtil.toNumber(record.boundarySchemaVersion)
@@ -426,12 +470,12 @@ function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
     if recordSchemaVersion ~= Constants.RV_RECORD_SCHEMA_VERSION
         or recordBoundarySchemaVersion ~= Constants.BOUNDARY_SCHEMA_VERSION
         or boundarySchemaVersion ~= Constants.BOUNDARY_SCHEMA_VERSION then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local recordGeneration = ServerUtil.toNumber(record.generation)
     if not ServerUtil.isFiniteNumber(recordGeneration) or math.floor(recordGeneration)
         ~= recordGeneration or recordGeneration < 1 then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local recordBitmapVersion = ServerUtil.toNumber(record.bitmapVersion)
     local boundaryGeneration = ServerUtil.toNumber(record.boundary.generation)
@@ -440,19 +484,19 @@ function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
         or tostring(record.boundary.rvId) ~= tostring(record.rvId)
         or boundaryGeneration ~= recordGeneration
         or boundaryBitmapVersion ~= recordBitmapVersion then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
 
     local identityOk, identityOrReason = playerIdentity(player)
     if not identityOk then return false, identityOrReason end
     local manifestOk, manifestOrError = pcall(manifestTable)
     if not manifestOk or type(manifestOrError) ~= "table" then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local manifest = manifestOrError
     local schemaOk = pcall(requireCurrentManifest, manifest, false)
     if not schemaOk then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     if manifest.state ~= "READY" then
         return false, "RV manifest is not READY"
@@ -465,7 +509,7 @@ function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
         or tostring(manifest.boundary.rvId) ~= tostring(record.rvId)
         or ServerUtil.toNumber(manifest.boundary.generation) ~= recordGeneration
         or ServerUtil.toNumber(manifest.boundary.bitmapVersion) ~= recordBitmapVersion then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
 
     local armedOk, armedError = pcall(armTargetedClientRoomOwnershipGuard,

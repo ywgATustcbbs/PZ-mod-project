@@ -4,6 +4,7 @@ local processIsServer = ctx.processIsServer
 local Bitmap = ctx.Bitmap
 local Boundary = ctx.Boundary
 local C = ctx.C
+local Template = require("RailroaderRV/RV_Template")
 local exactKeys = ctx.exactKeys
 -- A registered boundary is immutable. Retain its decoded snapshot by source
 -- table so normal tick lookups compare only constant-size metadata.
@@ -131,7 +132,15 @@ local function encodeShellEdges(source, rvId, generation, bitmapVersion)
                 objectZ = integer(edge.objectZ),
                 role = edge.role, corner = edge.corner == true,
                 replacementAllowed = edge.replacementAllowed ~= false,
+                templateIndex = integer(edge.templateIndex),
+                templateIndices = {},
+                sprite = edge.sprite, north = edge.north,
             }
+            if type(edge.templateIndices) == "table" then
+                for i = 1, #edge.templateIndices do
+                    result[key].templateIndices[i] = integer(edge.templateIndices[i])
+                end
+            end
         end
     end
     return result
@@ -149,7 +158,9 @@ local function validShellEdges(edges, rvId, generation, bitmapVersion)
         bitmapVersion = true, hostX = true, hostY = true, z = true,
         axis = true, side = true, objectX = true, objectY = true,
         objectZ = true, role = true, corner = true,
-        replacementAllowed = true,
+        replacementAllowed = true, templateIndex = true, templateIndices = true,
+        sprite = true,
+        north = true,
     }
     for key, edge in pairs(edges) do
         edgeCount = edgeCount + 1
@@ -181,13 +192,56 @@ local function validShellEdges(edges, rvId, generation, bitmapVersion)
             or integer(edge.objectX) ~= edgeX
             or integer(edge.objectY) ~= edgeY
             or integer(edge.objectZ) ~= edgeZ
+            or integer(edge.templateIndex) == nil
+            or type(edge.templateIndices) ~= "table"
+            or #edge.templateIndices < 1
+            or type(edge.sprite) ~= "string"
+            or type(edge.north) ~= "boolean"
             or type(edge.role) ~= "string"
             or type(edge.corner) ~= "boolean"
             or type(edge.replacementAllowed) ~= "boolean" then
             return false
         end
+        local captured = Template.objects[integer(edge.templateIndex)]
+        local expectedRole = edge.corner and "corner-nw"
+            or (edge.north and "wall-north" or "wall-west")
+        if not captured
+            or (captured.class ~= "IsoThumpable" and captured.class ~= "IsoWindow")
+            or captured.sprite ~= edge.sprite or captured.north ~= edge.north
+            or captured.x ~= integer(edge.objectX) - C.TELEPORT_X
+            or captured.y ~= integer(edge.objectY) - C.TELEPORT_Y
+            or captured.z ~= integer(edge.objectZ) - C.TELEPORT_Z
+            or edge.role ~= expectedRole
+            or edge.corner and edge.north ~= true then
+            return false
+        end
+        local partCount, partSeen = 0, {}
+        for partKey in pairs(edge.templateIndices) do
+            partCount = partCount + 1
+            if type(partKey) ~= "number" or partKey < 1
+                or math.floor(partKey) ~= partKey or partKey > #edge.templateIndices then
+                return false
+            end
+        end
+        if partCount ~= #edge.templateIndices
+            or edge.templateIndices[1] ~= integer(edge.templateIndex) then
+            return false
+        end
+        for partPosition = 1, #edge.templateIndices do
+            local partIndex = integer(edge.templateIndices[partPosition])
+            local part = partIndex and Template.objects[partIndex]
+            if not part or partSeen[partIndex]
+                or (part.class ~= "IsoThumpable" and part.class ~= "IsoWindow")
+                or part.x ~= integer(edge.objectX) - C.TELEPORT_X
+                or part.y ~= integer(edge.objectY) - C.TELEPORT_Y
+                or part.z ~= integer(edge.objectZ) - C.TELEPORT_Z
+                or part.north ~= edge.north then
+                return false
+            end
+            partSeen[partIndex] = true
+        end
     end
-    return edgeCount == 92
+    return edgeCount == 54
 end
 
 -- Build the persistent record from a layout plan.  Only the encoded bitmap is
@@ -249,7 +303,6 @@ local function decodeBoundary(boundary)
         "bitmapVersion", "managed", "bitmap", "shellEdges" }) then
         return nil
     end
-    if boundary.version ~= nil then return nil end
     if integer(boundary.schemaVersion) ~= C.BOUNDARY_SCHEMA_VERSION then return nil end
     local encoded = boundary.bitmap
     if type(encoded) ~= "table" then return nil end
@@ -321,7 +374,8 @@ local function sameBoundaryShellEdges(left, right)
     if type(left) ~= "table" or type(right) ~= "table" then return false end
     local fields = { "edgeKey", "rvId", "generation", "bitmapVersion",
         "hostX", "hostY", "z", "axis", "side", "objectX", "objectY",
-        "objectZ", "role", "corner", "replacementAllowed" }
+        "objectZ", "role", "corner", "replacementAllowed",
+        "templateIndex", "templateIndices", "sprite", "north" }
     local leftCount, rightCount = 0, 0
     for key, edge in pairs(left) do
         leftCount = leftCount + 1
@@ -333,6 +387,14 @@ local function sameBoundaryShellEdges(left, right)
         for i = 1, #fields do
             local field = fields[i]
             if edge[field] ~= other[field] then return false end
+        end
+        local edgeParts, otherParts = edge.templateIndices, other.templateIndices
+        if type(edgeParts) ~= "table" or type(otherParts) ~= "table"
+            or #edgeParts ~= #otherParts then
+            return false
+        end
+        for i = 1, #edgeParts do
+            if integer(edgeParts[i]) ~= integer(otherParts[i]) then return false end
         end
     end
     for _ in pairs(right) do rightCount = rightCount + 1 end
@@ -437,9 +499,7 @@ local function loadedBoundary(boundary)
     if cached then
         Boundary._registered[key] = nil
         -- A new geometry with the same identity must not inherit an old
-        -- cleanup cursor.  The next current-only registration starts a fresh
-        -- cursor against the replacement snapshot.
-        Boundary._cleanups[key] = nil
+        -- source snapshot. The current mapping remains the only authority.
     end
     local result = {
         rvId = rvId, generation = generation, bitmapVersion = bitmapVersion,
@@ -691,8 +751,85 @@ local function currentSquareMatches(player, position)
         and integer(z) == math.floor(position.z)
 end
 
+local function diagnosticPoint(point)
+    if type(point) ~= "table" then return "unavailable" end
+    return tostring(point.x) .. "," .. tostring(point.y) .. "," .. tostring(point.z)
+end
+
+function Boundary.diagnoseGuardState(player, knownIdentity, position,
+    relation, record, reason)
+    local id = knownIdentity or identity(player)
+    if not id or type(relation) ~= "table" or type(record) ~= "table"
+        or tostring(relation.locoId) ~= tostring(record.locoId)
+        or integer(relation.onlineId) ~= integer(id.onlineId) then
+        return false
+    end
+    local state = Boundary._states[id.key]
+    if not state or state.rvId ~= tostring(record.rvId)
+        or integer(state.generation) ~= integer(record.generation)
+        or integer(state.bitmapVersion) ~= integer(record.bitmapVersion) then
+        return false
+    end
+    local now = integer(Boundary._tick) or 0
+    if now < (integer(state.guardDiagnosticTick) or -math.huge)
+        or now - (integer(state.guardDiagnosticTick) or -math.huge) < 60 then
+        return false
+    end
+    state.guardDiagnosticTick = now
+
+    local squarePosition
+    local squareOk, current = call(player, "getCurrentSquare")
+    if squareOk and current then
+        local xOk, x = call(current, "getX")
+        local yOk, y = call(current, "getY")
+        local zOk, z = call(current, "getZ")
+        if xOk and yOk and zOk then
+            squarePosition = { x = integer(x), y = integer(y), z = integer(z) }
+        end
+    end
+    local boundary = state.boundaryReference
+    local inScope, active, inInner, outerHit, innerHit, squareMatches =
+        "unknown", "unknown", "unknown", "unknown", "unknown", "unknown"
+    local bounds
+    if type(position) == "table" then
+        squareMatches = tostring(currentSquareMatches(player, position))
+        if boundary and type(boundary.bitmap) == "table" then
+            inScope = tostring(Bitmap.containsScope(boundary.bitmap,
+                position.x, position.y, position.z))
+            local walkable, inner = Bitmap.walkableFast(boundary.bitmap,
+                position.x, position.y, position.z)
+            active, inInner = tostring(walkable), tostring(inner)
+            bounds = Bitmap.walkBounds(boundary.bitmap, math.floor(position.z))
+            if bounds then
+                outerHit = tostring(Bitmap.inAABB(bounds.outer,
+                    position.x, position.y))
+                innerHit = tostring(Bitmap.inAABB(bounds.inner,
+                    position.x, position.y))
+            end
+        end
+    end
+    local rider = type(record.players) == "table"
+        and record.players[id.username] or nil
+    print("[RailroaderRVTest][BoundaryDiag] player=" .. tostring(id.key)
+        .. " rv=" .. tostring(record.rvId)
+        .. " generation=" .. tostring(record.generation)
+        .. " reason=" .. tostring(reason or "unspecified")
+        .. " relationInside=" .. tostring(relation.inside)
+        .. " riderInside=" .. tostring(type(rider) == "table" and rider.inside or nil)
+        .. " position=" .. diagnosticPoint(position)
+        .. " currentSquare=" .. diagnosticPoint(squarePosition)
+        .. " squareMatches=" .. tostring(squareMatches)
+        .. " scope=" .. tostring(inScope) .. " active=" .. tostring(active)
+        .. " inInner=" .. tostring(inInner) .. " outerAABB=" .. tostring(outerHit)
+        .. " innerAABB=" .. tostring(innerHit)
+        .. " stateRV=" .. tostring(state.rvId)
+        .. " stateGeneration=" .. tostring(state.generation)
+        .. " lastValid=" .. diagnosticPoint(state.lastValid))
+    return true
+end
+
 local function updatePlayer(player, position, knownIdentity, deferValidationMiss)
-    local boundary, _, _, id = Boundary.boundaryForPlayer(player,
+    local boundary, record, relation, id = Boundary.boundaryForPlayer(player,
         knownIdentity, deferValidationMiss)
     if not boundary then return nil end
     local state = stateFor(player, id or knownIdentity)
@@ -727,10 +864,16 @@ local function updatePlayer(player, position, knownIdentity, deferValidationMiss
     -- relation alone never grants permission to touch a player outside this
     -- RV's exact managed region.
     if not Bitmap.containsScope(boundary.bitmap, position.x, position.y, position.z) then
+        Boundary.diagnoseGuardState(player, id, position, relation, record,
+            "outside-managed-scope")
         state.lastValid, state.lastPosition, state.invalidSegment = nil, nil, nil
         return boundary
     end
-    if not currentSquareMatches(player, position) then return boundary end
+    if not currentSquareMatches(player, position) then
+        Boundary.diagnoseGuardState(player, id, position, relation, record,
+            "current-square-mismatch")
+        return boundary
+    end
     if Boundary._tick < (state.recoveryCooldown or 0) then return boundary end
     local active, inInner = Bitmap.walkableFast(boundary.bitmap,
         position.x, position.y, position.z)
@@ -762,6 +905,8 @@ local function updatePlayer(player, position, knownIdentity, deferValidationMiss
         return boundary
     end
     if not active or state.invalidSegment then
+        Boundary.diagnoseGuardState(player, id, position, relation, record,
+            active and "invalid-movement-segment" or "inactive-bitmap-cell")
         local target = state.lastValid
         if not target or not Bitmap.isActive(boundary.bitmap,
             target.x, target.y, target.z) then

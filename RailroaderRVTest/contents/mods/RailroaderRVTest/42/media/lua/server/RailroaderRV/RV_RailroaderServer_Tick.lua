@@ -108,7 +108,7 @@ local function processPendingWallRoofRepairs()
         -- the next successful current-schema read; the explicit schema gate
         -- below is the only path allowed to reject it.
         local detail = type(mapOrReason) == "string" and mapOrReason or ""
-        if string.find(detail, C.SAVE_REBUILD_REQUIRED, 1, true) then
+        if string.find(detail, C.INVALID_RV_DATA, 1, true) then
             clearRoofRepairRuntimeState(true)
         end
         return
@@ -183,11 +183,11 @@ function Adapter.OnTick()
     if not ok or type(mapOrReason) ~= "table" then
         if not Adapter._schemaWarning then
             print("[RailroaderRVTest] " .. tostring(mapOrReason
-                or C.SAVE_REBUILD_REQUIRED))
+                or C.INVALID_RV_DATA))
             Adapter._schemaWarning = true
         end
         local detail = type(mapOrReason) == "string" and mapOrReason or ""
-        if string.find(detail, C.SAVE_REBUILD_REQUIRED, 1, true) then
+        if string.find(detail, C.INVALID_RV_DATA, 1, true) then
             clearRoofRepairRuntimeState(true)
         end
         return

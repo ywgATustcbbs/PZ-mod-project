@@ -99,7 +99,7 @@ local function usageObject(identity, context)
         C.UTILITY_ROLE_TANK, nil, context and context.player)
     if status == "unloaded" then return false, U.REASONS.TARGET_NOT_LOADED end
     if status == "duplicate" or status == "invalid" then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     if not object then
         local created, result = M.ensureUsageTank(identity, context)
@@ -112,10 +112,10 @@ local function usageObject(identity, context)
         or tag.objectFingerprint ~= i.objectFingerprint
         or objectFingerprint(object, C.UTILITY_ROLE_TANK) ~= i.objectFingerprint
         or not objectContainer(object) then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local externalOk = externalWaterMatches(object, C.UTILITY_ROLE_TANK)
-    if externalOk ~= true then return false, C.SAVE_REBUILD_REQUIRED end
+    if externalOk ~= true then return false, C.INVALID_RV_DATA end
     return true, object, record
 end
 
@@ -123,7 +123,7 @@ local function proxyObject(identity, entry, player)
     local object, status = squareObject(identity, entry.proxyX, entry.proxyY, entry.proxyZ,
         C.UTILITY_ROLE_PROXY, entry.deviceId, player)
     if status == "duplicate" or status == "invalid" then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     if status == "unloaded" then return false, U.REASONS.TARGET_NOT_LOADED end
     if not object then return false, U.REASONS.DEVICE_INVALID end
@@ -132,9 +132,9 @@ local function proxyObject(identity, entry, player)
         or tag.objectToken ~= entry.proxyToken
         or tag.objectFingerprint ~= entry.proxyFingerprint
         or objectFingerprint(object, C.UTILITY_ROLE_PROXY) ~= entry.proxyFingerprint
-        or not objectContainer(object) then return false, C.SAVE_REBUILD_REQUIRED end
+        or not objectContainer(object) then return false, C.INVALID_RV_DATA end
     local externalOk = externalWaterMatches(object, C.UTILITY_ROLE_PROXY)
-    if externalOk ~= true then return false, C.SAVE_REBUILD_REQUIRED end
+    if externalOk ~= true then return false, C.INVALID_RV_DATA end
     return true, object
 end
 
@@ -382,7 +382,7 @@ function M.ensureUsageTank(identity, context, workingRecord)
         -- A current-generation object with the retired role/schema (including
         -- the old visible barrel tag) is a save-shape conflict.  Never place
         -- a replacement beside it.
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     -- Recreate a missing projected tank from the saved balance after an
     -- interrupted save. Some consumption may be lost.
@@ -392,9 +392,9 @@ function M.ensureUsageTank(identity, context, workingRecord)
             or tag.objectToken ~= identityData.objectToken
             or tag.objectFingerprint ~= identityData.objectFingerprint
             or objectFingerprint(object, C.UTILITY_ROLE_TANK) ~= identityData.objectFingerprint
-            or not objectContainer(object) then return false, C.SAVE_REBUILD_REQUIRED end
+            or not objectContainer(object) then return false, C.INVALID_RV_DATA end
         if externalWaterMatches(object, C.UTILITY_ROLE_TANK) ~= true then
-            return false, C.SAVE_REBUILD_REQUIRED
+            return false, C.INVALID_RV_DATA
         end
         if workingRecord ~= nil then
             local commitOk, commitReason = Store.commit(record, identity)

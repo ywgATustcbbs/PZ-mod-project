@@ -233,7 +233,7 @@ serverTransactionMutexStatus = function()
         server.isRoofRepairTransactionActive, nil)
     if not generationCallOk or type(generationActive) ~= "boolean"
         or not roofCallOk or type(roofActive) ~= "boolean" then
-        return nil, nil, C.SAVE_REBUILD_REQUIRED
+        return nil, nil, C.INVALID_RV_DATA
     end
     return generationActive, roofActive, roofReason
 end
@@ -257,7 +257,7 @@ roofRepairTransactionBlocks = function(rvId)
     end
     for _, pending in pairs(pendingWallRoofRepairs) do
         if type(pending) ~= "table" then
-            return true, C.SAVE_REBUILD_REQUIRED
+            return true, C.INVALID_RV_DATA
         end
         if pending.relocationPhase ~= "complete" then
             return true, "roof repair refresh is in progress (rvId="
@@ -266,14 +266,14 @@ roofRepairTransactionBlocks = function(rvId)
     end
     for _, events in pairs(followUpWallRemovalEvents) do
         if type(events) ~= "table" then
-            return true, C.SAVE_REBUILD_REQUIRED
+            return true, C.INVALID_RV_DATA
         end
         for _, event in pairs(events) do
             if type(event) ~= "table" then
-                return true, C.SAVE_REBUILD_REQUIRED
+                return true, C.INVALID_RV_DATA
             end
             local expiresAt = integer(event.expiresAtTick)
-            if expiresAt == nil then return true, C.SAVE_REBUILD_REQUIRED end
+            if expiresAt == nil then return true, C.INVALID_RV_DATA end
             if expiresAt >= (Adapter._ticks or 0) then
                 return true, "roof repair refresh is in progress (rvId="
                     .. tostring(event.rvId or "unknown") .. ")"
@@ -290,18 +290,18 @@ end
 currentGeometryGate = function(record)
     local server = RailroaderRV and RailroaderRV.Server
     if not server or type(server.validateCurrentRVRecord) ~= "function" then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local callOk, accepted = pcall(server.validateCurrentRVRecord, record)
     if not callOk or accepted ~= true then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     return true
 end
 
 local function sentinelWarn(identityKey, reason)
     if type(reason) ~= "string" or reason == "" then
-        reason = C.SAVE_REBUILD_REQUIRED
+        reason = C.INVALID_RV_DATA
     end
     if relocationSentinelWarnings[identityKey] == reason then return end
     relocationSentinelWarnings[identityKey] = reason
@@ -351,7 +351,7 @@ local function sentinelBitmapAndCenter(record)
     if type(record) ~= "table" or type(record.managed) ~= "table"
         or type(record.boundary) ~= "table"
         or type(record.boundary.bitmap) ~= "table" or not Bitmap then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local managed = record.managed
     local originX, originY = integer(managed.originX), integer(managed.originY)
@@ -360,7 +360,7 @@ local function sentinelBitmapAndCenter(record)
     if originX == nil or originY == nil or width ~= integer(C.RV_MANAGED_WIDTH)
         or height ~= integer(C.RV_MANAGED_HEIGHT) or minZ == nil or maxZ == nil
         or maxZ <= minZ then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local decodeOk, bitmap = pcall(Bitmap.decode, record.boundary.bitmap)
     local bitmapValidOk, bitmapValid = false, false
@@ -374,7 +374,7 @@ local function sentinelBitmapAndCenter(record)
         or integer(bitmap.originX) ~= originX or integer(bitmap.originY) ~= originY
         or integer(bitmap.width) ~= width or integer(bitmap.height) ~= height
         or integer(bitmap.minZ) ~= minZ or integer(bitmap.maxZ) ~= maxZ then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local centerX = originX + math.floor(width / 2)
     local centerY = originY + math.floor(height / 2)
@@ -382,13 +382,13 @@ local function sentinelBitmapAndCenter(record)
     if not rvPosition or math.floor(rvPosition.x) ~= centerX
         or math.floor(rvPosition.y) ~= centerY
         or math.floor(rvPosition.z) ~= integer(C.TELEPORT_Z) then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local activeX, activeY, activeZ = math.floor(rvPosition.x),
         math.floor(rvPosition.y), math.floor(rvPosition.z)
     if not Bitmap.containsScope(bitmap, activeX, activeY, activeZ)
         or not Bitmap.isActive(bitmap, activeX, activeY, activeZ) then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     return true, {
         bitmap = bitmap, centerX = centerX, centerY = centerY,
@@ -435,7 +435,7 @@ local function sentinelRecordCandidate(map, player, server)
             if generationMatch or roofMatch then
                 if not validRecord(record) or not centerOk
                     or not sentinelRelationsConsistent(map, record) then
-                    invalidReason = centerOrReason or C.SAVE_REBUILD_REQUIRED
+                    invalidReason = centerOrReason or C.INVALID_RV_DATA
                 else
                     local manifestOk, manifestOrReason = false, nil
                     if server and type(server.currentRVManifestForRelocation)
@@ -449,15 +449,15 @@ local function sentinelRecordCandidate(map, player, server)
                             manifestOk = false
                             manifestOrReason = type(detail) == "string" and detail
                                 or type(current) == "string" and current
-                                or C.SAVE_REBUILD_REQUIRED
+                                or C.INVALID_RV_DATA
                         end
                     end
                     if not manifestOk or type(manifestOrReason) ~= "table" then
                         invalidReason = type(manifestOrReason) == "string"
-                            and manifestOrReason or C.SAVE_REBUILD_REQUIRED
+                            and manifestOrReason or C.INVALID_RV_DATA
                     elseif not sentinelRecordManifestConsistent(record,
                             manifestOrReason) then
-                        invalidReason = C.SAVE_REBUILD_REQUIRED
+                        invalidReason = C.INVALID_RV_DATA
                     else
                         candidates[#candidates + 1] = {
                             record = record, center = center,
@@ -494,7 +494,7 @@ local function sentinelRecordCandidate(map, player, server)
         or tostring(relation.locoId) ~= tostring(candidate.record.rvId)
         or integer(relation.onlineId) ~= candidate.onlineId
         or integer(rider.onlineId) ~= candidate.onlineId then
-        return nil, identityKey, C.SAVE_REBUILD_REQUIRED
+        return nil, identityKey, C.INVALID_RV_DATA
     end
     return candidate, identityKey, nil
 end
@@ -504,7 +504,7 @@ local function sentinelReturnToRV(candidate, player, map)
     local record = candidate and candidate.record
     local relation = record and map.players[candidate.username]
     if not server or not record or type(relation) ~= "table" then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local identityKey = sentinelIdentity(player)
     if identityKey ~= candidate.identityKey then
@@ -522,7 +522,7 @@ local function sentinelReturnToRV(candidate, player, map)
         identityKey)
     if not claimedOk or claimed ~= false then
         return false, claimedOk and "relocation sentinel identity is claimed"
-            or C.SAVE_REBUILD_REQUIRED
+            or C.INVALID_RV_DATA
     end
     local manifestOk, manifestOrReason = false, nil
     if type(server.currentRVManifestForRelocation) == "function" then
@@ -535,13 +535,13 @@ local function sentinelReturnToRV(candidate, player, map)
             manifestOk = false
             manifestOrReason = type(detail) == "string" and detail
                 or type(current) == "string" and current
-                or C.SAVE_REBUILD_REQUIRED
+                or C.INVALID_RV_DATA
         end
     end
     if not manifestOk or type(manifestOrReason) ~= "table"
         or not sentinelRecordManifestConsistent(record, manifestOrReason)
         or not sentinelRelationsConsistent(map, record) then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local centerOk, centerOrReason = sentinelBitmapAndCenter(record)
     if not centerOk then return false, centerOrReason end
@@ -557,7 +557,7 @@ local function sentinelReturnToRV(candidate, player, map)
         or target.z ~= centerOrReason.centerZ
         or not activeOk or active ~= true
         or not usableCoordinate(target) then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local monitorOk, monitorReason = armRoomOwnershipMonitor(player, record,
         "relocation-sentinel")
@@ -590,7 +590,7 @@ local function sentinelReturnToRV(candidate, player, map)
         end
         return false, beforeMoveClaimOk
             and "relocation sentinel identity became claimed"
-            or C.SAVE_REBUILD_REQUIRED
+            or C.INVALID_RV_DATA
     end
     local moved = movePlayer(player, target, "enter", {
         locoId = record.locoId, role = relation.role, seat = relation.seat,
@@ -619,7 +619,7 @@ end
 
 local function warnSentinelPlayersAtTemporaryCell(reason, knownSentinelPlayers)
     local safeReason = type(reason) == "string" and reason ~= "" and reason
-        or C.SAVE_REBUILD_REQUIRED
+        or C.INVALID_RV_DATA
     local players = knownSentinelPlayers or onlinePlayersSnapshot()
     for i = 1, #players do
         local player = players[i]

@@ -309,11 +309,11 @@ function RV.Server.roofRepairSquaresLoaded(player, record)
     end
     local manifestOk, manifestOrError = pcall(manifestTable)
     if not manifestOk or type(manifestOrError) ~= "table" then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local manifest = manifestOrError
     local schemaOk = pcall(requireCurrentManifest, manifest, false)
-    if not schemaOk then return false, Constants.SAVE_REBUILD_REQUIRED end
+    if not schemaOk then return false, Constants.INVALID_RV_DATA end
     local identityOk, identityOrReason = playerIdentity(player)
     if not identityOk then return false, identityOrReason end
     local contextOk, contextOrReason = currentRoofRepairContext(player,
@@ -326,7 +326,7 @@ function RV.Server.roofRepairSquaresLoaded(player, record)
             or ServerUtil.integer(record.generation) ~= contextOrReason.boundary.generation
             or ServerUtil.integer(record.bitmapVersion)
                 ~= contextOrReason.boundary.bitmapVersion) then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local loadedOk, loaded, reason = pcall(RoofRepair.isLoaded, player,
         manifest.bounds)

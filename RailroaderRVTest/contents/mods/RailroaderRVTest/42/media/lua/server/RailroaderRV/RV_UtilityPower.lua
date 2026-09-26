@@ -4,9 +4,9 @@
 -- binding identity, circuit policy and sequence; it never mirrors a second
 -- consumable fuel balance.
 
+local C = require("RailroaderRV/RV_Constants")
 local U = require("RailroaderRV/RV_UtilityConstants")
 local Store = require("RailroaderRV/RV_UtilityStore")
-local Water = require("RailroaderRV/RV_UtilityWater")
 local World = require("RailroaderRV/RV_ServerWorld")
 local Util = require("RailroaderRV/RV_ServerUtil")
 
@@ -23,6 +23,37 @@ end
 local function objectIndex(object)
     local ok, value = invoke(object, "getObjectIndex")
     return ok and Util.integer(value) or nil
+end
+
+local function resolveObjectForPower(player, hint)
+    if type(hint) ~= "table" then return false, U.REASONS.DEVICE_INVALID end
+    local x, y, z = Util.integer(hint.x), Util.integer(hint.y), Util.integer(hint.z)
+    if x == nil or y == nil or z == nil then
+        return false, U.REASONS.DEVICE_INVALID
+    end
+    local cellOk, cell = pcall(World.getCellForPlayer, player)
+    if not cellOk or not cell then return false, U.REASONS.TARGET_NOT_LOADED end
+    local squareOk, square = pcall(World.getSquare, cell, x, y, z)
+    if not squareOk or not square then return false, U.REASONS.TARGET_NOT_LOADED end
+    local objectsOk, objects = pcall(World.squareSnapshot, square)
+    if not objectsOk or type(objects) ~= "table" then
+        return false, U.REASONS.DEVICE_INVALID
+    end
+    local requestedIndex = Util.integer(hint.objectIndex)
+    for i = 1, #objects do
+        local object = objects[i]
+        local squareRead, objectSquare = invoke(object, "getSquare")
+        local xOk, objectX = invoke(objectSquare, "getX")
+        local yOk, objectY = invoke(objectSquare, "getY")
+        local zOk, objectZ = invoke(objectSquare, "getZ")
+        if squareRead and objectSquare and xOk and yOk and zOk
+            and Util.integer(objectX) == x and Util.integer(objectY) == y
+            and Util.integer(objectZ) == z then
+            if requestedIndex == nil then return true, object end
+            if objectIndex(object) == requestedIndex then return true, object end
+        end
+    end
+    return false, U.REASONS.DEVICE_INVALID
 end
 
 local function objectToken(identity, object)
@@ -74,7 +105,8 @@ end
 local function isGeneratedGenerator(object, identity)
     local data = World.objectModData(object)
     local tag = type(data) == "table" and data.RailroaderRVTest or nil
-    return type(tag) == "table" and tag.role == "generator"
+    return type(tag) == "table" and tag.owner == C.MOD_ID
+        and tag.role == "generator"
         and tostring(tag.rvId) == tostring(identity.rvId)
         and Util.integer(tag.generation) == Util.integer(identity.generation)
         and Util.integer(tag.bitmapVersion) == Util.integer(identity.bitmapVersion)
@@ -111,8 +143,7 @@ end
 function M.bindGenerator(identity, context, hint)
     local recordOk, recordOrReason = Store.getRecord(identity, false)
     if not recordOk then return false, recordOrReason end
-    local objectOk, objectOrReason = Water.resolveObjectForPower(context.player, hint,
-        true)
+    local objectOk, objectOrReason = resolveObjectForPower(context.player, hint)
     if not objectOk then return false, objectOrReason end
     local object = objectOrReason
     if not insideRecord(object, context) or not isGeneratedGenerator(object, identity) then
@@ -141,8 +172,7 @@ local function boundGenerator(identity, context, record)
     local hint = { x = binding.x, y = binding.y, z = binding.z,
         objectIndex = tonumber(string.match(binding.objectToken, ":(%-?%d+)$")) }
     if not hint.objectIndex then return false, U.REASONS.GENERATOR_INVALID end
-    local objectOk, objectOrReason = Water.resolveObjectForPower(context.player, hint,
-        true)
+    local objectOk, objectOrReason = resolveObjectForPower(context.player, hint)
     if not objectOk then return false, objectOrReason end
     local object = objectOrReason
     local token = objectToken(identity, object)

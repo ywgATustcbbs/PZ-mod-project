@@ -36,8 +36,6 @@ local exactKeys = Bitmap.hasExactKeys
 
 Boundary._states = Boundary._states or {}
 Boundary._registered = Boundary._registered or {}
-Boundary._cleanups = Boundary._cleanups or {}
-Boundary._dirty = Boundary._dirty or {}
 Boundary._builders = Boundary._builders or {}
 Boundary._tick = Boundary._tick or 0
 

@@ -46,7 +46,7 @@ local function clearRoofRepairRuntimeState(rejectQueued)
         if followUpCount > 0 then
             print("[RailroaderRVTest] wall removal follow-up queue cancelled count="
                 .. tostring(followUpCount) .. " reason="
-                .. C.SAVE_REBUILD_REQUIRED)
+                .. C.INVALID_RV_DATA)
         end
         followUpWallRemovalEvents = {}
     end
@@ -56,7 +56,7 @@ local function clearRoofRepairRuntimeState(rejectQueued)
             and pending.relocationPhase ~= "complete"
         if not relocationActive then
             print("[RailroaderRVTest] roof repair schedule cancelled room="
-                .. tostring(roomKey) .. " reason=" .. C.SAVE_REBUILD_REQUIRED)
+                .. tostring(roomKey) .. " reason=" .. C.INVALID_RV_DATA)
             pendingWallRoofRepairs[roomKey] = nil
         end
     end
@@ -418,7 +418,7 @@ local function promoteFollowUpWallRemoval(map, roomKey)
                 if waitingForGeneration then
                     print("[RailroaderRVTest] wall removal follow-up cancelled room="
                         .. tostring(roomKey) .. " event=" .. tostring(eventKey)
-                        .. " reason=" .. C.SAVE_REBUILD_REQUIRED)
+                        .. " reason=" .. C.INVALID_RV_DATA)
                 end
                 events[eventKey] = nil
             else
@@ -427,7 +427,7 @@ local function promoteFollowUpWallRemoval(map, roomKey)
                     if waitingForGeneration then
                         print("[RailroaderRVTest] wall removal follow-up cancelled room="
                             .. tostring(roomKey) .. " event=" .. tostring(eventKey)
-                            .. " reason=" .. C.SAVE_REBUILD_REQUIRED)
+                            .. " reason=" .. C.INVALID_RV_DATA)
                     end
                     events[eventKey] = nil
                 elseif currentRoomKey ~= roomKey then

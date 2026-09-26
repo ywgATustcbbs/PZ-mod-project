@@ -320,8 +320,8 @@ end
 function M.findEntry(object)
     if object == nil then return nil end
     -- Current generated sinks retain the stable sink deviceType.  The
-    -- FluidContainer check here is a data-mirror contract and a legacy-save
-    -- detector; plumbing eligibility itself is decided by isWaterPipedDevice.
+    -- FluidContainer check here is a data-mirror contract; plumbing eligibility
+    -- itself is decided by isWaterPipedDevice.
     if M.isGeneratedSink(object) then
         return M.hasFluidContainer(object) and M.DEVICE_CATALOG.sink or nil
     end

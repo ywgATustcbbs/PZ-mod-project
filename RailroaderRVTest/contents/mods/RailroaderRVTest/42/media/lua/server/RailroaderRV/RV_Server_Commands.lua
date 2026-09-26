@@ -11,7 +11,6 @@ local Boundary = ctx.Boundary
 local RV = ctx.RV
 local ServerSchema = ctx.ServerSchema
 local UtilityServer = ctx.UtilityServer
-local UtilityWater = ctx.UtilityWater
 local LayoutBuilder = ctx.LayoutBuilder
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local RELOCATION_MIN_TICKS = ctx.RELOCATION_MIN_TICKS
@@ -275,19 +274,6 @@ if Events and Events.OnClientCommand and type(Events.OnClientCommand.Add) == "fu
 end
 if Events and Events.OnTick and type(Events.OnTick.Add) == "function" then
     Events.OnTick.Add(RV.Server.OnTick)
-end
-if Events and Events.OnWaterAmountChange and type(Events.OnWaterAmountChange.Add) == "function"
-    and UtilityWater and type(UtilityWater.onWaterAmountChange) == "function" then
-    Events.OnWaterAmountChange.Add(UtilityWater.onWaterAmountChange)
-end
-if Events and Events.OnObjectAboutToBeRemoved
-    and type(Events.OnObjectAboutToBeRemoved.Add) == "function"
-    and UtilityWater and type(UtilityWater.onObjectAboutToBeRemoved) == "function" then
-    Events.OnObjectAboutToBeRemoved.Add(UtilityWater.onObjectAboutToBeRemoved)
-end
-if Events and Events.OnObjectAdded and type(Events.OnObjectAdded.Add) == "function"
-    and UtilityWater and type(UtilityWater.onObjectAdded) == "function" then
-    Events.OnObjectAdded.Add(UtilityWater.onObjectAdded)
 end
 if Boundary and Events and Events.OnProcessAction
     and type(Events.OnProcessAction.Add) == "function" then

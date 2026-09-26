@@ -13,6 +13,7 @@ local square = ctx.square
 local decodeBoundary = ctx.decodeBoundary
 local boundaryKey = ctx.boundaryKey
 local sameBoundary = ctx.sameBoundary
+local Template = require("RailroaderRV/RV_Template")
 
 local function objectModData(object)
     local ok, data = call(object, "getModData")
@@ -81,6 +82,28 @@ local function footprint(tag, x, y, z)
     return #result > 0 and includesHost and result or nil
 end
 
+local function shellEdgeHasTemplateIndex(edge, templateIndex)
+    if type(edge) ~= "table" or type(edge.templateIndices) ~= "table" then
+        return false
+    end
+    local count = 0
+    for key in pairs(edge.templateIndices) do
+        count = count + 1
+        if type(key) ~= "number" or key < 1 or math.floor(key) ~= key
+            or key > #edge.templateIndices then
+            return false
+        end
+    end
+    if count ~= #edge.templateIndices or #edge.templateIndices < 1
+        or integer(edge.templateIndices[1]) ~= integer(edge.templateIndex) then
+        return false
+    end
+    for i = 1, #edge.templateIndices do
+        if integer(edge.templateIndices[i]) == integer(templateIndex) then return true end
+    end
+    return false
+end
+
 local function shellEdgeAllowed(boundary, tag, objectX, objectY, objectZ)
     if type(tag) ~= "table" then return false end
     local keys = {}
@@ -92,6 +115,8 @@ local function shellEdgeAllowed(boundary, tag, objectX, objectY, objectZ)
     end
     for i = 1, #keys do
         local edge = boundary.shellEdges and boundary.shellEdges[keys[i]]
+        local captured = type(tag) == "table" and Template.objects[
+            integer(tag.templateIndex)] or nil
         if type(edge) == "table"
             and tag.owner == OWNER
             and tag.rvId ~= nil
@@ -104,6 +129,17 @@ local function shellEdgeAllowed(boundary, tag, objectX, objectY, objectZ)
             and integer(tag.generation) == boundary.generation
             and integer(tag.bitmapVersion) == boundary.bitmapVersion
             and edge.replacementAllowed ~= false
+            and shellEdgeHasTemplateIndex(edge, tag.templateIndex)
+            and captured ~= nil and captured.class == tag.templateClass
+            and captured.name == tag.templateName
+            and captured.sprite == tag.templateSprite
+            and captured.north == tag.templateNorth
+            and captured.direction == tag.templateDirection
+            and captured.north == edge.north
+            and edge.role == tag.role
+            and captured.x == objectX - C.TELEPORT_X
+            and captured.y == objectY - C.TELEPORT_Y
+            and captured.z == objectZ - C.TELEPORT_Z
             and integer(edge.objectX) == objectX
             and integer(edge.objectY) == objectY
             and integer(edge.objectZ or edge.z) == objectZ then
@@ -134,16 +170,20 @@ end
 
 -- The sledgehammer packet identifies an object only by its authoritative
 -- square coordinates and object-list index.  Keep RV wall attribution
--- separate from that packet contract: only a currently attached
--- IsoThumpable carrying the complete generated-wall identity and an exact
--- current shell-ledger entry may trigger RV-specific follow-up work.  This is
+-- separate from that packet contract: only a currently attached captured
+-- shell member (wall, railing, door, or window) with the complete generated
+-- identity and an exact current shell-ledger entry may trigger RV follow-up work. This is
 -- deliberately fail-closed for missing/ambiguous metadata.
 function Boundary.isCurrentShellWall(object, boundary)
     if not object or type(boundary) ~= "table" then return false end
     local bitmap, rvId, generation, bitmapVersion = decodeBoundary(boundary)
     if not bitmap then return false end
-    local typeOk, isThumpable = callGlobal("instanceof", object, "IsoThumpable")
-    if not typeOk or isThumpable ~= true then return false end
+    local thumpableOk, isThumpable = callGlobal("instanceof", object, "IsoThumpable")
+    local windowOk, isWindow = callGlobal("instanceof", object, "IsoWindow")
+    if not (thumpableOk and isThumpable == true)
+        and not (windowOk and isWindow == true) then
+        return false
+    end
     local indexOk, index = call(object, "getObjectIndex")
     if not indexOk or integer(index) == nil or integer(index) < 0 then return false end
     local x, y, z, square = objectCell(object)
@@ -170,34 +210,40 @@ function Boundary.isCurrentShellWall(object, boundary)
 
     local role = nested.role
     if role ~= "wall-north" and role ~= "wall-west"
-        and role ~= "corner-nw" and role ~= "corner-se" then
+        and role ~= "corner-nw" then
         return false
     end
-    if type(nested.edgeKey) ~= "string"
-        or type(nested.axis) ~= "string" then
+    if type(nested.edgeKey) ~= "string" or type(nested.axis) ~= "string"
+        or integer(nested.templateIndex) == nil then
         return false
     end
-    local expectedNorth
-    local expectedSprite
-    if role == "wall-north" then
-        expectedNorth = true
-        expectedSprite = C.SPRITES.wall.northSprite
-    elseif role == "wall-west" then
-        expectedNorth = false
-        expectedSprite = C.SPRITES.wall.sprite
-    elseif role == "corner-nw" then
-        expectedNorth = true
-        expectedSprite = C.SPRITES.wallNW.sprite
-    else
-        expectedNorth = false
-        expectedSprite = C.SPRITES.wallSE.sprite
+    local captured = Template.objects[integer(nested.templateIndex)]
+    local expectedNorth = captured and captured.north
+    local expectedSprite = captured and captured.sprite
+    local expectedRole = expectedNorth and "wall-north" or "wall-west"
+    if nested.role == "corner-nw" then expectedRole = "corner-nw" end
+    if not captured
+        or (captured.class ~= "IsoThumpable" and captured.class ~= "IsoWindow")
+        or captured.name ~= nested.templateName
+        or captured.sprite ~= nested.templateSprite
+        or captured.north ~= nested.templateNorth
+        or captured.direction ~= nested.templateDirection
+        or role ~= expectedRole
+        or nested.templateClass ~= captured.class then
+        return false
     end
     local northOk, north = call(object, "getNorth")
     local spriteOk, sprite = call(object, "getSprite")
     local spriteNameOk, spriteName = call(sprite, "getName")
+    local directions = rawget(_G, "IsoDirections")
+    local expectedDirection = directions and directions[captured.direction]
+    local directionOk, direction = call(object, "getDir")
+    local nameOk, name = call(object, "getName")
     if not northOk or north ~= expectedNorth
         or not spriteOk or not spriteNameOk
-        or tostring(spriteName) ~= tostring(expectedSprite) then
+        or tostring(spriteName) ~= tostring(expectedSprite)
+        or not nameOk or tostring(name) ~= tostring(captured.name)
+        or not expectedDirection or not directionOk or direction ~= expectedDirection then
         return false
     end
     local edge = boundary.shellEdges and boundary.shellEdges[nested.edgeKey]
@@ -205,7 +251,9 @@ function Boundary.isCurrentShellWall(object, boundary)
         or edge.edgeKey ~= nested.edgeKey
         or edge.role ~= role
         or edge.axis ~= nested.axis
-        or edge.corner ~= (role == "corner-nw" or role == "corner-se")
+        or edge.corner ~= (role == "corner-nw")
+        or not shellEdgeHasTemplateIndex(edge, nested.templateIndex)
+        or edge.north ~= nested.templateNorth
         or edge.replacementAllowed ~= true then
         return false
     end
@@ -320,6 +368,65 @@ local function removeObject(object, square)
     return ok and result ~= false
 end
 
+local function protectedWorldObject(object)
+    local classes = { "IsoWorldInventoryObject", "IsoPlayer", "IsoZombie",
+        "IsoAnimal", "IsoDeadBody", "BaseVehicle" }
+    for i = 1, #classes do
+        local ok, matches = callGlobal("instanceof", object, classes[i])
+        if ok and matches == true then return true end
+    end
+    return false
+end
+
+local function disallowedPlayerBuild(object, boundary)
+    if not object or type(boundary) ~= "table" or protectedWorldObject(object) then
+        return false
+    end
+    local bitmap, rvId, generation, bitmapVersion = decodeBoundary(boundary)
+    if not bitmap then return false end
+    local x, y, z, sq = objectCell(object)
+    if not x or not y or not z or not sq
+        or not Bitmap.containsScope(bitmap, x, y, z) then
+        return false
+    end
+    local tag = rvTag(object)
+    if type(tag) ~= "table" or tag.owner ~= OWNER or tag.playerBuilt ~= true
+        or tostring(tag.rvId) ~= tostring(rvId)
+        or integer(tag.generation) ~= generation
+        or integer(tag.bitmapVersion) ~= bitmapVersion
+        or shellEdgeAllowed(boundary, tag, x, y, z) then
+        return false
+    end
+    local cells = footprint(tag, x, y, z)
+    if not cells then return false end
+    local cabOnly, buildableOnly = true, true
+    for i = 1, #cells do
+        local cell = cells[i]
+        if not Bitmap.containsScope(bitmap, cell.x, cell.y, cell.z) then
+            return false
+        end
+        if cell.x < C.CAB_MIN_OFFSET_X + C.TELEPORT_X
+            or cell.x > C.CAB_MAX_OFFSET_X + C.TELEPORT_X
+            or cell.y < C.CAB_MIN_OFFSET_Y + C.TELEPORT_Y
+            or cell.y > C.CAB_MAX_OFFSET_Y + C.TELEPORT_Y
+            or cell.z ~= C.TELEPORT_Z then
+            cabOnly = false
+        end
+        if not Bitmap.isBuildable(bitmap, cell.x, cell.y, cell.z) then
+            buildableOnly = false
+        end
+    end
+    -- Only z0 in the internal cab rectangle is a direct user-edit area.
+    -- Roof/shell objects at the same XY on z1 remain protected.
+    if cabOnly or buildableOnly then return false end
+    return true, sq
+end
+
+function Boundary.isDisallowedPlayerBuild(object, boundary)
+    local remove = disallowedPlayerBuild(object, boundary)
+    return remove == true
+end
+
 -- Audit only objects proven to be player-created by our low-intrusion build
 -- marker.  Untagged or ambiguous objects are fail-open, preserving map and
 -- other-mod content even when an RV scope overlaps another ownership record.
@@ -327,6 +434,13 @@ function Boundary.auditObject(object, player, forcedBoundary)
     local boundary = forcedBoundary
     if not boundary and player then boundary = Boundary.boundaryForPlayer(player) end
     if type(boundary) ~= "table" then return false, "no owning RV" end
+    local remove, removalSquare = disallowedPlayerBuild(object, boundary)
+    if remove then
+        if removeObject(object, removalSquare) then
+            return true, "removed player build outside cab protection"
+        end
+        return false, "authoritative object removal failed"
+    end
     local x, y, z, sq = objectCell(object)
     if not x or not y or not z then return false, "object coordinate unavailable" end
     if not Bitmap.containsScope(boundary.bitmap, x, y, z) then
@@ -352,13 +466,7 @@ function Boundary.auditObject(object, player, forcedBoundary)
             return false, "footprint crosses managed scope"
         end
         if not Bitmap.isBuildable(boundary.bitmap, cell.x, cell.y, cell.z) then
-            if not tag or tag.playerBuilt ~= true then
-                return false, "inactive object ownership is uncertain"
-            end
-            if removeObject(object, sq) then
-                return true, "removed player build outside build bitmap"
-            end
-            return false, "authoritative object removal failed"
+            return false, "inactive object ownership is uncertain"
         end
     end
     return false, "object is in build bitmap"
@@ -391,12 +499,28 @@ local function markTagPlayerBuilt(object, builder, action)
         -- coordinate; the required fail-open policy preserves the object.
         return false
     end
+    if tag and tag.playerBuilt ~= true then
+        -- Never convert a generated template member or the native generator
+        -- into an attributed player build just because an add callback shares
+        -- its square.
+        return false
+    end
     if type(data.RailroaderRVTest) ~= "table" then
         data.RailroaderRVTest = {}
     end
     tag = data.RailroaderRVTest
     tag.owner = OWNER
     tag.playerBuilt = true
+    tag.role = nil
+    tag.templateIndex = nil
+    tag.templateClass = nil
+    tag.templateName = nil
+    tag.templateSprite = nil
+    tag.templateNorth = nil
+    tag.templateDirection = nil
+    tag.edgeKey = nil
+    tag.axis = nil
+    data.role = nil
     tag.builder = builder and builder.key or nil
     tag.rvId = action and action.rvId or tag.rvId
     tag.generation = action and action.generation or tag.generation
@@ -407,28 +531,6 @@ local function markTagPlayerBuilt(object, builder, action)
     tag.edgeKey = action.edgeKey
     tag.edgeKeys = action.edgeKeys
     tag.footprint = action.footprint
-    return true
-end
-
-local function dirtyKey(action, x, y, z)
-    return tostring(action.rvId) .. ":" .. tostring(action.generation) .. ":"
-        .. tostring(action.bitmapVersion) .. ":" .. tostring(x) .. ":"
-        .. tostring(y) .. ":" .. tostring(z)
-end
-
-function Boundary.markDirty(player, x, y, z, boundary)
-    local id = identity(player)
-    if not id then return false end
-    boundary = boundary or Boundary.boundaryForPlayer(player)
-    if not boundary or not Bitmap.containsScope(boundary.bitmap, x, y, z) then
-        return false
-    end
-    local action = { player = player, identity = id, rvId = boundary.rvId,
-        generation = boundary.generation, bitmapVersion = boundary.bitmapVersion,
-        x = math.floor(x), y = math.floor(y),
-        z = math.floor(z), boundary = boundary }
-    local key = dirtyKey(action, action.x, action.y, action.z)
-    Boundary._dirty[key] = action
     return true
 end
 
@@ -447,7 +549,6 @@ function Boundary.onProcessAction(actionName, player, args)
     local placementAction = actionText == "build"
         or string.find(actionText, "build", 1, true)
         or string.find(actionText, "place", 1, true)
-        or string.find(actionText, "drop", 1, true)
         or string.find(actionText, "moveable", 1, true)
     if not placementAction or not player then return end
     local x = commandCoordinate(args, "x")
@@ -477,15 +578,17 @@ function Boundary.onProcessAction(actionName, player, args)
     elseif #shellKeys > 1 then
         action.edgeKeys = shellKeys
     end
+    -- Only a server-validated build intent can authorize attribution. If the
+    -- later object-added callback cannot match this intent uniquely, the
+    -- object stays untagged and the repair queue deliberately preserves it.
     -- Keep the async attribution key generation-scoped as well as
     -- player-scoped.  A replacement/generation swap must not overwrite a
     -- still-expiring build action from an older bitmap identity.
     Boundary._builders[id.key .. ":" .. boundaryKey(boundary)] = action
-    Boundary.markDirty(player, x, y, z, boundary)
 
-    -- The standard build callback may run before or after this listener.  If
-    -- the builder already exposes its Java object, audit it immediately; the
-    -- OnObjectAdded/dirty-cell paths remain the conservative fallback.
+    -- The standard build callback may run before or after this listener. If
+    -- the builder already exposes its Java object, tag it for the bounded
+    -- proximity queue; do not start another world scan from this callback.
     local object = type(item) == "table" and item.javaObject or nil
     if not object then
         local objectOk, objectValue = call(item, "getJavaObject")
@@ -495,9 +598,8 @@ function Boundary.onProcessAction(actionName, player, args)
         local objectX, objectY, objectZ = objectCell(object)
         if objectX and objectY and objectZ
             and Bitmap.containsScope(boundary.bitmap, objectX, objectY, objectZ)
-            and actionMatchesObject(action, objectX, objectY, objectZ)
-            and markTagPlayerBuilt(object, id, action) then
-            Boundary.auditObject(object, player, boundary)
+            and actionMatchesObject(action, objectX, objectY, objectZ) then
+            markTagPlayerBuilt(object, id, action)
         end
     end
 end
@@ -518,17 +620,18 @@ function Boundary.onObjectAdded(object)
             end
         end
     end
+    -- Automatic deletion later requires both this unique action correlation
+    -- and the resulting current-generation playerBuilt tag. Ambiguous or
+    -- untagged additions are intentionally preserved to protect map objects.
     -- Two players can complete a placement at the same host cell in one
     -- server window.  Without a standard owner event, attribution is
     -- ambiguous, so leave the object untagged/fail-open instead of deleting
     -- another player's or another RV's object.
     if #matches ~= 1 then return end
     local action = matches[1]
-    local boundary = action.boundary
-    if markTagPlayerBuilt(object, action.identity, action) then
-        Boundary.auditObject(object, action.player, boundary)
-        Boundary.markDirty(action.player, x, y, z, boundary)
-    end
+    markTagPlayerBuilt(object, action.identity, action)
+    -- The 3x3 proximity queue classifies this tagged object within its
+    -- one-cell-per-tick budget.
 end
 
 

@@ -1,0 +1,1079 @@
+-- RV_Server: proximity-queued, authoritative template correction.
+return function(ctx)
+local Boundary = ctx.Boundary
+local Constants = ctx.Constants
+local ServerUtil = ctx.ServerUtil
+local ServerWorld = ctx.ServerWorld
+local Bitmap = require("RailroaderRV/RV_Bitmap")
+local manifestTable = ctx.manifestTable
+local requireCurrentManifest = ctx.requireCurrentManifest
+local createCapturedTemplateObject = ctx.createCapturedTemplateObject
+local configureCapturedDoorFrame = ctx.configureCapturedDoorFrame
+local createGenerator = ctx.createGenerator
+local Template = require("RailroaderRV/RV_Template")
+
+if not Boundary or type(ServerWorld) ~= "table"
+    or type(ServerWorld.objectModData) ~= "function"
+    or type(ServerWorld.removeGenericObject) ~= "function"
+    or type(ServerWorld.squareContainsObject) ~= "function"
+    or type(ServerWorld.isPlayerObject) ~= "function"
+    or type(ServerWorld.isVehicleObject) ~= "function"
+    or type(manifestTable) ~= "function"
+    or type(requireCurrentManifest) ~= "function"
+    or type(createCapturedTemplateObject) ~= "function"
+    or type(configureCapturedDoorFrame) ~= "function"
+    or type(createGenerator) ~= "function"
+    or Template.schemaVersion ~= Constants.CAPTURED_TEMPLATE_VERSION
+    or Template.objectCount ~= 357 or #Template.objects ~= 357 then
+    error("RailroaderRVTest: current template-repair dependencies are incomplete")
+end
+
+local queues = {}
+local repairIndexes = {}
+local configuredDoorFrames = setmetatable({}, { __mode = "k" })
+local capturedClasses = {}
+for i = 1, #Template.objects do
+    local captured = Template.objects[i]
+    capturedClasses[captured.class] = true
+end
+local sampleInterval = ServerUtil.toNumber(
+    Constants.BUILD_GUARD_SAMPLE_INTERVAL_TICKS)
+if not sampleInterval or sampleInterval < 1
+    or math.floor(sampleInterval) ~= sampleInterval then
+    error("RailroaderRVTest: proximity template-guard limits are invalid")
+end
+local lastServedQueueKey = nil
+
+local function integer(value)
+    local number = ServerUtil.toNumber(value)
+    if type(number) ~= "number" or number ~= number
+        or number <= -math.huge or number >= math.huge
+        or math.floor(number) ~= number then
+        return nil
+    end
+    return number
+end
+
+local function sameIdentity(left, right)
+    return type(left) == "table" and type(right) == "table"
+        and tostring(left.rvId) == tostring(right.rvId)
+        and integer(left.generation) == integer(right.generation)
+        and integer(left.bitmapVersion) == integer(right.bitmapVersion)
+end
+
+local function queueKey(boundary, record)
+    if type(boundary) ~= "table" or type(record) ~= "table"
+        or not sameIdentity(boundary, record) or boundary.rvId == nil
+        or tostring(boundary.rvId) == "" then
+        return nil
+    end
+    local generation = integer(boundary.generation)
+    local bitmapVersion = integer(boundary.bitmapVersion)
+    if not generation or generation < 1 or not bitmapVersion then return nil end
+    return tostring(boundary.rvId) .. ":" .. tostring(generation)
+        .. ":" .. tostring(bitmapVersion)
+end
+
+local function columnKey(x, y)
+    return tostring(x) .. ":" .. tostring(y)
+end
+
+local function coordinateKey(x, y, z)
+    return tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
+end
+
+local function objectTag(object)
+    local data = ServerWorld.objectModData(object)
+    if type(data) ~= "table" then return nil end
+    local nested = data.RailroaderRVTest
+    if type(nested) ~= "table"
+        or data.owner ~= Constants.MOD_ID
+        or nested.owner ~= Constants.MOD_ID
+        or tostring(data.rvId) ~= tostring(nested.rvId)
+        or integer(data.generation) ~= integer(nested.generation)
+        or integer(data.bitmapVersion) ~= integer(nested.bitmapVersion)
+        or data.role ~= nested.role then
+        return nil
+    end
+    return nested
+end
+
+local function validCurrentContext(player, expectedBoundary)
+    if not player or type(Boundary.boundaryForPlayer) ~= "function" then
+        return false, "current RV boundary validation is unavailable"
+    end
+    local boundaryOk, boundary, record, relation, identity = pcall(
+        Boundary.boundaryForPlayer, player)
+    if not boundaryOk or type(boundary) ~= "table"
+        or type(record) ~= "table" or type(relation) ~= "table"
+        or type(identity) ~= "table" or type(identity.key) ~= "string"
+        or (expectedBoundary and boundary ~= expectedBoundary) then
+        return false, "player is not mapped to the current RV generation"
+    end
+    local manifestOk, manifest = pcall(manifestTable)
+    if not manifestOk or type(manifest) ~= "table" then
+        return false, Constants.INVALID_RV_DATA
+    end
+    local schemaOk = pcall(requireCurrentManifest, manifest, false)
+    if not schemaOk or manifest.state ~= "READY" or manifest.phase ~= "COMMITTED"
+        or not sameIdentity(manifest, boundary)
+        or not sameIdentity(manifest.boundary, boundary)
+        or not sameIdentity(record, boundary)
+        or manifest.templateVersion ~= Constants.CAPTURED_TEMPLATE_VERSION
+        or type(manifest.bounds) ~= "table"
+        or manifest.bounds.schemaVersion ~= Constants.LAYOUT_SCHEMA_VERSION then
+        return false, Constants.INVALID_RV_DATA
+    end
+    local region, bitmap = record.region, boundary.bitmap
+    if type(region) ~= "table" or type(bitmap) ~= "table" then
+        return false, Constants.INVALID_RV_DATA
+    end
+    local regionMinX, regionMinY = integer(region.minX), integer(region.minY)
+    local regionMaxX, regionMaxY = integer(region.maxX), integer(region.maxY)
+    local regionMinZ, regionMaxZ = integer(region.minZ), integer(region.maxZ)
+    local originX, originY = integer(bitmap.originX), integer(bitmap.originY)
+    local width, height = integer(bitmap.width), integer(bitmap.height)
+    local bitmapMinZ, bitmapMaxZ = integer(bitmap.minZ), integer(bitmap.maxZ)
+    if not regionMinX or not regionMinY or not regionMaxX or not regionMaxY
+        or not regionMinZ or not regionMaxZ or not originX or not originY
+        or not width or not height or not bitmapMinZ or not bitmapMaxZ
+        or regionMinX ~= originX or regionMinY ~= originY
+        or regionMaxX ~= originX + width or regionMaxY ~= originY + height
+        or regionMinZ ~= bitmapMinZ or regionMaxZ ~= bitmapMaxZ then
+        return false, Constants.INVALID_RV_DATA
+    end
+    return true, boundary, record, manifest, identity
+end
+
+local function isCabCoordinate(x, y, anchor)
+    if type(anchor) ~= "table" then return false end
+    local anchorX, anchorY = integer(anchor.x), integer(anchor.y)
+    if not anchorX or not anchorY then return false end
+    local offsetX, offsetY = x - anchorX, y - anchorY
+    return offsetX >= Constants.CAB_MIN_OFFSET_X
+        and offsetX <= Constants.CAB_MAX_OFFSET_X
+        and offsetY >= Constants.CAB_MIN_OFFSET_Y
+        and offsetY <= Constants.CAB_MAX_OFFSET_Y
+end
+
+local function isCabNorthWestWall(edge, anchor)
+    if type(edge) ~= "table" then return false end
+    local x = integer(edge.objectX)
+    local y = integer(edge.objectY)
+    local anchorX, anchorY = integer(anchor.x), integer(anchor.y)
+    if not x or not y or not anchorX or not anchorY then return false end
+    local offsetX, offsetY = x - anchorX, y - anchorY
+    if edge.side == "north" then
+        return offsetY == Constants.CAB_MIN_OFFSET_Y
+            and offsetX >= Constants.CAB_MIN_OFFSET_X
+            and offsetX <= Constants.CAB_MAX_OFFSET_X
+    end
+    if edge.side == "west" then
+        return offsetX == Constants.CAB_MIN_OFFSET_X
+            and offsetY >= Constants.CAB_MIN_OFFSET_Y
+            and offsetY <= Constants.CAB_MAX_OFFSET_Y
+    end
+    return false
+end
+
+local function templateEntry(captured, templateIndex, anchor)
+    return {
+        templateIndex = templateIndex,
+        class = captured.class,
+        name = captured.name,
+        sprite = captured.sprite,
+        direction = captured.direction,
+        x = anchor.x + captured.x,
+        y = anchor.y + captured.y,
+        z = anchor.z + captured.z,
+        north = captured.north,
+        state = captured.state,
+    }
+end
+
+local function expectedEdgeMap(manifest)
+    local result = {}
+    local edges = manifest.boundary and manifest.boundary.shellEdges
+    if type(edges) ~= "table" then return nil end
+    for key, edge in pairs(edges) do
+        if type(key) ~= "string" or type(edge) ~= "table"
+            or edge.edgeKey ~= key or not sameIdentity(edge, manifest) then
+            return nil
+        end
+        if edge.side ~= "north" and edge.side ~= "south"
+            and edge.side ~= "east" and edge.side ~= "west" then
+            return nil
+        end
+        local parts = edge.templateIndices
+        if type(parts) ~= "table" or #parts < 1
+            or integer(parts[1]) ~= integer(edge.templateIndex) then
+            return nil
+        end
+        local seen = {}
+        for i = 1, #parts do
+            local index = integer(parts[i])
+            if not index or index < 1 or index > Template.objectCount
+                or seen[index] or result[index] ~= nil then
+                return nil
+            end
+            seen[index] = true
+            result[index] = edge
+        end
+    end
+    return result
+end
+
+local function buildRepairIndex(boundary, manifest)
+    local edges = expectedEdgeMap(manifest)
+    local anchor = manifest and manifest.anchor
+    if not edges or type(anchor) ~= "table"
+        or not integer(anchor.x) or not integer(anchor.y)
+        or not integer(anchor.z) then
+        return nil
+    end
+    local index = {
+        rvId = tostring(boundary.rvId),
+        generation = integer(boundary.generation),
+        bitmapVersion = integer(boundary.bitmapVersion),
+        anchorX = integer(anchor.x),
+        anchorY = integer(anchor.y),
+        anchorZ = integer(anchor.z),
+        edges = edges,
+        byColumn = {},
+        byCoordinate = {},
+        protectedCoordinates = {},
+        cabEditableCoordinates = {},
+        reportedSafetyBlocks = {},
+        reportedIdentityBlocks = {},
+    }
+    for templateIndex = 1, #Template.objects do
+        local expected = templateEntry(Template.objects[templateIndex],
+            templateIndex, anchor)
+        local edge = edges[templateIndex]
+        -- Player-opened doors/windows keep their generation identity, but are
+        -- omitted from automatic template state restoration.
+        local protected = expected.class ~= "IsoDoor"
+            and expected.class ~= "IsoWindow"
+        if expected.z == anchor.z and isCabCoordinate(expected.x, expected.y, anchor) then
+            if isCabNorthWestWall(edge, anchor) then
+                protected = false
+            elseif not edge then
+                protected = false
+            end
+            if not protected then
+                index.cabEditableCoordinates[coordinateKey(expected.x,
+                    expected.y, expected.z)] = true
+            end
+        end
+        if protected then
+            local column = columnKey(expected.x, expected.y)
+            local coordinate = coordinateKey(expected.x, expected.y, expected.z)
+            local target = { expected = expected, edge = edge }
+            local columnTargets = index.byColumn[column]
+            if not columnTargets then
+                columnTargets = {}
+                index.byColumn[column] = columnTargets
+            end
+            columnTargets[#columnTargets + 1] = target
+            local coordinateTargets = index.byCoordinate[coordinate]
+            if not coordinateTargets then
+                coordinateTargets = {}
+                index.byCoordinate[coordinate] = coordinateTargets
+            end
+            coordinateTargets[#coordinateTargets + 1] = target
+            index.protectedCoordinates[coordinate] = true
+        end
+    end
+    return index
+end
+
+local function objectMatchesCapturedIdentity(object, entry)
+    if not ServerUtil.classInstance(object, entry.class) then return false end
+    local nameOk, name = ServerUtil.invoke(object, "getName")
+    local directionOk, direction = ServerUtil.invoke(object, "getDir")
+    local directionTable = rawget(_G, "IsoDirections")
+    local expectedDirection = directionTable and directionTable[entry.direction]
+    if not nameOk or tostring(name) ~= tostring(entry.name)
+        or not directionOk or not expectedDirection or direction ~= expectedDirection
+        or tostring(ServerWorld.getSpriteName(object)) ~= tostring(entry.sprite) then
+        return false
+    end
+    if entry.north ~= nil then
+        local northOk, north = ServerUtil.invoke(object, "getNorth")
+        if not northOk or north ~= entry.north then return false end
+    end
+    return true
+end
+
+local function objectMatchesCaptured(object, entry)
+    if not objectMatchesCapturedIdentity(object, entry) then return false end
+    local stateGetters = {
+        health = "getHealth", maxHealth = "getMaxHealth",
+        hoppable = "isHoppable", locked = "isLocked",
+    }
+    for key, expected in pairs(entry.state or {}) do
+        local getter = stateGetters[key]
+        if not getter then return false end
+        local stateOk, state = ServerUtil.invoke(object, getter)
+        if not stateOk or state ~= expected then return false end
+    end
+    return true
+end
+
+local function objectClassName(object)
+    local classOk, class = ServerUtil.invoke(object, "getClass")
+    if not classOk or not class then return nil end
+    local textOk, text = pcall(tostring, class)
+    if not textOk or type(text) ~= "string" or text == "" then return nil end
+    text = string.gsub(text, "^class%s+", "")
+    return string.match(text, "([^%.]+)$") or text
+end
+
+local function isBloodOrSplat(object)
+    local className = objectClassName(object)
+    if type(className) == "string" then
+        local lowered = string.lower(className)
+        if string.find(lowered, "blood", 1, true)
+            or string.find(lowered, "splat", 1, true) then
+            return true
+        end
+    end
+    local sprite = ServerWorld.getSpriteName(object)
+    if type(sprite) == "string"
+        and string.find(string.lower(sprite), "blood", 1, true) then
+        return true
+    end
+    local nameOk, name = ServerUtil.invoke(object, "getName")
+    return nameOk and type(name) == "string"
+        and (string.find(string.lower(name), "blood", 1, true) ~= nil
+            or string.find(string.lower(name), "splat", 1, true) ~= nil)
+end
+
+local function protectedWorldObject(object)
+    if ServerWorld.isPlayerObject(object) or ServerWorld.isVehicleObject(object) then
+        return true
+    end
+    local classes = { "IsoWorldInventoryObject", "IsoZombie", "IsoAnimal",
+        "IsoDeadBody" }
+    for i = 1, #classes do
+        if ServerUtil.classInstance(object, classes[i]) then return true end
+    end
+    return isBloodOrSplat(object)
+end
+
+local function hasStoredContainerItems(object, className)
+    local knownContainer = className == "IsoThumpable"
+        or ServerUtil.classInstance(object, "IsoThumpable")
+    local countOk, rawCount = ServerUtil.invoke(object, "getContainerCount")
+    if countOk then
+        local count = integer(rawCount)
+        if not count then return true end
+        if count > 1 then return true end
+    elseif knownContainer then
+        return true
+    end
+    local containerOk, container = ServerUtil.invoke(object, "getContainer")
+    if not containerOk then return knownContainer end
+    if not container then return false end
+    local itemsOk, items = ServerUtil.invoke(container, "getItems")
+    if not itemsOk or not items then return true end
+    local sizeOk, rawSize = ServerUtil.invoke(items, "size")
+    local size = sizeOk and integer(rawSize) or nil
+    return not size or size > 0
+end
+
+local function hasTemplateFloorTarget(targets)
+    for i = 1, #targets do
+        if targets[i].expected.class == "IsoObject" then return true end
+    end
+    return false
+end
+
+local function objectAtCoordinate(object, x, y, z)
+    local xOk, objectX = ServerUtil.invoke(object, "getX")
+    local yOk, objectY = ServerUtil.invoke(object, "getY")
+    local zOk, objectZ = ServerUtil.invoke(object, "getZ")
+    return xOk and yOk and zOk and integer(objectX) == x
+        and integer(objectY) == y and integer(objectZ) == z
+end
+
+local function isCabEditableCoordinate(x, y, z, index)
+    if z ~= integer(index.anchorZ)
+        or not isCabCoordinate(x, y, { x = index.anchorX, y = index.anchorY }) then
+        return false
+    end
+    local coordinate = coordinateKey(x, y, z)
+    if index.cabEditableCoordinates[coordinate] then return true end
+    if index.protectedCoordinates[coordinate] then return false end
+    local offsetX, offsetY = x - index.anchorX, y - index.anchorY
+    -- Without a template edge entry, preserve the south and east cabin walls.
+    -- The north and west edges and the cabin interior remain player-editable.
+    return offsetX ~= Constants.CAB_MAX_OFFSET_X
+        and offsetY ~= Constants.CAB_MAX_OFFSET_Y
+end
+
+local function isRemovalScopeCoordinate(boundary, index, x, y, z)
+    return Bitmap.containsScope(boundary.bitmap, x, y, z)
+        and not isCabEditableCoordinate(x, y, z, index)
+end
+
+local function footprintAllowsRemoval(tag, boundary, index, x, y, z)
+    if type(tag) ~= "table" then return true end
+    local footprint = tag.footprint
+    if tag.multiTile == true and type(footprint) ~= "table" then return false end
+    if type(footprint) ~= "table" then return true end
+    local count, hostSeen, seen = 0, false, {}
+    for key, item in pairs(footprint) do
+        if type(key) ~= "number" or key < 1 or math.floor(key) ~= key
+            or key > #footprint or type(item) ~= "table" then
+            return false
+        end
+        local fx, fy = integer(item.x), integer(item.y)
+        local fz = integer(item.z == nil and z or item.z)
+        if not fx or not fy or not fz
+            or not isRemovalScopeCoordinate(boundary, index, fx, fy, fz) then
+            return false
+        end
+        local coordinate = coordinateKey(fx, fy, fz)
+        if seen[coordinate] then return false end
+        seen[coordinate] = true
+        if fx == x and fy == y and fz == z then hostSeen = true end
+        count = count + 1
+    end
+    return count == #footprint and count > 0 and hostSeen
+end
+
+local function objectFootprintAllowsRemoval(object, boundary, index, x, y, z)
+    local data = ServerWorld.objectModData(object)
+    if type(data) ~= "table" then return true end
+    local nested = data.RailroaderRVTest
+    if not footprintAllowsRemoval(data, boundary, index, x, y, z) then
+        return false
+    end
+    return type(nested) ~= "table"
+        or footprintAllowsRemoval(nested, boundary, index, x, y, z)
+end
+
+local function reportUnsafeRemoval(index, object, boundary, x, y, z)
+    local className = objectClassName(object)
+    local reason
+    if hasStoredContainerItems(object, className) then
+        reason = "container contents are present or could not be verified"
+    elseif not objectFootprintAllowsRemoval(object, boundary, index, x, y, z) then
+        reason = "object footprint is invalid or leaves the RV removal scope"
+    else
+        return
+    end
+    if index.reportedSafetyBlocks[object] then return end
+    index.reportedSafetyBlocks[object] = true
+    print("[RailroaderRVTest] build-guard retained object at "
+        .. coordinateKey(x, y, z) .. ": " .. reason)
+end
+
+local function isProtectedBuildingCandidate(object, x, y, z, boundary,
+    index, claimedTarget)
+    if not isRemovalScopeCoordinate(boundary, index, x, y, z)
+        or not objectAtCoordinate(object, x, y, z)
+        or protectedWorldObject(object) then
+        return false
+    end
+    local className = objectClassName(object)
+    if claimedTarget and (claimedTarget.expected.class ~= className
+        or claimedTarget.expected.x ~= x or claimedTarget.expected.y ~= y
+        or claimedTarget.expected.z ~= z) then
+        claimedTarget = nil
+    end
+    if not className
+        or hasStoredContainerItems(object, className)
+        or not objectFootprintAllowsRemoval(object, boundary, index, x, y, z) then
+        return false
+    end
+    -- RV-managed coordinates are exclusive, regardless of foreign mod-data
+    -- claims or structural sprite metadata.
+    if not ServerUtil.classInstance(object, "IsoObject") then
+        return false
+    end
+    if isBloodOrSplat(object) then return false end
+    return true
+end
+
+local function isWhitelistedTemplateObject(object, boundary, manifest, edges)
+    local tag = objectTag(object)
+    if not tag or not sameIdentity(tag, boundary) then return false end
+    local index = integer(tag.templateIndex)
+    local captured = index and Template.objects[index] or nil
+    if not captured or tag.templateClass ~= captured.class
+        or tag.templateName ~= captured.name
+        or tag.templateSprite ~= captured.sprite
+        or tag.templateDirection ~= captured.direction
+        or tag.templateNorth ~= captured.north then
+        return false
+    end
+    local anchor = manifest and manifest.anchor
+    if type(anchor) ~= "table" then return false end
+    local expected = templateEntry(captured, index, anchor)
+    local xOk, x = ServerUtil.invoke(object, "getX")
+    local yOk, y = ServerUtil.invoke(object, "getY")
+    local zOk, z = ServerUtil.invoke(object, "getZ")
+    x, y, z = xOk and integer(x), yOk and integer(y), zOk and integer(z)
+    if not x or not y or not z
+        or x ~= expected.x or y ~= expected.y or z ~= expected.z then
+        return false
+    end
+    local openable = expected.class == "IsoDoor"
+        or expected.class == "IsoWindow"
+    if not openable and not objectMatchesCaptured(object, expected) then
+        return false
+    end
+    local edge = edges and edges[index] or nil
+    if edge then
+        if tag.edgeKey ~= edge.edgeKey or tag.axis ~= edge.axis
+            or tag.role ~= edge.role
+            or integer(edge.objectX) ~= expected.x
+            or integer(edge.objectY) ~= expected.y
+            or integer(edge.objectZ) ~= expected.z then
+            return false
+        end
+    elseif tag.edgeKey ~= nil or tag.axis ~= nil
+        or tag.role ~= "captured-template" then
+        return false
+    end
+    return Bitmap.containsScope(boundary.bitmap, x, y, z) == true
+end
+
+local function isWhitelistedGenerator(object, boundary, manifest)
+    local tag = objectTag(object)
+    if not tag or not sameIdentity(tag, boundary) or tag.role ~= "generator"
+        or not ServerUtil.classInstance(object, "IsoGenerator") then
+        return false
+    end
+    local anchor = manifest.anchor
+    local xOk, x = ServerUtil.invoke(object, "getX")
+    local yOk, y = ServerUtil.invoke(object, "getY")
+    local zOk, z = ServerUtil.invoke(object, "getZ")
+    return type(anchor) == "table" and xOk and yOk and zOk
+        and integer(x) == integer(anchor.x) + Constants.GENERATOR_OFFSET.x
+        and integer(y) == integer(anchor.y) + Constants.GENERATOR_OFFSET.y
+        and integer(z) == integer(anchor.z) + Constants.GENERATOR_OFFSET.z
+end
+
+local function currentTemplateTagMismatch(object, expected, edge, boundary)
+    local tag = objectTag(object)
+    if not tag then return "tag expected=current identity observed=missing" end
+    if not sameIdentity(tag, boundary) then
+        return "boundary identity expected=current observed=stale or incomplete"
+    end
+    local checks = {
+        { "templateIndex", expected.templateIndex, integer(tag.templateIndex) },
+        { "templateClass", expected.class, tag.templateClass },
+        { "templateName", expected.name, tag.templateName },
+        { "templateSprite", expected.sprite, tag.templateSprite },
+        { "templateDirection", expected.direction, tag.templateDirection },
+        { "templateNorth", expected.north, tag.templateNorth },
+    }
+    for i = 1, #checks do
+        local check = checks[i]
+        if check[2] ~= check[3] then
+            return "tag." .. check[1] .. " expected=" .. tostring(check[2])
+                .. " observed=" .. tostring(check[3])
+        end
+    end
+    local expectedEdgeKey = edge and edge.edgeKey or nil
+    local expectedAxis = edge and edge.axis or nil
+    local expectedRole = edge and edge.role or "captured-template"
+    if tag.edgeKey ~= expectedEdgeKey then
+        return "tag.edgeKey expected=" .. tostring(expectedEdgeKey)
+            .. " observed=" .. tostring(tag.edgeKey)
+    end
+    if tag.axis ~= expectedAxis then
+        return "tag.axis expected=" .. tostring(expectedAxis)
+            .. " observed=" .. tostring(tag.axis)
+    end
+    if tag.role ~= expectedRole then
+        return "tag.role expected=" .. tostring(expectedRole)
+            .. " observed=" .. tostring(tag.role)
+    end
+    return nil
+end
+
+local function exactExpectedTag(object, expected, edge, boundary)
+    if currentTemplateTagMismatch(object, expected, edge, boundary)
+        or not objectMatchesCaptured(object, expected) then
+        return false
+    end
+    return true
+end
+
+local function reportIncompleteClaimedFloorTag(index, object, boundary,
+    expected, edge)
+    if index.reportedIdentityBlocks[object] then return end
+    index.reportedIdentityBlocks[object] = true
+    local mismatch = currentTemplateTagMismatch(object, expected, edge,
+        boundary) or "captured object state does not match the current template"
+    print("[RailroaderRVTest] captured floor identity blocked rvId="
+        .. tostring(boundary.rvId) .. " generation="
+        .. tostring(boundary.generation) .. " templateIndex="
+        .. tostring(expected.templateIndex) .. " failed=" .. mismatch)
+end
+
+local function currentTemplateTarget(object, boundary, targets)
+    local tag = objectTag(object)
+    if not tag or not sameIdentity(tag, boundary) then return nil end
+    local templateIndex = integer(tag.templateIndex)
+    if not templateIndex then return nil end
+    for i = 1, #targets do
+        if targets[i].expected.templateIndex == templateIndex then
+            return targets[i]
+        end
+    end
+    return nil
+end
+
+local function currentTemplateClaimIsSafe(object, target, boundary, index,
+    x, y, z, floorTarget)
+    if not target then return false end
+    local expected = target.expected
+    local className = objectClassName(object)
+    if not objectAtCoordinate(object, expected.x, expected.y, expected.z)
+        or className ~= expected.class or protectedWorldObject(object)
+        or isBloodOrSplat(object)
+        or hasStoredContainerItems(object, className)
+        or not objectFootprintAllowsRemoval(object, boundary, index, x, y, z) then
+        return false
+    end
+    if expected.class == "IsoObject" and not floorTarget then return false end
+    return true
+end
+
+local function markMatchingTargetsBlocked(object, targets, blocked)
+    if protectedWorldObject(object) then return end
+    local className = objectClassName(object)
+    for i = 1, #targets do
+        local expected = targets[i].expected
+        if objectMatchesCapturedIdentity(object, expected)
+            or (className == expected.class)
+            or (expected.class ~= "IsoObject"
+                and ServerUtil.classInstance(object, expected.class))
+            or (expected.class == "IsoObject"
+                and ServerUtil.classInstance(object, "IsoObject")) then
+            blocked[expected.templateIndex] = true
+        end
+    end
+end
+
+local function collectColumn(cell, x, y, boundary, manifest, index)
+    local squares, removals, removalSeen, blocked = {}, {}, {}, {}
+    local bitmap = boundary.bitmap
+    for z = bitmap.minZ, bitmap.maxZ - 1 do
+        local squareOk, square = pcall(ServerWorld.getSquare, cell, x, y, z)
+        if not squareOk then return false, "build-guard square lookup failed" end
+        if square then
+            local snapshotOk, objects = pcall(ServerWorld.squareSnapshot, square)
+            if not snapshotOk or type(objects) ~= "table" then
+                return false, "build-guard object snapshot failed"
+            end
+            squares[z] = { square = square, objects = objects }
+            local targets = index.byCoordinate[coordinateKey(x, y, z)] or {}
+            local floorOk, floor = ServerUtil.invoke(square, "getFloor")
+            if hasTemplateFloorTarget(targets) and not floorOk then
+                return false, "captured floor slot could not be verified"
+            end
+            for i = 1, #objects do
+                local object = objects[i]
+                if not isWhitelistedGenerator(object, boundary, manifest)
+                    and not isWhitelistedTemplateObject(object, boundary,
+                        manifest, index.edges) then
+                    local floorTarget = floor == object
+                        and hasTemplateFloorTarget(targets)
+                    local claimedTarget = currentTemplateTarget(object,
+                        boundary, targets)
+                    local safeClaimedTarget = currentTemplateClaimIsSafe(
+                        object, claimedTarget, boundary, index, x, y, z,
+                        floorTarget)
+                    local buildingCandidate = isProtectedBuildingCandidate(
+                        object, x, y, z, boundary, index, claimedTarget)
+                    local incompleteClaimedFloor = floorTarget and claimedTarget
+                        and currentTemplateTagMismatch(object,
+                            claimedTarget.expected, claimedTarget.edge,
+                            boundary) ~= nil
+                    if incompleteClaimedFloor then
+                        blocked[claimedTarget.expected.templateIndex] = true
+                        reportIncompleteClaimedFloorTag(index, object,
+                            boundary, claimedTarget.expected,
+                            claimedTarget.edge)
+                    elseif (safeClaimedTarget or buildingCandidate) and floorTarget then
+                        if not protectedWorldObject(object)
+                            and not hasStoredContainerItems(object,
+                                objectClassName(object)) then
+                            removals[#removals + 1] = {
+                                object = object, square = square, inPlace = true,
+                            }
+                            removalSeen[object] = true
+                        else
+                            reportUnsafeRemoval(index, object, boundary, x, y, z)
+                            if claimedTarget then
+                                blocked[claimedTarget.expected.templateIndex] = true
+                            end
+                            markMatchingTargetsBlocked(object, targets, blocked)
+                        end
+                    elseif safeClaimedTarget or buildingCandidate then
+                        if not removalSeen[object] then
+                            removalSeen[object] = true
+                            removals[#removals + 1] = {
+                                object = object, square = square,
+                            }
+                        end
+                    else
+                        if #targets > 0 then
+                            reportUnsafeRemoval(index, object, boundary,
+                                x, y, z)
+                        end
+                        if claimedTarget then
+                            blocked[claimedTarget.expected.templateIndex] = true
+                        end
+                        markMatchingTargetsBlocked(object, targets, blocked)
+                    end
+                end
+            end
+        end
+    end
+    return true, squares, removals, blocked
+end
+
+local function removeCandidates(removals)
+    local removed, inPlace = {}, {}
+    for i = 1, #removals do
+        local item = removals[i]
+        local object = item.object
+        if item.inPlace then
+            inPlace[object] = true
+        else
+            local removeOk, removeError = pcall(ServerWorld.removeGenericObject,
+                item.square, object, false)
+            if not removeOk then
+                return false, "build-guard structure removal failed: "
+                    .. tostring(removeError)
+            end
+            local checkOk, stillPresent = pcall(ServerWorld.squareContainsObject,
+                item.square, object)
+            if not checkOk or stillPresent ~= false then
+                return false, "build-guard structure removal was not observable"
+            end
+            removed[object] = true
+        end
+    end
+    return true, removed, inPlace
+end
+
+local function removeDuplicateTemplate(square, object)
+    local className = objectClassName(object)
+    if protectedWorldObject(object)
+        or not className or not capturedClasses[className]
+        or hasStoredContainerItems(object, className) then
+        return false
+    end
+    local removeOk, removeError = pcall(ServerWorld.removeGenericObject,
+        square, object, false)
+    if not removeOk then return false, removeError end
+    local checkOk, stillPresent = pcall(ServerWorld.squareContainsObject,
+        square, object)
+    if not checkOk or stillPresent ~= false then
+        return false, "duplicate template object removal was not observable"
+    end
+    return true
+end
+
+local function repairTemplateColumn(cell, x, y, squares, removed,
+    inPlace, blocked, index, boundary, manifest)
+    local targets = index.byColumn[columnKey(x, y)] or {}
+    local updatedFloors = {}
+    for i = 1, #targets do
+        local target = targets[i]
+        local expected, edge = target.expected, target.edge
+        local squareInfo = squares[expected.z]
+        if squareInfo then
+            local templateIndex = expected.templateIndex
+            local present, ambiguous = false, blocked[templateIndex] == true
+            for j = 1, #squareInfo.objects do
+                local object = squareInfo.objects[j]
+                if not removed[object] then
+                    if inPlace[object] and expected.class == "IsoObject" then
+                        if not updatedFloors[object] then
+                            local updateOk, updateError = pcall(
+                                createCapturedTemplateObject, cell,
+                                squareInfo.square, expected, boundary.generation,
+                                { rvId = boundary.rvId,
+                                    bitmapVersion = boundary.bitmapVersion }, edge)
+                            if not updateOk then
+                                return false, "captured floor repair failed: "
+                                    .. tostring(updateError)
+                            end
+                            updatedFloors[object] = templateIndex
+                        end
+                        if updatedFloors[object] == templateIndex then
+                            present = true
+                        end
+                    elseif updatedFloors[object] == templateIndex then
+                        present = true
+                    elseif isWhitelistedGenerator(object, boundary, manifest) then
+                        -- The retained generator can share a floor tile with
+                        -- a captured template object.
+                    elseif isWhitelistedTemplateObject(object, boundary,
+                            manifest, index.edges) then
+                        local tag = objectTag(object)
+                        if integer(tag.templateIndex) == templateIndex then
+                            if present then
+                                local duplicateOk, duplicateError =
+                                    removeDuplicateTemplate(squareInfo.square, object)
+                                if not duplicateOk then
+                                    ambiguous = true
+                                    if duplicateError then
+                                        print("[RailroaderRVTest] duplicate template retained: "
+                                            .. tostring(duplicateError))
+                                    end
+                                else
+                                    removed[object] = true
+                                end
+                            else
+                                present = exactExpectedTag(object, expected,
+                                    edge, boundary)
+                                if present
+                                    and expected.name == "Wooden Door Frame"
+                                    and not configuredDoorFrames[object] then
+                                    local configureOk, configureError = pcall(
+                                        configureCapturedDoorFrame, object, expected)
+                                    if not configureOk then
+                                        return false, "captured door frame repair failed: "
+                                            .. tostring(configureError)
+                                    end
+                                    if not ServerUtil.callSucceeded(object,
+                                        "transmitCompleteItemToClients") then
+                                        return false, "captured door frame update transmission failed"
+                                    end
+                                    configuredDoorFrames[object] = true
+                                end
+                            end
+                        end
+                    elseif objectMatchesCapturedIdentity(object, expected) then
+                        ambiguous = true
+                    end
+                end
+            end
+            if not present and not ambiguous then
+                local createOk, createError = pcall(createCapturedTemplateObject,
+                    cell, squareInfo.square, expected, boundary.generation,
+                    { rvId = boundary.rvId,
+                        bitmapVersion = boundary.bitmapVersion }, edge)
+                if not createOk then
+                    return false, "captured template repair failed: "
+                        .. tostring(createError)
+                end
+            end
+        end
+    end
+    return true
+end
+
+local function repairGeneratorAtColumn(cell, x, y, squares, removed,
+    boundary, manifest)
+    local point = {
+        x = manifest.anchor.x + Constants.GENERATOR_OFFSET.x,
+        y = manifest.anchor.y + Constants.GENERATOR_OFFSET.y,
+        z = manifest.anchor.z + Constants.GENERATOR_OFFSET.z,
+    }
+    if x ~= point.x or y ~= point.y then return true end
+    local squareInfo = squares[point.z]
+    if not squareInfo then return true end
+    local present, ambiguous = false, false
+    for i = 1, #squareInfo.objects do
+        local object = squareInfo.objects[i]
+        if not removed[object] then
+            if isWhitelistedGenerator(object, boundary, manifest) then
+                present = true
+            elseif ServerUtil.classInstance(object, "IsoGenerator") then
+                ambiguous = true
+            end
+        end
+    end
+    if not present and not ambiguous then
+        local ok, err = pcall(createGenerator, cell, squareInfo.square,
+            Constants.SPRITES.generator.sprite, boundary.generation,
+            { rvId = boundary.rvId, bitmapVersion = boundary.bitmapVersion })
+        if not ok then
+            return false, "retained generator repair failed: " .. tostring(err)
+        end
+    end
+    return true
+end
+
+local function repairQueuedColumn(player, boundary, expectedKey, x, y,
+    repairIndex)
+    local contextOk, currentBoundary, record, manifest =
+        validCurrentContext(player, boundary)
+    local currentKey = contextOk and queueKey(currentBoundary, record) or nil
+    if not contextOk or currentKey ~= expectedKey
+        or type(repairIndex) ~= "table" or repairIndex.key ~= expectedKey then
+        return false, contextOk and "queued RV generation is stale" or currentBoundary
+    end
+    if not Bitmap.containsScope(boundary.bitmap, x, y, boundary.bitmap.minZ) then
+        return true
+    end
+    local cellOk, cell = pcall(ServerWorld.getCellForPlayer, player)
+    if not cellOk or not cell then return false, "current player cell is unavailable" end
+    local scanOk, squares, removals, blocked = collectColumn(cell, x, y,
+        boundary, manifest, repairIndex)
+    if not scanOk then return false, squares end
+    local removeOk, removed, inPlace = removeCandidates(removals)
+    if not removeOk then return false, removed end
+    local repairOk, repairReason = repairTemplateColumn(cell, x, y,
+        squares, removed, inPlace, blocked, repairIndex, boundary, manifest)
+    if not repairOk then return false, repairReason end
+    local generatorOk, generatorReason = repairGeneratorAtColumn(cell, x, y,
+        squares, removed, boundary, manifest)
+    if not generatorOk then return false, generatorReason end
+    return true
+end
+
+local function compactQueue(queue)
+    if queue.head <= 64 or queue.head <= queue.tail / 2 then return end
+    local compacted = {}
+    local count = 0
+    for i = queue.head, queue.tail do
+        local entry = queue.entries[i]
+        if entry then
+            count = count + 1
+            compacted[count] = entry
+        end
+    end
+    queue.entries, queue.head, queue.tail = compacted, 1, count
+end
+
+local function enqueueTile(queue, x, y)
+    local tileKey = columnKey(x, y)
+    if queue.pending[tileKey] then return end
+    queue.tail = queue.tail + 1
+    queue.entries[queue.tail] = { x = x, y = y, key = tileKey }
+    queue.pending[tileKey] = true
+    queue.count = queue.count + 1
+end
+
+local function purgePreviousGenerations(rvId, currentKey)
+    for key, queue in pairs(queues) do
+        if queue.rvId == tostring(rvId) and key ~= currentKey then
+            queues[key] = nil
+            repairIndexes[key] = nil
+        end
+    end
+    for key, index in pairs(repairIndexes) do
+        if index.rvId == tostring(rvId) and key ~= currentKey then
+            repairIndexes[key] = nil
+        end
+    end
+end
+
+function Boundary.sampleBuildGuardPlayer(expectedBoundary, player)
+    local contextOk, boundary, record, manifest, identity =
+        validCurrentContext(player, expectedBoundary)
+    if not contextOk then return false, boundary end
+    local xOk, playerX = ServerUtil.invoke(player, "getX")
+    local yOk, playerY = ServerUtil.invoke(player, "getY")
+    playerX, playerY = xOk and ServerUtil.toNumber(playerX),
+        yOk and ServerUtil.toNumber(playerY)
+    if not playerX or not playerY then return false, "player position is unavailable" end
+    local centerX, centerY = math.floor(playerX), math.floor(playerY)
+    local key = queueKey(boundary, record)
+    if not key then return false, Constants.INVALID_RV_DATA end
+    purgePreviousGenerations(boundary.rvId, key)
+    local index = repairIndexes[key]
+    if not index then
+        local indexOk, builtIndex = pcall(buildRepairIndex, boundary, manifest)
+        if not indexOk or type(builtIndex) ~= "table" then
+            return false, Constants.INVALID_RV_DATA
+        end
+        builtIndex.key = key
+        repairIndexes[key] = builtIndex
+        index = builtIndex
+    end
+    local queue = queues[key]
+    if not queue then
+        queue = { rvId = tostring(boundary.rvId), entries = {}, head = 1,
+            tail = 0, pending = {}, count = 0, index = index }
+        queues[key] = queue
+    elseif queue.index ~= index then
+        return false, Constants.INVALID_RV_DATA
+    end
+    for offsetY = -1, 1 do
+        for offsetX = -1, 1 do
+            local x, y = centerX + offsetX, centerY + offsetY
+            if Bitmap.containsScope(boundary.bitmap, x, y,
+                    boundary.bitmap.minZ) then
+                enqueueTile(queue, x, y)
+            end
+        end
+    end
+    return true
+end
+
+local function popTile(queue)
+    local entry = queue.entries[queue.head]
+    if not entry then return nil end
+    queue.entries[queue.head] = nil
+    queue.head = queue.head + 1
+    queue.pending[entry.key] = nil
+    queue.count = queue.count - 1
+    compactQueue(queue)
+    return entry
+end
+
+function Boundary.processBuildGuardQueue(activeBoundaries)
+    if type(activeBoundaries) ~= "table" then return false end
+    local ready = {}
+    for _, item in pairs(activeBoundaries) do
+        if type(item) == "table" and item.boundary and item.player then
+            local contextOk, boundary, record, manifest, identity =
+                validCurrentContext(item.player, item.boundary)
+            if contextOk then
+                local key = queueKey(boundary, record)
+                if key then
+                    purgePreviousGenerations(boundary.rvId, key)
+                    local queue = queues[key]
+                    if queue and queue.count > 0 then
+                        ready[#ready + 1] = { key = key, queue = queue,
+                            boundary = boundary, player = item.player }
+                    end
+                end
+            end
+        end
+    end
+    if #ready == 0 then return false end
+    table.sort(ready, function(left, right) return left.key < right.key end)
+    local selected = ready[1]
+    if lastServedQueueKey then
+        for i = 1, #ready do
+            if ready[i].key > lastServedQueueKey then
+                selected = ready[i]
+                break
+            end
+        end
+    end
+    lastServedQueueKey = selected.key
+    local entry = popTile(selected.queue)
+    if selected.queue.count == 0 then queues[selected.key] = nil end
+    if not entry then return false end
+    local callOk, repaired, reason = pcall(repairQueuedColumn, selected.player,
+        selected.boundary, selected.key, entry.x, entry.y,
+        selected.queue.index)
+    if not callOk or repaired ~= true then
+        -- Dequeue failures safely. A nearby player will enqueue the tile again
+        -- at the next ten-tick sampling interval; no unbounded retry is kept.
+        print("[RailroaderRVTest] build-guard tile deferred: "
+            .. tostring(callOk and reason or repaired))
+        return false
+    end
+    return true
+end
+
+function Boundary.shouldSampleBuildGuard(tick)
+    return integer(tick) ~= nil and integer(tick) % sampleInterval == 0
+end
+end

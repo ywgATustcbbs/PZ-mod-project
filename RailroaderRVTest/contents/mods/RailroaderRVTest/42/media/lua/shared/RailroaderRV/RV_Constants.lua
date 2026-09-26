@@ -53,19 +53,20 @@ C.COMMAND_RV_UTILITY_MAPPING = "RVUtilityMapping"
 C.RV_MAP_KEY = "RailroaderRVTest.TrainMap"
 C.MANIFEST_KEY = "RailroaderRVTest.Manifest"
 C.LAYOUT_CAPTURE_KEY = "RailroaderRVTest.LayoutCapture"
-C.TECH_VERSION = "0.3.0-tech"
-C.MANIFEST_SCHEMA_VERSION = 2
-C.MAP_SCHEMA_VERSION = 2
-C.RV_RECORD_SCHEMA_VERSION = 2
-C.RV_RELATION_SCHEMA_VERSION = 2
-C.BOUNDARY_SCHEMA_VERSION = 2
-C.LAYOUT_SCHEMA_VERSION = 5
+C.TECH_VERSION = "0.4.0-tech"
+C.MANIFEST_SCHEMA_VERSION = 6
+C.MAP_SCHEMA_VERSION = 4
+C.RV_RECORD_SCHEMA_VERSION = 4
+C.RV_RELATION_SCHEMA_VERSION = 3
+C.BOUNDARY_SCHEMA_VERSION = 4
+C.LAYOUT_SCHEMA_VERSION = 8
+C.CAPTURED_TEMPLATE_VERSION = 3
 C.LAYOUT_CAPTURE_SCHEMA_VERSION = 1
-C.UTILITY_STORE_SCHEMA_VERSION = 3
+C.UTILITY_STORE_SCHEMA_VERSION = 4
 C.UTILITY_WATER_SCHEMA_VERSION = 4
 C.UTILITY_POWER_SCHEMA_VERSION = 2
 C.UTILITY_WATER_CAPACITY = 1000.0
-C.SAVE_REBUILD_REQUIRED = "RailroaderRVTest: 开发版本存档不兼容，请删除该测试存档并重建 (delete this test save and rebuild it)"
+C.INVALID_RV_DATA = "RailroaderRVTest: RV data is invalid"
 
 -- The current test button always targets this server-selected destination.
 -- Clients never send or choose these coordinates.
@@ -79,8 +80,8 @@ C.TELEPORT_Z = 0
 C.RV_REGION_SIZE = 100
 C.RV_MANAGED_WIDTH = 100
 C.RV_MANAGED_HEIGHT = 100
-C.BITMAP_SCHEMA_VERSION = 2
-C.BITMAP_VERSION = 2
+C.BITMAP_SCHEMA_VERSION = 3
+C.BITMAP_VERSION = 4
 C.RV_REGION_MIN_OFFSET_X = -50
 C.RV_REGION_MIN_OFFSET_Y = -50
 C.RV_MANAGED_MIN_Z_OFFSET = 0
@@ -97,11 +98,6 @@ C.CLEAR_MIN_OFFSET_X = -50
 C.CLEAR_MAX_OFFSET_X = C.CLEAR_MIN_OFFSET_X + C.RV_MANAGED_WIDTH
 C.CLEAR_MIN_OFFSET_Y = -50
 C.CLEAR_MAX_OFFSET_Y = C.CLEAR_MIN_OFFSET_Y + C.RV_MANAGED_HEIGHT
--- Boundary object cleanup is gradual fallback work. At the 10 Hz server tick,
--- process one bounded batch per second and leave a long pause after a full scan.
-C.BOUNDARY_TICK_INTERVAL = 10
-C.BOUNDARY_CLEANUP_SQUARES_PER_STEP = 64
-C.BOUNDARY_CLEANUP_RESCAN_TICKS = 6000
 C.BOUNDARY_RECOVERY_COOLDOWN_TICKS = 8
 C.BOUNDARY_TRANSITION_TIMEOUT_TICKS = 120
 C.BOUNDARY_SNAPSHOT_TIMEOUT_TICKS = 120
@@ -117,15 +113,19 @@ C.ROOF_REPAIR_REMOTE_OFFSET_Z = 15
 C.RELOCATION_SENTINEL_INTERVAL_TICKS = 5
 C.RELOCATION_SENTINEL_RETRY_COOLDOWN_TICKS = 10
 
--- The generated cabin has a six-cell east/west interior and a forty-cell
--- north/south interior.  The one-cell wall ring therefore spans 7 x 41
--- coordinates.  The even dimensions are centered on the target cell: the
--- interior runs x=-2..+3 and y=-19..+20 relative to the anchor, so the
--- final destination (anchor + 0.5, anchor + 0.5) is the geometric center.
-C.INTERIOR_MIN_OFFSET_X = -2
-C.INTERIOR_MAX_OFFSET_X = 3
-C.INTERIOR_MIN_OFFSET_Y = -19
-C.INTERIOR_MAX_OFFSET_Y = 20
+-- Captured RV activity footprint: six rows by twenty-three columns.  The
+-- source target cell (51,44) maps to x=0,y=0.  Row 1 is x=+1 (x=52) and row 6
+-- is x=-4 (x=47); columns map y=-6..+16 (y=38..60).  The physical shell
+-- extends one additional cell east and south, matching the captured objects.
+C.INTERIOR_MIN_OFFSET_X = -4
+C.INTERIOR_MAX_OFFSET_X = 1
+C.INTERIOR_MIN_OFFSET_Y = -6
+C.INTERIOR_MAX_OFFSET_Y = 16
+C.CAB_MIN_OFFSET_X = -4
+C.CAB_MAX_OFFSET_X = 1
+C.CAB_MIN_OFFSET_Y = -2
+C.CAB_MAX_OFFSET_Y = 1
+C.BUILD_GUARD_SAMPLE_INTERVAL_TICKS = 10
 C.WALL_MIN_OFFSET_X = C.INTERIOR_MIN_OFFSET_X
 C.WALL_MAX_OFFSET_X = C.INTERIOR_MAX_OFFSET_X + 1
 C.WALL_MIN_OFFSET_Y = C.INTERIOR_MIN_OFFSET_Y
@@ -150,12 +150,10 @@ C.UTILITY_AUTO_REFILL_STATE = "DISABLED"
 C.UTILITY_AUTO_REFILL_PROVIDER = ""
 C.UTILITY_AUTO_REFILL_CHANNEL = ""
 
--- Direction-independent object placement contract.  Layout.lua resolves
--- these offsets into absolute coordinates for the server worker.
-C.LAMP_OFFSET = { x = -2, y = 0, z = 0 }
-C.COUNTER_OFFSET = { x = 1, y = 0, z = 0 }
-C.SINK_OFFSET = { x = 1, y = 0, z = 0 }
-C.GENERATOR_OFFSET = { x = -1, y = 0, z = 1 }
+-- The only extra gameplay object retained beside the captured template is the
+-- generator. It shares a captured roof square above the former floor-only
+-- generator point, keeping the active machine outside the enclosed interior.
+C.GENERATOR_OFFSET = { x = 0, y = 3, z = 1 }
 
 -- BuildCraft's ordinary, resource-free sprites are used as the visual
 -- vocabulary for the static test.  The server may choose the directional
@@ -171,40 +169,11 @@ C.SPRITES = {
     wall = { sprite = "walls_interior_house_03_20", northSprite = "walls_interior_house_03_21" },
     wallNW = { sprite = "walls_interior_house_03_22", northSprite = "walls_interior_house_03_22" },
     wallSE = { sprite = "walls_interior_house_03_23", northSprite = "walls_interior_house_03_23" },
-    -- BuildingCraft's "Custom House Light Switch 1" for the west wall.  The
-    -- tile is supplied by the required runtime dependency; do not replace it
-    -- with either of BuildingCraft's system-house switches or a vanilla lamp.
-    wallLamp = { sprite = "BuildingCraft_Light_17", northSprite = "BuildingCraft_Light_17" },
     -- The utility objects are rendered off.  Their isolated sprite is a
     -- registered blueprint and must never alias ordinary furniture.
     utilityHidden = { sprite = C.UTILITY_HIDDEN_SPRITE_KEY, northSprite = C.UTILITY_HIDDEN_SPRITE_KEY },
     utilityProxy = { sprite = C.UTILITY_HIDDEN_SPRITE_KEY, northSprite = C.UTILITY_HIDDEN_SPRITE_KEY },
     generator = { sprite = "appliances_misc_01_0", northSprite = "appliances_misc_01_0" },
-    counter = { sprite = "furniture_counters_01_0", northSprite = "furniture_counters_01_0" },
-    sink = { sprite = "fixtures_sinks_01_0", northSprite = "fixtures_sinks_01_0" },
-}
-
-C.LIGHT_PROPERTIES = {
-    -- `attachedW` is an IsoFlagType bit, not a string PropertyContainer key.
-    -- The server resolves this name through IsoFlagType before calling
-    -- PropertyContainer:has; the light type is an IsoObjectType enum checked
-    -- against the sprite itself.  The remaining entries below are ordinary
-    -- string properties read with PropertyContainer:has/get.  BuildCraft's
-    -- custom switch tile has no Facing key: its attachedW flag is the
-    -- authoritative west-wall orientation.
-    attachedFlag = "attachedW",
-    objectType = "lightswitch",
-    movable = "IsMoveAble",
-    radius = "LightRadius",
-    red = "lightR",
-    green = "lightG",
-    blue = "lightB",
-    customName = "CustomName",
-    customNameValue = "Switch",
-    groupName = "GroupName",
-    groupNameValue = "Light",
-    moveType = "MoveType",
-    moveTypeValue = "WallObject",
 }
 
 -- Technical-test initial state requested by the design brief.

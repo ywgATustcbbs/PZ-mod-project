@@ -198,7 +198,7 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
             or bitmapVersion ~= Constants.BITMAP_VERSION
             or roomKey ~= rvId .. ":" .. tostring(generation) .. ":"
                 .. tostring(bitmapVersion) then
-            return false, Constants.SAVE_REBUILD_REQUIRED
+            return false, Constants.INVALID_RV_DATA
         end
 
         if request.phase == "return" then
@@ -327,7 +327,7 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
             if not exactOk then return false, exactOrReason end
             local returnOk, returnPosition = pcall(roofRepairPosition,
                 exactOrReason, "group return")
-            if not returnOk then return false, Constants.SAVE_REBUILD_REQUIRED end
+            if not returnOk then return false, Constants.INVALID_RV_DATA end
             if not Bitmap.containsScope(contextOrReason.bitmap,
                 returnPosition.x, returnPosition.y, returnPosition.z)
                 or not Bitmap.isActive(contextOrReason.bitmap,
@@ -362,7 +362,7 @@ function RV.Server.beginRoofRepairRelocationGroup(request)
                 .. tostring(exactOrReason.z))
         end
         if not sharedContext then
-            return false, Constants.SAVE_REBUILD_REQUIRED
+            return false, Constants.INVALID_RV_DATA
         end
         local destinationOk, destinationOrReason = roofRepairDestination(
             sharedContext, { phase = "temporary" })

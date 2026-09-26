@@ -97,7 +97,7 @@ local function externalWaterMatches(object, role)
         -- This is an identity/safety mismatch, not a projection that may be
         -- repaired.  A tank with false or a proxy with true could change the
         -- native source graph, so all current-schema operations stop here.
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     return true
 end
@@ -218,26 +218,6 @@ local function genericObjectTag(object)
         return nested
     end
     if data.owner == "RailroaderRVTest" and data.rvId ~= nil
-        and data.generation ~= nil and data.bitmapVersion ~= nil then
-        return data
-    end
-    return nil
-end
-
-local function retiredObjectTag(object)
-    -- Current generic boundary tags (sink/floor/roof/counter/generator) are
-    -- not retired evidence; only the historically proven rain_barrel role is.
-    local data = World.objectModData(object)
-    if type(data) ~= "table" then return nil end
-    local nested = data.RailroaderRVTest
-    if type(nested) == "table" and nested.owner == "RailroaderRVTest"
-        and nested.role == "rain_barrel"
-        and nested.rvId ~= nil and nested.generation ~= nil
-        and nested.bitmapVersion ~= nil then
-        return nested
-    end
-    if data.owner == "RailroaderRVTest" and data.role == "rain_barrel"
-        and data.rvId ~= nil
         and data.generation ~= nil and data.bitmapVersion ~= nil then
         return data
     end
@@ -384,16 +364,7 @@ local function squareObject(identity, x, y, z, role, deviceId, player)
     for i = 1, #objects do
         local tag = objectTag(objects[i])
         -- Current utility objects carry both the generic boundary tag and the
-        -- exact utility tag.  Only inspect the legacy namespace when that
-        -- current utility tag is absent.
-        local retired = not tag and retiredObjectTag(objects[i])
-        if retired and sameGenerationIdentity(retired, identity) then
-            -- The former generation-owned barrel and other retired object
-            -- roles use the legacy RailroaderRVTest namespace.  They remain
-            -- evidence of an incompatible current square; never hide them
-            -- and place a new utility object beside them.
-            return nil, "invalid"
-        end
+        -- exact utility tag. Validate current generation-owned tags before use.
         if sameGenerationIdentity(tag, identity) then
             if tag.role ~= role or not sameIdentity(tag, identity)
                 or not validUtilityTag(tag, identity, role, deviceId) then
@@ -617,7 +588,7 @@ local function makeObject(identity, context, x, y, z, role, token, fingerprint, 
     if externalOk ~= true then
         print("[RailroaderRVTest] utility object create failed role=" .. tostring(role)
             .. " stage=external-water-flag")
-        return creationFailure(square, object, externalReason or C.SAVE_REBUILD_REQUIRED)
+        return creationFailure(square, object, externalReason or C.INVALID_RV_DATA)
     end
     local container = objectContainer(object)
     if not container then
@@ -677,7 +648,6 @@ ctx.hiddenObjectFingerprint = hiddenObjectFingerprint
 ctx.objectFingerprint = objectFingerprint
 ctx.objectTag = objectTag
 ctx.genericObjectTag = genericObjectTag
-ctx.retiredObjectTag = retiredObjectTag
 ctx.sameIdentity = sameIdentity
 ctx.sameGenerationIdentity = sameGenerationIdentity
 ctx.validUtilityTag = validUtilityTag

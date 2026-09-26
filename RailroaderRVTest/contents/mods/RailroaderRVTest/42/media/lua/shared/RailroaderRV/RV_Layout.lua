@@ -6,12 +6,45 @@
 
 require "RailroaderRV/RV_Constants"
 local Bitmap = require "RailroaderRV/RV_Bitmap"
+local Template = require "RailroaderRV/RV_Template"
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.Layout = RailroaderRV.Layout or {}
 
 local Layout = RailroaderRV.Layout
 local C = RailroaderRV.Constants
+
+if type(Template) ~= "table" or Template.schemaVersion ~= C.CAPTURED_TEMPLATE_VERSION
+    or type(Template.objects) ~= "table"
+    or Template.objectCount ~= #Template.objects
+    or Template.objectCount ~= 357
+    or type(Template.buildCells) ~= "table" or #Template.buildCells ~= 24 then
+    error("RailroaderRV: captured user template contract is incomplete")
+end
+
+local buildCellSet = {}
+for i = 1, #Template.buildCells do
+    local cell = Template.buildCells[i]
+    if type(cell) ~= "table" or type(cell.x) ~= "number"
+        or type(cell.y) ~= "number" or math.floor(cell.x) ~= cell.x
+        or math.floor(cell.y) ~= cell.y
+        or cell.x < C.CAB_MIN_OFFSET_X or cell.x > C.CAB_MAX_OFFSET_X
+        or cell.y < C.CAB_MIN_OFFSET_Y or cell.y > C.CAB_MAX_OFFSET_Y then
+        error("RailroaderRV: captured cab build cell is outside the 6x4 contract")
+    end
+    local key = tostring(cell.x) .. ":" .. tostring(cell.y)
+    if buildCellSet[key] then
+        error("RailroaderRV: captured cab build cell is duplicated")
+    end
+    buildCellSet[key] = true
+end
+for x = C.CAB_MIN_OFFSET_X, C.CAB_MAX_OFFSET_X do
+    for y = C.CAB_MIN_OFFSET_Y, C.CAB_MAX_OFFSET_Y do
+        if not buildCellSet[tostring(x) .. ":" .. tostring(y)] then
+            error("RailroaderRV: captured cab build mask is not a complete 6x4 rectangle")
+        end
+    end
+end
 
 Layout.SCHEMA_VERSION = C.LAYOUT_SCHEMA_VERSION
 
@@ -21,9 +54,19 @@ function Layout.eachStructureCoordinate(bounds, callback)
             callback(x, y, bounds.z)
         end
     end
-    for x = bounds.roofMinX, bounds.roofMaxX do
-        for y = bounds.roofMinY, bounds.roofMaxY do
-            callback(x, y, bounds.roofZ)
+    local anchorX = bounds.roofMinX - C.INTERIOR_MIN_OFFSET_X
+    local anchorY = bounds.roofMinY - C.INTERIOR_MIN_OFFSET_Y
+    local seen = {}
+    for i = 1, #Template.objects do
+        local captured = Template.objects[i]
+        if captured.z == C.ROOF_Z_OFFSET then
+            local x, y = anchorX + captured.x, anchorY + captured.y
+            local key = tostring(x) .. ":" .. tostring(y) .. ":"
+                .. tostring(bounds.roofZ)
+            if not seen[key] then
+                seen[key] = true
+                callback(x, y, bounds.roofZ)
+            end
         end
     end
 end
@@ -66,53 +109,80 @@ local function appendWall(result, x, y, z, north, sprite, role, corner)
     }
 end
 
--- The wall list is intentionally explicit.  It represents a one-cell wall
--- ring around the six-by-forty net interior rather than a generic rectangle
--- perimeter.  PZ's WallNW/WallSE single strips occupy the two diagonal corner
--- coordinates; the other edges use the paired WallW/WallN straight sprites:
---
--- [NW][N][N][N][N][N][W]
--- [W] [ ][ ][ ][ ][ ][W]
--- [W] [ ][ ][ ][ ][ ][W]
--- ... 38 further interior rows ...
--- [W] [ ][ ][ ][ ][ ][W]
--- [N] [N][N][N][N][N][SE]
---
--- The 92 entries are all unique: two single corner strips, 11 north-facing
--- straight walls (5 top + 6 bottom), and 79 west-facing straight walls
--- (39 west edge + 40 east edge).  The NW/SE corner strips add one entry to
--- each orientation, so the complete list contains 12 north-oriented and 80
--- west-oriented entries.
+local function isShellSprite(entry)
+    local sprite = tostring(entry.sprite or "")
+    return sprite:sub(1, 6) == "walls_"
+        or sprite:sub(1, 21) == "fixtures_railings_01_"
+        or sprite:sub(1, 17) == "fixtures_windows_"
+        or sprite:sub(1, 31) == "location_restaurant_pileocrepe_"
+end
+
+local function shellPriority(entry)
+    if entry.name == "Wooden Wall" then return 1 end
+    if entry.sprite:sub(1, 21) == "fixtures_railings_01_" then return 2 end
+    if entry.sprite:sub(1, 17) == "fixtures_windows_" then return 3 end
+    if entry.name == "Wooden Door Frame" then return 4 end
+    if entry.name == "Wooden Door" then return 5 end
+    return 6
+end
+
+-- The edge ledger represents only captured shell objects.  The hand-built
+-- model has four open/missing edge slots, so those are kept open instead of
+-- filled with a synthetic wall.  Multiple captured objects can share one
+-- edge host (for example a wall and railing); choose the wall/railing object
+-- deterministically for edge ownership while generation still creates every
+-- object from the full captured table.
 local function wallCoordinatesForAnchor(cx, cy, cz)
     local result = {}
-    local northSprite = C.SPRITES.wall.northSprite
-    local westSprite = C.SPRITES.wall.sprite
-    local nwSprite = C.SPRITES.wallNW.sprite
-    local seSprite = C.SPRITES.wallSE.sprite
-
     local interiorMinX = cx + C.INTERIOR_MIN_OFFSET_X
     local interiorMaxX = cx + C.INTERIOR_MAX_OFFSET_X
     local interiorMinY = cy + C.INTERIOR_MIN_OFFSET_Y
     local interiorMaxY = cy + C.INTERIOR_MAX_OFFSET_Y
-    local wallMinX = cx + C.WALL_MIN_OFFSET_X
-    local wallMaxX = cx + C.WALL_MAX_OFFSET_X
-    local wallMinY = cy + C.WALL_MIN_OFFSET_Y
-    local wallMaxY = cy + C.WALL_MAX_OFFSET_Y
 
-    appendWall(result, wallMinX, wallMinY, cz, true, nwSprite, "corner-nw", true)
-    for x = interiorMinX + 1, interiorMaxX do
-        appendWall(result, x, interiorMinY, cz, true, northSprite, "wall-north")
+    local function addCapturedEdge(side, x, y, north)
+        local candidates = {}
+        for i = 1, #Template.objects do
+            local captured = Template.objects[i]
+            if captured.x == x - cx and captured.y == y - cy
+                and captured.z == 0
+                and (captured.class == "IsoThumpable" or captured.class == "IsoWindow")
+                and captured.north == north and isShellSprite(captured) then
+                candidates[#candidates + 1] = { index = i, object = captured }
+            end
+        end
+        table.sort(candidates, function(left, right)
+            local leftPriority = shellPriority(left.object)
+            local rightPriority = shellPriority(right.object)
+            if leftPriority == rightPriority then return left.index < right.index end
+            return leftPriority < rightPriority
+        end)
+        if #candidates == 0 then return end
+        local selected = candidates[1]
+        local corner = side == "north" and x == interiorMinX
+            and y == interiorMinY
+        local role = corner and "corner-nw"
+            or ((side == "north" or side == "south") and "wall-north" or "wall-west")
+        appendWall(result, x, y, cz, north, selected.object.sprite, role, corner)
+        result[#result].templateIndex = selected.index
+        result[#result].templateIndices = {}
+        for i = 1, #candidates do
+            result[#result].templateIndices[i] = candidates[i].index
+        end
+    end
+
+    for x = interiorMinX, interiorMaxX do
+        addCapturedEdge("north", x, interiorMinY, true)
     end
     for y = interiorMinY + 1, interiorMaxY do
-        appendWall(result, wallMinX, y, cz, false, westSprite, "wall-west")
+        addCapturedEdge("west", interiorMinX, y, false)
     end
     for y = interiorMinY, interiorMaxY do
-        appendWall(result, wallMaxX, y, cz, false, westSprite, "wall-west")
+        addCapturedEdge("east", interiorMaxX + 1, y, false)
     end
     for x = interiorMinX, interiorMaxX do
-        appendWall(result, x, wallMaxY, cz, true, northSprite, "wall-north")
+        addCapturedEdge("south", x, interiorMaxY + 1, true)
     end
-    appendWall(result, wallMaxX, wallMaxY, cz, false, seSprite, "corner-se", true)
+    addCapturedEdge("south", interiorMaxX + 1, interiorMaxY + 1, false)
     return result
 end
 
@@ -188,12 +258,12 @@ function Layout.make(cx, cy, cz)
         layers = {},
         encoding = "bytes",
     }
-    -- The active/build geometry comes from the layout planner, never from
-    -- objects observed in the world.  Both current cabin layers are active
-    -- in this test layout; future irregular rooms can set arbitrary cells.
+    -- Activity is the full six-by-twenty-three base footprint. Buildability
+    -- is the explicit six-by-four cab; the roof layer is neither walkable nor
+    -- buildable.
     for z = managed.minZ, managed.maxZ - 1 do
         local layer = Bitmap.newLayer(managed.width, managed.height, false, false)
-        if z == cz or z == cz + C.ROOF_Z_OFFSET then
+        if z == cz then
             for y = cy + C.INTERIOR_MIN_OFFSET_Y,
                 cy + C.INTERIOR_MAX_OFFSET_Y do
                 for x = cx + C.INTERIOR_MIN_OFFSET_X,
@@ -201,9 +271,13 @@ function Layout.make(cx, cy, cz)
                     local ix, iy = x - managed.originX, y - managed.originY
                     Bitmap.setCell(layer, ix, iy, true, managed.width,
                         managed.height, "walk")
-                    Bitmap.setCell(layer, ix, iy, true, managed.width,
-                        managed.height, "build")
                 end
+            end
+            for i = 1, #Template.buildCells do
+                local cell = Template.buildCells[i]
+                local x, y = cx + cell.x, cy + cell.y
+                Bitmap.setCell(layer, x - managed.originX, y - managed.originY,
+                    true, managed.width, managed.height, "build")
             end
         end
         bitmap.layers[z] = layer
@@ -270,7 +344,15 @@ function Layout.make(cx, cy, cz)
             role = entry.role,
             corner = entry.corner == true,
             replacementAllowed = true,
+            templateIndex = entry.templateIndex,
+            templateIndices = {},
+            sprite = entry.sprite,
+            north = entry.north,
         }
+        for partIndex = 1, #entry.templateIndices do
+            shellEdges[edgeKey].templateIndices[partIndex] =
+                entry.templateIndices[partIndex]
+        end
     end
 
     local result = {
@@ -280,14 +362,11 @@ function Layout.make(cx, cy, cz)
         managed = managed,
         bitmap = bitmap,
         shellEdges = shellEdges,
+        templateObjects = {},
         room = interior,
         wall = wall,
         roof = roof,
         wallCoordinates = wallCoordinates,
-        light = offsetPoint(anchor, C.LAMP_OFFSET),
-        counter = offsetPoint(anchor, C.COUNTER_OFFSET),
-        sink = offsetPoint(anchor, C.SINK_OFFSET),
-        utilityTank = offsetPoint(anchor, C.UTILITY_TANK_OFFSET),
         generator = offsetPoint(anchor, C.GENERATOR_OFFSET),
     }
     result.wallCount = #wallCoordinates
@@ -295,6 +374,22 @@ function Layout.make(cx, cy, cz)
     result.wallCoordinateCount = #wallCoordinates
     result.wallEdgeCounts = { north = northCount, west = #wallCoordinates - northCount }
     result.wallCornerCount = cornerCount
+    for i = 1, #Template.objects do
+        local captured = Template.objects[i]
+        local copy = {
+            templateIndex = i,
+            class = captured.class,
+            name = captured.name,
+            sprite = captured.sprite,
+            direction = captured.direction,
+            x = cx + captured.x,
+            y = cy + captured.y,
+            z = cz + captured.z,
+            north = captured.north,
+            state = captured.state,
+        }
+        result.templateObjects[i] = copy
+    end
     return result
 end
 

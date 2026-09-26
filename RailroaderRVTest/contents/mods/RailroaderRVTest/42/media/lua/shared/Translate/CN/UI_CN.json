@@ -5,7 +5,6 @@
     "ContextMenu_RailroaderRVTest_Enter": "进入房车",
     "ContextMenu_RailroaderRVTest_Exit": "退出房车",
     "ContextMenu_RailroaderRVTest_UtilityDashboard": "房车水电系统面板",
-    "ContextMenu_RailroaderRVTest_UtilitySaveRebuild": "开发测试存档不兼容，请删除后重建",
     "ContextMenu_RailroaderRVTest_AddWater": "添加水到房车",
     "ContextMenu_RailroaderRVTest_AddFuel": "添加燃油到房车",
     "UI_RailroaderRVTest_Utility_Title": "房车水电系统面板",

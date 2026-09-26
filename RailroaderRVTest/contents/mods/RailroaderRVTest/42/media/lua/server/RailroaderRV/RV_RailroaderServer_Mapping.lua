@@ -39,12 +39,12 @@ end
 
 local function mapData()
     if not ModData then
-        error(C.SAVE_REBUILD_REQUIRED)
+        error(C.INVALID_RV_DATA)
     end
     local map
     if type(ModData.get) == "function" then
         local ok, value = pcall(ModData.get, C.RV_MAP_KEY)
-        if not ok then error(C.SAVE_REBUILD_REQUIRED) end
+        if not ok then error(C.INVALID_RV_DATA) end
         map = value
     elseif type(ModData.getOrCreate) == "function" then
         local ok, value = pcall(ModData.getOrCreate, C.RV_MAP_KEY)
@@ -66,7 +66,7 @@ local function mapData()
         map.locomotives = {}
         map.players = {}
     elseif type(map) ~= "table" then
-        error(C.SAVE_REBUILD_REQUIRED)
+        error(C.INVALID_RV_DATA)
     else
         local empty = true
         for _ in pairs(map) do
@@ -81,10 +81,9 @@ local function mapData()
             map.locomotives = {}
             map.players = {}
         elseif integer(map.schemaVersion) ~= C.MAP_SCHEMA_VERSION
-            or map.version ~= nil
             or type(map.locomotives) ~= "table"
             or type(map.players) ~= "table" then
-            error(C.SAVE_REBUILD_REQUIRED)
+            error(C.INVALID_RV_DATA)
         end
     end
     local mappingEpoch = Adapter._boundaryValidationEpoch or 0
@@ -99,7 +98,7 @@ local function mapData()
         return map
     end
     if validateMapSchema and not validateMapSchema(map) then
-        error(C.SAVE_REBUILD_REQUIRED)
+        error(C.INVALID_RV_DATA)
     end
     geometryEpoch = Boundary and Boundary._geometryEpoch or 0
     validatedMapCache = { map = map, mappingEpoch = mappingEpoch,
@@ -233,7 +232,6 @@ local function validMappingRecord(record)
             "rvId", "generation", "region", "rvPosition", "enterPosition",
             "locoPosition", "boundarySchemaVersion", "bitmapVersion",
             "boundary", "managed", "players", "updatedAt" })
-        or record.version ~= nil
         or integer(record.schemaVersion) ~= C.RV_RECORD_SCHEMA_VERSION
         or type(record.locoId) ~= "string" or record.locoId == ""
         or type(record.rvId) ~= "string" or record.rvId ~= record.locoId
@@ -514,10 +512,9 @@ local function repairRoofForPlayer(player, record, force, reason)
         }
         local name = playerName(player)
         if name then roofRepairPlayers[name .. ":" .. roomKey] = true end
-        -- This is an authoritative add/remove application only.  The server
-        -- cannot prove the client's rendered roof cache, so never label this
-        -- line as visual success.
-        print("[RailroaderRVTest] roof repair applied room=" .. roomKey
+        -- This confirms the server-side room/roof neighbour synchronization;
+        -- it cannot prove that every client's rendered cache updated.
+        print("[RailroaderRVTest] roof room synchronization applied room=" .. roomKey
             .. " reason=" .. tostring(reason or "entry")
             .. " detail=" .. tostring(detail or "ok"))
         return true, detail
@@ -554,7 +551,7 @@ local function armRoomOwnershipMonitor(player, record, reason)
         player, record)
     if not ok then
         print("[RailroaderRVTest] room ownership monitor error: " .. tostring(armed))
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     if armed ~= true then
         print("[RailroaderRVTest] room ownership monitor deferred reason="
@@ -578,7 +575,7 @@ local function recordAtPlayerCoordinate(map, player)
     for key, record in pairs(map.locomotives or {}) do
         if type(record) == "table" and inRegion(position, record.region) then
             if not validMappingRecord(record) then
-                error(C.SAVE_REBUILD_REQUIRED)
+                error(C.INVALID_RV_DATA)
             end
             local train = findTrain(record.locoId)
             if train and trainPosition(train) then

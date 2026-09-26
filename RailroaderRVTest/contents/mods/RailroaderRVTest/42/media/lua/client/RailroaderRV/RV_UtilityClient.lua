@@ -5,12 +5,6 @@
 
 require("RailroaderRV/RV_Constants")
 local U = require("RailroaderRV/RV_UtilityConstants")
-local UtilitySprite = require("RailroaderRV/RV_UtilitySprite")
-
--- Register the same isolated blueprint/id pair before any complete utility
--- add packet can arrive.  This does not rebind loaded objects; it only makes
--- the client manager resolve the packet's registered sprite id.
-UtilitySprite.install()
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.UtilityClient = RailroaderRV.UtilityClient or {}
@@ -80,51 +74,6 @@ local function hintForItem(item)
     return ok and id ~= nil and { itemId = id } or nil
 end
 
--- setDoRender is a local presentation flag and is not part of an IsoObject's
--- saved/networked state. Re-apply it from the current utility identity tag
--- whenever a hidden usage tank/proxy arrives on the client or its square is
--- loaded; the client never creates or repairs the object.
-local function hideUtilityObject(object)
-    if not object or type(object.getModData) ~= "function" then return end
-    local ok, data = pcall(function() return object:getModData() end)
-    local tag = ok and type(data) == "table" and data.RailroaderRVTestUtility or nil
-    if type(tag) ~= "table" or tag.schemaVersion ~= C.UTILITY_WATER_SCHEMA_VERSION
-        or (tag.role ~= C.UTILITY_ROLE_TANK and tag.role ~= C.UTILITY_ROLE_PROXY) then
-        return
-    end
-    if type(object.setDoRender) == "function" then
-        pcall(function() object:setDoRender(false) end)
-    end
-end
-
-local function hideLoadedSquare(square)
-    if not square then return end
-    local function visit(collection)
-        if not collection then return end
-        if type(collection.size) == "function" and type(collection.get) == "function" then
-            local sizeOk, size = pcall(function() return collection:size() end)
-            if sizeOk and type(size) == "number" then
-                for i = 0, size - 1 do
-                    local itemOk, item = pcall(function() return collection:get(i) end)
-                    if itemOk then hideUtilityObject(item) end
-                end
-                return
-            end
-        end
-        if type(collection) == "table" then
-            for _, item in pairs(collection) do hideUtilityObject(item) end
-        end
-    end
-    if type(square.getObjects) == "function" then
-        local ok, objects = pcall(function() return square:getObjects() end)
-        if ok then visit(objects) end
-    end
-    if type(square.getSpecialObjects) == "function" then
-        local ok, objects = pcall(function() return square:getSpecialObjects() end)
-        if ok then visit(objects) end
-    end
-end
-
 function Client.ensureSession()
     if not sessionNonce then sessionNonce = newNonce() end
     return sessionNonce
@@ -143,17 +92,6 @@ function Client.send(player, operation, targetHint, sourceHint, entryPoint)
     return ok and result ~= false
 end
 
-function Client.requestConnect(player, object)
-    local hint = hintForObject(object)
-    return hint and Client.send(player, U.OP_CONNECT_WATER_DEVICE, hint, nil) or false
-end
-
-function Client.requestAddWater(player, item, entryPoint)
-    local hint = hintForItem(item)
-    return hint and Client.send(player, U.OP_ADD_WATER, nil, hint,
-        entryPoint or U.ENTRY_INTERNAL) or false
-end
-
 function Client.requestAddFuel(player, item)
     local hint = hintForItem(item)
     return hint and Client.send(player, U.OP_ADD_FUEL, nil, hint) or false
@@ -168,19 +106,16 @@ function Client.requestGenerator(player, operation, object)
     return hint and Client.send(player, operation, hint, nil) or false
 end
 
-local function showRebuildHint(player)
+local function showInvalidRVData(player)
     if player and type(player.setHaloNote) == "function" then
         pcall(function()
-            player:setHaloNote("Delete this test save and rebuild it", 255, 255, 255, 5000)
+            player:setHaloNote("RV data is invalid", 255, 255, 255, 5000)
         end)
     end
 end
 
--- A stale generated object can be rejected by the client menu before any
--- intent packet exists.  Keep the same stable, local-only user-facing hint as
--- the server ACK path; this helper never repairs or mutates the old object.
-function Client.showSaveRebuildRequired(player)
-    showRebuildHint(player or localPlayer(0))
+function Client.showInvalidRVData(player)
+    showInvalidRVData(player or localPlayer(0))
 end
 
 function Client.onServerCommand(module, command, args)
@@ -208,8 +143,8 @@ function Client.onServerCommand(module, command, args)
     if dashboard and type(dashboard.onAck) == "function" then
         pcall(dashboard.onAck, localPlayer(0), args)
     end
-    if args.reason == U.REASON_SAVE_REBUILD_REQUIRED then
-        Client.showSaveRebuildRequired(localPlayer(0))
+    if args.reason == U.REASON_INVALID_RV_DATA then
+        Client.showInvalidRVData(localPlayer(0))
     end
 end
 
@@ -224,11 +159,4 @@ end
 if Events and Events.OnDisconnect and type(Events.OnDisconnect.Add) == "function" then
     Events.OnDisconnect.Add(Client.clearConnectionState)
 end
-if Events and Events.OnObjectAdded and type(Events.OnObjectAdded.Add) == "function" then
-    Events.OnObjectAdded.Add(hideUtilityObject)
-end
-if Events and Events.OnLoadGridsquare and type(Events.OnLoadGridsquare.Add) == "function" then
-    Events.OnLoadGridsquare.Add(hideLoadedSquare)
-end
-
 return Client

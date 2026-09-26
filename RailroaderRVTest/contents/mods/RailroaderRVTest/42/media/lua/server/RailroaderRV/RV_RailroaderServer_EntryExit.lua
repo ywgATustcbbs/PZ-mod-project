@@ -52,7 +52,7 @@ function Adapter.resolveCurrentUtilityRV(player)
     end
     local mapOk, mapOrReason = pcall(mapData)
     if not mapOk or type(mapOrReason) ~= "table" then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local map = mapOrReason
     local name = playerName(player)
@@ -100,16 +100,16 @@ function Adapter.resolveCurrentUtilityRV(player)
         if not boundaryOk or boundaryRecord ~= record
             or type(boundaryRelation) ~= "table"
             or boundaryRelation.inside ~= true then
-            return false, C.SAVE_REBUILD_REQUIRED
+            return false, C.INVALID_RV_DATA
         end
     end
     local rv = rawget(_G, "RailroaderRV")
     local server = rv and rv.Server
     if not server or type(server.validateCurrentRVRecord) ~= "function" then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local gateOk, gateResult = pcall(server.validateCurrentRVRecord, record)
-    if not gateOk or gateResult ~= true then return false, C.SAVE_REBUILD_REQUIRED end
+    if not gateOk or gateResult ~= true then return false, C.INVALID_RV_DATA end
     return true, {
         identity = { rvId = tostring(record.rvId), generation = integer(record.generation),
             bitmapVersion = integer(record.bitmapVersion) },
@@ -126,7 +126,7 @@ end
 function Adapter.validateCurrentUtilityIdentity(identity)
     local function reject(stage)
         print("[RailroaderRVTest] utility identity gate rejected stage=" .. stage)
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     if type(identity) ~= "table" or type(identity.rvId) ~= "string"
         or identity.rvId == "" or integer(identity.generation) == nil
@@ -226,7 +226,7 @@ local function markPlayerOutside(map, record, key, player, position, seat, role)
     map.players[name] = relation
     if record then
         if type(record.players) ~= "table" then
-            error(C.SAVE_REBUILD_REQUIRED)
+            error(C.INVALID_RV_DATA)
         end
         local rider = record.players[name]
         if type(rider) ~= "table" then rider = {} end
@@ -246,7 +246,7 @@ local function markPlayerInside(map, record, key, player, sourcePosition,
     local name = playerName(player)
     if not name then error("Railroader RV player username is unavailable") end
     local enterPosition = copyPosition(sourcePosition)
-    if not enterPosition then error(C.SAVE_REBUILD_REQUIRED) end
+    if not enterPosition then error(C.INVALID_RV_DATA) end
     local relation = {
         schemaVersion = C.RV_RELATION_SCHEMA_VERSION,
         locoId = tostring(record.locoId),
@@ -256,7 +256,7 @@ local function markPlayerInside(map, record, key, player, sourcePosition,
     }
     map.players[name] = relation
     if type(record.players) ~= "table" then
-        error(C.SAVE_REBUILD_REQUIRED)
+        error(C.INVALID_RV_DATA)
     end
     record.players[name] = {
         schemaVersion = C.RV_RELATION_SCHEMA_VERSION,
@@ -290,7 +290,7 @@ local function requestData(train, player, role, seat, sourcePosition)
     local entryPosition = copyPosition(sourcePosition)
     local locoPosition = trainPose(train)
     if not entryPosition or not locoPosition then
-        error(C.SAVE_REBUILD_REQUIRED)
+        error(C.INVALID_RV_DATA)
     end
     return {
         locoId = tostring(trainId(train)), sourceRole = role, sourceSeat = seat,
@@ -321,7 +321,7 @@ local function enterExisting(player, train, record, key, sourceRole,
     end
     local onlineId = playerId(player)
     local target = copyPosition(record.rvPosition)
-    if not target then return false, C.SAVE_REBUILD_REQUIRED end
+    if not target then return false, C.INVALID_RV_DATA end
     -- Re-arm the persistent client stale-room monitor before changing seats or
     -- moving the player.  A missing/incompatible current manifest therefore
     -- fails closed without performing the RV teleport.
@@ -394,7 +394,7 @@ local function enterPlayer(player, locoId)
     local existingRecord, existingKey, _, lookupState =
         recordAtPlayerCoordinate(map, player)
     if lookupState == "unmapped-rv" then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     if existingRecord then return false, "player is already inside an RV" end
     local train = findTrain(locoId)
@@ -499,7 +499,7 @@ local function commitGeneration(player, data, prepared)
     record.locoId = locoId
     record.rvId = locoId
     record.generation = generation
-    if not validRegion(data.region) then return false, C.SAVE_REBUILD_REQUIRED end
+    if not validRegion(data.region) then return false, C.INVALID_RV_DATA end
     record.region = {
         minX = integer(data.region.minX), minY = integer(data.region.minY),
         maxX = integer(data.region.maxX), maxY = integer(data.region.maxY),
@@ -516,7 +516,7 @@ local function commitGeneration(player, data, prepared)
         or not record.locoPosition
         or number(record.locoPosition.dirX) == nil
         or number(record.locoPosition.dirY) == nil then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     if type(record.players) ~= "table" then record.players = {} end
     if not Boundary.registerGeneration(locoId, record.generation,
@@ -528,7 +528,7 @@ local function commitGeneration(player, data, prepared)
         data.entryPosition, data.sourceRole, data.sourceSeat)
     local server = RailroaderRV and RailroaderRV.Server
     if not server or type(server.initializeUtilityRecord) ~= "function" then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local utilityOk, utilityAccepted, utilityReason = pcall(
         server.initializeUtilityRecord,
@@ -539,7 +539,7 @@ local function commitGeneration(player, data, prepared)
             bitmapVersion = record.bitmapVersion,
         }, record = record })
     if not utilityOk or utilityAccepted ~= true then
-        return false, utilityOk and (utilityReason or C.SAVE_REBUILD_REQUIRED)
+        return false, utilityOk and (utilityReason or C.INVALID_RV_DATA)
             or tostring(utilityAccepted)
     end
     -- RV_Server owns the transition close after FinalRelocateAck and the
@@ -576,7 +576,7 @@ local function exitPlayer(player)
         return false, "player is outside the RV area"
     end
     if not record then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local roofBlocked, roofReason = roofRepairTransactionBlocks(record.rvId)
     if roofBlocked then return false, roofReason end
@@ -584,11 +584,11 @@ local function exitPlayer(player)
     if not geometryOk then return false, geometryReason end
     if not train then
         local target = persistedBesidePosition(record)
-        if not target then return false, C.SAVE_REBUILD_REQUIRED end
+        if not target then return false, C.INVALID_RV_DATA end
         -- The mapping is valid but the locomotive is inactive/unloaded.  Do
         -- not invent a driver/passenger seat; use only a persisted beside
         -- target and retain the explicit state for diagnostics and tests.
-        if lookupState ~= "inactive-mapped" then return false, C.SAVE_REBUILD_REQUIRED end
+        if lookupState ~= "inactive-mapped" then return false, C.INVALID_RV_DATA end
         local transitionToken = newTransitionToken("exit", record)
         if Boundary and type(Boundary.beginTransition) == "function" then
             local armed = Boundary.beginTransition(player, record.locoId,

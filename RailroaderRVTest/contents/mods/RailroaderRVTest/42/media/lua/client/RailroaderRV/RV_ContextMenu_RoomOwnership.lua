@@ -151,15 +151,15 @@ local function readRoomRefreshBounds(args, prefix)
         or bounds.roomMinX > bounds.roomMaxX or bounds.roomMinY > bounds.roomMaxY
         or bounds.roofMinX > bounds.roofMaxX or bounds.roofMinY > bounds.roofMaxY
         or bounds.wallMaxX - bounds.wallMinX + 1 ~= 7
-        or bounds.wallMaxY - bounds.wallMinY + 1 ~= 41
+        or bounds.wallMaxY - bounds.wallMinY + 1 ~= 24
         or bounds.roomMaxX - bounds.roomMinX + 1 ~= 6
-        or bounds.roomMaxY - bounds.roomMinY + 1 ~= 40
+        or bounds.roomMaxY - bounds.roomMinY + 1 ~= 23
         or bounds.roomMinX < bounds.wallMinX
         or bounds.roomMaxX > bounds.wallMaxX
         or bounds.roomMinY < bounds.wallMinY
         or bounds.roomMaxY > bounds.wallMaxY
         or bounds.roofMaxX - bounds.roofMinX + 1 ~= 6
-        or bounds.roofMaxY - bounds.roofMinY + 1 ~= 40
+        or bounds.roofMaxY - bounds.roofMinY + 1 ~= 23
         or bounds.z < -32 or bounds.z > 31
         or bounds.roofZ < -32 or bounds.roofZ > 31
         or bounds.roofZ ~= bounds.z + 1 then

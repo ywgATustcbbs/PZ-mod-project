@@ -131,7 +131,11 @@ def main() -> int:
     )
     constants_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_Constants.lua"
     layout_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_Layout.lua"
+    template_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_Template.lua"
     bitmap_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_Bitmap.lua"
+    mapping_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_RailroaderServer_Mapping.lua"
+    manifest_validation_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_ManifestValidation.lua"
+    boundary_geometry_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_BoundaryServer_Geometry.lua"
     boundary_server_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_BoundaryServer.lua"
     boundary_client_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_BoundaryClient.lua"
     utility_catalog_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_UtilityCatalog.lua"
@@ -139,7 +143,22 @@ def main() -> int:
     utility_client_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_UtilityClient.lua"
     utility_server_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_UtilityServer.lua"
     utility_water_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_UtilityWater.lua"
+    utility_objects_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_UtilityWater_Objects.lua"
+    utility_plumbing_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_UtilityWater_Plumbing.lua"
     utility_store_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_UtilityStore.lua"
+    generation_build_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_GenerationBuild.lua"
+    generation_flow_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_GenerationFlow.lua"
+    generation_ack_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_GenerationAck.lua"
+    player_validation_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_PlayerValidation.lua"
+    roof_destinations_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_RoofDestinations.lua"
+    server_commands_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_Commands.lua"
+    room_ownership_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_RoomOwnership.lua"
+    record_validation_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_RecordValidation.lua"
+    client_room_ownership_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_ContextMenu_RoomOwnership.lua"
+    client_relocation_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_ContextMenu_Relocation.lua"
+    world_objects_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_WorldObjects.lua"
+    template_repair_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_TemplateRepair.lua"
+    boundary_objects_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_BoundaryServer_Objects.lua"
     start_bat_path = root / "testserver" / "steamcmd" / "380870" / "StartServer64 - test.bat"
     runner_path = root / "testserver" / "run_test.py"
     testserver_agent_path = root / "testserver" / "agent.md"
@@ -166,7 +185,27 @@ def main() -> int:
         f"Railroader client adapter is missing: {railroader_client_path}",
     )
     checks.true(constants_path.is_file(), f"shared constants Lua is missing: {constants_path}")
+    checks.true(template_path.is_file(), f"captured RV template Lua is missing: {template_path}")
     checks.true(bitmap_path.is_file(), f"shared bitmap Lua is missing: {bitmap_path}")
+    for current_contract_path in (
+        generation_build_path,
+        generation_flow_path,
+        generation_ack_path,
+        player_validation_path,
+        roof_destinations_path,
+        server_commands_path,
+        room_ownership_path,
+        record_validation_path,
+        client_room_ownership_path,
+        client_relocation_path,
+        world_objects_path,
+        template_repair_path,
+        boundary_objects_path,
+    ):
+        checks.true(
+            current_contract_path.is_file(),
+            f"current RV contract Lua is missing: {current_contract_path}",
+        )
     checks.true(
         boundary_server_path.is_file(),
         f"boundary server Lua is missing: {boundary_server_path}",
@@ -191,6 +230,48 @@ def main() -> int:
         server_util = read_utf8(server_util_path) if server_util_path.is_file() else ""
         server_world = read_utf8(server_world_path) if server_world_path.is_file() else ""
         server_schema = read_utf8(server_schema_path) if server_schema_path.is_file() else ""
+        generation_build = (
+            read_utf8(generation_build_path) if generation_build_path.is_file() else ""
+        )
+        generation_flow = (
+            read_utf8(generation_flow_path) if generation_flow_path.is_file() else ""
+        )
+        generation_ack = (
+            read_utf8(generation_ack_path) if generation_ack_path.is_file() else ""
+        )
+        player_validation = (
+            read_utf8(player_validation_path)
+            if player_validation_path.is_file()
+            else ""
+        )
+        roof_destinations = (
+            read_utf8(roof_destinations_path) if roof_destinations_path.is_file() else ""
+        )
+        server_commands = (
+            read_utf8(server_commands_path) if server_commands_path.is_file() else ""
+        )
+        room_ownership = (
+            read_utf8(room_ownership_path) if room_ownership_path.is_file() else ""
+        )
+        record_validation = (
+            read_utf8(record_validation_path) if record_validation_path.is_file() else ""
+        )
+        client_room_ownership = (
+            read_utf8(client_room_ownership_path)
+            if client_room_ownership_path.is_file()
+            else ""
+        )
+        client_relocation_source = (
+            read_utf8(client_relocation_path)
+            if client_relocation_path.is_file()
+            else ""
+        )
+        world_objects = (
+            read_utf8(world_objects_path) if world_objects_path.is_file() else ""
+        )
+        template_repair = (
+            read_utf8(template_repair_path) if template_repair_path.is_file() else ""
+        )
         # Existing contract checks intentionally inspect one logical server
         # surface.  Include each require chunk, then normalize only the
         # private module qualifier so assertions continue to cover helpers
@@ -210,8 +291,43 @@ def main() -> int:
             else ""
         )
         bitmap = read_utf8(bitmap_path) if bitmap_path.is_file() else ""
+        mapping = read_utf8(mapping_path) if mapping_path.is_file() else ""
+        manifest_validation = (
+            read_utf8(manifest_validation_path)
+            if manifest_validation_path.is_file()
+            else ""
+        )
+        boundary_geometry = (
+            read_utf8(boundary_geometry_path)
+            if boundary_geometry_path.is_file()
+            else ""
+        )
+        captured_template = read_utf8(template_path) if template_path.is_file() else ""
+        captured_template_rows = re.findall(
+            r"(?m)^\s*\{x=-?\d+,\s*y=-?\d+,\s*z=-?\d+,\s*class=",
+            captured_template,
+        )
+        captured_shell_cells = {
+            (int(x), int(y))
+            for x, y in re.findall(
+                r'(?m)^\s*\{x=(-?\d+), y=(-?\d+), z=0, '
+                r'class="(?:IsoThumpable|IsoWindow)", '
+                r'name="(?:Wooden Wall|Wooden Door Frame|Wooden Door|Window)",',
+                captured_template,
+            )
+        }
+        captured_roof_cells = {
+            (int(x), int(y))
+            for x, y in re.findall(
+                r"(?m)^\s*\{x=(-?\d+), y=(-?\d+), z=1, class=",
+                captured_template,
+            )
+        }
         boundary_server = (
             read_utf8(boundary_server_path) if boundary_server_path.is_file() else ""
+        )
+        boundary_objects = (
+            read_utf8(boundary_objects_path) if boundary_objects_path.is_file() else ""
         )
         boundary_client = (
             read_utf8(boundary_client_path) if boundary_client_path.is_file() else ""
@@ -230,6 +346,12 @@ def main() -> int:
         )
         utility_water = (
             read_utf8(utility_water_path) if utility_water_path.is_file() else ""
+        )
+        utility_objects = (
+            read_utf8(utility_objects_path) if utility_objects_path.is_file() else ""
+        )
+        utility_plumbing = (
+            read_utf8(utility_plumbing_path) if utility_plumbing_path.is_file() else ""
         )
         utility_store = (
             read_utf8(utility_store_path) if utility_store_path.is_file() else ""
@@ -315,7 +437,7 @@ def main() -> int:
             and "Catalog.isNativeSink(object)" in utility_connect
             and 'entry.id ~= "sink"' in utility_connect
             and "local taggedSink = Catalog.isGeneratedSink(object)" in utility_connect
-            and "U.REASON_SAVE_REBUILD_REQUIRED" in utility_connect
+            and "U.REASON_INVALID_RV_DATA" in utility_connect
             and "entryIsRuntimeTestEnabled" in utility_connect
             and "entryIsValidated" not in utility_connect,
             "server utility connect path does not distinguish native sinks from stale generated objects",
@@ -452,32 +574,57 @@ def main() -> int:
             )),
             "shell/build audit does not require full tag identity or host-aware attribution",
         )
-        checks.true(
-            "currentManifestValid" in server
-            and "requireCurrentManifest" in server
-            and "SAVE_REBUILD_REQUIRED" in server
-            and "manifest.schemaVersion" in server
-            and "manifest.boundary" in server
-            and "persistedBoundsMatchBoundary" not in server
-            and "manifest.version = 1" not in server
-            and "isTaggedForGeneration(objects[i], generation, rvId," in server
-            and "clearSquare(square, generation, rvId, bitmapVersion)" in server
-            and "walkBounds(cell, oldBounds" in server
-            and "currentBoundsValid" in server
-            and "insideInclusive" not in server,
-            "generation cleanup lacks the current manifest identity gate",
+        generation_cleanup = section(
+            room_ownership,
+            r"local function removeOldGeneration",
+            r"local function structureCoordinates",
+        )
+        generation_cleanup_world_gate = section(
+            server_world,
+            r"local function isTaggedForGeneration",
+            r"local function isPlayerObject",
         )
         checks.true(
-            "repairRoofVisuals" in server
-            and "pcall(requireCurrentManifest, manifest, false)" in server
-            and "return false, Constants.SAVE_REBUILD_REQUIRED" in server,
-            "roof repair does not require a current manifest before using bounds",
+            generation_cleanup is not None
+            and "requireCurrentManifest(manifest, true)" in generation_cleanup
+            and "ServerSchema.walkBounds(cell, oldBounds" in generation_cleanup
+            and "ServerWorld.clearSquare(square, generation, rvId, bitmapVersion)"
+                in generation_cleanup
+            and generation_cleanup_world_gate is not None
+            and "tag.owner ~= OWNER" in generation_cleanup_world_gate
+            and "tag.generation" in generation_cleanup_world_gate
+            and "tag.rvId" in generation_cleanup_world_gate
+            and "tag.bitmapVersion" in generation_cleanup_world_gate,
+            "generation cleanup lacks the current manifest and full object identity gates",
+        )
+        repair_context = section(
+            template_repair,
+            r"local function validCurrentContext",
+            r"local function isCabCoordinate",
         )
         checks.true(
-            "local function rectInside" in server
-            and "is outside the bitmap scope" in server
-            and "Bitmap.containsScope(planned.bitmap, point.x, point.y, point.z)" in server,
-            "layout feature/structure coordinates are not clipped to the bitmap scope",
+            repair_context is not None
+            and "pcall(requireCurrentManifest, manifest, false)" in repair_context
+            and 'manifest.state ~= "READY"' in repair_context
+            and 'manifest.phase ~= "COMMITTED"' in repair_context
+            and "sameIdentity(manifest, boundary)" in repair_context
+            and "manifest.bounds.schemaVersion ~= Constants.LAYOUT_SCHEMA_VERSION"
+                in repair_context,
+            "template repair does not require the current committed manifest before using bounds",
+        )
+        checks.true(
+            "local function rectInside" in server_schema
+            and "local scopeMinX, scopeMinY = managedOriginX, managedOriginY" in server_schema
+            and "maxX >= scopeMaxX" in server_schema
+            and "maxY >= scopeMaxY" in server_schema
+            and 'rectInside(roomMinX, roomMaxX, roomMinY, roomMaxY, roomZ, "room")'
+                in server_schema
+            and 'rectInside(wallMinX, wallMaxX, wallMinY, wallMaxY, wallZ, "wall")'
+                in server_schema
+            and 'rectInside(roofMinX, roofMaxX, roofMinY, roofMaxY, roofZ, "roof")'
+                in server_schema
+            and "Bitmap.containsScope(bitmap, entry.x, entry.y, entry.z)" in server_schema,
+            "layout structure rectangles and captured wall hosts are not clipped to the bitmap scope",
         )
         checks.true(
             "function Boundary.beginTransition(player, rvId, generation, token, kind," in boundary_server
@@ -499,9 +646,9 @@ def main() -> int:
             "persisted RV bounds are not checked against the current bitmap scope",
         )
         checks.true(
-            "local function roomOwnershipGuardKey" in server
-            and "guard.key = roomOwnershipGuardKey" in server
-            and "roomOwnershipGuards[guard.key] = guard" in server,
+            "local function roomOwnershipGuardKey" in room_ownership
+            and "guard.key = roomOwnershipGuardKey" in room_ownership
+            and "roomOwnershipGuards[guard.key] = guard" in room_ownership,
             "server room-ownership guard is not keyed by the full RV boundary identity",
         )
         checks.true(
@@ -813,7 +960,7 @@ def main() -> int:
             )
 
         shell_wall = section(
-            boundary_server,
+            boundary_objects,
             r"function Boundary\.isCurrentShellWall",
             r"local function appendShellEdgeKey",
         )
@@ -838,7 +985,7 @@ def main() -> int:
                 and "wall-north" in shell_wall
                 and "wall-west" in shell_wall
                 and "corner-nw" in shell_wall
-                and "corner-se" in shell_wall,
+                and "corner-se" not in shell_wall,
                 "shell-wall detector does not require the current type/tag/ledger identity",
             )
 
@@ -1129,7 +1276,8 @@ def main() -> int:
             "roof return does not reassert server float coordinates or expose target proof waits",
         )
         checks.true(
-            "allowMissingSquare" in roof_relocation
+            roof_relocation is not None
+            and "allowMissingSquare" in roof_relocation
             and "type(allowedPlayers) == \"table\"" in roof_relocation
             and "pending.roofRepairTransition" in client
             and "pending.roofRepairPhase == \"temporary\"" in client
@@ -1281,7 +1429,7 @@ def main() -> int:
             and "isRoofRepairTransactionActive" in adapter_mutex
             and "isRoofRepairTransactionActive, nil" in adapter_mutex
             and "pendingWallRoofRepairs" in adapter_mutex
-            and "SAVE_REBUILD_REQUIRED" in adapter_mutex
+            and "INVALID_RV_DATA" in adapter_mutex
             and all(
                 token in railroader_server
                 for token in (
@@ -1408,7 +1556,7 @@ def main() -> int:
             "generation halo does not stay visible through the complete temporary phase",
         )
         checks.true(
-            "if string.find(detail, C.SAVE_REBUILD_REQUIRED, 1, true) then"
+            "if string.find(detail, C.INVALID_RV_DATA, 1, true) then"
             in railroader_server
             and "already accepted follow-up" in railroader_server
             and "expiresAtTick" in railroader_server,
@@ -1493,7 +1641,7 @@ def main() -> int:
                 exit_player,
             ) is not None
             and re.search(
-                r'if not record then[\s\S]*?C\.SAVE_REBUILD_REQUIRED',
+                r'if not record then[\s\S]*?C\.INVALID_RV_DATA',
                 exit_player,
             ) is not None
             and re.search(
@@ -1532,10 +1680,10 @@ def main() -> int:
                     "ROOF_REPAIR_REMOTE_OFFSET_X",
                     "ROOF_REPAIR_REMOTE_OFFSET_Y",
                     "ROOF_REPAIR_REMOTE_OFFSET_Z",
-                    "SAVE_REBUILD_REQUIRED",
+                    "INVALID_RV_DATA",
                 ))
-                and "delete this test save and rebuild it" in constants,
-                "current schema constants do not expose the save-rebuild failure contract",
+                and 'C.INVALID_RV_DATA = "RailroaderRVTest: RV data is invalid"' in constants,
+                "current schema constants do not expose the generic invalid-RV-data contract",
             )
             checks.true(
                 "followUpWallRemovalEvents" in railroader_server
@@ -1545,21 +1693,21 @@ def main() -> int:
                 "independent wall events are not retained in a bounded stable follow-up queue",
             )
             checks.true(
-                "manifest.version ~= nil" in server
-                and "map.version ~= nil" in railroader_server
-                and "record.version ~= nil" in railroader_server
-                and "relation.locomotive ~= nil" in railroader_server
-                and "encoded.version ~= nil" in bitmap
-                and "boundary.version ~= nil" in boundary_server,
-                "old persisted field shapes are not rejected by current-only gates",
+                "if not manifestKeys[key] then return false end" in manifest_validation
+                and 'not mapOnlyKeys(map, { "schemaVersion", "locomotives", "players" })' in mapping
+                and "integer(map.schemaVersion) ~= C.MAP_SCHEMA_VERSION" in mapping
+                and 'not exactKeys(encoded, { "schemaVersion", "bitmapVersion"' in bitmap
+                and 'not exactKeys(boundary, { "schemaVersion", "rvId"' in boundary_geometry,
+                "current manifest, mapping, bitmap, and boundary validators do not enforce current exact fields",
             )
             checks.true(
                 "requireCurrentManifest(manifest, true)" in server
-                and "error(C.SAVE_REBUILD_REQUIRED)" in railroader_server
+                and "error(C.INVALID_RV_DATA)" in mapping
+                and "error(Constants.INVALID_RV_DATA)" in manifest_validation
                 and "Bitmap.decode(encoded)" in boundary_server
-                and "bitmapVersion ~= C.BITMAP_VERSION" in bitmap
-                and "integer(bitmapVersion) ~= C.BITMAP_VERSION" in boundary_server,
-                "schema mismatch does not fail closed with the stable rebuild message",
+                and "schemaVersion ~= Bitmap.SCHEMA_VERSION" in bitmap
+                and "integer(boundary.schemaVersion) ~= C.BOUNDARY_SCHEMA_VERSION" in boundary_geometry,
+                "current schema mismatch does not fail closed with generic invalid-RV-data",
             )
             checks.true(
                 re.search(r"C\.TELEPORT_X\s*=\s*20050", constants) is not None
@@ -1588,78 +1736,22 @@ def main() -> int:
                 "shared constants do not define the final relocation command",
             )
             checks.true(
-                re.search(
-                    r'woodFloor\s*=\s*\{\s*sprite\s*=\s*["\']floors_interior_carpet_01_5["\']\s*,\s*'
-                    r'northSprite\s*=\s*["\']floors_interior_carpet_01_5["\']',
-                    constants,
-                ) is not None,
-                "room floor contract does not use floors_interior_carpet_01_5",
+                re.search(r"C\.CAPTURED_TEMPLATE_VERSION\s*=\s*2", constants)
+                is not None
+                and re.search(r"schemaVersion\s*=\s*2", captured_template)
+                is not None
+                and re.search(r"objectCount\s*=\s*357", captured_template)
+                is not None
+                and len(captured_template_rows) == 357
+                and len(captured_roof_cells) == 88,
+                "current captured template version/count or unique roof-host count is stale",
             )
             checks.true(
-                re.search(
-                    r'wall\s*=\s*\{\s*sprite\s*=\s*["\']walls_interior_house_03_20["\']\s*,\s*'
-                    r'northSprite\s*=\s*["\']walls_interior_house_03_21["\']',
-                    constants,
-                ) is not None
-                and re.search(
-                    r'wallNW\s*=\s*\{\s*sprite\s*=\s*["\']walls_interior_house_03_22["\']',
-                    constants,
-                ) is not None
-                and re.search(
-                    r'wallSE\s*=\s*\{\s*sprite\s*=\s*["\']walls_interior_house_03_23["\']',
-                    constants,
-                ) is not None,
-                "wall sprite contract does not use the verified 20/21 straight and 22/23 corner tiles",
-            )
-            checks.true(
-                re.search(
-                    r'wallLamp\s*=\s*\{\s*sprite\s*=\s*["\']BuildingCraft_Light_17["\']\s*,\s*'
-                    r'northSprite\s*=\s*["\']BuildingCraft_Light_17["\']',
-                    constants,
-                )
-                is not None,
-                "light contract does not select BuildCraft Custom House Light Switch 1",
-            )
-            checks.true(
-                "lighting_indoor_01_16" not in constants,
-                "light contract still names the retired vanilla wall lamp",
-            )
-            checks.true(
-                re.search(r"attachedFlag\s*=\s*[\"']attachedW[\"']", constants)
-                is not None,
-                "light contract does not identify attachedW as an IsoFlagType flag",
-            )
-            checks.true(
-                re.search(r"attached\s*=\s*[\"']attachedW[\"']", constants)
-                is None,
-                "light contract still exposes attachedW as an ordinary string property",
-            )
-            checks.true(
-                re.search(r"objectType\s*=\s*[\"']lightswitch[\"']", constants)
-                is not None,
-                "light contract does not identify lightswitch as the IsoObjectType",
-            )
-            checks.true(
-                re.search(r"lightSwitch\s*=", constants) is None,
-                "light contract still exposes lightswitch as an ordinary property",
-            )
-            for metadata_name, metadata_value in (
-                ("customNameValue", "Switch"),
-                ("groupNameValue", "Light"),
-                ("moveTypeValue", "WallObject"),
-            ):
-                checks.true(
-                    re.search(
-                        rf"{metadata_name}\s*=\s*[\"']{metadata_value}[\"']",
-                        constants,
-                    )
-                    is not None,
-                    f"light contract does not require BuildCraft {metadata_value} metadata",
-                )
-            checks.true(
-                re.search(r"^\s*facing(?:Value)?\s*=", constants, re.MULTILINE)
-                is None,
-                "light contract still assumes a Facing property absent from BuildCraft switch tiles",
+                "wallLamp" not in captured_template
+                and "lighting_indoor_01_16" not in captured_template
+                and "createLight" not in generation_build
+                and "createCapturedTemplateObject" in generation_build,
+                "captured RV generation still depends on the retired synthetic wall-lamp stage",
             )
             checks.true(
                 re.search(
@@ -1695,16 +1787,17 @@ def main() -> int:
                 and "C.INTERIOR_MIN_OFFSET_Y" in layout
                 and "C.INTERIOR_MAX_OFFSET_Y" in layout
                 and '"corner-nw"' in layout
-                and '"corner-se"' in layout,
-                "shared layout does not expose the 6x40 interior and verified corner roles",
+                and '"corner-se"' not in layout
+                and "#Template.buildCells ~= 24" in layout,
+                "shared layout does not expose the captured 6x23 interior and 6x4 cab build mask",
             )
             checks.true(
-                "#wallCoordinates ~= 92" in layout
-                and "uniqueCoordinateCount ~= 92" in layout
-                and "northCount ~= 12" in layout
-                and "westCount ~= 80" in layout
-                and "cornerCount ~= 2" in layout,
-                "shared layout wall quantity contract is not 92 objects/coordinates",
+                "Template.objects" in layout
+                and "templateIndex" in layout
+                and "bounds.wallObjectCount ~= 54" in server_schema
+                and "bounds.northEdges ~= 12 or bounds.westEdges ~= 42" in server_schema
+                and "bounds.wallCornerCount ~= 1" in server_schema,
+                "captured shell contract is not 54 objects with N12/W42/corner1",
             )
 
         helper = section(
@@ -1810,14 +1903,14 @@ def main() -> int:
             )
 
         validate = section(
-            server,
+            generation_flow,
             r"local function validateRequest\(module, command, player, args\)",
             r"local function generateForPlayer",
         )
         checks.true(validate is not None, "validateRequest function is missing")
         if validate is not None:
             checks.true(
-                "if not isEmptyCommandArgs(args) then" in validate,
+                "if not ServerUtil.isEmptyCommandArgs(args) then" in validate,
                 "validateRequest does not call strict payload validation",
             )
             checks.true(
@@ -1826,7 +1919,7 @@ def main() -> int:
             )
 
         relocation_safety = section(
-            server,
+            roof_destinations,
             r"local function squareIsSafeForRelocation",
             r"local function selectGenerationStagingDestination",
         )
@@ -1847,7 +1940,7 @@ def main() -> int:
                 )
 
         relocation_search = section(
-            server,
+            roof_destinations,
             r"local function selectGenerationStagingDestination",
             r"local function playerIsAtStagingDestination",
         )
@@ -1867,7 +1960,7 @@ def main() -> int:
             )
 
         generation_staging_server = section(
-            server,
+            roof_destinations,
             r"local function selectGenerationStagingDestination",
             r"local function playerIsAtStagingDestination",
         )
@@ -1891,21 +1984,21 @@ def main() -> int:
         checks.true(
             "GENERATION_STAGING_Z = Constants.RELOCATION_SENTINEL_Z" in server
             and "RELOCATION_SENTINEL_Z = -15" in constants
-            and 'generationTransition = true' in server
-            and 'generationPhase = "temporary"' in server
+            and 'generationTransition = true' in generation_flow
+            and 'generationPhase = "temporary"' in generation_flow
             and 'GENERATION_HALO_TEXT = "正在生成房车"' in client,
             "generation staging phase marker or exact local Chinese halo is missing",
         )
 
         queue = section(
-            server,
+            generation_flow,
             r"local function queueGeneration",
-            r"local function ackPayloadToken",
+            r"ctx\.queueGeneration\s*=",
         )
         checks.true(queue is not None, "delayed generation queue is missing")
         if queue is not None:
             checks.true(
-                "pendingGeneration ~= nil or transactionBusy" in queue,
+                "ctx.pendingGeneration ~= nil or ctx.transactionBusy" in queue,
                 "generation queue does not reject duplicate/pending requests",
             )
             checks.true(
@@ -1967,10 +2060,10 @@ def main() -> int:
                 "queue does not use the server-selected staging destination",
             )
             checks.true(
-                "pendingGeneration = {" in queue
+                "ctx.pendingGeneration = {" in queue
                 and "identity = identityOrReason" in queue
                 and "originalPosition = {" in queue
-                and "queuedAtTick = serverTick" in queue
+                and "queuedAtTick = ctx.serverTick" in queue
                 and "relocationServices.relocationLedger" not in queue
                 and "ModData" not in queue,
                 "generation staging does not retain its exact identity/position in process memory",
@@ -1992,7 +2085,7 @@ def main() -> int:
             )
 
         target_coordinates = section(
-            server,
+            server_schema,
             r"local function validateTargetCoordinates\(bounds, destination\)",
             r"local function preflightLoaded",
         )
@@ -2021,19 +2114,19 @@ def main() -> int:
                 and "for y = bounds.roofMinY, bounds.roofMaxY" in target_coordinates
                 and 'validWorldCoordinate(x, y, bounds.roofZ, "roof")' in target_coordinates
                 and "bounds.roomMaxX - bounds.roomMinX + 1 ~= 6" in target_coordinates
-                and "bounds.roomMaxY - bounds.roomMinY + 1 ~= 40" in target_coordinates
+                and "bounds.roomMaxY - bounds.roomMinY + 1 ~= 23" in target_coordinates
                 and "bounds.wallMaxX - bounds.wallMinX + 1 ~= 7" in target_coordinates
-                and "bounds.wallMaxY - bounds.wallMinY + 1 ~= 41" in target_coordinates
+                and "bounds.wallMaxY - bounds.wallMinY + 1 ~= 24" in target_coordinates
                 and "bounds.roofMaxX - bounds.roofMinX + 1 ~= 6" in target_coordinates
-                and "bounds.roofMaxY - bounds.roofMinY + 1 ~= 40" in target_coordinates
+                and "bounds.roofMaxY - bounds.roofMinY + 1 ~= 23" in target_coordinates
                 and "final relocation center is outside the interior" in target_coordinates,
-                "target coordinate validation does not enforce the fixed cleanup and 6x40 room contract",
+                "target coordinate validation does not enforce the fixed cleanup and 6x23 room contract",
             )
 
         preflight = section(
-            server,
+            server_schema,
             r"local function preflightLoaded\(cell, bounds(?:, allowIncomplete)?\)",
-            r"local function removeOldGeneration",
+            r"local function targetAreaLoadStatus",
         )
         checks.true(preflight is not None, "loaded-area preflight is missing")
         if preflight is not None:
@@ -2053,9 +2146,9 @@ def main() -> int:
             )
 
         load_wait = section(
-            server,
+            server_schema,
             r"local function targetAreaLoadStatus",
-            r"local function removeOldGeneration",
+            r"local function eachStructureSquare",
         )
         checks.true(load_wait is not None, "post-teleport target loading wait is missing")
         if load_wait is not None:
@@ -2072,20 +2165,20 @@ def main() -> int:
             )
 
         cleanup = section(
-            server,
+            generation_build,
             r"local function clearGenerationArea",
             r"local function buildGeneration",
         )
         checks.true(cleanup is not None, "fixed cleanup helper is missing")
         if cleanup is not None:
             checks.true(
-                "clearSquare(square, nil)" in cleanup
-                and "walkBounds(cell, bounds" in cleanup,
+                "ServerWorld.clearSquare(square, nil)" in cleanup
+                and "ServerSchema.walkBounds(cell, bounds" in cleanup,
                 "fixed cleanup helper does not walk loaded squares authoritatively",
             )
 
         build_generation = section(
-            server,
+            generation_build,
             r"local function buildGeneration",
             r"local function markGenerationFailed",
         )
@@ -2098,22 +2191,17 @@ def main() -> int:
                 "buildGeneration still enables the retired full metal-floor stage",
             )
             checks.true(
-                'setGenerationPhase(manifest, generation, "WOOD_FLOOR")' in build_generation
-                and 'createFloor(square, woodSprite, generation, "wood_floor", tagContext)' in build_generation
-                and "Interior floor: exactly 6x40" in build_generation
-                and "nwWallSprite" in build_generation
-                and "seWallSprite" in build_generation
-                and "#wallCoordinates ~= 92" in build_generation
-                and "northEdges ~= 12" in build_generation
-                and "westEdges ~= 80" in build_generation
-                and "corners ~= 2" in build_generation,
-                "buildGeneration does not retain the 6x40 carpet floor and 92-object wall stage",
+                'setGenerationPhase(manifest, generation, "CAPTURED_TEMPLATE")' in build_generation
+                and "Template.objectCount ~= 357" in build_generation
+                and "createCapturedTemplateObject(cell, square, entry" in build_generation
+                and "captured object differs from the current template" in build_generation,
+                "buildGeneration does not apply the captured 357-object template",
             )
 
         generation = section(
-            server,
+            generation_flow,
             r"local function generateForPlayer",
-            r"local function queueGeneration",
+            r"local function finalizeGenerationAfterRelocate",
         )
         checks.true(generation is not None, "generation transaction is missing")
         if generation is not None:
@@ -2168,11 +2256,12 @@ def main() -> int:
                 "generation failure does not enter the existing rollback path",
             )
             final_relocate = generation.find("relocatePlayerIntoHouse, player, prepared")
-            ready_commit = generation.find('setManifestState(manifest, "READY")')
+            await_final_relocate = generation.find('return "await-final-relocate"')
             checks.true(
                 final_relocate > build_call
-                and ready_commit > final_relocate,
-                "final in-house relocation is not after build and before READY",
+                and await_final_relocate > final_relocate
+                and 'setManifestState(manifest, "READY")' not in generation,
+                "post-build final relocation does not hand off to its asynchronous ACK phase",
             )
             checks.true(
                 'setGenerationPhase(manifest, generation, "FINAL_RELOCATE")' in generation
@@ -2180,19 +2269,20 @@ def main() -> int:
                 and "removeGeneration(cell, bounds, generation, manifest.rvId" in generation,
                 "final relocation failure does not enter the generation rollback path",
             )
-            phase_pos = server.find(
+            phase_pos = generation_flow.find(
                 'setGenerationPhase(manifest, generation, "FINAL_RELOCATE")'
             )
             checks.true(
                 phase_pos >= 0
-                and "finalRelocationAcked" in server
-                and "pendingGeneration = completedPending" not in server
-                and "publishFinalRelocationLedger" not in server,
-                "generation FINAL_RELOCATE still depends on a persisted relocation ledger",
+                and "prepared.finalRelocationAcked = false" in generation_flow
+                and "pending.finalRelocationAcked = true" in generation_ack
+                and 'manifest.phase ~= "FINAL_RELOCATE"' in generation_ack
+                and "publishFinalRelocationLedger" not in generation_flow + generation_ack,
+                "generation FINAL_RELOCATE does not use its process-local ACK transaction",
             )
 
         final_relocation = section(
-            server,
+            generation_flow,
             r"local function relocatePlayerIntoHouse",
             r"local function generateForPlayer",
         )
@@ -2215,7 +2305,7 @@ def main() -> int:
             )
 
         final_ack = section(
-            server,
+            generation_ack,
             r"local function acknowledgeFinalRelocation",
             r"local function rollbackPendingGenerationWorld",
         )
@@ -2227,7 +2317,7 @@ def main() -> int:
             "final relocation ACK does not perform one bounded server-target reassertion",
         )
         final_generation = section(
-            server,
+            generation_flow,
             r"local function finalizeGenerationAfterRelocate",
             r"local function queueGeneration",
         )
@@ -2239,9 +2329,19 @@ def main() -> int:
             and '"teleportTo", target.x, target.y, target.z' in final_generation,
             "generation finalization does not wait for a post-update authoritative target proof",
         )
+        checks.true(
+            final_generation is not None
+            and 'refreshServerRoomOwnershipGuard(guard, "before-commit")' in final_generation
+            and 'refreshServerRoomOwnershipGuard(guard, "after-commit")' in final_generation
+            and final_generation.find('"before-commit"')
+                < final_generation.find('setGenerationPhase(manifest, prepared.generation, "COMMITTED")')
+            and final_generation.find('setManifestState(manifest, "READY")')
+                < final_generation.find('"after-commit"'),
+            "manifest commit is missing the asynchronous room-ownership scans around READY",
+        )
 
         tick = section(
-            server,
+            server_commands,
             r"function RV\.Server\.OnTick\(\)",
             r"function RV\.Server\.OnClientCommand",
         )
@@ -2279,14 +2379,12 @@ def main() -> int:
                 and "final relocation authoritative target is still synchronizing" in tick,
                 "generation OnTick treats stale final-relocation coordinates as an immediate hard failure",
             )
-            server_teleport_pos = server.find('callSucceeded(player, "teleportTo"')
-            wait_call_pos = server.find("local targetLoaded, targetLoadReason")
-            generate_call_pos = server.find("local ok, reason = generateForPlayer")
             checks.true(
-                server_teleport_pos >= 0
-                and wait_call_pos > server_teleport_pos
-                and generate_call_pos > wait_call_pos,
-                "post-teleport target loading wait is not ordered before cleanup",
+                "ServerSchema.targetAreaLoadStatus(playerOrReason" in tick
+                and "local ok, reason = generateForPlayer" in tick
+                and tick.find("ServerSchema.targetAreaLoadStatus(playerOrReason")
+                < tick.find("local ok, reason = generateForPlayer"),
+                "post-teleport target loading wait is not ordered before generation",
             )
 
             destination_wait = section(
@@ -2314,9 +2412,9 @@ def main() -> int:
                 )
 
             wait_helper = section(
-                server,
+                roof_destinations,
                 r"local function relocationPositionStillSyncing\(reason\)",
-                r"local function validateRequest",
+                r"local function roofRepairPosition",
             )
             checks.true(
                 wait_helper is not None,
@@ -2360,14 +2458,14 @@ def main() -> int:
                 "sender lacks UseDebugContextMenu capability",
             ):
                 checks.true(
-                    cancellation_reason in server,
+                    cancellation_reason in player_validation + generation_flow,
                     f"relocation safety regression omits cancellation reason: {cancellation_reason}",
                 )
 
         prepared_generate = section(
-            server,
+            generation_flow,
             r"local function generateForPlayer\(player, prepared\)",
-            r"local function queueGeneration",
+            r"local function finalizeGenerationAfterRelocate",
         )
         checks.true(prepared_generate is not None, "prepared generation executor is missing")
         if prepared_generate is not None:
@@ -2400,16 +2498,10 @@ def main() -> int:
                 and remove_old_pos > server_guard_pos,
                 "client/server stale-room guards are not registered before old-generation removal",
             )
-            for refresh_phase in (
-                '"after-remove"',
-                '"before-final-relocate"',
-                '"before-commit"',
-                '"after-commit"',
-            ):
-                checks.true(
-                    refresh_phase in prepared_generate,
-                    f"server stale-room refresh omits phase {refresh_phase}",
-                )
+            checks.true(
+                '"before-final-relocate"' in prepared_generate,
+                "server stale-room refresh is missing immediately before final relocation",
+            )
 
         structure_scan = section(
             server_schema,
@@ -2459,48 +2551,65 @@ def main() -> int:
             and "for x = bounds.wallMinX, bounds.wallMaxX do" in structure_coordinates
             and "for y = bounds.wallMinY, bounds.wallMaxY do" in structure_coordinates
             and "callback(x, y, bounds.z)" in structure_coordinates
-            and "for x = bounds.roofMinX, bounds.roofMaxX do" in structure_coordinates
-            and "for y = bounds.roofMinY, bounds.roofMaxY do" in structure_coordinates
+            and "for i = 1, #Template.objects do" in structure_coordinates
+            and "local captured = Template.objects[i]" in structure_coordinates
+            and "if captured.z == C.ROOF_Z_OFFSET then" in structure_coordinates
+            and "local seen = {}" in structure_coordinates
+            and "if not seen[key] then" in structure_coordinates
+            and "seen[key] = true" in structure_coordinates
             and "callback(x, y, bounds.roofZ)" in structure_coordinates
             and "roomMin" not in structure_coordinates,
-            "shared structure traversal does not cover only the wall and roof rectangles",
+            "shared structure traversal does not scan the base walls plus unique captured roof squares",
         )
 
         server_room_clear = section(
-            server,
+            room_ownership,
             r"local function clearInvalidRoomOwnershipReferences",
             r"local function registerServerRoomOwnershipGuard",
         )
+        server_room_square_clear = section(
+            room_ownership,
+            r"local function clearInvalidRoomOwnershipSquare\(square\)",
+            r"local function clearInvalidRoomOwnershipReferences",
+        )
         checks.true(server_room_clear is not None, "server stale-room correction is missing")
-        if server_room_clear is not None:
+        checks.true(
+            server_room_square_clear is not None,
+            "server stale-room square inspector is missing",
+        )
+        if server_room_clear is not None and server_room_square_clear is not None:
             checks.true(
-                'invoke(square, "getRoom")' in server_room_clear
-                and 'invoke(square, "getRoomDef")' in server_room_clear
-                and "if roomDef == nil then" in server_room_clear,
+                "clearInvalidRoomOwnershipSquare(square)" in server_room_clear
+                and 'invoke(square, "getRoom")' in server_room_square_clear
+                and 'invoke(square, "getRoomDef")' in server_room_square_clear
+                and "if roomDef ~= nil then return false end" in server_room_square_clear,
                 "server stale-room correction does not require room!=nil and RoomDef=nil",
             )
             checks.true(
-                server_room_clear.count('callSucceeded(square, "setRoomID", -1)') == 1
-                and server_room_clear.find("if roomDef == nil then")
-                < server_room_clear.find('callSucceeded(square, "setRoomID", -1)'),
+                server_room_square_clear.count('callSucceeded(square, "setRoomID", -1)') == 1
+                and server_room_square_clear.find("if roomDef ~= nil then return false end")
+                < server_room_square_clear.find('callSucceeded(square, "setRoomID", -1)'),
                 "server stale-room correction is absent, duplicated, or outside the RoomDef=nil branch",
             )
             checks.true(
-                '"setRoom"' not in server_room_clear
-                and "ResetIsoWorldRegion" not in server_room_clear
-                and "RecalcAllWithNeighbours" not in server_room_clear,
+                '"setRoom"' not in server_room_square_clear
+                and "ResetIsoWorldRegion" not in server_room_square_clear
+                and "RecalcAllWithNeighbours" not in server_room_square_clear,
                 "server stale-room correction mutates valid engine room/region state",
             )
             checks.true(
-                "eachStructureSquare(cell, oldBounds, inspect)" in server_room_clear
-                and "eachStructureSquare(cell, newBounds, inspect)" in server_room_clear,
+                "structureCoordinates(oldBounds, markExpected)" in server_room_clear
+                and "structureCoordinates(newBounds, markExpected, materializedNewRoofCoordinates)"
+                    in server_room_clear
+                and "for i = 1, #expectedCoordinates do" in server_room_clear
+                and "ServerWorld.getSquare(cell, coordinate.x" in server_room_clear,
                 "server stale-room correction does not cover complete old and new footprints",
             )
 
         room_guard_broadcast = section(
-            server,
+            room_ownership,
             r"local function armClientRoomOwnershipGuard",
-            r"local function removeGeneration",
+            r"local function armTargetedClientRoomOwnershipGuard",
         )
         checks.true(room_guard_broadcast is not None, "client room-guard broadcast is missing")
         if room_guard_broadcast is not None:
@@ -2520,9 +2629,9 @@ def main() -> int:
             )
 
         targeted_room_guard = section(
-            server,
+            room_ownership,
             r"local function armTargetedClientRoomOwnershipGuard",
-            r"local function ensureRoofSquare",
+            r"ctx\.armTargetedClientRoomOwnershipGuard\s*=",
         )
         checks.true(
             targeted_room_guard is not None,
@@ -2539,9 +2648,9 @@ def main() -> int:
             )
 
         current_room_monitor = section(
-            server,
+            record_validation,
             r"function RV\.Server\.armCurrentRoomOwnershipMonitor",
-            r"local function ackPayloadToken",
+            r"\nend\s*\n\s*end\s*$",
         )
         checks.true(
             current_room_monitor is not None,
@@ -2557,13 +2666,13 @@ def main() -> int:
                 and "record.rvId" in current_room_monitor
                 and "record.generation" in current_room_monitor
                 and "record.bitmapVersion" in current_room_monitor
-                and "return false, Constants.SAVE_REBUILD_REQUIRED"
+                and "return false, Constants.INVALID_RV_DATA"
                 in current_room_monitor,
                 "existing-entry monitor does not fail closed on current identity/schema",
             )
 
         server_guard_tick = section(
-            server,
+            room_ownership,
             r"local function processServerRoomOwnershipGuards",
             r"local function copyRoomRefreshBounds",
         )
@@ -2580,7 +2689,7 @@ def main() -> int:
                 "server stale-room guard is not cleaned after completion/timeout",
             )
             checks.true(
-                "roofRepairRelocationGroup ~= nil or roofRepairGroupFinalReturn ~= nil"
+                "ctx.roofRepairRelocationGroup ~= nil or ctx.roofRepairGroupFinalReturn ~= nil"
                 in server_guard_tick
                 and "pause only this non-transactional cleanup until the member returns"
                 in server_guard_tick,
@@ -2588,7 +2697,7 @@ def main() -> int:
             )
 
         client_room_clear = section(
-            client,
+            client_room_ownership,
             r"local function inspectRoomOwnershipSquare",
             r"local function beginRoomOwnershipRefresh",
         )
@@ -2622,7 +2731,7 @@ def main() -> int:
                 "client stale-room correction does not cover complete old and new footprints",
             )
             client_room_refresh = section(
-                client,
+                client_room_ownership,
                 r"local function refreshInvalidRoomOwnership",
                 r"local function refreshCurrentPlayerRoomOwnership",
             )
@@ -2633,7 +2742,7 @@ def main() -> int:
             )
 
         client_room_event = section(
-            client,
+            client_room_ownership,
             r"local function requestRoomOwnershipScan",
             r"local function beginRoomOwnershipRefresh",
         )
@@ -2645,7 +2754,7 @@ def main() -> int:
         )
 
         client_structure_scan = section(
-            client,
+            client_room_ownership,
             r"local function eachStructureSquare",
             r"local function refreshInvalidRoomOwnership",
         )
@@ -2667,7 +2776,7 @@ def main() -> int:
             )
 
         client_room_begin = section(
-            client,
+            client_room_ownership,
             r"local function beginRoomOwnershipRefresh",
             r"local function updateRoomOwnershipGuards",
         )
@@ -2693,7 +2802,7 @@ def main() -> int:
             )
 
         final_client_room = section(
-            client,
+            client_relocation_source,
             r"local function tryApplyFinalRelocation",
             r"local function applyFinalRelocation",
         )
@@ -2706,33 +2815,35 @@ def main() -> int:
         )
 
         client_room_tick = section(
-            client,
+            client_room_ownership,
             r"local function updateRoomOwnershipGuards",
-            r"function Client\.requestGenerate",
+            r"ctx\.updateRoomOwnershipGuards\s*=",
         )
         checks.true(client_room_tick is not None, "client room-guard tick processor is missing")
         if client_room_tick is not None:
             checks.true(
                 "ROOM_OWNERSHIP_MIN_TICKS" in client_room_tick
-                and "ROOM_OWNERSHIP_STABLE_TICKS" in client_room_tick
                 and "guard.monitorReady" in client_room_tick,
-                "client room monitor lacks stable warm-up state",
+                "client room monitor does not track its readiness age",
             )
             checks.true(
-                "ROOM_OWNERSHIP_MAX_TICKS" not in client
+                "ROOM_OWNERSHIP_MAX_TICKS" not in client_room_ownership
                 and "roomOwnershipGuards[finished[i]] = nil" not in client_room_tick
-                and "client room ownership monitor active generation=" in client_room_tick,
+                and "client room ownership guard active generation=" in client_room_tick,
                 "client room monitor still retires after the initial generation tail",
             )
             checks.true(
                 re.search(r"local clientTick\s*=\s*0", client) is not None
-                and "clientTick = clientTick + 1" in client
+                and "ctx.clientTick = ctx.clientTick + 1" in client_relocation_source
                 and "refreshCurrentPlayerRoomOwnership(guard)" in client_room_tick
                 and "guard.scanRequested" in client_room_tick,
                 "client room monitor lacks an owned tick counter or mutation-safe immediate scan",
             )
             checks.true(
-                "guard.scanRequested = not scanOk or cleared > 0" in client_room_tick,
+                "if (guard.scanRetryRemaining or 0) > 0 then" in client_room_tick
+                and "guard.scanRequested = true" in client_room_tick
+                and "if currentScanOk and currentCleared > 0 then" in client_room_tick
+                and "scheduleRoomOwnershipScan(guard, 0)" in client_room_tick,
                 "client room monitor drops failed full-scan retries",
             )
 
@@ -2755,22 +2866,16 @@ def main() -> int:
                 "utility mapping sync caches a business failure or send failure",
             )
 
-        checks.true(
-            "C.BOUNDARY_TICK_INTERVAL = 1" in constants
-            and "C.BOUNDARY_CLEANUP_RESCAN_TICKS" in constants
-            and "cursor.completedTick" in boundary_server
-            and "completedTick = Boundary._tick" in boundary_server,
-            "boundary cleanup fallback has no timely cursor completion/cooldown contract",
-        )
-
         server_room_event = section(
-            server,
+            room_ownership,
             r"local function requestRoomOwnershipScan",
-            r"local function roomOwnershipGuardKey",
+            r"local function requestRoomOwnershipRemovalScan",
         )
         checks.true(
             server_room_event is not None
-            and "if x == nil then return end" in server_room_event
+            and "if x == nil then" in server_room_event
+            and server_room_event.find("if x == nil then")
+                < server_room_event.find("for _, guard in pairs(roomOwnershipGuards) do")
             and "x == nil or" not in server_room_event,
             "server room mutation events wake every guard when object coordinates are unavailable",
         )
@@ -2807,7 +2912,7 @@ def main() -> int:
             "client adapters do not share Java-aware finite and integer conversion with NaN/infinity rejection",
         )
         client_relocation = section(
-            client,
+            client_relocation_source,
             r"function Client\.onServerCommand",
             r"function Client\.onTick",
         )
@@ -2837,7 +2942,7 @@ def main() -> int:
             )
 
         final_client_relocation = section(
-            client,
+            client_relocation_source,
             r"local function tryApplyFinalRelocation",
             r"function Client\.onServerCommand",
         )
@@ -2851,16 +2956,14 @@ def main() -> int:
                 and "sendFinalRelocationAck" in final_client_relocation,
                 "client final relocation does not apply the server-selected center",
             )
-            cleanup_pos = final_client_relocation.find(
-                "refreshInvalidRoomOwnership"
-            )
+            cleanup_pos = final_client_relocation.find("tryFinalRelocationGuardScan")
             teleport_pos = final_client_relocation.find("playerObj:teleportTo")
             checks.true(
                 cleanup_pos >= 0
                 and teleport_pos > cleanup_pos
                 and "generation" in final_client_relocation
                 and "pendingFinalRelocation" in final_client_relocation,
-                "client final relocation does not synchronously clear stale rooms before teleport",
+                "client final relocation does not complete its guarded full scan before teleport",
             )
             checks.true(
                 "COMMAND_FINAL_RELOCATE_ACK" in final_client_relocation
@@ -2869,7 +2972,7 @@ def main() -> int:
                 "client final relocation does not use its separate strict ACK flow",
             )
         server_command_handler = section(
-            client,
+            client_relocation_source,
             r"function Client\.onServerCommand",
             r"function Client\.onTick",
         )
@@ -2881,9 +2984,9 @@ def main() -> int:
         )
 
         client_tick = section(
-            client,
+            client_relocation_source,
             r"function Client\.onTick\(\)",
-            r"Events\.OnFillWorldObjectContextMenu",
+            r"Events\.OnServerCommand\.Add",
         )
         checks.true(client_tick is not None, "client delayed relocation OnTick is missing")
         if client_tick is not None:
@@ -2913,9 +3016,9 @@ def main() -> int:
             )
 
         preflight = section(
-            server,
+            server_schema,
             r"local function preflightLoaded\(cell, bounds(?:, allowIncomplete)?\)",
-            r"local function removeOldGeneration",
+            r"local function targetAreaLoadStatus",
         )
         checks.true(preflight is not None, "preflightLoaded function is missing")
         if preflight is not None:
@@ -2934,7 +3037,7 @@ def main() -> int:
             )
 
         roof_helper = section(
-            server,
+            world_objects,
             r"local function ensureRoofSquare\(cell, x, y, z\)",
             r"local function createFloor",
         )
@@ -2959,112 +3062,39 @@ def main() -> int:
             )
 
         roof_phase = section(
-            server,
-            r'setGenerationPhase\(manifest, generation, "ROOF_FLOOR"\)',
+            generation_build,
+            r'setGenerationPhase\(manifest, generation, "CAPTURED_TEMPLATE"\)',
             r'setGenerationPhase\(manifest, generation, "STRUCTURE_RECALC"\)',
         )
-        checks.true(roof_phase is not None, "ROOF_FLOOR phase is missing")
+        checks.true(roof_phase is not None, "CAPTURED_TEMPLATE phase is missing")
         if roof_phase is not None:
             checks.true(
-                "ensureRoofSquare(cell, x, y, bounds.roofZ)" in roof_phase,
-                "ROOF_FLOOR does not create or reuse missing roof squares",
+                "ensureRoofSquare(cell, entry.x, entry.y, entry.z)" in roof_phase,
+                "captured roof objects do not create or reuse their upper squares",
             )
             checks.true(
-                roof_phase.find("ensureRoofSquare") < roof_phase.find("createFloor"),
-                "ROOF_FLOOR does not create the square before addFloor",
+                roof_phase.find("ensureRoofSquare(cell, entry.x")
+                < roof_phase.find("createCapturedTemplateObject(cell, square, entry"),
+                "captured template objects are added before their square exists",
             )
 
-        entity_helper = section(
-            server,
-            r"local function createEntityFromSprite\(object, sprite, requiredComponent\)",
-            r"local function createWall",
+        captured_factory = section(
+            world_objects,
+            r"local function createCapturedTemplateObject",
+            r"-- Error objects are not required",
         )
-        checks.true(entity_helper is not None, "createEntityFromSprite helper is missing")
-        if entity_helper is not None:
-            checks.true(
-                "pcall(factory.CreateIsoObjectEntity, object, parent, true)" in entity_helper,
-                "entity helper does not call the B42 factory",
+        checks.true(
+            captured_factory is not None
+            and all(
+                f'entry.class == "{class_name}"' in captured_factory
+                for class_name in ("IsoObject", "IsoThumpable", "IsoWindow", "IsoLightSwitch")
             )
-            checks.true(
-                "getEntityScript" in entity_helper,
-                "entity helper does not verify the script component on the IsoObject",
-            )
-            checks.true(
-                "hasEntityComponent(object, requiredComponent)" in entity_helper
-                and 'invoke(object, "getFluidContainer")' in server,
-                "entity helper does not verify the required FluidContainer component",
-            )
-            checks.true(
-                re.search(r'invoke\(object,\s*"getEntity"\)', entity_helper) is None,
-                "entity helper still treats getEntity as the factory postcondition",
-            )
-            checks.true(
-                entity_helper.count("if requiredComponent and not hasEntityComponent(object, requiredComponent)")
-                == 1,
-                "entity helper contains a duplicated required-component check",
-            )
-
-        light_validate = section(
-            server,
-            r"local function validatePlayerLightSprite\(spriteObject, spriteName\)",
-            r"local function createLight",
+            and "applyCapturedIdentityAndState" in captured_factory
+            and "captured object client transmission failed" in captured_factory
+            and "createFurniture(" not in generation_build
+            and "createLight(" not in generation_build,
+            "generation does not construct captured classes from their current template entries",
         )
-        checks.true(light_validate is not None, "validatePlayerLightSprite function is missing")
-        if light_validate is not None:
-            checks.true(
-                'expectedSprite = Constants.SPRITES.wallLamp.sprite' in light_validate
-                and "player light must be BuildCraft custom-house switch 1" in light_validate,
-                "player light validation does not reject a non-BuildingCraft custom switch",
-            )
-            checks.true(
-                'rawget(_G, "IsoFlagType")' in light_validate
-                and "lightProperties.attachedFlag" in light_validate,
-                "player light validation does not resolve the attached flag through IsoFlagType",
-            )
-            checks.true(
-                re.search(r'invoke\(properties,\s*"has",\s*attachedFlag\)', light_validate)
-                is not None,
-                "player light validation does not pass the IsoFlagType enum to PropertyContainer:has",
-            )
-            checks.true(
-                'rawget(_G, "IsoObjectType")' in light_validate
-                and "objectTypes.lightswitch" in light_validate
-                and re.search(
-                    r'invoke\(spriteObject,\s*"getType"\)', light_validate
-                ) is not None
-                and "expectedType" in light_validate,
-                "player light validation does not verify IsoObjectType via sprite:getType",
-            )
-            checks.true(
-                "lightProperties.lightSwitch" not in light_validate,
-                "lightswitch is still checked as an ordinary string property",
-            )
-            checks.true(
-                re.search(r'invoke\(properties,\s*"has",\s*propertyName\)', light_validate)
-                is not None,
-                "player light validation no longer checks ordinary string properties",
-            )
-            checks.true(
-                re.search(r"local required = \{\s*\n\s*lightProperties\.movable", light_validate)
-                is not None,
-                "attachedW flag was not separated from ordinary string properties",
-            )
-            checks.true(
-                "expectedMetadata" in light_validate
-                and "lightProperties.customName" in light_validate
-                and "lightProperties.groupName" in light_validate
-                and "lightProperties.moveType" in light_validate,
-                "player light validation does not check BuildCraft custom switch metadata",
-            )
-            checks.true(
-                "lightProperties.facing" not in light_validate
-                and "must face E" not in light_validate,
-                "player light validation still assumes the retired Facing=E metadata",
-            )
-            checks.true(
-                'invoke(properties, "has", lightProperties.attachedFlag)' not in light_validate,
-                "player light validation still passes attachedW as a literal string",
-            )
         hidden_component = section(
             utility_water,
             r"local function addFluidComponent",
@@ -3174,13 +3204,11 @@ def main() -> int:
                 "usage-tank initialization does not carry fresh metadata or fail closed for persisted-missing objects",
             )
         checks.true(
-            "local function retiredObjectTag" in utility_water
-            and "RailroaderRVTestUtility" in utility_water
-            and 'nested.role == "rain_barrel"' in utility_water
-            and 'data.role == "rain_barrel"' in utility_water
-            and "generic boundary tags" in utility_water
-            and "former generation-owned barrel" in utility_water,
-            "usage-tank square audit does not restrict legacy evidence to the exact rain_barrel role",
+            "retiredObjectTag" not in utility_objects + utility_plumbing
+            and "if sameGenerationIdentity(tag, identity) then" in utility_objects
+            and "validUtilityTag(tag, identity, role, deviceId)" in utility_objects
+            and 'validUtilityTag(oldTag, identity, "fixture", oldTag.deviceId)' in utility_plumbing,
+            "usage-tank square audit retains current utility tag validation without retired-object handling",
         )
         checks.true(
             "local recordFresh = false" in utility_store
@@ -3242,7 +3270,7 @@ def main() -> int:
                 and 'proxyState == "orphan"' in connect_transaction
                 and 'proxyState == "registered"' in connect_transaction
                 and connect_transaction.find('proxyState == "orphan"') < connect_transaction.find("makeObject")
-                and 'if existing or status == "duplicate" then return false, C.SAVE_REBUILD_REQUIRED end'
+                and 'if existing or status == "duplicate" then return false, C.INVALID_RV_DATA end'
                 and "result.committed ~= true" in connect_transaction
                 and "markCurrentWaterRebuild(identity, result)" in connect_transaction,
                 "CONNECT does not gate orphan/duplicate proxy squares or prove proxy/fixture rollback around the isolated root",
@@ -3272,26 +3300,10 @@ def main() -> int:
             and "layout.barrel" not in server,
             "server still contains the retired visible rain-barrel path",
         )
-        furniture = section(
-            server,
-            r"local function createFurniture",
-            r"-- Error objects are not required",
-        )
-        checks.true(furniture is not None, "createFurniture function is missing")
-        if furniture is not None:
-            checks.true(
-                "entityCreated == false" in furniture,
-                "furniture path does not reject a failed scripted-entity creation",
-            )
-            checks.true(
-                "transmitCompleteItemToClients" not in furniture,
-                "createFurniture sends before the caller finalizes object state",
-            )
-
         special_add = section(
-            server,
+            world_objects,
             r"local function addSpecialObject\(square, object\)",
-            r"local function addNormalObject",
+            r"local function createWall",
         )
         checks.true(special_add is not None, "addSpecialObject helper is missing")
         if special_add is not None:
@@ -3303,99 +3315,8 @@ def main() -> int:
                 "recalcSquare(square)" in special_add,
                 "addSpecialObject no longer recalculates after attachment",
             )
-        normal_add = section(
-            server,
-            r"local function addNormalObject\(square, object\)",
-            r"local function hasEntityComponent",
-        )
-        checks.true(normal_add is not None, "addNormalObject helper is missing")
-        if normal_add is not None:
-            checks.true(
-                "transmitCompleteItemToClients" not in normal_add,
-                "addNormalObject still sends a premature full-object packet",
-            )
-            checks.true(
-                "recalcSquare(square)" in normal_add,
-                "addNormalObject no longer recalculates after attachment",
-            )
-
-        wall = section(
-            server,
-            r"local function createWall",
-            r"local function validatePlayerLightSprite",
-        )
-        checks.true(wall is not None, "createWall function is missing")
-        if wall is not None:
-            checks.true(
-                wall.count("transmitCompleteItemToClients") == 1,
-                "wall does not have exactly one final full-object packet",
-            )
-            checks.true(
-                wall.find("transmitCompleteItemToClients") > wall.find("addSpecialObject"),
-                "wall full-object packet is sent before attachment",
-            )
-            checks.true(
-                all(
-                    network_call not in wall
-                    for network_call in (
-                        "transmitModData",
-                        "sendObjectChange",
-                        '"sync"',
-                        "transmitUpdatedSpriteToClients",
-                        "transmitRemoveItemFromSquare",
-                    )
-                ),
-                "wall emits a pre-complete object-index network packet",
-            )
-
-        light = section(
-            server,
-            r"local function createLight",
-            r"local function createGenerator",
-        )
-        checks.true(light is not None, "createLight function is missing")
-        if light is not None:
-            construct_position = light.find("invokeClass(cls")
-            source_position = light.find('callSucceeded(light, "addLightSourceFromSprite")')
-            attach_position = light.find("addSpecialObject(square, light)")
-            activate_position = light.find('callSucceeded(light, "setActivated", true)')
-            packet_position = light.find('callSucceeded(light, "transmitCompleteItemToClients")')
-            checks.true(
-                construct_position >= 0
-                and source_position > construct_position
-                and attach_position > source_position
-                and activate_position > attach_position
-                and packet_position > activate_position,
-                "light does not preserve BuildCraft construct/source/attach/activate/send order",
-            )
-            checks.true(
-                light.count("transmitCompleteItemToClients") == 1,
-                "light does not have exactly one final full-object packet",
-            )
-            checks.true(
-                light.find("transmitCompleteItemToClients") > light.find("addSpecialObject")
-                and light.find("transmitCompleteItemToClients") > light.find("setActivated"),
-                "light full-object packet is sent before final activation",
-            )
-            checks.true(
-                "transmitModData" not in light,
-                "light sends a separate modData packet instead of carrying final state in its full packet",
-            )
-            checks.true(
-                all(
-                    network_call not in light
-                    for network_call in (
-                        "sendObjectChange",
-                        "transmitUpdatedSpriteToClients",
-                        "transmitRemoveItemFromSquare",
-                        '"sync"',
-                    )
-                ),
-                "light has an additional network send before or beside its unique full packet",
-            )
-
         generator = section(
-            server,
+            world_objects,
             r"local function createGenerator",
             r"local function createFurniture",
         )
@@ -3435,89 +3356,130 @@ def main() -> int:
             "retired rain-barrel creator or global bridge remains in the server facade",
         )
 
-        sink_component_helper = section(
-            server,
-            r"local function ensureSinkFluidContainer",
-            r"local function createEntityFromSprite",
-        )
-        checks.true(
-            sink_component_helper is not None
-            and "ComponentType" in sink_component_helper
-            and "FluidContainer" in sink_component_helper
-            and "GameEntityFactory" in sink_component_helper
-            and "AddComponent" in sink_component_helper,
-            "generated sink does not have a B42 FluidContainer component helper",
-        )
-        furniture_builder = section(
-            server,
-            r"local function createFurniture",
+        captured_builder = section(
+            world_objects,
+            r"local function createCapturedTemplateObject",
             r"-- Error objects are not required",
         )
         checks.true(
-            furniture_builder is not None
-            and 'role == "sink"' in furniture_builder
-            and "ensureSinkFluidContainer" in furniture_builder
-            and furniture_builder.find("ensureSinkFluidContainer")
-                < furniture_builder.find("tagObject"),
-            "generated sink component is not ready before tag/attachment/full-packet flow",
+            captured_builder is not None
+            and "IsoThumpable" in captured_builder
+            and "IsoWindow" in captured_builder
+            and "captured object client transmission failed" in captured_builder,
+            "captured-template builder does not transmit the current captured object classes",
         )
 
-        counter_sink = section(
-            server,
-            r'setGenerationPhase\(manifest, generation, "COUNTER_SINK"\)',
-            r"local lightSquare",
+        captured_template_phase = section(
+            generation_build,
+            r'setGenerationPhase\(manifest, generation, "CAPTURED_TEMPLATE"\)',
+            r'setGenerationPhase\(manifest, generation, "STRUCTURE_RECALC"\)',
         )
-        checks.true(counter_sink is not None, "counter/sink build section is missing")
-        if counter_sink is not None:
-            checks.true(
-                counter_sink.count("transmitCompleteItemToClients") == 2,
-                "counter/sink paths do not each send exactly one full-object packet",
+        checks.true(
+            captured_template_phase is not None
+            and "for i = 1, #templateObjects do" in captured_template_phase
+            and "local captured = Template.objects[i]" in captured_template_phase
+            and "createCapturedTemplateObject(cell, square, entry" in captured_template_phase
+            and "captured object differs from the current template" in captured_template_phase
+            and re.search(
+                r'setGenerationPhase\(manifest, generation,\s*"COUNTER_SINK"',
+                generation_build,
+            ) is None,
+            "generation does not apply the current captured template entry by entry",
+        )
+
+        cab_region = section(
+            template_repair,
+            r"local function isCabCoordinate",
+            r"local function templateEntry",
+        )
+        template_repair_index = section(
+            template_repair,
+            r"local function buildRepairIndex",
+            r"local function footprintAllowsRemoval",
+        )
+        player_build_policy = section(
+            boundary_objects,
+            r"local function disallowedPlayerBuild",
+            r"function Boundary\.isDisallowedPlayerBuild",
+        )
+        checks.true(
+            all(
+                cell in captured_shell_cells
+                for cell in ((-4, -2), (-4, -1), (-4, 2), (2, -2))
             )
-            counter_packet = counter_sink.find(
-                'callSucceeded(counter, "transmitCompleteItemToClients")'
-            )
-            sink_packet = counter_sink.find(
-                'callSucceeded(sink, "transmitCompleteItemToClients")'
-            )
-            checks.true(
-                counter_packet >= 0 and sink_packet > counter_packet,
-                "counter/sink final packet order is not explicit",
-            )
-            capability_position = counter_sink.find("sinkData.canBeWaterPiped = true")
-            capability_packet = counter_sink.find(
-                'callSucceeded(sink, "transmitModData")'
-            )
-            checks.true(
-                sink_packet >= 0
-                and capability_position > sink_packet
-                and capability_packet > capability_position
-                and "doFindExternalWaterSource" not in counter_sink,
-                "sink capability metadata must be published after its initial object packet",
-            )
-            checks.true(
-                counter_packet > counter_sink.find(
-                    'local counter = createFurniture(cell, counterSquare, counterSprite, generation, "counter")'
-                ),
-                "counter full-object packet is not sent after attachment/final local state",
-            )
-            if counter_packet >= 0:
-                counter_before_packet = counter_sink[:counter_packet]
-                checks.true(
-                    all(
-                        network_call not in counter_before_packet
-                        for network_call in (
-                            "transmitModData",
-                            "sendObjectChange",
-                            '"sync"',
-                            "transmitUpdatedSpriteToClients",
-                            "transmitRemoveItemFromSquare",
-                        )
-                    ),
-                    "counter emits a referential packet before its unique complete packet",
-                )
+            and all(token in constants for token in (
+                "C.CAB_MIN_OFFSET_X = -4", "C.CAB_MAX_OFFSET_X = 1",
+                "C.CAB_MIN_OFFSET_Y = -2", "C.CAB_MAX_OFFSET_Y = 1",
+            ))
+            and cab_region is not None
+            and all(token in cab_region for token in (
+                "Constants.CAB_MIN_OFFSET_X", "Constants.CAB_MAX_OFFSET_X",
+                "Constants.CAB_MIN_OFFSET_Y", "Constants.CAB_MAX_OFFSET_Y",
+                'edge.side == "north"', 'edge.side == "west"',
+                "return false",
+            ))
+            and template_repair_index is not None
+            and "local protected = true" in template_repair_index
+            and "expected.z == anchor.z and isCabCoordinate(expected.x, expected.y, anchor)"
+                in template_repair_index
+            and "if isCabNorthWestWall(edge, anchor) then" in template_repair_index
+            and "elseif not edge then" in template_repair_index
+            and "protected = false" in template_repair_index
+            and player_build_policy is not None
+            and "CAB_MIN_OFFSET_X" in player_build_policy
+            and "CAB_MAX_OFFSET_X" in player_build_policy
+            and "CAB_MIN_OFFSET_Y" in player_build_policy
+            and "CAB_MAX_OFFSET_Y" in player_build_policy
+            and "if cabOnly or buildableOnly then return false end" in player_build_policy,
+            "captured cab north/west edges are editable while south/east remain protected",
+        )
+
+        building_object_classes = section(
+            template_repair,
+            r"local buildingObjectClasses = {",
+            r"local structuralSpriteFlagNames",
+        )
+        plain_structural = section(
+            template_repair,
+            r"local function isStructuralPlainObject",
+            r"local function objectAtCoordinate",
+        )
+        structural_flags = section(
+            template_repair,
+            r"local function hasStructuralSpriteFlag",
+            r"local function hasStructuralObjectType",
+        )
+        structural_types = section(
+            template_repair,
+            r"local function hasStructuralObjectType",
+            r"local function isStructuralPlainObject",
+        )
+        protected_candidate = section(
+            template_repair,
+            r"local function isProtectedBuildingCandidate",
+            r"local function isWhitelistedTemplateObject",
+        )
+        checks.true(
+            building_object_classes is not None
+            and '"IsoDoor"' in building_object_classes
+            and '"IsoWindowFrame"' in building_object_classes
+            and plain_structural is not None
+            and "hasStructuralObjectType(object)" in plain_structural
+            and "hasStructuralSpriteFlag(object)" in plain_structural
+            and structural_flags is not None
+            and 'rawget(_G, "IsoFlagType")' in structural_flags
+            and 'invoke(properties, "has", flag)' in structural_flags
+            and structural_types is not None
+            and 'rawget(_G, "IsoObjectType")' in structural_types
+            and protected_candidate is not None
+            and 'className == "IsoObject"' in protected_candidate
+            and "not isStructuralPlainObject(object)" in protected_candidate
+            and "elseif not isBuildingObjectClass(object) then" in protected_candidate,
+            "official door/frame classes and TileWalls_51-style engine structure metadata are not classified independently of sprite-family names",
+        )
 
         floor_helper = section(
-            server,
+            world_objects,
             r"local function createFloor",
             r"local function addSpecialObject",
         )
@@ -3555,7 +3517,7 @@ def main() -> int:
                 "floor client transmission failures are not hard errors",
             )
         rollback_remove = section(
-            server,
+            server_world,
             r"local function removeGenericObject",
             r"local function removeObject",
         )
@@ -3580,7 +3542,7 @@ def main() -> int:
                 "rollback still calls the nonexistent IsoGridSquare:setFloor API",
             )
         special_remove = section(
-            server,
+            server_world,
             r"local function deregisterSpecialSystems",
             r"local function removeCorpse",
         )
@@ -3595,9 +3557,9 @@ def main() -> int:
                 "utility cleanup still assumes a global rain-barrel system",
             )
         rollback = section(
-            server,
+            room_ownership,
             r"local function removeGeneration",
-            r"local function ensureRoofSquare",
+            r"ctx\.removeGeneration\s*=",
         )
         checks.true(rollback is not None, "removeGeneration function is missing")
         if rollback is not None:
@@ -3609,7 +3571,7 @@ def main() -> int:
 
         checks.true(
             re.search(
-                r"sendClientCommand\([^\n]*\{\s*\}\s*\)", client
+                r"sendClientCommand\([^\n]*\{\s*\}\s*\)", client_relocation_source
             )
             is not None,
             "client request no longer uses an empty payload",
@@ -3688,14 +3650,13 @@ def main() -> int:
             "README does not document the no-metal-floor build and final relocation",
         )
         checks.true(
-            "floors_interior_carpet_01_5" in readme
-            and "walls_interior_house_03_20" in readme
-            and "walls_interior_house_03_22" in readme
-            and "walls_interior_house_03_23" in readme
-            and "7x41" in readme
-            and "6x40" in readme
-            and "92 个" in readme,
-            "README does not document the 6x40 room, 7x41 wall ring, and verified sprites",
+            "357 个对象" in readme
+            and "6×23" in readme
+            and "驾驶室内部 x=-4..1、y=-2..1" in readme
+            and "每 10 tick" in readme
+            and "54 条" in readme
+            and "四处缺口" in readme,
+            "README does not document the captured 6x23 RV and 54-edge shell",
         )
         checks.true(
             "位于旧、新边界之外的安全格" not in readme,

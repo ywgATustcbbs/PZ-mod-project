@@ -5,6 +5,177 @@ local Constants = ctx.Constants
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 
+local function applyIntegerState(object, state, key, setter, getter)
+    local expected = state[key]
+    if expected == nil then return end
+    if type(expected) ~= "number" or math.floor(expected) ~= expected
+        or (setter and not ServerUtil.callSucceeded(object, setter, expected)) then
+        error("RailroaderRVTest: captured object " .. key .. " could not be applied")
+    end
+    local readOk, actual = ServerUtil.invoke(object, getter)
+    if not readOk or ServerUtil.toNumber(actual) ~= expected then
+        error("RailroaderRVTest: captured object " .. key .. " did not match")
+    end
+end
+
+local function applyCapturedHealthState(object, entry)
+    local setter = "setHealth"
+    if entry.class == "IsoWindow" then
+        -- IsoWindow exposes a health getter but no setter; retain the strict
+        -- read-back check against the constructor-provided template value.
+        setter = nil
+    end
+    applyIntegerState(object, entry.state, "health", setter, "getHealth")
+end
+
+local function applyCapturedIdentityAndState(object, entry, deferHealth)
+    if type(entry) ~= "table" or type(entry.templateIndex) ~= "number"
+        or type(entry.class) ~= "string"
+        or type(entry.name) ~= "string" or type(entry.sprite) ~= "string"
+        or entry.direction ~= "N" or type(entry.state) ~= "table" then
+        error("RailroaderRVTest: captured object identity is malformed")
+    end
+    if not ServerUtil.classInstance(object, entry.class) then
+        error("RailroaderRVTest: captured object class did not match")
+    end
+    if entry.class == "IsoThumpable" or entry.class == "IsoWindow"
+        or entry.class == "IsoDoor" then
+        if type(entry.north) ~= "boolean" then
+            error("RailroaderRVTest: captured object north state is malformed")
+        end
+    elseif entry.north ~= nil then
+        error("RailroaderRVTest: captured object has an unexpected north state")
+    end
+    local stateKeys = { health = true, maxHealth = true, hoppable = true,
+        locked = true }
+    for key in pairs(entry.state) do
+        if not stateKeys[key] then
+            error("RailroaderRVTest: captured object state has an unsupported field")
+        end
+    end
+    if not ServerUtil.callSucceeded(object, "setName", entry.name) then
+        error("RailroaderRVTest: captured object name could not be applied")
+    end
+    local directions = rawget(_G, "IsoDirections")
+    local expectedDirection = directions and directions[entry.direction]
+    if not expectedDirection
+        or not ServerUtil.callSucceeded(object, "setDir", expectedDirection) then
+        error("RailroaderRVTest: captured object direction could not be applied")
+    end
+    if entry.north ~= nil then
+        local northOk, actualNorth = ServerUtil.invoke(object, "getNorth")
+        if not northOk or actualNorth ~= entry.north then
+            error("RailroaderRVTest: captured object north state did not match")
+        end
+    end
+
+    applyIntegerState(object, entry.state, "maxHealth", "setMaxHealth",
+        "getMaxHealth")
+    if not deferHealth then applyCapturedHealthState(object, entry) end
+
+    if entry.state.hoppable ~= nil then
+        if type(entry.state.hoppable) ~= "boolean" then
+            error("RailroaderRVTest: captured object hoppable state is malformed")
+        end
+        -- Plain captured IsoObject floors, captured IsoWindows, and captured
+        -- IsoLightSwitches have no hoppable setter path in this template. Keep
+        -- their recorded false state strict through the getter below.
+        local applied = (entry.class == "IsoObject"
+            or entry.class == "IsoWindow"
+            or entry.class == "IsoLightSwitch") and entry.state.hoppable == false
+        if not applied then
+            applied = ServerUtil.callSucceeded(object, "setIsHoppable",
+                entry.state.hoppable)
+        end
+        if not applied then
+            applied = ServerUtil.callSucceeded(object, "setHoppable",
+                entry.state.hoppable)
+        end
+        if not applied then
+            error("RailroaderRVTest: captured object hoppable state could not be applied")
+        end
+        local readOk, actual = ServerUtil.invoke(object, "isHoppable")
+        if not readOk then
+            readOk, actual = ServerUtil.invoke(object, "getIsHoppable")
+        end
+        if not readOk or actual ~= entry.state.hoppable then
+            error("RailroaderRVTest: captured object hoppable state did not match")
+        end
+    end
+
+    if entry.state.locked ~= nil then
+        if type(entry.state.locked) ~= "boolean" or entry.state.locked == true then
+            error("RailroaderRVTest: captured locked state is unsupported")
+        end
+        local lockSetterOk = ServerUtil.callSucceeded(object, "setIsLocked", false)
+        local observedLockState = false
+        local hasLockState = false
+        for _, getter in ipairs({ "isLocked", "getIsLocked" }) do
+            local readOk, actual = ServerUtil.invoke(object, getter)
+            if readOk then
+                hasLockState = true
+                observedLockState = observedLockState or actual == true
+            end
+        end
+        local padlockOk, padlocked = ServerUtil.invoke(object, "isLockedByPadlock")
+        if padlockOk then
+            hasLockState = true
+            observedLockState = observedLockState or padlocked == true
+        end
+        local codeOk, lockCode = ServerUtil.invoke(object, "getLockedByCode")
+        if codeOk then
+            hasLockState = true
+            observedLockState = observedLockState
+                or (ServerUtil.toNumber(lockCode) or 0) > 0
+        end
+        if not hasLockState and not lockSetterOk then
+            error("RailroaderRVTest: captured unlocked state cannot be verified")
+        end
+        if observedLockState then
+            error("RailroaderRVTest: captured object remained locked")
+        end
+    end
+
+    local nameOk, actualName = ServerUtil.invoke(object, "getName")
+    local dirOk, actualDirection = ServerUtil.invoke(object, "getDir")
+    local spriteName = ServerWorld.getSpriteName(object)
+    if not nameOk or tostring(actualName) ~= entry.name
+        or not dirOk or actualDirection ~= expectedDirection
+        or tostring(spriteName) ~= entry.sprite then
+        error("RailroaderRVTest: captured object identity read-back failed")
+    end
+end
+
+local function capturedTagData(entry, edge)
+    local result = {
+        templateIndex = entry.templateIndex,
+        templateClass = entry.class,
+        templateName = entry.name,
+        templateSprite = entry.sprite,
+        templateNorth = entry.north,
+        templateDirection = entry.direction,
+    }
+    if edge then
+        result.edgeKey = edge.edgeKey
+        result.axis = edge.axis
+    end
+    return result
+end
+
+local function configureCapturedDoorFrame(object, entry)
+    if type(entry) ~= "table" or entry.class ~= "IsoThumpable"
+        or entry.name ~= "Wooden Door Frame"
+        or entry.sprite ~= "walls_interior_house_02_43"
+        or entry.north ~= true or entry.direction ~= "N" then
+        error("RailroaderRVTest: captured door frame identity is invalid")
+    end
+    if not ServerUtil.callSucceeded(object, "setCanPassThrough", true)
+        or not ServerUtil.callSucceeded(object, "setIsDoorFrame", true)
+        or not ServerUtil.callSucceeded(object, "setIsThumpable", false) then
+        error("RailroaderRVTest: captured door frame pass-through state failed")
+    end
+end
+
 local function ensureRoofSquare(cell, x, y, z)
     -- B42's player-building path creates a missing upper square with the
     -- IsoGridSquare constructor, then connects it to the cell.  Keep this
@@ -43,7 +214,7 @@ local function ensureRoofSquare(cell, x, y, z)
     return connected
 end
 
-local function createFloor(square, sprite, generation, role, tagContext)
+local function createFloor(square, sprite, generation, role, tagContext, capturedEntry, edge)
     if not sprite then
         error("RailroaderRVTest: floor sprite is not configured")
     end
@@ -89,10 +260,21 @@ local function createFloor(square, sprite, generation, role, tagContext)
     if not floor then
         error("RailroaderRVTest: floor object was not created")
     end
+    if capturedEntry then
+        applyCapturedIdentityAndState(floor, capturedEntry)
+    end
     local tagged, tagError = pcall(ServerWorld.tagObject, floor, generation, role,
         ServerWorld.withTagIdentity({
         previousSprite = previousSprite,
         createdByGeneration = createdByGeneration,
+        templateIndex = capturedEntry and capturedEntry.templateIndex or nil,
+        templateClass = capturedEntry and capturedEntry.class or nil,
+        templateName = capturedEntry and capturedEntry.name or nil,
+        templateSprite = capturedEntry and capturedEntry.sprite or nil,
+        templateNorth = capturedEntry and capturedEntry.north or nil,
+        templateDirection = capturedEntry and capturedEntry.direction or nil,
+        edgeKey = edge and edge.edgeKey or nil,
+        axis = edge and edge.axis or nil,
         }, tagContext))
     if not tagged then
         local removed, removeError = pcall(ServerWorld.removeGenericObject, square, floor)
@@ -142,106 +324,9 @@ local function addSpecialObject(square, object)
         error("RailroaderRVTest: object attachment was not observable")
     end
     -- The caller must transmit exactly once, after all object-specific state is
-    -- final.  Sending here made the subsequent light/generator sync send
-    -- a second AddItemToMap for the same object index.
+    -- final. Sending here would duplicate the complete packet for the same
+    -- object index.
     ServerWorld.recalcSquare(square)
-end
-
-local function addNormalObject(square, object)
-    -- B42.20 has AddTileObject for ordinary IsoObject instances; AddObject
-    -- and addObject are not IsoGridSquare methods.  Counters/sinks must remain
-    -- tile objects so their sprite/entity behavior is preserved.
-    local ok = ServerUtil.callSucceeded(square, "AddTileObject", object)
-    if not ok then
-        error("RailroaderRVTest: unable to attach normal object to square")
-    end
-    local indexOk, attachedIndex = ServerUtil.invoke(object, "getObjectIndex")
-    local attachedNumber = ServerUtil.toNumber(attachedIndex)
-    if not indexOk or not attachedNumber or attachedNumber < 0 then
-        error("RailroaderRVTest: normal object attachment was not observable")
-    end
-    -- The creator owns the one final full-object packet so plumbing/entity
-    -- state can be completed before it is sent.
-    ServerWorld.recalcSquare(square)
-end
-
-local function hasEntityComponent(object, componentName)
-    if componentName == "FluidContainer" then
-        local containerOk, container = ServerUtil.invoke(object, "getFluidContainer")
-        return containerOk and container ~= nil
-    end
-    local componentTypes = rawget(_G, "ComponentType")
-    local componentType = componentTypes and componentTypes[componentName] or nil
-    if not componentType then
-        return false
-    end
-    local hasOk, has = ServerUtil.invoke(object, "hasComponent", componentType)
-    if hasOk and has == true then
-        return true
-    end
-    local componentOk, component = ServerUtil.invoke(object, "getComponent", componentType)
-    return componentOk and component ~= nil
-end
-
-local function ensureSinkFluidContainer(object)
-    if hasEntityComponent(object, "FluidContainer") then return true end
-    local componentTypes = rawget(_G, "ComponentType")
-    local fluidType = componentTypes and componentTypes.FluidContainer or nil
-    local factory = rawget(_G, "GameEntityFactory")
-    if not fluidType or not factory
-        or type(fluidType.CreateComponent) ~= "function"
-        or type(factory.AddComponent) ~= "function" then
-        return false
-    end
-    local created, component = pcall(function()
-        return fluidType:CreateComponent()
-    end)
-    if not created or not component then return false end
-    local added = pcall(factory.AddComponent, object, true, component)
-    return added and hasEntityComponent(object, "FluidContainer")
-end
-
-local function createEntityFromSprite(object, sprite, requiredComponent)
-    local configManager = rawget(_G, "SpriteConfigManager")
-    if not configManager or type(configManager.getObjectInfoFromSprite) ~= "function" then
-        return requiredComponent and false or nil
-    end
-    local okInfo, info = pcall(configManager.getObjectInfoFromSprite, sprite)
-    if not okInfo or not info or type(info.getScript) ~= "function" then
-        -- Ordinary furniture such as the counter/sink has no entity script;
-        -- absence is not an entity-creation failure for those sprites.
-        return requiredComponent and false or nil
-    end
-    local okScript, script = pcall(info.getScript, info)
-    if not okScript or not script or type(script.getParent) ~= "function" then
-        return false
-    end
-    local okParent, parent = pcall(script.getParent, script)
-    if not okParent or not parent then
-        return false
-    end
-    local factory = rawget(_G, "GameEntityFactory")
-    if not factory or type(factory.CreateIsoObjectEntity) ~= "function" then
-        return false
-    end
-    -- The factory is the B42.20-supported way to attach FluidContainer and
-    -- other entity components to an IsoObject created from a sprite.
-    -- CreateIsoObjectEntity is Java void; pcall success is only invocation
-    -- success, never a returned entity value.
-    local okEntity = pcall(factory.CreateIsoObjectEntity, object, parent, true)
-    if not okEntity then
-        return false
-    end
-    -- The factory catches its own Java exceptions, so also require the script
-    -- component to be observable on the same IsoObject after the call.
-    local attachedScriptOk, attachedScript = ServerUtil.invoke(object, "getEntityScript")
-    if not attachedScriptOk or not attachedScript then
-        return false
-    end
-    if requiredComponent and not hasEntityComponent(object, requiredComponent) then
-        return false
-    end
-    return true
 end
 
 local function createWall(cell, square, sprite, north, generation, role, extraData,
@@ -497,6 +582,110 @@ local function createFurniture(cell, square, sprite, generation, role, tagContex
     return object
 end
 
+local function createCapturedTemplateObject(cell, square, entry, generation,
+    tagContext, edge)
+    if type(entry) ~= "table" or type(entry.class) ~= "string"
+        or type(entry.templateIndex) ~= "number" then
+        error("RailroaderRVTest: captured template object is malformed")
+    end
+    local role = edge and edge.role or "captured-template"
+    local tagData = capturedTagData(entry, edge)
+    local object
+    if entry.class == "IsoObject" then
+        -- Every captured IsoObject in this log is a floor object.  Keeping it
+        -- in the square's floor slot preserves the source class and sprite.
+        object = createFloor(square, entry.sprite, generation, role, tagContext,
+            entry, edge)
+        return object
+    elseif entry.class == "IsoThumpable" then
+        local cls = rawget(_G, "IsoThumpable")
+        local constructed, thumpable = ServerUtil.invokeClass(cls, {
+            { cell, square, entry.sprite, entry.north, nil },
+        })
+        if not constructed then
+            error("RailroaderRVTest: captured IsoThumpable construction failed")
+        end
+        if not ServerUtil.callSucceeded(thumpable, "setIsThumpable", true) then
+            error("RailroaderRVTest: captured IsoThumpable state failed")
+        end
+        applyCapturedIdentityAndState(thumpable, entry, true)
+        if entry.name == "Wooden Door Frame" then
+            configureCapturedDoorFrame(thumpable, entry)
+        end
+        ServerWorld.tagObject(thumpable, generation, role,
+            ServerWorld.withTagIdentity(tagData, tagContext))
+        addSpecialObject(square, thumpable)
+        -- The B42 health setter resolves the object through its square. Apply
+        -- captured health after attachment, while the generation tag already
+        -- lets transaction rollback remove it if the setter or read-back fails.
+        applyCapturedHealthState(thumpable, entry)
+        object = thumpable
+    elseif entry.class == "IsoDoor" then
+        local cls = rawget(_G, "IsoDoor")
+        local constructed, door = ServerUtil.invokeClass(cls, {
+            -- The native door constructor uses the captured closed tile and
+            -- orientation, so no guessed open-sprite index is needed.
+            { cell, square, entry.sprite, entry.north },
+        })
+        if not constructed then
+            error("RailroaderRVTest: captured IsoDoor construction failed")
+        end
+        applyCapturedIdentityAndState(door, entry)
+        ServerWorld.tagObject(door, generation, role,
+            ServerWorld.withTagIdentity(tagData, tagContext))
+        addSpecialObject(square, door)
+        object = door
+    elseif entry.class == "IsoWindow" then
+        local spriteOk, spriteObject = ServerUtil.callGlobal("getSprite", entry.sprite)
+        local cls = rawget(_G, "IsoWindow")
+        local constructed, window = ServerUtil.invokeClass(cls, {
+            { cell, square, spriteObject, entry.north },
+        })
+        if not spriteOk or not spriteObject or not constructed then
+            error("RailroaderRVTest: captured IsoWindow construction failed")
+        end
+        if not ServerUtil.callSucceeded(window, "setIsLocked", false) then
+            error("RailroaderRVTest: captured window unlocked state failed")
+        end
+        applyCapturedIdentityAndState(window, entry, true)
+        ServerWorld.tagObject(window, generation, role,
+            ServerWorld.withTagIdentity(tagData, tagContext))
+        addSpecialObject(square, window)
+        applyCapturedHealthState(window, entry)
+        object = window
+    elseif entry.class == "IsoLightSwitch" then
+        local spriteOk, spriteObject = ServerUtil.callGlobal("getSprite", entry.sprite)
+        local roomOk, roomId = ServerUtil.invoke(square, "getRoomID")
+        roomId = roomOk and ServerUtil.toNumber(roomId) or -1
+        local cls = rawget(_G, "IsoLightSwitch")
+        local constructed, light = ServerUtil.invokeClass(cls, {
+            { cell, square, spriteObject, roomId },
+        })
+        if not spriteOk or not spriteObject or not constructed then
+            error("RailroaderRVTest: captured IsoLightSwitch construction failed")
+        end
+        applyCapturedIdentityAndState(light, entry)
+        if not ServerUtil.callSucceeded(light, "addLightSourceFromSprite")
+            or not ServerUtil.callSucceeded(light, "update") then
+            error("RailroaderRVTest: captured light switch state failed")
+        end
+        ServerWorld.tagObject(light, generation, role,
+            ServerWorld.withTagIdentity(tagData, tagContext))
+        addSpecialObject(square, light)
+        if not ServerUtil.callSucceeded(light, "update") then
+            error("RailroaderRVTest: captured light switch update failed")
+        end
+        object = light
+    else
+        error("RailroaderRVTest: unsupported captured object class "
+            .. tostring(entry.class))
+    end
+    if not ServerUtil.callSucceeded(object, "transmitCompleteItemToClients") then
+        error("RailroaderRVTest: captured object client transmission failed")
+    end
+    return object
+end
+
 -- Error objects are not required to be strings in Lua.  Keep diagnostics
 -- useful without allowing a hostile __tostring/debug implementation to
 -- escape the transaction's protected/finalize path.
@@ -504,7 +693,7 @@ end
 ctx.ensureRoofSquare = ensureRoofSquare
 ctx.createFloor = createFloor
 ctx.createWall = createWall
-ctx.createLight = createLight
 ctx.createGenerator = createGenerator
-ctx.createFurniture = createFurniture
+ctx.createCapturedTemplateObject = createCapturedTemplateObject
+ctx.configureCapturedDoorFrame = configureCapturedDoorFrame
 end

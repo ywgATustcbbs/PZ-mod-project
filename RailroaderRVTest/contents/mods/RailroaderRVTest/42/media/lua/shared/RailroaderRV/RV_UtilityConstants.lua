@@ -61,8 +61,7 @@ U.POWER_STATE_DEGRADED = "DEGRADED"
 U.CIRCUIT_OFF = "OFF"
 U.CIRCUIT_ON = "ON"
 
--- Stable reason codes are intentionally ASCII and transport-safe.  The
--- current-schema user-facing message remains C.SAVE_REBUILD_REQUIRED.
+-- Stable reason codes are intentionally ASCII and transport-safe.
 U.REASONS = {
     OK = "OK",
     BUSY = "UTILITY_BUSY",
@@ -95,7 +94,6 @@ U.REASONS = {
     POWER_NOT_AVAILABLE = "UTILITY_POWER_NOT_AVAILABLE",
 }
 
-U.SAVE_REBUILD_REQUIRED = C.SAVE_REBUILD_REQUIRED
-U.REASON_SAVE_REBUILD_REQUIRED = "SAVE_REBUILD_REQUIRED"
+U.REASON_INVALID_RV_DATA = "INVALID_RV_DATA"
 
 return U

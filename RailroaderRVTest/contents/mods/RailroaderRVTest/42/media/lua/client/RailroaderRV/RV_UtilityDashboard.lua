@@ -148,11 +148,6 @@ if ISCollapsableWindow then
         self.statusLabel = addLabel(tr("UI_RailroaderRVTest_Utility_Waiting",
             "Waiting for server snapshot"), left, top, width)
         top = top + fontHeight + 10
-        self.waterLabel = addLabel(tr("UI_RailroaderRVTest_Utility_Water", "Water tank")
-            .. ": - / - L", left, top, width)
-        top = top + fontHeight + 4
-        self.waterBar = addBar(left, top, width, 20, { r = 0.20, g = 0.65, b = 1.0, a = 1 })
-        top = top + 32
         self.fuelLabel = addLabel(tr("UI_RailroaderRVTest_Utility_Fuel", "Fuel")
             .. ": - / - L", left, top, width)
         top = top + fontHeight + 4
@@ -160,23 +155,14 @@ if ISCollapsableWindow then
         top = top + 32
         self.powerLabel = addLabel(tr("UI_RailroaderRVTest_Utility_Generator",
             "Generator") .. ": -", left, top, width)
-        top = top + fontHeight + 4
-        self.deviceLabel = addLabel(tr("UI_RailroaderRVTest_Utility_Devices",
-            "Water devices") .. ": -", left, top, width)
         top = top + fontHeight + 14
-        local buttonWidth = math.floor((width - 12) / 3)
-        self.waterButton = ISButton:new(left, top, buttonWidth, 28,
-            tr("UI_RailroaderRVTest_Utility_AddWater", "Add water"), self,
-            Window.onAddWater)
-        self.waterButton:initialise()
-        self.waterButton.displayBackground = true
-        self:addChild(self.waterButton)
+        local buttonWidth = math.floor((width - 6) / 2)
         self.fuelButton = ISButton:new(left + buttonWidth + 6, top, buttonWidth, 28,
             tr("UI_RailroaderRVTest_Utility_AddFuel", "Add fuel"), self, Window.onAddFuel)
         self.fuelButton:initialise()
         self.fuelButton.displayBackground = true
         self:addChild(self.fuelButton)
-        self.refreshButton = ISButton:new(left + (buttonWidth + 6) * 2, top, buttonWidth,
+        self.refreshButton = ISButton:new(left, top, buttonWidth,
             28, tr("UI_RailroaderRVTest_Utility_Refresh", "Refresh"), self,
             Window.onRefresh)
         self.refreshButton:initialise()
@@ -198,30 +184,14 @@ if ISCollapsableWindow then
                 self:setStatus(tr("UI_RailroaderRVTest_Utility_Waiting",
                     "Waiting for server snapshot"))
             end
-            self.waterLabel:setNameWithoutMoving(
-                tr("UI_RailroaderRVTest_Utility_Water", "Water tank")
-                .. ": - / - L")
             self.fuelLabel:setNameWithoutMoving(
                 tr("UI_RailroaderRVTest_Utility_Fuel", "Fuel") .. ": - / - L")
             self.powerLabel:setNameWithoutMoving(
                 tr("UI_RailroaderRVTest_Utility_Generator", "Generator") .. ": -")
-            self.deviceLabel:setNameWithoutMoving(
-                tr("UI_RailroaderRVTest_Utility_Devices", "Water devices") .. ": -")
-            self.waterBar:setProgress(0)
-            self.waterBar:setText("0%")
             self.fuelBar:setProgress(0)
             self.fuelBar:setText("0%")
             return
         end
-        local water = value.water
-        local canonical = water.canonicalTank or {}
-        local amount, capacity = number(canonical.amount) or 0,
-            number(canonical.capacity) or 0
-        self.waterLabel:setNameWithoutMoving(
-            tr("UI_RailroaderRVTest_Utility_Water", "Water tank") .. ": "
-            .. text(amount) .. " / " .. text(capacity) .. " L")
-        self.waterBar:setProgress(ratio(amount, capacity))
-        self.waterBar:setText(string.format("%.0f%%", ratio(amount, capacity) * 100))
         local native = value.generator and value.generator.native or nil
         local fuel = native and number(native.fuel) or nil
         local fuelCapacity = native and number(native.fuelCapacity) or nil
@@ -240,24 +210,13 @@ if ISCollapsableWindow then
             tr("UI_RailroaderRVTest_Utility_Generator", "Generator") .. ": " .. active
             .. "  " .. tr("UI_RailroaderRVTest_Utility_State", "State") .. "="
             .. tostring(value.generator and value.generator.state or "-"))
-        local total, activeCount = 0, 0
-        for _, entry in pairs(water.registry or {}) do
-            total = total + 1
-            if type(entry) == "table" and entry.status == U.STATUS_ACTIVE then
-                activeCount = activeCount + 1
-            end
-        end
-        self.deviceLabel:setNameWithoutMoving(
-            tr("UI_RailroaderRVTest_Utility_Devices", "Water devices") .. ": "
-            .. tostring(activeCount) .. " / " .. tostring(total) .. " "
-            .. tr("UI_RailroaderRVTest_Utility_Connected", "connected"))
         if not self.operationStatus then
             self:setStatus(tr("UI_RailroaderRVTest_Utility_Updated",
                 "Server snapshot updated"))
         end
     end
 
-    function Window:openSourceMenu(kind)
+    function Window:openFuelMenu()
         local player = self.player
         if not player or not ISContextMenu or type(ISContextMenu.get) ~= "function" then
             self:setStatus("Unable to open item menu")
@@ -269,9 +228,7 @@ if ISCollapsableWindow then
             return
         end
         local fluid = rawget(_G, "Fluid")
-        local wanted = kind == "fuel" and fluid and fluid.Petrol or nil
-        local water = fluid and fluid.Water
-        local tainted = fluid and fluid.TaintedWater
+        local wanted = fluid and fluid.Petrol
         local items = {}
         inventoryItems(inventory, items, {})
         local menu = ISContextMenu.get(player:getPlayerNum(), self:getAbsoluteX() + 20,
@@ -282,26 +239,13 @@ if ISCollapsableWindow then
         end
         local count = 0
         for _, item in ipairs(items) do
-            local amount = wanted and fluidAmount(item, wanted)
-                or (fluidAmount(item, water) or fluidAmount(item, tainted))
+            local amount = wanted and fluidAmount(item, wanted) or nil
             if amount then
                 count = count + 1
                 local operationItem = item
                 menu:addOption(itemLabel(item) .. " (" .. text(amount) .. " L)", self,
                     function(window)
-                        if kind == "fuel" then
-                            Client.requestAddFuel(window.player, operationItem)
-                        else
-                            local entryPoint = U.ENTRY_INTERNAL
-                            local rv = rawget(_G, "RailroaderRV")
-                            local railroader = rv and rv.RailroaderContextMenu
-                            if railroader and type(railroader.utilityEntryPoint) == "function" then
-                                local pointOk, point = pcall(
-                                    railroader.utilityEntryPoint, window.player)
-                                if pointOk and point then entryPoint = point end
-                            end
-                            Client.requestAddWater(window.player, operationItem, entryPoint)
-                        end
+                        Client.requestAddFuel(window.player, operationItem)
                         window.operationStatus = tr(
                             "UI_RailroaderRVTest_Utility_Submitted",
                             "Operation submitted; waiting for server")
@@ -310,19 +254,14 @@ if ISCollapsableWindow then
             end
         end
         if count == 0 then
-            local empty = menu:addOption(kind == "fuel"
-                and tr("UI_RailroaderRVTest_Utility_NoFuel", "No usable fuel")
-                or tr("UI_RailroaderRVTest_Utility_NoWater", "No usable water"))
+            local empty = menu:addOption(
+                tr("UI_RailroaderRVTest_Utility_NoFuel", "No usable fuel"))
             empty.notAvailable = true
         end
     end
 
-    function Window:onAddWater()
-        self:openSourceMenu("water")
-    end
-
     function Window:onAddFuel()
-        self:openSourceMenu("fuel")
+        self:openFuelMenu()
     end
 
     function Window:onRefresh()
@@ -352,20 +291,13 @@ end
 
 function Dashboard.read(snapshot)
     snapshot = snapshot or (Client.getSnapshot and Client.getSnapshot() or nil)
-    if type(snapshot) ~= "table" or type(snapshot.water) ~= "table" then
+    if type(snapshot) ~= "table" or type(snapshot.power) ~= "table" then
         return { available = false, label = tr("UI_RailroaderRVTest_Utility_Waiting",
             "Waiting for server snapshot") }
     end
-    local water = snapshot.water
     return {
         available = true,
         rvId = snapshot.rvId,
-        water = water,
-        canonicalTank = water.canonicalTank,
-        amount = water.canonicalTank and water.canonicalTank.amount or 0,
-        capacity = water.canonicalTank and water.canonicalTank.capacity or 0,
-        state = water.state,
-        registry = water.registry,
         generator = snapshot.power,
     }
 end
@@ -376,9 +308,10 @@ function Dashboard.format(value)
         return tr("UI_RailroaderRVTest_Utility_Waiting",
             "Waiting for server snapshot")
     end
-    return tr("UI_RailroaderRVTest_Utility_Water", "Water tank") .. " "
-        .. text(value.amount) .. " / "
-        .. text(value.capacity) .. " L"
+    local generator = value.generator or {}
+    local native = generator.native or {}
+    return tr("UI_RailroaderRVTest_Utility_Fuel", "Fuel") .. " "
+        .. text(native.fuel) .. " / " .. text(native.fuelCapacity) .. " L"
 end
 
 function Dashboard.refresh(snapshot)

@@ -76,7 +76,6 @@ local ServerUtil = require("RailroaderRV/RV_ServerUtil")
 local ServerWorld = require("RailroaderRV/RV_ServerWorld")
 local ServerSchema = require("RailroaderRV/RV_ServerSchema")
 local UtilityServer = require("RailroaderRV/RV_UtilityServer")
-local UtilityWater = require("RailroaderRV/RV_UtilityWater")
 
 local transactionBusy = false
 local transactionPlayer = nil
@@ -151,7 +150,6 @@ local ctx = {
     ServerWorld = ServerWorld,
     ServerSchema = ServerSchema,
     UtilityServer = UtilityServer,
-    UtilityWater = UtilityWater,
     transactionBusy = transactionBusy,
     transactionPlayer = transactionPlayer,
     pendingGeneration = pendingGeneration,
@@ -188,6 +186,7 @@ require("RailroaderRV/RV_Server_GenerationBuild")(ctx)
 require("RailroaderRV/RV_Server_PlayerValidation")(ctx)
 require("RailroaderRV/RV_Server_LayoutBuilder")(ctx)
 require("RailroaderRV/RV_Server_ManifestValidation")(ctx)
+require("RailroaderRV/RV_Server_TemplateRepair")(ctx)
 require("RailroaderRV/RV_Server_RoofDestinations")(ctx)
 require("RailroaderRV/RV_Server_RoofRelocation")(ctx)
 require("RailroaderRV/RV_Server_RoofApi")(ctx)

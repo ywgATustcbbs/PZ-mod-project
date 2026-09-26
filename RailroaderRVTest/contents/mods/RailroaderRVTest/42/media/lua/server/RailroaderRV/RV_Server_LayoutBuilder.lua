@@ -331,7 +331,7 @@ captureStore = function()
         error("layout capture ModData API is unavailable")
     end
     local readOk, store = pcall(ModData.get, C.LAYOUT_CAPTURE_KEY)
-    if not readOk then error(C.SAVE_REBUILD_REQUIRED) end
+    if not readOk then error(C.INVALID_RV_DATA) end
     if store == nil then
         local createOk, created = pcall(ModData.getOrCreate, C.LAYOUT_CAPTURE_KEY)
         if not createOk or type(created) ~= "table" then
@@ -339,7 +339,7 @@ captureStore = function()
         end
         store = created
     end
-    if type(store) ~= "table" then error(C.SAVE_REBUILD_REQUIRED) end
+    if type(store) ~= "table" then error(C.INVALID_RV_DATA) end
     local empty = true
     for _ in pairs(store) do
         empty = false
@@ -352,7 +352,7 @@ captureStore = function()
     elseif not hasOnlyKeys(store, { schemaVersion = true, capture = true })
         or store.schemaVersion ~= C.LAYOUT_CAPTURE_SCHEMA_VERSION
         or not (store.capture == false or validCapture(store.capture)) then
-        error(C.SAVE_REBUILD_REQUIRED)
+        error(C.INVALID_RV_DATA)
     end
     return store
 end

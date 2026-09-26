@@ -44,7 +44,6 @@ local inRegion = ctx.inRegion
 local validRecord = ctx.validRecord
 local roofRepairRoomKey = ctx.roofRepairRoomKey
 local isWallRemovalSource = ctx.isWallRemovalSource
-local consumeSuppressedRoomTransition = ctx.consumeSuppressedRoomTransition
 local wallRemovalEventKey = ctx.wallRemovalEventKey
 local repairRoofForPlayer = ctx.repairRoofForPlayer
 local armRoomOwnershipMonitor = ctx.armRoomOwnershipMonitor
@@ -120,7 +119,7 @@ local function processStatelessRelocationSentinel()
         or type(server.currentRVManifestForRelocation) ~= "function"
         or type(server.isGenerationTransactionActive) ~= "function"
         or type(server.isRoofRepairTransactionActive) ~= "function" then
-        warnSentinelPlayersAtTemporaryCell(C.SAVE_REBUILD_REQUIRED,
+        warnSentinelPlayersAtTemporaryCell(C.INVALID_RV_DATA,
             sentinelPlayers)
         return
     end
@@ -130,7 +129,7 @@ local function processStatelessRelocationSentinel()
         server.isRoofRepairTransactionActive, nil)
     if not generationCallOk or type(generationActive) ~= "boolean"
         or not roofCallOk or type(roofActive) ~= "boolean" then
-        warnSentinelPlayersAtTemporaryCell(C.SAVE_REBUILD_REQUIRED,
+        warnSentinelPlayersAtTemporaryCell(C.INVALID_RV_DATA,
             sentinelPlayers)
         return
     end
@@ -142,7 +141,7 @@ local function processStatelessRelocationSentinel()
     local mapOk, map = pcall(mapData)
     if not mapOk or type(map) ~= "table" then
         warnSentinelPlayersAtTemporaryCell(
-            mapOk and map or C.SAVE_REBUILD_REQUIRED, sentinelPlayers)
+            mapOk and map or C.INVALID_RV_DATA, sentinelPlayers)
         return
     end
     for i = 1, #sentinelPlayers do
@@ -155,7 +154,7 @@ local function processStatelessRelocationSentinel()
                 candidateReason
         else
             identityKey = sentinelIdentity(player)
-            reason = C.SAVE_REBUILD_REQUIRED
+            reason = C.INVALID_RV_DATA
         end
         if identityKey then
             present[identityKey] = true
@@ -164,7 +163,7 @@ local function processStatelessRelocationSentinel()
                 if now >= untilTick then
                     local claimed = sentinelClaimState(server, identityKey)
                     if claimed == nil then
-                        sentinelWarn(identityKey, C.SAVE_REBUILD_REQUIRED)
+                        sentinelWarn(identityKey, C.INVALID_RV_DATA)
                     elseif not claimed then
                         -- Recheck immediately before moving, after the full
                         -- current-schema candidate resolution.
@@ -175,7 +174,7 @@ local function processStatelessRelocationSentinel()
                                 sentinelReturnToRV, candidate, player, map)
                             if not returnCallOk then
                                 returned, returnReason = false,
-                                    C.SAVE_REBUILD_REQUIRED
+                                    C.INVALID_RV_DATA
                             end
                             local claimedAfter = sentinelClaimState(server,
                                 identityKey)
@@ -183,7 +182,7 @@ local function processStatelessRelocationSentinel()
                             relocationSentinelCooldown[identityKey] = now
                                 + (RELOCATION_SENTINEL_RETRY_COOLDOWN_TICKS or 10)
                             if claimedAfter == nil then
-                                sentinelWarn(identityKey, C.SAVE_REBUILD_REQUIRED)
+                                sentinelWarn(identityKey, C.INVALID_RV_DATA)
                             elseif claimedAfter ~= false then
                                 sentinelWarn(identityKey,
                                     "relocation sentinel identity became claimed")
@@ -443,20 +442,25 @@ local function pauseFollowUpWallRemovalDeadlines(now)
     end
 end
 
--- Both legal server-side removal paths pass the authoritative IsoThumpable
--- before it is detached.  In particular, 42.20.4's
+-- The generic removal path passes the authoritative captured shell object
+-- before it is detached; direct thumpable destruction is covered separately.
+-- In particular, 42.20.4's
 -- SledgehammerDestroyPacket delegates to RemoveItemFromSquarePacket, which
 -- raises OnObjectAboutToBeRemoved immediately before removeFromWorld and
--- removeFromSquare.  OnDestroyIsoThumpable is retained for direct thumpable
--- destruction paths and uses the same strict matcher.  Never infer ownership
+-- removeFromSquare, including captured windows. OnDestroyIsoThumpable is
+-- retained for direct thumpable destruction paths and uses the same matcher. Never infer ownership
 -- from a coordinate, action name, or client payload.
 local function cheapShellWallCandidate(object)
     if not object then return false end
     local squareOk, hostSquare = call(object, "getSquare")
     if not squareOk or not hostSquare then return false end
 
-    local typeOk, isThumpable = callGlobal("instanceof", object, "IsoThumpable")
-    if not typeOk or isThumpable ~= true then return false end
+    local thumpableOk, isThumpable = callGlobal("instanceof", object, "IsoThumpable")
+    local windowOk, isWindow = callGlobal("instanceof", object, "IsoWindow")
+    if not (thumpableOk and isThumpable == true)
+        and not (windowOk and isWindow == true) then
+        return false
+    end
     local indexOk, objectIndex = call(object, "getObjectIndex")
     objectIndex = indexOk and integer(objectIndex) or nil
     if objectIndex == nil or objectIndex < 0 then return false end
@@ -482,7 +486,7 @@ local function cheapShellWallCandidate(object)
 
     local role = nested.role
     return role == "wall-north" or role == "wall-west"
-        or role == "corner-nw" or role == "corner-se"
+        or role == "corner-nw"
 end
 
 local function queueWallRoofRepairForObject(object, source)
@@ -664,14 +668,8 @@ observeRoomTransitions = function(map, observedRooms)
         if observed.roomStateAvailable
             and previous and previous.inRoom == true
             and observed.inRoom ~= true then
-            local suppressed = consumeSuppressedRoomTransition(roomKey)
-            local scheduled = false
-            if not suppressed then
-                scheduled = scheduleRoofRepair(map, observed.record, "room-transition")
-            end
             print("[RailroaderRVTest] room transition detected room=" .. roomKey
-                .. " previous=inside current=outside suppressed="
-                .. tostring(suppressed) .. " scheduled=" .. tostring(scheduled))
+                .. " previous=inside current=outside repair=not-scheduled-without-wall-removal")
         end
         if observed.roomStateAvailable then
             roomTransitionStates[roomKey] = {

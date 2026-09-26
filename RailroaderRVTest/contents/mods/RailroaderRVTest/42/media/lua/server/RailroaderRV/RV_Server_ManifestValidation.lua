@@ -4,16 +4,46 @@ local OWNER = ctx.OWNER
 local Constants = ctx.Constants
 local Boundary = ctx.Boundary
 local Bitmap = ctx.Bitmap
+local Layout = require("RailroaderRV/RV_Layout")
 local ServerUtil = ctx.ServerUtil
 local function requireCurrentManifest(...) return ctx.requireCurrentManifest(...) end
 
-local function currentBoundsValid(bounds, managed, bitmap)
+local function currentBoundsValid(bounds, managed, bitmap, anchor)
     local function onlyKeys(value, expected)
         if type(value) ~= "table" then return false end
         local allowed = {}
         for i = 1, #expected do allowed[expected[i]] = true end
         for key in pairs(value) do
             if not allowed[key] then return false end
+        end
+        return true
+    end
+    local function sameTemplateIndices(left, right)
+        if type(left) ~= "table" or type(right) ~= "table"
+            or #left < 1 or #left ~= #right then
+            return false
+        end
+        local leftCount, rightCount = 0, 0
+        for key in pairs(left) do
+            leftCount = leftCount + 1
+            if type(key) ~= "number" or key < 1 or math.floor(key) ~= key
+                or key > #left then
+                return false
+            end
+        end
+        for key in pairs(right) do
+            rightCount = rightCount + 1
+            if type(key) ~= "number" or key < 1 or math.floor(key) ~= key
+                or key > #right then
+                return false
+            end
+        end
+        if leftCount ~= #left or rightCount ~= #right then return false end
+        for i = 1, #left do
+            if ServerUtil.requiredInteger(left[i], "manifest template part")
+                ~= ServerUtil.requiredInteger(right[i], "current template part") then
+                return false
+            end
         end
         return true
     end
@@ -72,10 +102,35 @@ local function currentBoundsValid(bounds, managed, bitmap)
         or values.roomZ ~= values.z or values.wallZ ~= values.z
         or values.roofZ < values.managedMinZ
         or values.roofZ >= values.managedMaxZ
-        or values.wallObjectCount ~= 92
-        or values.wallCoordinateCount ~= 92
-        or values.northEdges ~= 12 or values.westEdges ~= 80
-        or values.wallCornerCount ~= 2 then
+        or values.wallObjectCount ~= 54
+        or values.wallCoordinateCount ~= 54
+        or values.northEdges ~= 12 or values.westEdges ~= 42
+        or values.wallCornerCount ~= 1 then
+        return false
+    end
+    if type(anchor) ~= "table"
+        or ServerUtil.requiredInteger(anchor.x, "manifest anchor.x") ~= Constants.TELEPORT_X
+        or ServerUtil.requiredInteger(anchor.y, "manifest anchor.y") ~= Constants.TELEPORT_Y
+        or ServerUtil.requiredInteger(anchor.z, "manifest anchor.z") ~= Constants.TELEPORT_Z then
+        return false
+    end
+    local expectedLayout = Layout.make(anchor.x, anchor.y, anchor.z)
+    if values.roomMinX ~= expectedLayout.room.minX
+        or values.roomMaxX ~= expectedLayout.room.maxX
+        or values.roomMinY ~= expectedLayout.room.minY
+        or values.roomMaxY ~= expectedLayout.room.maxY
+        or values.roomZ ~= expectedLayout.room.z
+        or values.wallMinX ~= expectedLayout.wall.minX
+        or values.wallMaxX ~= expectedLayout.wall.maxX
+        or values.wallMinY ~= expectedLayout.wall.minY
+        or values.wallMaxY ~= expectedLayout.wall.maxY
+        or values.wallZ ~= expectedLayout.wall.z
+        or values.roofMinX ~= expectedLayout.roof.minX
+        or values.roofMaxX ~= expectedLayout.roof.maxX
+        or values.roofMinY ~= expectedLayout.roof.minY
+        or values.roofMaxY ~= expectedLayout.roof.maxY
+        or values.z ~= expectedLayout.anchor.z
+        or values.roofZ ~= expectedLayout.roof.z then
         return false
     end
     -- `bounds.bitmap` is the decoded current-layout snapshot persisted inside
@@ -108,6 +163,12 @@ local function currentBoundsValid(bounds, managed, bitmap)
             or boundsLayer.walkBits ~= boundaryLayer.walkBits
             or boundsLayer.buildBits ~= boundaryLayer.buildBits
             or boundsLayer.encoding ~= boundaryLayer.encoding then
+            return false
+        end
+        local expectedLayer = Bitmap.layer(expectedLayout.bitmap, z)
+        if type(expectedLayer) ~= "table"
+            or boundsLayer.walkBits ~= expectedLayer.walkBits
+            or boundsLayer.buildBits ~= expectedLayer.buildBits then
             return false
         end
     end
@@ -169,7 +230,8 @@ local function currentBoundsValid(bounds, managed, bitmap)
         return false
     end
     local wallEntryKeys = {
-        "x", "y", "z", "north", "sprite", "role", "corner",
+        "x", "y", "z", "north", "sprite", "role", "corner", "templateIndex",
+        "templateIndices",
         "edgeNorth", "edgeWest", "axis", "edgeKey", "edgeSide",
         "edgeCellX", "edgeCellY", "edgeHostX", "edgeHostY",
     }
@@ -177,11 +239,13 @@ local function currentBoundsValid(bounds, managed, bitmap)
     local shellEntryKeys = {
         "edgeKey", "rvId", "generation", "hostX", "hostY", "z", "axis",
         "side", "objectX", "objectY", "objectZ", "role", "corner",
-        "replacementAllowed",
+        "replacementAllowed", "templateIndex", "templateIndices", "sprite", "north",
     }
     for i = 1, #bounds.wallCoordinates do
         local entry = bounds.wallCoordinates[i]
+        local expectedEntry = expectedLayout.wallCoordinates[i]
         if not onlyKeys(entry, wallEntryKeys)
+            or type(expectedEntry) ~= "table"
             or type(entry) ~= "table"
             or type(entry.north) ~= "boolean"
             or type(entry.corner) ~= "boolean"
@@ -193,6 +257,10 @@ local function currentBoundsValid(bounds, managed, bitmap)
             or ServerUtil.requiredInteger(entry.x, "manifest wall coordinate x") == nil
             or ServerUtil.requiredInteger(entry.y, "manifest wall coordinate y") == nil
             or ServerUtil.requiredInteger(entry.z, "manifest wall coordinate z") == nil
+            or ServerUtil.requiredInteger(entry.templateIndex,
+                "manifest wall coordinate templateIndex") == nil
+            or not sameTemplateIndices(entry.templateIndices,
+                expectedEntry.templateIndices)
             or ServerUtil.requiredInteger(entry.edgeCellX,
                 "manifest wall coordinate edgeCellX") == nil
             or ServerUtil.requiredInteger(entry.edgeCellY,
@@ -222,20 +290,6 @@ local function currentBoundsValid(bounds, managed, bitmap)
         end
         local expectedEdgeKey = Bitmap.edgeForSide and Bitmap.edgeForSide(
             expectedSide, expectedCellX, expectedCellY, entry.z) or nil
-        local expectedRole = entry.north and "wall-north" or "wall-west"
-        local expectedSprite = entry.north and Constants.SPRITES.wall.northSprite
-            or Constants.SPRITES.wall.sprite
-        if entry.corner then
-            if entry.x == values.wallMinX and entry.y == values.wallMinY then
-                expectedRole = "corner-nw"
-                expectedSprite = Constants.SPRITES.wallNW.sprite
-            elseif entry.x == values.wallMaxX and entry.y == values.wallMaxY then
-                expectedRole = "corner-se"
-                expectedSprite = Constants.SPRITES.wallSE.sprite
-            else
-                return false
-            end
-        end
         if entry.axis ~= expectedAxis
             or entry.edgeNorth ~= (expectedAxis == "N")
             or entry.edgeWest ~= (expectedAxis == "W")
@@ -249,8 +303,11 @@ local function currentBoundsValid(bounds, managed, bitmap)
             or ServerUtil.requiredInteger(entry.edgeHostY,
                 "manifest wall coordinate edgeHostY") ~= entry.y
             or entry.edgeKey ~= expectedEdgeKey
-            or entry.role ~= expectedRole
-            or entry.sprite ~= expectedSprite then
+            or entry.x ~= expectedEntry.x or entry.y ~= expectedEntry.y
+            or entry.z ~= expectedEntry.z or entry.north ~= expectedEntry.north
+            or entry.role ~= expectedEntry.role or entry.sprite ~= expectedEntry.sprite
+            or entry.corner ~= expectedEntry.corner
+            or entry.templateIndex ~= expectedEntry.templateIndex then
             return false
         end
         expectedShellKeys[entry.edgeKey] = true
@@ -292,7 +349,12 @@ local function currentBoundsValid(bounds, managed, bitmap)
             or edge.objectY ~= wallEntry.y
             or edge.objectZ ~= wallEntry.z
             or edge.role ~= wallEntry.role
-            or edge.corner ~= wallEntry.corner then
+            or edge.corner ~= wallEntry.corner
+            or ServerUtil.requiredInteger(edge.templateIndex,
+                "manifest shell edge templateIndex") ~= wallEntry.templateIndex
+            or not sameTemplateIndices(edge.templateIndices,
+                wallEntry.templateIndices)
+            or edge.sprite ~= wallEntry.sprite or edge.north ~= wallEntry.north then
             return false
         end
     end
@@ -311,7 +373,8 @@ local function currentManifestValid(manifest, allowEmpty)
     end
     if not hasField then return allowEmpty == true end
     local manifestKeys = {
-        schemaVersion = true, techVersion = true, generation = true,
+        schemaVersion = true, techVersion = true, templateVersion = true,
+        generation = true,
         owner = true, anchor = true, bounds = true, rvId = true,
         boundarySchemaVersion = true, bitmapVersion = true, boundary = true,
         startedAt = true, rollback = true, state = true, updatedAt = true,
@@ -321,11 +384,17 @@ local function currentManifestValid(manifest, allowEmpty)
     for key in pairs(manifest) do
         if not manifestKeys[key] then return false end
     end
-    if manifest.version ~= nil or manifest.managed ~= nil
-        or manifest.bitmap ~= nil or manifest.shellEdges ~= nil
-        or ServerUtil.requiredInteger(manifest.schemaVersion, "manifest schemaVersion")
+    local anchorFields = { x = true, y = true, z = true }
+    if type(manifest.anchor) == "table" then
+        for key in pairs(manifest.anchor) do
+            if not anchorFields[key] then return false end
+        end
+    end
+    if ServerUtil.requiredInteger(manifest.schemaVersion, "manifest schemaVersion")
         ~= Constants.MANIFEST_SCHEMA_VERSION
         or manifest.techVersion ~= Constants.TECH_VERSION
+        or ServerUtil.requiredInteger(manifest.templateVersion,
+            "manifest templateVersion") ~= Constants.CAPTURED_TEMPLATE_VERSION
         or manifest.owner ~= OWNER
         or type(manifest.state) ~= "string"
         or (manifest.state ~= "RUNNING" and manifest.state ~= "READY"
@@ -363,7 +432,7 @@ local function currentManifestValid(manifest, allowEmpty)
     end
     if not boundaryBitmapOk or type(boundaryBitmap) ~= "table"
         or not currentBoundsValid(manifest.bounds,
-            manifest.boundary.managed, boundaryBitmap) then
+            manifest.boundary.managed, boundaryBitmap, manifest.anchor) then
         return false
     end
     local startedAt = ServerUtil.requiredInteger(manifest.startedAt, "manifest startedAt")
@@ -376,14 +445,9 @@ local function currentManifestValid(manifest, allowEmpty)
     if type(manifest.phase) ~= "string"
         or (manifest.phase ~= "RUNNING"
             and manifest.phase ~= "CLEARING"
-            and manifest.phase ~= "WOOD_FLOOR"
-            and manifest.phase ~= "WALLS"
-            and manifest.phase ~= "ROOF_FLOOR"
+            and manifest.phase ~= "CAPTURED_TEMPLATE"
             and manifest.phase ~= "STRUCTURE_RECALC"
             and manifest.phase ~= "GENERATOR"
-            and manifest.phase ~= "UTILITY_TANK"
-            and manifest.phase ~= "COUNTER_SINK"
-            and manifest.phase ~= "LIGHT"
             and manifest.phase ~= "FINAL_RELOCATE"
             and manifest.phase ~= "COMMITTED"
             and manifest.phase ~= "ROLLED_BACK"
@@ -429,7 +493,7 @@ end
 requireCurrentManifest = function(manifest, allowEmpty)
     local ok, valid = pcall(currentManifestValid, manifest, allowEmpty)
     if not ok or valid ~= true then
-        error(Constants.SAVE_REBUILD_REQUIRED)
+        error(Constants.INVALID_RV_DATA)
     end
     return manifest
 end

@@ -232,8 +232,8 @@ local function roofRepairWorldCoordinateValid(destination)
 end
 
 -- Read the current mapping/boundary identity from the authoritative server
--- player.  The request object is built by RV_RailroaderServer; it never carries
--- a client coordinate or persisted legacy geometry.  Rechecking the manifest
+-- player.  The request object is built by RV_RailroaderServer; it carries no
+-- geometry.  Rechecking the current manifest
 -- here keeps the generic relocation bridge safe if a generation changes between
 -- the wall event and the next server tick.
 local function currentRoofRepairContext(player, request)
@@ -245,7 +245,7 @@ local function currentRoofRepairContext(player, request)
         or tostring(request.rvId or "") == ""
         or requestGeneration == nil or requestGeneration < 1
         or requestBitmapVersion ~= Constants.BITMAP_VERSION then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
    end
     if not Boundary or type(Boundary.boundaryForPlayer) ~= "function" then
         return false, "RV boundary service is unavailable"
@@ -255,26 +255,26 @@ local function currentRoofRepairContext(player, request)
     if not boundaryOk or type(boundary) ~= "table"
         or type(record) ~= "table" or type(relation) ~= "table"
         or type(boundaryIdentity) ~= "table" then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     if tostring(boundary.rvId) ~= tostring(request.rvId)
         or ServerUtil.integer(boundary.generation) ~= requestGeneration
         or ServerUtil.integer(boundary.bitmapVersion) ~= requestBitmapVersion
         or relation.inside ~= true
         or tostring(boundaryIdentity.key) ~= tostring(request.identityKey) then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local name = boundaryIdentity.username
     local rider = type(record.players) == "table" and record.players[name] or nil
     if type(rider) ~= "table" or rider.inside ~= true
         or ServerUtil.integer(rider.onlineId) ~= ServerUtil.integer(relation.onlineId)
         or ServerUtil.integer(rider.onlineId) ~= ServerUtil.integer(boundaryIdentity.onlineId) then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
 
     local manifestOk, manifestOrError = pcall(manifestTable)
     if not manifestOk or type(manifestOrError) ~= "table" then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local manifest = manifestOrError
     local schemaOk = pcall(requireCurrentManifest, manifest, false)
@@ -285,7 +285,7 @@ local function currentRoofRepairContext(player, request)
         or tostring(manifest.boundary.rvId) ~= tostring(request.rvId)
         or ServerUtil.integer(manifest.boundary.generation) ~= ServerUtil.integer(request.generation)
         or ServerUtil.integer(manifest.boundary.bitmapVersion) ~= ServerUtil.integer(request.bitmapVersion) then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     -- All consumers share one cross-object geometry proof.  Keeping this
     -- check in RV_Server prevents the roof path, boundary guard, and
@@ -293,21 +293,21 @@ local function currentRoofRepairContext(player, request)
     local geometryService = RV and RV.Server
         and RV.Server.currentRVRecordGeometryConsistent
     if type(geometryService) ~= "function" then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local geometryCallOk, geometryConsistent = pcall(geometryService, record,
         manifest)
     if not geometryCallOk or geometryConsistent ~= true then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local bitmap = boundary.bitmap
     if type(bitmap) ~= "table" or not Bitmap
         or type(Bitmap.validate) ~= "function" then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local bitmapOk, bitmapValid = pcall(Bitmap.validate, bitmap)
     if not bitmapOk or bitmapValid ~= true then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     return true, {
         boundary = boundary,
@@ -322,7 +322,7 @@ end
 local function roofRepairDestination(context, request)
     local bitmap = context and context.bitmap
     if type(bitmap) ~= "table" then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local phase = tostring(request.phase or "")
     if phase == "temporary" then
@@ -332,12 +332,12 @@ local function roofRepairDestination(context, request)
         local originY = ServerUtil.requiredInteger(bitmap.originY, "roof repair bitmap originY")
         if width ~= Constants.RV_MANAGED_WIDTH
             or height ~= Constants.RV_MANAGED_HEIGHT then
-            return false, Constants.SAVE_REBUILD_REQUIRED
+            return false, Constants.INVALID_RV_DATA
         end
         local centerZ = ServerUtil.requiredInteger(bitmap.minZ,
             "roof repair bitmap center z")
         if centerZ < WORLD_MIN_Z or centerZ > WORLD_MAX_Z then
-            return false, Constants.SAVE_REBUILD_REQUIRED
+            return false, Constants.INVALID_RV_DATA
         end
         -- Force the RV scope to leave the loaded chunk set.  The center comes
         -- from the current validated bitmap (the same layout contract used by
@@ -352,7 +352,7 @@ local function roofRepairDestination(context, request)
             z = centerZ - ROOF_REPAIR_REMOTE_OFFSET_Z,
         }
         if destination.z < WORLD_MIN_Z or destination.z > WORLD_MAX_Z then
-            return false, Constants.SAVE_REBUILD_REQUIRED
+            return false, Constants.INVALID_RV_DATA
         end
         return true, destination
     end
@@ -361,7 +361,7 @@ local function roofRepairDestination(context, request)
     end
     local destinationOk, destination = pcall(roofRepairPosition,
         request.returnPosition, "return")
-    if not destinationOk then return false, Constants.SAVE_REBUILD_REQUIRED end
+    if not destinationOk then return false, Constants.INVALID_RV_DATA end
     local x, y, z = math.floor(destination.x), math.floor(destination.y),
         math.floor(destination.z)
     if not Bitmap.containsScope(bitmap, x, y, z)
@@ -484,7 +484,7 @@ end
 local function validatedRoofRepairReturn(pending)
     if type(pending) ~= "table" or not pending.player
         or not pending.identity then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local resolved, livePlayerOrReason = resolvePendingPlayer(pending)
     if not resolved then return false, livePlayerOrReason end
@@ -500,7 +500,7 @@ local function validatedRoofRepairReturn(pending)
             identityKey = identityOrReason.key })
     if not contextOk then return false, contextOrReason end
     local returnPosition = copyRoofRepairPosition(pending.returnPosition)
-    if not returnPosition then return false, Constants.SAVE_REBUILD_REQUIRED end
+    if not returnPosition then return false, Constants.INVALID_RV_DATA end
     local returnX, returnY, returnZ = math.floor(returnPosition.x),
         math.floor(returnPosition.y), math.floor(returnPosition.z)
     if not Bitmap.containsScope(contextOrReason.bitmap, returnX, returnY,
@@ -523,7 +523,7 @@ end
 -- the authoritative server object is moved first/alongside it.
 local function rollbackRoofRepairRelocation(pending)
     if type(pending) ~= "table" then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local targetOk, targetOrReason = validatedRoofRepairReturn(pending)
     if not targetOk then
@@ -533,7 +533,7 @@ local function rollbackRoofRepairRelocation(pending)
         return false, targetOrReason
     end
     local player = pending.player
-    if not player then return false, Constants.SAVE_REBUILD_REQUIRED end
+    if not player then return false, Constants.INVALID_RV_DATA end
     local returnPosition = targetOrReason.position
     local identity = targetOrReason.identity
     local liveCallOk, livePositionOrReason =

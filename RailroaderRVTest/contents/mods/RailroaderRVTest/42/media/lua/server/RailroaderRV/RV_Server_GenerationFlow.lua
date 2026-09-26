@@ -11,8 +11,22 @@ local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local ServerSchema = ctx.ServerSchema
+local UtilityServer = ctx.UtilityServer
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local function requireCurrentManifest(...) return ctx.requireCurrentManifest(...) end
+local function validateGenerationUtilityState(identity)
+    if not UtilityServer
+        or type(UtilityServer.validateGenerationUtilityState) ~= "function" then
+        return false, Constants.INVALID_RV_DATA
+    end
+    local callOk, accepted, reason = pcall(
+        UtilityServer.validateGenerationUtilityState, identity)
+    if not callOk or accepted ~= true then
+        return false, callOk and (reason or Constants.INVALID_RV_DATA)
+            or Constants.INVALID_RV_DATA
+    end
+    return true
+end
 local RELOCATION_TIMEOUT_TICKS = ctx.RELOCATION_TIMEOUT_TICKS
 local removeOldGeneration = ctx.removeOldGeneration
 local registerServerRoomOwnershipGuard = ctx.registerServerRoomOwnershipGuard
@@ -153,7 +167,7 @@ local function generateForPlayer(player, prepared)
         end
         ctx.transactionBusy = false
         ctx.transactionPlayer = nil
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     if manifest.state == "RUNNING" then
         if Boundary and type(Boundary.clearPlayer) == "function" then
@@ -225,7 +239,12 @@ local function generateForPlayer(player, prepared)
         end
         prepared.rvId = tostring(rvId)
         prepared.boundary = boundaryOrReason
-        -- Arm every connected client before any old wall or roof is removed.
+        local utilityReady, utilityReason = validateGenerationUtilityState({
+            rvId = prepared.rvId, generation = generation,
+            bitmapVersion = boundaryOrReason.bitmapVersion,
+        })
+        if not utilityReady then error(utilityReason) end
+        -- Arm every connected client before any old captured object is removed.
         -- Reliable packet order installs the guard before the following world
         -- deltas; the requester remains at the validated staging square,
         -- outside both old and new structure footprints, while later client
@@ -238,12 +257,13 @@ local function generateForPlayer(player, prepared)
         -- Remove only objects owned by a prior generation before taking the
         -- new generation lock in persistent state.
         removeOldGeneration(cell, manifest)
-        -- The loaded-area gate covers the base footprint and walls, but upper
-        -- squares may be nil until buildGeneration reaches ensureRoofSquare.
-        -- Keep the player at staging and defer the complete transaction scan
-        -- until the roof loop has materialized the entire upper footprint.
+        -- The loaded-area gate covers the base footprint and shell hosts. Upper
+        -- squares are materialized only at captured-object hosts during build.
+        -- Keep the player at staging until that pass has created each required
+        -- square and the room-ownership scan has verified the captured roof.
         manifest.schemaVersion = Constants.MANIFEST_SCHEMA_VERSION
         manifest.techVersion = Constants.TECH_VERSION
+        manifest.templateVersion = Constants.CAPTURED_TEMPLATE_VERSION
         manifest.generation = generation
         manifest.owner = OWNER
         manifest.anchor = { x = anchor.x, y = anchor.y, z = anchor.z }
@@ -300,10 +320,10 @@ local function generateForPlayer(player, prepared)
             end
         end
         if not buildOk then
-            -- The lamp is intentionally last, but any phase can fail.  Remove
+            -- The generator is intentionally last, but any phase can fail. Remove
             -- every object tagged by this generation before exposing FAILED;
-            -- otherwise a failed lamp/API call would leave a powered
-            -- generator, utility object or roof as a half-built cabin.
+            -- otherwise a failed generator/API call would leave a partial
+            -- captured model or powered generator in the world.
             local rollbackOk, rollbackError = pcall(function()
                 removeGeneration(cell, bounds, generation, manifest.rvId,
                     manifest.bitmapVersion, manifest.phase)
@@ -399,7 +419,7 @@ local function finalizeGenerationAfterRelocate(player, prepared)
             or tostring(manifest.rvId) ~= tostring(prepared.rvId)
             or ServerUtil.integer(manifest.generation) ~= prepared.generation
             or ServerUtil.integer(manifest.bitmapVersion) ~= prepared.bitmapVersion then
-            error(Constants.SAVE_REBUILD_REQUIRED)
+            error(Constants.INVALID_RV_DATA)
         end
         local anchor = manifest.anchor
         local anchorX = ServerUtil.requiredInteger(anchor.x, "final manifest anchor x")
@@ -408,7 +428,7 @@ local function finalizeGenerationAfterRelocate(player, prepared)
         if prepared.finalDestination.x ~= anchorX + 0.5
             or prepared.finalDestination.y ~= anchorY + 0.5
             or prepared.finalDestination.z ~= anchorZ then
-            error(Constants.SAVE_REBUILD_REQUIRED)
+            error(Constants.INVALID_RV_DATA)
         end
         local guard = prepared.generationRoomOwnershipGuard
         if guard then
@@ -437,7 +457,7 @@ local function finalizeGenerationAfterRelocate(player, prepared)
         local readySchemaOk = pcall(requireCurrentManifest, manifest, false)
         if not readySchemaOk or manifest.state ~= "READY"
             or manifest.phase ~= "COMMITTED" then
-            error(Constants.SAVE_REBUILD_REQUIRED)
+            error(Constants.INVALID_RV_DATA)
         end
         prepared.finalizationReady = true
     end)
@@ -476,7 +496,7 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     local manifest = manifestOrError
     local schemaOk = pcall(requireCurrentManifest, manifest, true)
     if not schemaOk then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     if manifest.state == "RUNNING" then
         return false, "generation already in progress"
@@ -524,6 +544,11 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     local transitionBitmapVersion = ServerUtil.requiredInteger(
         layoutOrError.bitmap and layoutOrError.bitmap.bitmapVersion,
         "planned generation bitmapVersion")
+    local utilityReady, utilityReason = validateGenerationUtilityState({
+        rvId = tostring(transitionRvId), generation = transitionGeneration,
+        bitmapVersion = transitionBitmapVersion,
+    })
+    if not utilityReady then return false, utilityReason end
     ctx.pendingGeneration = {
         player = player,
         identity = identityOrReason,

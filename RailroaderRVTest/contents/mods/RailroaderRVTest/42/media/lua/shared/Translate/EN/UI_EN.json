@@ -5,7 +5,6 @@
     "ContextMenu_RailroaderRVTest_Enter": "Enter RV",
     "ContextMenu_RailroaderRVTest_Exit": "Exit RV",
     "ContextMenu_RailroaderRVTest_UtilityDashboard": "RV utility panel",
-    "ContextMenu_RailroaderRVTest_UtilitySaveRebuild": "RV test save is incompatible; delete it and rebuild",
     "ContextMenu_RailroaderRVTest_AddWater": "Add water to RV",
     "ContextMenu_RailroaderRVTest_AddFuel": "Add fuel to RV",
     "UI_RailroaderRVTest_Utility_Title": "RV utility panel",

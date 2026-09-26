@@ -1,6 +1,7 @@
 -- RV_Server: RoomOwnership responsibilities.
 return function(ctx)
 local RemovalTrace = require("RailroaderRV/RV_Server_ObjectRemovalTrace")
+local Template = require("RailroaderRV/RV_Template")
 local COMMAND_MODULE = ctx.COMMAND_MODULE
 local COMMAND_REFRESH_ROOM_OWNERSHIP = ctx.COMMAND_REFRESH_ROOM_OWNERSHIP
 local COMMAND_RV_TELEPORT = ctx.COMMAND_RV_TELEPORT
@@ -166,9 +167,30 @@ local function structureCoordinates(bounds, callback, materializedRoofCoordinate
     for x = wallMinX, wallMaxX do
         for y = wallMinY, wallMaxY do callback(x, y, z) end
     end
+    local emittedRoof = {}
+    local function emitRoof(x, y, z)
+        local key = tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
+        if not emittedRoof[key] then
+            emittedRoof[key] = true
+            callback(x, y, z)
+        end
+    end
     if materializedRoofCoordinates == nil then
-        for x = roofMinX, roofMaxX do
-            for y = roofMinY, roofMaxY do callback(x, y, roofZ) end
+        -- The captured roof is sparse: inspect the square hosts of its actual
+        -- logged objects, not every cell in the six-by-twenty-three outline.
+        local anchorX = ServerUtil.requiredInteger(bounds.roomMinX,
+            "room ownership roomMinX") - Constants.INTERIOR_MIN_OFFSET_X
+        local anchorY = ServerUtil.requiredInteger(bounds.roomMinY,
+            "room ownership roomMinY") - Constants.INTERIOR_MIN_OFFSET_Y
+        for i = 1, #Template.objects do
+            local captured = Template.objects[i]
+            if captured.z == Constants.ROOF_Z_OFFSET then
+                local x, y = anchorX + captured.x, anchorY + captured.y
+                if x < roofMinX or x > roofMaxX or y < roofMinY or y > roofMaxY then
+                    error("RailroaderRVTest: captured roof object is outside bounds")
+                end
+                emitRoof(x, y, roofZ)
+            end
         end
     else
         for i = 1, #materializedRoofCoordinates do
@@ -186,7 +208,7 @@ local function structureCoordinates(bounds, callback, materializedRoofCoordinate
                 or z ~= roofZ then
                 error("RailroaderRVTest: materialized roof coordinate is outside bounds")
             end
-            callback(x, y, z)
+            emitRoof(x, y, z)
         end
     end
 end
@@ -783,11 +805,12 @@ local function removeGeneration(cell, bounds, generation, rvId, bitmapVersion,
         error("RailroaderRVTest: rollback verification found " .. tostring(remaining)
             .. " tagged objects still present")
     end
-    -- Before ROOF_FLOOR has completed, some upper squares may not exist by
+    -- Before CAPTURED_TEMPLATE has completed, some upper squares may not exist by
     -- design. ensureRoofSquare connects each successful square to this cell,
     -- so the remaining existing upper squares are the authoritative set that
     -- rollback must inspect. Old bounds remain a strict full scan. After the
-    -- build has passed the roof loop, rollback requires the full new roof.
+    -- build has passed the captured-object loop, rollback requires every
+    -- captured roof-object host.
     local roofBuildComplete = guard.newRoofComplete == true
         or ROOF_COMPLETE_GENERATION_PHASES[generationPhase] == true
     if roofBuildComplete then

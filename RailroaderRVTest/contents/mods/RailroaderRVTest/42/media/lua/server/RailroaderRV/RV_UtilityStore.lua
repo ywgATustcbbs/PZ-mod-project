@@ -1,14 +1,12 @@
--- Current-only persistence for the water/power utility layer.
+-- Current-only persistence for the native generator power layer.
 --
--- Current records retain the same identity and version gates. Obsolete water
--- checkpoint fields are discarded when an existing record is read.
+-- The current contract has no water identity or hidden tank/proxy record.
 
 local C = require("RailroaderRV/RV_Constants")
 local U = require("RailroaderRV/RV_UtilityConstants")
 local Catalog = require("RailroaderRV/RV_UtilityCatalog")
 
 local M = {}
-local sessionPrepared = {}
 
 local function hiddenFingerprint(role, sprite)
     return tostring(role) .. ":" .. tostring(C.UTILITY_HIDDEN_OBJECT_CLASS)
@@ -232,8 +230,8 @@ local function validPower(value, identity)
 end
 
 local function validRecord(value, identity)
-    return exactKeys(value, { "rvId", "generation", "bitmapVersion", "water", "power" })
-        and identityMatches(value, identity) and validWater(value.water, identity)
+    return exactKeys(value, { "rvId", "generation", "bitmapVersion", "power" })
+        and identityMatches(value, identity)
         and validPower(value.power, identity)
 end
 
@@ -242,17 +240,17 @@ end
 -- written here, so failed initialization cannot seed a half-record in ModData.
 local function readRoot()
     if not ModData or type(ModData.get) ~= "function" then
-        error(C.SAVE_REBUILD_REQUIRED)
+        error(C.INVALID_RV_DATA)
     end
     local ok, value = pcall(ModData.get, U.STORE_KEY)
-    if not ok then error(C.SAVE_REBUILD_REQUIRED) end
+    if not ok then error(C.INVALID_RV_DATA) end
     if value == nil then return nil end
-    if type(value) ~= "table" then error(C.SAVE_REBUILD_REQUIRED) end
+    if type(value) ~= "table" then error(C.INVALID_RV_DATA) end
     if empty(value) then return value end
     if not exactKeys(value, { "schemaVersion", "records" })
         or integer(value.schemaVersion) ~= U.STORE_SCHEMA_VERSION
         or type(value.records) ~= "table" then
-        error(C.SAVE_REBUILD_REQUIRED)
+        error(C.INVALID_RV_DATA)
     end
     return value
 end
@@ -262,7 +260,7 @@ local function root(allowCreate)
     local value = readRoot()
     if value == nil and allowCreate and ModData and type(ModData.getOrCreate) == "function" then
         local ok, result = pcall(ModData.getOrCreate, U.STORE_KEY)
-        if not ok then error(C.SAVE_REBUILD_REQUIRED) end
+        if not ok then error(C.INVALID_RV_DATA) end
         value = result
     end
     if type(value) == "table" and empty(value) and allowCreate == true then
@@ -271,23 +269,23 @@ local function root(allowCreate)
     end
     if type(value) ~= "table" or not exactKeys(value, { "schemaVersion", "records" })
         or integer(value.schemaVersion) ~= U.STORE_SCHEMA_VERSION
-        or type(value.records) ~= "table" then error(C.SAVE_REBUILD_REQUIRED) end
+        or type(value.records) ~= "table" then error(C.INVALID_RV_DATA) end
     return value
 end
 
 local function currentIdentityGate(identity)
-    if not identityValid(identity) then return false, C.SAVE_REBUILD_REQUIRED end
+    if not identityValid(identity) then return false, C.INVALID_RV_DATA end
     local rv = rawget(_G, "RailroaderRV")
     local server = rv and rv.Server
     if not server or type(server.currentRVManifestForBoundary) ~= "function"
         or type(server.validateCurrentUtilityIdentity) ~= "function" then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local ok, accepted = pcall(server.currentRVManifestForBoundary, identity.rvId,
         identity.generation, identity.bitmapVersion)
-    if not ok or accepted ~= true then return false, C.SAVE_REBUILD_REQUIRED end
+    if not ok or accepted ~= true then return false, C.INVALID_RV_DATA end
     local mapOk, mapAccepted = pcall(server.validateCurrentUtilityIdentity, identity)
-    if not mapOk or mapAccepted ~= true then return false, C.SAVE_REBUILD_REQUIRED end
+    if not mapOk or mapAccepted ~= true then return false, C.INVALID_RV_DATA end
     return true
 end
 
@@ -328,7 +326,7 @@ end
 
 local function newRecord(identity)
     return { rvId = tostring(identity.rvId), generation = identity.generation,
-        bitmapVersion = identity.bitmapVersion, water = newWater(identity), power = newPower() }
+        bitmapVersion = identity.bitmapVersion, power = newPower() }
 end
 
 function M.validateIdentity(identity)
@@ -339,78 +337,34 @@ function M.getRecord(identity, allowCreate)
     local gateOk, gateReason = currentIdentityGate(identity)
     if not gateOk then return false, gateReason end
     local ok, value = pcall(readRoot)
-    if not ok then return false, C.SAVE_REBUILD_REQUIRED end
+    if not ok then return false, C.INVALID_RV_DATA end
     local id = tostring(identity.rvId)
     local record
     if value == nil or empty(value) then
-        if allowCreate ~= true then return false, C.SAVE_REBUILD_REQUIRED end
+        if allowCreate ~= true then return false, C.INVALID_RV_DATA end
         record = newRecord(identity)
     else
         local persisted = value.records[id]
         if persisted == nil then
-            if allowCreate ~= true then return false, C.SAVE_REBUILD_REQUIRED end
+            if allowCreate ~= true then return false, C.INVALID_RV_DATA end
             record = newRecord(identity)
         else
             if not validRecord(persisted, identity) then
-                return false, C.SAVE_REBUILD_REQUIRED
+                return false, C.INVALID_RV_DATA
             end
             record = copyTable(persisted)
-            local water = record.water
-            water.requestLedger = nil
-            water.canonicalTank.checkpoint = nil
-            water.canonicalTank.faultPolicy = nil
-            local snapshot = water.usageTankSnapshot
-            snapshot.baselineSequence = nil
-            snapshot.usageSequence = nil
-            snapshot.settledCanonicalSequence = nil
-            snapshot.projectionSequence = nil
-            snapshot.state = nil
-            for _, ledger in pairs(water.proxyLedger) do
-                ledger.baselineSequence = nil
-                ledger.usageSequence = nil
-                ledger.projectionSequence = nil
-                if ledger.status == U.STATUS_QUARANTINE_PENDING
-                    or ledger.status == U.STATUS_REBUILD_REQUIRED
-                    or ledger.status == U.STATUS_SUSPENDED then
-                    ledger.status = U.STATUS_NEEDS_RECONCILE
-                end
-            end
-            for _, entry in pairs(water.registry) do
-                if entry.status == U.STATUS_QUARANTINE_PENDING
-                    or entry.status == U.STATUS_REBUILD_REQUIRED
-                    or entry.status == U.STATUS_SUSPENDED then
-                    entry.status = U.STATUS_NEEDS_RECONCILE
-                end
-            end
-            if water.state == U.WATER_STATE_QUARANTINE_PENDING
-                or water.state == U.WATER_STATE_REBUILD_REQUIRED then
-                water.state = U.WATER_STATE_NEEDS_RECONCILE
-            end
-            if water.canonicalTank.state == U.WATER_STATE_QUARANTINE_PENDING
-                or water.canonicalTank.state == U.WATER_STATE_REBUILD_REQUIRED then
-                water.canonicalTank.state = U.WATER_STATE_NEEDS_RECONCILE
-            end
         end
     end
-    if not validRecord(record, identity) then return false, C.SAVE_REBUILD_REQUIRED end
-    local preparedKey = id .. ":" .. tostring(identity.generation) .. ":"
-        .. tostring(identity.bitmapVersion)
-    if not sessionPrepared[preparedKey] then
-        -- A process-local reconnect refreshes loaded projections from the
-        -- saved balance before the next water operation.
-        record.water.state = U.WATER_STATE_NEEDS_RECONCILE
-        record.water.canonicalTank.state = U.WATER_STATE_NEEDS_RECONCILE
-        sessionPrepared[preparedKey] = true
-    end
+    if not validRecord(record, identity) then return false, C.INVALID_RV_DATA end
     return true, record
 end
 
 function M.commit(record, identity)
     local gateOk, gateReason = currentIdentityGate(identity)
     if not gateOk then return false, gateReason end
-    if not validRecord(record, identity) then return false, C.SAVE_REBUILD_REQUIRED end
+    if not validRecord(record, identity) then return false, C.INVALID_RV_DATA end
     local ok, value = pcall(root, true)
-    if not ok then return false, C.SAVE_REBUILD_REQUIRED end
+    if not ok then return false, C.INVALID_RV_DATA end
     -- Keep the caller's working copy detached even after a successful commit;
     -- later mutations must require another explicit commit.
     value.records[tostring(identity.rvId)] = copyTable(record)
@@ -425,28 +379,44 @@ end
 
 function M.allRecords()
     local ok, value = pcall(readRoot)
-    if not ok then return false, C.SAVE_REBUILD_REQUIRED end
+    if not ok then return false, C.INVALID_RV_DATA end
     local result = {}
     if value == nil or empty(value) then return true, result end
     for id, record in pairs(value.records) do
         if type(id) ~= "string" or type(record) ~= "table"
-            or tostring(record.rvId) ~= id then return false, C.SAVE_REBUILD_REQUIRED end
+            or tostring(record.rvId) ~= id then return false, C.INVALID_RV_DATA end
         local identity = { rvId = record.rvId, generation = record.generation,
             bitmapVersion = record.bitmapVersion }
-        if not validRecord(record, identity) then return false, C.SAVE_REBUILD_REQUIRED end
+        if not validRecord(record, identity) then return false, C.INVALID_RV_DATA end
         result[#result + 1] = { identity = identity, record = copyTable(record) }
     end
     return true, result
 end
 
-function M.copyWater(water)
-    return copyTable(water)
+-- Validate the persistent utility contract before generation changes world state.
+-- This deliberately does not call currentIdentityGate: the Railroader mapping
+-- is committed later in the generation transaction and is required by that
+-- gate.  A fresh root or a root with no record for this RV can be initialized
+-- after the mapping is committed; an existing record must already match the
+-- candidate generation exactly.
+function M.validateGenerationUtilityState(identity)
+    if not identityValid(identity) then return false, C.INVALID_RV_DATA end
+    local callOk, recordsOk, entries = pcall(M.allRecords)
+    if not callOk or recordsOk ~= true or type(entries) ~= "table" then
+        return false, C.INVALID_RV_DATA
+    end
+    for _, entry in ipairs(entries) do
+        if tostring(entry.identity.rvId) == tostring(identity.rvId)
+            and not validRecord(entry.record, identity) then
+            return false, C.INVALID_RV_DATA
+        end
+    end
+    return true
 end
 
 function M.snapshot(record)
     return { rvId = record.rvId, generation = record.generation,
-        bitmapVersion = record.bitmapVersion, water = copyTable(record.water),
-        power = copyTable(record.power) }
+        bitmapVersion = record.bitmapVersion, power = copyTable(record.power) }
 end
 
 return M

@@ -7,6 +7,7 @@
 
 local Constants = require("RailroaderRV/RV_Constants")
 local Layout = require("RailroaderRV/RV_Layout")
+local Template = require("RailroaderRV/RV_Template")
 local Bitmap = require("RailroaderRV/RV_Bitmap")
 local ServerUtil = require("RailroaderRV/RV_ServerUtil")
 local ServerWorld = require("RailroaderRV/RV_ServerWorld")
@@ -171,29 +172,68 @@ local function walkBounds(cell, bounds, fn)
 end
 
 local function validateWallContract(bounds)
-    if type(bounds.wallCoordinates) ~= "table" or #bounds.wallCoordinates ~= 92
-        or bounds.wallObjectCount ~= 92 or bounds.wallCoordinateCount ~= 92
-        or bounds.northEdges ~= 12 or bounds.westEdges ~= 80
-        or bounds.wallCornerCount ~= 2 then
+    if type(bounds.wallCoordinates) ~= "table" or #bounds.wallCoordinates ~= 54
+        or bounds.wallObjectCount ~= 54 or bounds.wallCoordinateCount ~= 54
+        or bounds.northEdges ~= 12 or bounds.westEdges ~= 42
+        or bounds.wallCornerCount ~= 1 then
         error("RailroaderRVTest: wall layout contract is invalid")
     end
-    local coordinates, orientations, exact, both = {}, {}, {}, {}
+    local coordinates, orientations, exact, both, templateIndices = {}, {}, {}, {}, {}
     local uniqueCoordinates, northEdges, westEdges, corners = 0, 0, 0, 0
     local nwKey = tostring(bounds.wallMinX) .. ":" .. tostring(bounds.wallMinY)
         .. ":" .. tostring(bounds.z)
-    local seKey = tostring(bounds.wallMaxX) .. ":" .. tostring(bounds.wallMaxY)
-        .. ":" .. tostring(bounds.z)
+    local anchorX = bounds.roomMinX - Constants.INTERIOR_MIN_OFFSET_X
+    local anchorY = bounds.roomMinY - Constants.INTERIOR_MIN_OFFSET_Y
     for i = 1, #bounds.wallCoordinates do
         local entry = bounds.wallCoordinates[i]
         if type(entry) ~= "table" or type(entry.x) ~= "number"
             or type(entry.y) ~= "number" or type(entry.z) ~= "number"
             or type(entry.north) ~= "boolean" or type(entry.role) ~= "string"
-            or type(entry.sprite) ~= "string" or type(entry.corner) ~= "boolean" then
+            or type(entry.sprite) ~= "string" or type(entry.corner) ~= "boolean"
+            or type(entry.templateIndex) ~= "number"
+            or type(entry.templateIndices) ~= "table"
+            or #entry.templateIndices < 1 then
             error("RailroaderRVTest: malformed wall entry at index " .. tostring(i))
+        end
+        local partCount = 0
+        for partKey in pairs(entry.templateIndices) do
+            partCount = partCount + 1
+            if type(partKey) ~= "number" or partKey < 1
+                or math.floor(partKey) ~= partKey or partKey > #entry.templateIndices then
+                error("RailroaderRVTest: shell edge parts are not a dense list")
+            end
+        end
+        if partCount ~= #entry.templateIndices
+            or entry.templateIndices[1] ~= entry.templateIndex then
+            error("RailroaderRVTest: shell edge representative is not its first part")
         end
         local x = ServerUtil.requiredInteger(entry.x, "wall[" .. tostring(i) .. "].x")
         local y = ServerUtil.requiredInteger(entry.y, "wall[" .. tostring(i) .. "].y")
         local z = ServerUtil.requiredInteger(entry.z, "wall[" .. tostring(i) .. "].z")
+        local templateIndex = ServerUtil.requiredInteger(entry.templateIndex,
+            "wall[" .. tostring(i) .. "].templateIndex")
+        local captured = templateIndex and Template.objects[templateIndex]
+        if not captured
+            or (captured.class ~= "IsoThumpable" and captured.class ~= "IsoWindow")
+            or captured.x ~= x - anchorX or captured.y ~= y - anchorY
+            or captured.z ~= z - bounds.z or captured.sprite ~= entry.sprite
+            or captured.north ~= entry.north or templateIndices[templateIndex] then
+            error("RailroaderRVTest: wall entry does not match its captured object")
+        end
+        for partPosition = 1, #entry.templateIndices do
+            local partIndex = ServerUtil.requiredInteger(entry.templateIndices[partPosition],
+                "wall[" .. tostring(i) .. "].templateIndices["
+                    .. tostring(partPosition) .. "]")
+            local part = partIndex and Template.objects[partIndex]
+            if not part
+                or (part.class ~= "IsoThumpable" and part.class ~= "IsoWindow")
+                or part.x ~= x - anchorX or part.y ~= y - anchorY
+                or part.z ~= z - bounds.z or part.north ~= entry.north
+                or templateIndices[partIndex] then
+                error("RailroaderRVTest: shell edge part does not match its captured host")
+            end
+            templateIndices[partIndex] = true
+        end
         if x < bounds.wallMinX or x > bounds.wallMaxX
             or y < bounds.wallMinY or y > bounds.wallMaxY or z ~= bounds.z then
             error("RailroaderRVTest: wall entry is outside the wall bounds")
@@ -213,23 +253,9 @@ local function validateWallContract(bounds)
         end
         both[coordinateKey] = both[coordinateKey] or {}
         both[coordinateKey][orientation] = true
-        local expectedRole = "wall-" .. orientation
-        local expectedSprite = entry.north
-            and Constants.SPRITES.wall.northSprite
-            or Constants.SPRITES.wall.sprite
-        if entry.corner then
-            if coordinateKey == nwKey then
-                expectedRole = "corner-nw"
-                expectedSprite = Constants.SPRITES.wallNW.sprite
-            elseif coordinateKey == seKey then
-                expectedRole = "corner-se"
-                expectedSprite = Constants.SPRITES.wallSE.sprite
-            else
-                error("RailroaderRVTest: corner wall is not at NW or SE")
-            end
-        end
-        if entry.role ~= expectedRole or entry.sprite ~= expectedSprite then
-            error("RailroaderRVTest: wall role/sprite does not match orientation")
+        local expectedRole = entry.corner and "corner-nw" or "wall-" .. orientation
+        if entry.corner ~= (coordinateKey == nwKey) or entry.role ~= expectedRole then
+            error("RailroaderRVTest: wall role/corner does not match captured geometry")
         end
         if entry.north then northEdges = northEdges + 1 else westEdges = westEdges + 1 end
         if entry.corner == true then corners = corners + 1 end
@@ -239,8 +265,8 @@ local function validateWallContract(bounds)
             error("RailroaderRVTest: wall ring cannot duplicate an orientation at " .. coordinateKey)
         end
     end
-    if uniqueCoordinates ~= 92 or northEdges ~= 12 or westEdges ~= 80 or corners ~= 2 then
-        error("RailroaderRVTest: wall contract must contain 92 coordinates/objects, north12/west80/corner2")
+    if uniqueCoordinates ~= 54 or northEdges ~= 12 or westEdges ~= 42 or corners ~= 1 then
+        error("RailroaderRVTest: captured shell must contain 54 objects, north12/west42/corner1")
     end
 end
 
@@ -274,8 +300,18 @@ local function validateShellEdgeContract(bounds)
             or ServerUtil.requiredInteger(ledger.objectX, "shell edge objectX") ~= entry.x
             or ServerUtil.requiredInteger(ledger.objectY, "shell edge objectY") ~= entry.y
             or ServerUtil.requiredInteger(ledger.objectZ, "shell edge objectZ") ~= entry.z
+            or ServerUtil.requiredInteger(ledger.templateIndex,
+                "shell edge templateIndex") ~= entry.templateIndex
+            or type(ledger.templateIndices) ~= "table"
+            or #ledger.templateIndices ~= #entry.templateIndices
+            or ledger.sprite ~= entry.sprite or ledger.north ~= entry.north
             or ledger.replacementAllowed ~= true then
             error("RailroaderRVTest: shell edge ledger identity is inconsistent")
+        end
+        for partPosition = 1, #entry.templateIndices do
+            if ledger.templateIndices[partPosition] ~= entry.templateIndices[partPosition] then
+                error("RailroaderRVTest: shell edge part ledger is inconsistent")
+            end
         end
         seen[key] = true
     end
@@ -327,16 +363,16 @@ local function validateTargetCoordinates(bounds, destination)
         error("RailroaderRVTest: managed footprint must be exactly half-open 100x100")
     end
     if bounds.roomMaxX - bounds.roomMinX + 1 ~= 6
-        or bounds.roomMaxY - bounds.roomMinY + 1 ~= 40 then
-        error("RailroaderRVTest: room footprint must be exactly 6x40")
+        or bounds.roomMaxY - bounds.roomMinY + 1 ~= 23 then
+        error("RailroaderRVTest: room footprint must be exactly 6x23")
     end
     if bounds.wallMaxX - bounds.wallMinX + 1 ~= 7
-        or bounds.wallMaxY - bounds.wallMinY + 1 ~= 41 then
-        error("RailroaderRVTest: wall footprint must be exactly 7x41")
+        or bounds.wallMaxY - bounds.wallMinY + 1 ~= 24 then
+        error("RailroaderRVTest: wall footprint must be exactly 7x24")
     end
     if bounds.roofMaxX - bounds.roofMinX + 1 ~= 6
-        or bounds.roofMaxY - bounds.roofMinY + 1 ~= 40 then
-        error("RailroaderRVTest: roof footprint must be exactly 6x40")
+        or bounds.roofMaxY - bounds.roofMinY + 1 ~= 23 then
+        error("RailroaderRVTest: roof footprint must be exactly 6x23")
     end
     if targetX < bounds.roomMinX or targetX > bounds.roomMaxX
         or targetY < bounds.roomMinY or targetY > bounds.roomMaxY then

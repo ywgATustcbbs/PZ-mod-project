@@ -125,7 +125,7 @@ local function acknowledgeFinalRelocation(player, args)
     end
     local manifestOk, manifest = pcall(manifestTable)
     if not manifestOk or type(manifest) ~= "table" then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local schemaOk = pcall(requireCurrentManifest, manifest, false)
     if not schemaOk or manifest.state ~= "RUNNING"
@@ -133,7 +133,7 @@ local function acknowledgeFinalRelocation(player, args)
         or tostring(manifest.rvId) ~= tostring(pending.rvId)
         or ServerUtil.integer(manifest.generation) ~= pending.generation
         or ServerUtil.integer(manifest.bitmapVersion) ~= pending.bitmapVersion then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local anchor = manifest.anchor
     local anchorX = type(anchor) == "table"
@@ -147,7 +147,7 @@ local function acknowledgeFinalRelocation(player, args)
         or type(target) ~= "table"
         or target.x ~= anchorX + 0.5 or target.y ~= anchorY + 0.5
         or target.z ~= anchorZ then
-        return false, Constants.SAVE_REBUILD_REQUIRED
+        return false, Constants.INVALID_RV_DATA
     end
     local stateOk, state = authoritativePlayerPosition(livePlayerOrReason)
     local finalPositionOk = stateOk and relocationPositionsEqual(state, target)

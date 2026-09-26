@@ -23,7 +23,6 @@ local hiddenObjectFingerprint = ctx.hiddenObjectFingerprint
 local objectFingerprint = ctx.objectFingerprint
 local objectTag = ctx.objectTag
 local genericObjectTag = ctx.genericObjectTag
-local retiredObjectTag = ctx.retiredObjectTag
 local sameIdentity = ctx.sameIdentity
 local sameGenerationIdentity = ctx.sameGenerationIdentity
 local validUtilityTag = ctx.validUtilityTag
@@ -262,12 +261,12 @@ function M.connectDevice(identity, context, hint)
     if not fixtureInside(object, context) then return false, U.REASONS.OUTSIDE_RV end
     local taggedSink = Catalog.isGeneratedSink(object)
     if taggedSink and not Catalog.hasFluidContainer(object) then
-        return false, U.REASON_SAVE_REBUILD_REQUIRED
+        return false, U.REASON_INVALID_RV_DATA
     end
     local currentGenerated = Catalog.isGeneratedSink(object, identity)
     local nativeSink = Catalog.isNativeSink(object)
     if taggedSink and not currentGenerated then
-        return false, U.REASON_SAVE_REBUILD_REQUIRED
+        return false, U.REASON_INVALID_RV_DATA
     end
     if not taggedSink and not nativeSink then
         return false, U.REASONS.DEVICE_NOT_SUPPORTED
@@ -283,12 +282,8 @@ function M.connectDevice(identity, context, hint)
     local x, y, z = point.x, point.y, point.z
     local fingerprint = objectFingerprint(object, "fixture")
     local oldTag = objectTag(object)
-    local retiredTag = not oldTag and retiredObjectTag(object)
-    if retiredTag and sameGenerationIdentity(retiredTag, identity) then
-        return false, C.SAVE_REBUILD_REQUIRED
-    end
     if oldTag and not validUtilityTag(oldTag, identity, "fixture", oldTag.deviceId) then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local carriedTagCleared, carriedTagReason = clearPendingDetachedFixture(identity,
         object, oldTag)
@@ -296,7 +291,7 @@ function M.connectDevice(identity, context, hint)
     if carriedTagCleared then oldTag = nil end
     if oldTag and oldTag.deviceId ~= nil
         and recordOrReason.water.registry[oldTag.deviceId] == nil then
-        return false, C.SAVE_REBUILD_REQUIRED
+        return false, C.INVALID_RV_DATA
     end
     local token = oldTag and oldTag.fixtureToken or nextToken(identity, "fixture", x, y, z)
     for deviceId, entry in pairs(recordOrReason.water.registry) do
@@ -328,13 +323,13 @@ function M.connectDevice(identity, context, hint)
         local existing, status = squareObject(identity, proxyX, proxyY, proxyZ,
             C.UTILITY_ROLE_PROXY, deviceId, player)
         if status == "unloaded" then return false, U.REASONS.TARGET_NOT_LOADED end
-        if status == "invalid" then return false, C.SAVE_REBUILD_REQUIRED end
+        if status == "invalid" then return false, C.INVALID_RV_DATA end
         local proxyState = proxySquareEvidence(identity, record, proxyX, proxyY, proxyZ, player)
         if proxyState == "unloaded" then return false, U.REASONS.TARGET_NOT_LOADED end
-        if proxyState == "invalid" then return false, C.SAVE_REBUILD_REQUIRED end
-        if proxyState == "orphan" then return false, C.SAVE_REBUILD_REQUIRED end
+        if proxyState == "invalid" then return false, C.INVALID_RV_DATA end
+        if proxyState == "orphan" then return false, C.INVALID_RV_DATA end
         if proxyState == "registered" then return false, U.REASONS.DEVICE_CONFLICT end
-        if existing or status == "duplicate" then return false, C.SAVE_REBUILD_REQUIRED end
+        if existing or status == "duplicate" then return false, C.INVALID_RV_DATA end
         local made, proxyOrReason = makeObject(identity, context, proxyX, proxyY, proxyZ,
             C.UTILITY_ROLE_PROXY, entry.proxyToken, entry.proxyFingerprint,
             record.water.usageTankSnapshot.amount, deviceId)

@@ -89,19 +89,33 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
         return nil
     end
     local relation = map.players[name]
+    local record = type(relation) == "table" and relation.locoId ~= nil
+        and recordForLoco(map, relation.locoId) or nil
+    local validatedIdentity = {
+        username = name, onlineId = identityId, key = identityKey,
+    }
+    local function diagnose(reason)
+        if type(Boundary.diagnoseGuardState) == "function" then
+            Boundary.diagnoseGuardState(player, validatedIdentity,
+                playerPositionInRegion(player, rvRegion()), relation, record,
+                reason)
+        end
+    end
     if type(relation) ~= "table" or relation.inside ~= true
         or integer(relation.onlineId) ~= identityId then
+        diagnose("mapping-relation-rejected")
         cache[identityKey] = nil
         return nil
     end
-    local record = recordForLoco(map, relation.locoId)
     if not record or not validRecord(record) then
+        diagnose("mapping-record-rejected")
         cache[identityKey] = nil
         return nil
     end
     local rider = type(record.players) == "table" and record.players[name] or nil
     if type(rider) ~= "table" or rider.inside ~= true
         or integer(rider.onlineId) ~= identityId then
+        diagnose("record-rider-rejected")
         cache[identityKey] = nil
         return nil
     end
@@ -116,18 +130,17 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
         record.bitmapVersion)
     if not manifestCallOk or manifestAccepted ~= true
         or type(manifest) ~= "table" then
+        diagnose("manifest-rejected")
         cache[identityKey] = nil
         return nil
     end
     local geometryCallOk, geometryConsistent = pcall(
         server.currentRVRecordGeometryConsistent, record, manifest)
     if not geometryCallOk or geometryConsistent ~= true then
+        diagnose("geometry-rejected")
         cache[identityKey] = nil
         return nil
     end
-    local validatedIdentity = {
-        username = name, onlineId = identityId, key = identityKey,
-    }
     pending[identityKey] = nil
     mappingEpoch = Adapter._boundaryValidationEpoch or 0
     geometryEpoch = Boundary and Boundary._geometryEpoch or 0

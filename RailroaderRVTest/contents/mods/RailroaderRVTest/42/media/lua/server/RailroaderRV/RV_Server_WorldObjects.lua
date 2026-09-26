@@ -4,6 +4,7 @@ local OWNER = ctx.OWNER
 local Constants = ctx.Constants
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
+local ProtectionManifest = require("RailroaderRV/RV_ProtectionManifest")
 
 local function applyIntegerState(object, state, key, setter, getter)
     local expected = state[key]
@@ -15,6 +16,63 @@ local function applyIntegerState(object, state, key, setter, getter)
     local readOk, actual = ServerUtil.invoke(object, getter)
     if not readOk or ServerUtil.toNumber(actual) ~= expected then
         error("RailroaderRVTest: captured object " .. key .. " did not match")
+    end
+end
+
+local function applyBooleanState(object, state, key, setter, getter)
+    local expected = state[key]
+    if expected == nil then return end
+    if type(expected) ~= "boolean"
+        or not ServerUtil.callSucceeded(object, setter, expected) then
+        error("RailroaderRVTest: captured object " .. key .. " could not be applied")
+    end
+    local readOk, actual = ServerUtil.invoke(object, getter)
+    if not readOk or actual ~= expected then
+        error("RailroaderRVTest: captured object " .. key .. " did not match")
+    end
+end
+
+local function capturedObjectContext(entry)
+    return " templateIndex=" .. tostring(entry.templateIndex)
+        .. " class=" .. tostring(entry.class)
+        .. " name=" .. tostring(entry.name)
+        .. " sprite=" .. tostring(entry.sprite)
+        .. " world=" .. tostring(entry.x) .. "," .. tostring(entry.y)
+        .. "," .. tostring(entry.z)
+end
+
+local function ensureCapturedHiddenSprite(entry)
+    if entry.sprite ~= Constants.UTILITY_HIDDEN_SPRITE_KEY then return end
+    local utilitySprite = require("RailroaderRV/RV_UtilitySprite")
+    local ready, expectedSprite, reason = utilitySprite.ensureHiddenSprites()
+    if not ready or not expectedSprite then
+        error("RailroaderRVTest: captured hidden blocker sprite is unavailable;"
+            .. capturedObjectContext(entry) .. " reason=" .. tostring(reason))
+    end
+    return expectedSprite
+end
+
+local function bindCapturedHiddenSprite(object, entry, expectedSprite)
+    if entry.sprite ~= Constants.UTILITY_HIDDEN_SPRITE_KEY then return end
+    if not expectedSprite then
+        error("RailroaderRVTest: captured hidden blocker sprite was not registered before construction;"
+            .. capturedObjectContext(entry))
+    end
+    if not ServerUtil.callSucceeded(object, "setSpriteFromName", entry.sprite) then
+        error("RailroaderRVTest: captured hidden blocker sprite bind failed;"
+            .. capturedObjectContext(entry))
+    end
+    local spriteOk, actualSprite = ServerUtil.invoke(object, "getSprite")
+    local nameOk, actualName = ServerUtil.invoke(actualSprite, "getName")
+    local objectNameOk, actualObjectName = ServerUtil.invoke(object, "getSpriteName")
+    if not spriteOk or actualSprite ~= expectedSprite
+        or not nameOk or tostring(actualName) ~= entry.sprite
+        or not objectNameOk or tostring(actualObjectName) ~= entry.sprite then
+        error("RailroaderRVTest: captured hidden blocker sprite bind did not match;"
+            .. capturedObjectContext(entry)
+            .. " expectedSprite=" .. tostring(entry.sprite)
+            .. " actualSprite=" .. tostring(actualName)
+            .. " objectSpriteName=" .. tostring(actualObjectName))
     end
 end
 
@@ -47,7 +105,8 @@ local function applyCapturedIdentityAndState(object, entry, deferHealth)
         error("RailroaderRVTest: captured object has an unexpected north state")
     end
     local stateKeys = { health = true, maxHealth = true, hoppable = true,
-        locked = true }
+        locked = true, canPassThrough = true, blockAllTheSquare = true,
+        doRender = true, thumpable = true }
     for key in pairs(entry.state) do
         if not stateKeys[key] then
             error("RailroaderRVTest: captured object state has an unsupported field")
@@ -80,6 +139,7 @@ local function applyCapturedIdentityAndState(object, entry, deferHealth)
         -- Plain captured IsoObject floors, captured IsoWindows, and captured
         -- IsoLightSwitches have no hoppable setter path in this template. Keep
         -- their recorded false state strict through the getter below.
+        local setter = "setIsHoppable"
         local applied = (entry.class == "IsoObject"
             or entry.class == "IsoWindow"
             or entry.class == "IsoLightSwitch") and entry.state.hoppable == false
@@ -88,20 +148,38 @@ local function applyCapturedIdentityAndState(object, entry, deferHealth)
                 entry.state.hoppable)
         end
         if not applied then
+            setter = "setHoppable"
             applied = ServerUtil.callSucceeded(object, "setHoppable",
                 entry.state.hoppable)
         end
         if not applied then
-            error("RailroaderRVTest: captured object hoppable state could not be applied")
+            error("RailroaderRVTest: captured object hoppable state could not be applied;"
+                .. capturedObjectContext(entry) .. " setter=" .. setter
+                .. " expected=" .. tostring(entry.state.hoppable))
         end
         local readOk, actual = ServerUtil.invoke(object, "isHoppable")
+        local getter = "isHoppable"
         if not readOk then
+            getter = "getIsHoppable"
             readOk, actual = ServerUtil.invoke(object, "getIsHoppable")
         end
         if not readOk or actual ~= entry.state.hoppable then
-            error("RailroaderRVTest: captured object hoppable state did not match")
+            error("RailroaderRVTest: captured object hoppable state did not match;"
+                .. capturedObjectContext(entry) .. " setter=" .. setter
+                .. " getter=" .. getter .. " expected="
+                .. tostring(entry.state.hoppable) .. " actual="
+                .. (readOk and tostring(actual) or "<unreadable>"))
         end
     end
+
+    applyBooleanState(object, entry.state, "canPassThrough",
+        "setCanPassThrough", "isCanPassThrough")
+    applyBooleanState(object, entry.state, "blockAllTheSquare",
+        "setBlockAllTheSquare", "isBlockAllTheSquare")
+    applyBooleanState(object, entry.state, "doRender", "setDoRender",
+        "getDoRender")
+    applyBooleanState(object, entry.state, "thumpable", "setIsThumpable",
+        "isThumpable")
 
     if entry.state.locked ~= nil then
         if type(entry.state.locked) ~= "boolean" or entry.state.locked == true then
@@ -139,27 +217,77 @@ local function applyCapturedIdentityAndState(object, entry, deferHealth)
     local nameOk, actualName = ServerUtil.invoke(object, "getName")
     local dirOk, actualDirection = ServerUtil.invoke(object, "getDir")
     local spriteName = ServerWorld.getSpriteName(object)
-    if not nameOk or tostring(actualName) ~= entry.name
-        or not dirOk or actualDirection ~= expectedDirection
-        or tostring(spriteName) ~= entry.sprite then
-        error("RailroaderRVTest: captured object identity read-back failed")
+    local nameMatches = nameOk and tostring(actualName) == entry.name
+    local directionMatches = dirOk and actualDirection == expectedDirection
+    local spriteMatches = tostring(spriteName) == entry.sprite
+    if not nameMatches or not directionMatches or not spriteMatches then
+        error("RailroaderRVTest: captured object identity read-back failed;"
+            .. capturedObjectContext(entry)
+            .. " expectedName=" .. tostring(entry.name)
+            .. " actualName=" .. tostring(actualName)
+            .. " nameReadable=" .. tostring(nameOk)
+            .. " expectedDirection=" .. tostring(expectedDirection)
+            .. " actualDirection=" .. tostring(actualDirection)
+            .. " directionReadable=" .. tostring(dirOk)
+            .. " expectedSprite=" .. tostring(entry.sprite)
+            .. " actualSprite=" .. tostring(spriteName))
     end
 end
 
-local function capturedTagData(entry, edge)
+local function capturedTagData(entry, edge, tagContext)
+    if not ProtectionManifest.matchesCapturedEntry(entry.templateIndex, entry) then
+        error("RailroaderRVTest: captured protection identity is incomplete at index "
+            .. tostring(entry.templateIndex))
+    end
+    local protection = ProtectionManifest.get(entry.templateIndex)
+    local anchorX = ServerUtil.requiredInteger(tagContext and tagContext.anchorX,
+        "captured tag anchorX")
+    local anchorY = ServerUtil.requiredInteger(tagContext and tagContext.anchorY,
+        "captured tag anchorY")
+    local anchorZ = ServerUtil.requiredInteger(tagContext and tagContext.anchorZ,
+        "captured tag anchorZ")
+    if entry.x ~= anchorX + protection.x or entry.y ~= anchorY + protection.y
+        or entry.z ~= anchorZ + protection.z then
+        error("RailroaderRVTest: captured tag coordinates differ from static ledger at index "
+            .. tostring(entry.templateIndex))
+    end
     local result = {
         templateIndex = entry.templateIndex,
+        templateX = protection.x,
+        templateY = protection.y,
+        templateZ = protection.z,
+        templateAnchorX = anchorX,
+        templateAnchorY = anchorY,
+        templateAnchorZ = anchorZ,
+        templateWorldX = entry.x,
+        templateWorldY = entry.y,
+        templateWorldZ = entry.z,
         templateClass = entry.class,
         templateName = entry.name,
         templateSprite = entry.sprite,
         templateNorth = entry.north,
+        protectionClass = protection.protectionClass,
         templateDirection = entry.direction,
     }
     if edge then
         result.edgeKey = edge.edgeKey
         result.axis = edge.axis
     end
+    if type(entry.state) == "table" and entry.class == "IsoThumpable"
+        and entry.name == "Wooden Wall" and entry.state.doRender == false
+        and type(edge) == "table"
+        and (edge.role == "wall-north" or edge.role == "wall-west"
+            or edge.role == "corner-nw") then
+        result.templateBoundarySupportWall = true
+    end
     return result
+end
+
+local function isVisualCornerTemplateEntry(entry)
+    return type(entry) == "table"
+        and entry.class == "IsoObject"
+        and entry.name == "Wooden Wall"
+        and entry.sprite == "walls_interior_house_02_35"
 end
 
 local function configureCapturedDoorFrame(object, entry)
@@ -263,19 +391,12 @@ local function createFloor(square, sprite, generation, role, tagContext, capture
     if capturedEntry then
         applyCapturedIdentityAndState(floor, capturedEntry)
     end
+    local floorTagData = capturedEntry
+        and capturedTagData(capturedEntry, edge, tagContext) or {}
+    floorTagData.previousSprite = previousSprite
+    floorTagData.createdByGeneration = createdByGeneration
     local tagged, tagError = pcall(ServerWorld.tagObject, floor, generation, role,
-        ServerWorld.withTagIdentity({
-        previousSprite = previousSprite,
-        createdByGeneration = createdByGeneration,
-        templateIndex = capturedEntry and capturedEntry.templateIndex or nil,
-        templateClass = capturedEntry and capturedEntry.class or nil,
-        templateName = capturedEntry and capturedEntry.name or nil,
-        templateSprite = capturedEntry and capturedEntry.sprite or nil,
-        templateNorth = capturedEntry and capturedEntry.north or nil,
-        templateDirection = capturedEntry and capturedEntry.direction or nil,
-        edgeKey = edge and edge.edgeKey or nil,
-        axis = edge and edge.axis or nil,
-        }, tagContext))
+        ServerWorld.withTagIdentity(floorTagData, tagContext))
     if not tagged then
         local removed, removeError = pcall(ServerWorld.removeGenericObject, square, floor)
         if not removed then
@@ -306,8 +427,8 @@ local function createFloor(square, sprite, generation, role, tagContext, capture
 end
 
 local function addSpecialObject(square, object)
-    -- IsoGenerator's B42.20 constructor already calls AddSpecialObject.  Do
-    -- not insert it a second time; all other constructors arrive unattached.
+    -- Some native constructors attach their object before this helper runs.
+    -- Add only when needed, then require an observable square-list index.
     local indexOk, index = ServerUtil.invoke(object, "getObjectIndex")
     local indexNumber = ServerUtil.toNumber(index)
     local attached = indexOk and indexNumber and indexNumber >= 0
@@ -514,9 +635,8 @@ end
 
 local function createGenerator(cell, square, sprite, generation, tagContext)
     local cls = rawget(_G, "IsoGenerator")
-    -- B42.20's only world constructor is
-    -- IsoGenerator(InventoryItem, IsoCell, IsoGridSquare).  The item carries
-    -- the initial condition/fuel state and also selects the world sprite.
+    -- The cell-only constructor does not attach or transmit. Configure the
+    -- registered hidden sprite first, then assign the square and add it.
     local itemOk, item = ServerUtil.callGlobal("instanceItem", "Base.Generator")
     if not itemOk or not item then
         error("RailroaderRVTest: Base.Generator item is unavailable")
@@ -526,13 +646,45 @@ local function createGenerator(cell, square, sprite, generation, tagContext)
     if itemDataOk and type(itemData) == "table" then
         itemData.fuel = Constants.GENERATOR_INITIAL_FUEL
     end
+    local utilitySprite = require("RailroaderRV/RV_UtilitySprite")
+    local spriteReady, hiddenSprite, spriteReason = utilitySprite.ensureHiddenSprites()
+    local hiddenSpriteName = Constants.SPRITES.utilityHidden.sprite
+    if not spriteReady or not hiddenSprite
+        or hiddenSpriteName ~= Constants.UTILITY_HIDDEN_SPRITE_KEY then
+        error("RailroaderRVTest: generator hidden sprite is unavailable: "
+            .. tostring(spriteReason))
+    end
     local ok, generator = ServerUtil.invokeClass(cls, {
-        { item, cell, square },
+        { cell },
     })
     if not ok then
         error("RailroaderRVTest: IsoGenerator construction failed")
     end
+    if not ServerUtil.callSucceeded(generator, "setInfoFromItem", item)
+        or not ServerUtil.callSucceeded(generator, "setSprite", hiddenSpriteName)
+        or not ServerUtil.callSucceeded(generator, "setSpriteFromName", hiddenSpriteName) then
+        error("RailroaderRVTest: generator hidden initialization failed")
+    end
+    local spriteOk, actualSprite = ServerUtil.invoke(generator, "getSprite")
+    local nameOk, actualSpriteName = ServerUtil.invoke(generator, "getSpriteName")
+    if not spriteOk or actualSprite ~= hiddenSprite or not nameOk
+        or tostring(actualSpriteName) ~= tostring(hiddenSpriteName) then
+        error("RailroaderRVTest: generator hidden sprite did not persist")
+    end
+    if not ServerUtil.callSucceeded(generator, "setSquare", square) then
+        error("RailroaderRVTest: generator square assignment failed")
+    end
+    local squareOk, actualSquare = ServerUtil.invoke(generator, "getSquare")
+    if not squareOk or actualSquare ~= square then
+        error("RailroaderRVTest: generator square assignment did not match")
+    end
+    -- Tag before attachment so a partially completed add remains discoverable
+    -- by transaction rollback; the explicit square above makes removal safe.
     ServerWorld.tagObject(generator, generation, "generator", ServerWorld.withTagIdentity(nil, tagContext))
+    addSpecialObject(square, generator)
+    if not ServerUtil.callSucceeded(generator, "transmitCompleteItemToClients") then
+        error("RailroaderRVTest: generator initial client transmission failed")
+    end
     if not ServerUtil.callSucceeded(generator, "setCondition", 100)
         or not ServerUtil.callSucceeded(generator, "setFuel", Constants.GENERATOR_INITIAL_FUEL)
         or not ServerUtil.callSucceeded(generator, "setConnected", true)
@@ -542,10 +694,6 @@ local function createGenerator(cell, square, sprite, generation, tagContext)
     if type(cls.updateGenerator) == "function" then
         pcall(cls.updateGenerator, square)
     end
-    -- IsoGenerator's B42.20 constructor attaches the object itself.  Keep the
-    -- explicit helper after all local/tag state is final so it only validates
-    -- that attachment and recalculates the square; it emits no packet.
-    addSpecialObject(square, generator)
     if not ServerUtil.callSucceeded(generator, "transmitCompleteItemToClients") then
         error("RailroaderRVTest: generator client transmission failed")
     end
@@ -589,15 +737,47 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
         error("RailroaderRVTest: captured template object is malformed")
     end
     local role = edge and edge.role or "captured-template"
-    local tagData = capturedTagData(entry, edge)
+    local tagData = capturedTagData(entry, edge, tagContext)
     local object
-    if entry.class == "IsoObject" then
-        -- Every captured IsoObject in this log is a floor object.  Keeping it
-        -- in the square's floor slot preserves the source class and sprite.
+    if isVisualCornerTemplateEntry(entry) then
+        if entry.class ~= "IsoObject" then
+            error("RailroaderRVTest: captured corner trim class is invalid")
+        end
+        local cls = rawget(_G, "IsoObject")
+        local constructed, tileObject = ServerUtil.invokeClass(cls, {
+            { cell, square, entry.sprite },
+            { square, entry.sprite },
+        })
+        if not constructed then
+            error("RailroaderRVTest: captured corner trim construction failed")
+        end
+        applyCapturedIdentityAndState(tileObject, entry)
+        ServerWorld.tagObject(tileObject, generation, role,
+            ServerWorld.withTagIdentity(tagData, tagContext))
+        if not ServerUtil.callSucceeded(square, "AddTileObject", tileObject) then
+            error("RailroaderRVTest: captured corner trim attachment failed")
+        end
+        local indexOk, objectIndex = ServerUtil.invoke(tileObject, "getObjectIndex")
+        local indexNumber = ServerUtil.toNumber(objectIndex)
+        if not indexOk or not indexNumber or indexNumber < 0 then
+            error("RailroaderRVTest: captured corner trim attachment was not observable")
+        end
+        ServerWorld.recalcSquare(square)
+        if not ServerUtil.callSucceeded(tileObject, "transmitCompleteItemToClients") then
+            error("RailroaderRVTest: captured corner trim client transmission failed")
+        end
+        return tileObject
+    elseif entry.class == "IsoObject" then
+        -- The corner trim entries above are tile objects; other captured
+        -- IsoObject entries in this template occupy the floor slot.
         object = createFloor(square, entry.sprite, generation, role, tagContext,
             entry, edge)
         return object
     elseif entry.class == "IsoThumpable" then
+        -- Register the numeric sprite before the string constructor performs
+        -- its name lookup; otherwise the manager can cache an unindexed
+        -- DEFAULT_SPRITE_ID entry under this custom key.
+        local expectedHiddenSprite = ensureCapturedHiddenSprite(entry)
         local cls = rawget(_G, "IsoThumpable")
         local constructed, thumpable = ServerUtil.invokeClass(cls, {
             { cell, square, entry.sprite, entry.north, nil },
@@ -608,6 +788,7 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
         if not ServerUtil.callSucceeded(thumpable, "setIsThumpable", true) then
             error("RailroaderRVTest: captured IsoThumpable state failed")
         end
+        bindCapturedHiddenSprite(thumpable, entry, expectedHiddenSprite)
         applyCapturedIdentityAndState(thumpable, entry, true)
         if entry.name == "Wooden Door Frame" then
             configureCapturedDoorFrame(thumpable, entry)

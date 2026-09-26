@@ -6,6 +6,9 @@
 -- and the current-schema generation-center staging coordinate.
 
 require "RailroaderRV/RV_Constants"
+require "RailroaderRV/RV_BoundaryWallVisuals"
+require "RailroaderRV/RV_WardrobeVisuals"
+require "RailroaderRV/RV_ProtectedDemolition"
 local boundaryClientLoaded, BoundaryClient = pcall(require,
     "RailroaderRV/RV_BoundaryClient")
 if not boundaryClientLoaded then

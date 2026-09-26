@@ -97,13 +97,6 @@ local function playerPosition(player)
     return { x = x, y = y, z = z }
 end
 
-local function copyPosition(position)
-    if type(position) ~= "table" then return nil end
-    local x, y, z = number(position.x), number(position.y), number(position.z)
-    if not x or not y or not z then return nil end
-    return { x = x, y = y, z = z }
-end
-
 local function playerCell(player)
     local ok, cell = call(player, "getCell")
     if ok and cell then return cell end
@@ -241,7 +234,7 @@ local function validShellEdges(edges, rvId, generation, bitmapVersion)
             partSeen[partIndex] = true
         end
     end
-    return edgeCount == 54
+    return edgeCount == 59
 end
 
 -- Build the persistent record from a layout plan.  Only the encoded bitmap is
@@ -569,7 +562,7 @@ local function stateFor(player, knownIdentity)
     local state = Boundary._states[id.key]
     if not state then
         state = { identity = id, correctionSequence = 0,
-            recoveryCooldown = 0, snapshotKey = nil }
+            snapshotKey = nil }
         Boundary._states[id.key] = state
     else
         state.identity = id
@@ -605,10 +598,6 @@ function Boundary.beginTransition(player, rvId, generation, token, kind,
         + (integer(C.BOUNDARY_TRANSITION_TIMEOUT_TICKS) or 120)
     state.snapshotKey = nil
     state.snapshotSentTick = nil
-    state.lastValid = nil
-    state.lastPosition = nil
-    state.invalidSegment = nil
-    state.recoveryCooldown = 0
     return true
 end
 
@@ -619,9 +608,6 @@ function Boundary.completeTransition(player, token)
     state.transitionToken = nil
     state.transitionKind = nil
     state.transitionUntil = Boundary._tick + 2
-    state.lastValid = nil
-    state.lastPosition = nil
-    state.invalidSegment = nil
     return true
 end
 
@@ -726,11 +712,6 @@ local function correction(player, boundary, state, target)
     end
     callGlobal("sendServerCommand", player, C.MOD_ID,
         C.COMMAND_RV_BOUNDARY_CORRECTION, payload)
-    state.lastValid = copyPosition(target)
-    state.lastPosition = copyPosition(target)
-    state.invalidSegment = nil
-    state.recoveryCooldown = Boundary._tick
-        + (integer(C.BOUNDARY_RECOVERY_COOLDOWN_TICKS) or 8)
     return true
 end
 
@@ -824,7 +805,7 @@ function Boundary.diagnoseGuardState(player, knownIdentity, position,
         .. " innerAABB=" .. tostring(innerHit)
         .. " stateRV=" .. tostring(state.rvId)
         .. " stateGeneration=" .. tostring(state.generation)
-        .. " lastValid=" .. diagnosticPoint(state.lastValid))
+        .. " entryPosition=" .. diagnosticPoint(record.rvPosition))
     return true
 end
 
@@ -834,13 +815,6 @@ local function updatePlayer(player, position, knownIdentity, deferValidationMiss
     if not boundary then return nil end
     local state = stateFor(player, id or knownIdentity)
     if not state then return nil end
-    local lastObserved = integer(state.lastObservedBoundaryTick)
-    if lastObserved == nil or Boundary._tick > lastObserved + 1 then
-        state.lastValid, state.lastPosition, state.invalidSegment = nil, nil, nil
-        state.nextValidRecordTick = nil
-        state.recoveryCooldown = 0
-    end
-    state.lastObservedBoundaryTick = Boundary._tick
     if state.boundaryReference ~= boundary
         or state.rvId ~= boundary.rvId
         or state.generation ~= boundary.generation
@@ -848,8 +822,6 @@ local function updatePlayer(player, position, knownIdentity, deferValidationMiss
         state.rvId, state.generation, state.bitmapVersion = boundary.rvId,
             boundary.generation, boundary.bitmapVersion
         state.boundaryReference = boundary
-        state.lastValid, state.lastPosition, state.invalidSegment = nil, nil, nil
-        state.recoveryCooldown = 0
         state.snapshotKey = nil
     end
     local snapshotAge = Boundary._tick
@@ -866,7 +838,6 @@ local function updatePlayer(player, position, knownIdentity, deferValidationMiss
     if not Bitmap.containsScope(boundary.bitmap, position.x, position.y, position.z) then
         Boundary.diagnoseGuardState(player, id, position, relation, record,
             "outside-managed-scope")
-        state.lastValid, state.lastPosition, state.invalidSegment = nil, nil, nil
         return boundary
     end
     if not currentSquareMatches(player, position) then
@@ -874,47 +845,13 @@ local function updatePlayer(player, position, knownIdentity, deferValidationMiss
             "current-square-mismatch")
         return boundary
     end
-    if Boundary._tick < (state.recoveryCooldown or 0) then return boundary end
-    local active, inInner = Bitmap.walkableFast(boundary.bitmap,
-        position.x, position.y, position.z)
-    local previous = state.lastPosition
-    local sameCell = previous
-        and math.floor(previous.x) == math.floor(position.x)
-        and math.floor(previous.y) == math.floor(position.y)
-        and math.floor(previous.z) == math.floor(position.z)
-    if active and previous and not sameCell then
-        local bounds = inInner and Bitmap.walkBounds(boundary.bitmap,
-            math.floor(position.z))
-        local staysInside = bounds and math.floor(previous.z) == math.floor(position.z)
-            and Bitmap.inAABB(bounds.inner, previous.x, previous.y)
-        if not staysInside then
-            local segmentOk = Bitmap.segmentValid(boundary.bitmap,
-                previous, position)
-            if not segmentOk then state.invalidSegment = true end
-        end
-    end
-    if active and not state.invalidSegment then
-        if not sameCell or Boundary._tick >= (state.nextValidRecordTick or 0) then
-            state.lastValid = copyPosition(position)
-            state.nextValidRecordTick = Boundary._tick + 10
-        end
-        if not previous or previous.x ~= position.x or previous.y ~= position.y
-            or previous.z ~= position.z then
-            state.lastPosition = copyPosition(position)
-        end
+    local bounds = Bitmap.walkBounds(boundary.bitmap, math.floor(position.z))
+    if bounds and Bitmap.inAABB(bounds.outer, position.x, position.y) then
         return boundary
     end
-    if not active or state.invalidSegment then
-        Boundary.diagnoseGuardState(player, id, position, relation, record,
-            active and "invalid-movement-segment" or "inactive-bitmap-cell")
-        local target = state.lastValid
-        if not target or not Bitmap.isActive(boundary.bitmap,
-            target.x, target.y, target.z) then
-            target = Bitmap.nearestActive(boundary.bitmap, position.x,
-                position.y, math.floor(position.z))
-        end
-        if target then correction(player, boundary, state, target) end
-    end
+    Boundary.diagnoseGuardState(player, id, position, relation, record,
+        "outside-rv-aabb")
+    correction(player, boundary, state, record.rvPosition)
     return boundary
 end
 

@@ -45,6 +45,7 @@ end
 local function ensureOne(manager, namedMap, key, id)
     local existingOk, sprite = invoke(namedMap, "get", key)
     if not existingOk then return false, nil, "named-map-read" end
+    local source = sprite and "named-map-existing" or "registered-now"
     if not sprite then
         -- AddSprite(name, id) writes intMap before it returns.  Inspect the
         -- numeric slot first so a pre-existing unrelated sprite cannot be
@@ -58,7 +59,11 @@ local function ensureOne(manager, namedMap, key, id)
     end
 
     local idOk, spriteId = invoke(sprite, "getID")
-    if not idOk or spriteId ~= id then return false, nil, "sprite-id" end
+    if not idOk or spriteId ~= id then
+        return false, nil, "sprite-id expected=" .. tostring(id)
+            .. " actual=" .. (idOk and tostring(spriteId) or "<unreadable>")
+            .. " source=" .. source
+    end
     local byIdOk, byId = invoke(manager, "getSprite", id)
     if not byIdOk or byId ~= sprite then return false, nil, "sprite-id-map" end
     local byNameOk, byName = invoke(manager, "getSprite", key)

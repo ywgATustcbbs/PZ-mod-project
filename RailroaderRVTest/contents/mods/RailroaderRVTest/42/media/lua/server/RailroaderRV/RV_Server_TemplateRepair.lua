@@ -11,6 +11,7 @@ local createCapturedTemplateObject = ctx.createCapturedTemplateObject
 local configureCapturedDoorFrame = ctx.configureCapturedDoorFrame
 local createGenerator = ctx.createGenerator
 local Template = require("RailroaderRV/RV_Template")
+local ProtectionManifest = require("RailroaderRV/RV_ProtectionManifest")
 
 if not Boundary or type(ServerWorld) ~= "table"
     or type(ServerWorld.objectModData) ~= "function"
@@ -24,7 +25,8 @@ if not Boundary or type(ServerWorld) ~= "table"
     or type(configureCapturedDoorFrame) ~= "function"
     or type(createGenerator) ~= "function"
     or Template.schemaVersion ~= Constants.CAPTURED_TEMPLATE_VERSION
-    or Template.objectCount ~= 357 or #Template.objects ~= 357 then
+    or Template.objectCount ~= 412 or #Template.objects ~= 412
+    or not ProtectionManifest.validateTemplate(Template) then
     error("RailroaderRVTest: current template-repair dependencies are incomplete")
 end
 
@@ -52,6 +54,18 @@ local function integer(value)
         return nil
     end
     return number
+end
+
+local function isVisualCornerTemplate(entry)
+    return type(entry) == "table"
+        and entry.class == "IsoObject"
+        and entry.name == "Wooden Wall"
+        and entry.sprite == "walls_interior_house_02_35"
+end
+
+local function isTemplateFloorObject(entry)
+    return type(entry) == "table" and entry.class == "IsoObject"
+        and not isVisualCornerTemplate(entry)
 end
 
 local function sameIdentity(left, right)
@@ -156,39 +170,14 @@ local function isCabCoordinate(x, y, anchor)
         and offsetY <= Constants.CAB_MAX_OFFSET_Y
 end
 
-local function isCabNorthWestWall(edge, anchor)
-    if type(edge) ~= "table" then return false end
-    local x = integer(edge.objectX)
-    local y = integer(edge.objectY)
-    local anchorX, anchorY = integer(anchor.x), integer(anchor.y)
-    if not x or not y or not anchorX or not anchorY then return false end
-    local offsetX, offsetY = x - anchorX, y - anchorY
-    if edge.side == "north" then
-        return offsetY == Constants.CAB_MIN_OFFSET_Y
-            and offsetX >= Constants.CAB_MIN_OFFSET_X
-            and offsetX <= Constants.CAB_MAX_OFFSET_X
+local function templateEntry(templateIndex, anchor)
+    local expected = ProtectionManifest.worldEntry(templateIndex, anchor)
+    if not expected or not ProtectionManifest.matchesLayoutEntry(templateIndex,
+        expected, anchor) then
+        error("RailroaderRVTest: static protection class is missing at index "
+            .. tostring(templateIndex))
     end
-    if edge.side == "west" then
-        return offsetX == Constants.CAB_MIN_OFFSET_X
-            and offsetY >= Constants.CAB_MIN_OFFSET_Y
-            and offsetY <= Constants.CAB_MAX_OFFSET_Y
-    end
-    return false
-end
-
-local function templateEntry(captured, templateIndex, anchor)
-    return {
-        templateIndex = templateIndex,
-        class = captured.class,
-        name = captured.name,
-        sprite = captured.sprite,
-        direction = captured.direction,
-        x = anchor.x + captured.x,
-        y = anchor.y + captured.y,
-        z = anchor.z + captured.z,
-        north = captured.north,
-        state = captured.state,
-    }
+    return expected
 end
 
 local function expectedEdgeMap(manifest)
@@ -246,20 +235,18 @@ local function buildRepairIndex(boundary, manifest)
         reportedSafetyBlocks = {},
         reportedIdentityBlocks = {},
     }
-    for templateIndex = 1, #Template.objects do
-        local expected = templateEntry(Template.objects[templateIndex],
-            templateIndex, anchor)
+    for templateIndex = 1, ProtectionManifest.OBJECT_COUNT do
+        local protection = ProtectionManifest.get(templateIndex)
+        if not protection then return nil end
+        local expected = templateEntry(templateIndex, anchor)
         local edge = edges[templateIndex]
-        -- Player-opened doors/windows keep their generation identity, but are
-        -- omitted from automatic template state restoration.
-        local protected = expected.class ~= "IsoDoor"
-            and expected.class ~= "IsoWindow"
+        local protectionClass = expected.protectionClass
+        if protectionClass == ProtectionManifest.SPECIAL then
+            return nil
+        end
+        local protected = protectionClass == ProtectionManifest.RESTORE_ONLY
+            or protectionClass == ProtectionManifest.PROHIBITED
         if expected.z == anchor.z and isCabCoordinate(expected.x, expected.y, anchor) then
-            if isCabNorthWestWall(edge, anchor) then
-                protected = false
-            elseif not edge then
-                protected = false
-            end
             if not protected then
                 index.cabEditableCoordinates[coordinateKey(expected.x,
                     expected.y, expected.z)] = true
@@ -310,6 +297,9 @@ local function objectMatchesCaptured(object, entry)
     local stateGetters = {
         health = "getHealth", maxHealth = "getMaxHealth",
         hoppable = "isHoppable", locked = "isLocked",
+        canPassThrough = "isCanPassThrough",
+        blockAllTheSquare = "isBlockAllTheSquare",
+        doRender = "getDoRender", thumpable = "isThumpable",
     }
     for key, expected in pairs(entry.state or {}) do
         local getter = stateGetters[key]
@@ -383,6 +373,13 @@ local function hasStoredContainerItems(object, className)
 end
 
 local function hasTemplateFloorTarget(targets)
+    for i = 1, #targets do
+        if isTemplateFloorObject(targets[i].expected) then return true end
+    end
+    return false
+end
+
+local function hasTemplateIsoObjectTarget(targets)
     for i = 1, #targets do
         if targets[i].expected.class == "IsoObject" then return true end
     end
@@ -497,21 +494,42 @@ local function isProtectedBuildingCandidate(object, x, y, z, boundary,
     return true
 end
 
-local function isWhitelistedTemplateObject(object, boundary, manifest, edges)
+local function isWhitelistedTemplateObject(object, boundary, manifest, edges,
+    objectIsFloor)
     local tag = objectTag(object)
     if not tag or not sameIdentity(tag, boundary) then return false end
     local index = integer(tag.templateIndex)
-    local captured = index and Template.objects[index] or nil
-    if not captured or tag.templateClass ~= captured.class
-        or tag.templateName ~= captured.name
-        or tag.templateSprite ~= captured.sprite
-        or tag.templateDirection ~= captured.direction
-        or tag.templateNorth ~= captured.north then
+    local protection = index and ProtectionManifest.get(index) or nil
+    local expectedNorth
+    if protection then expectedNorth = protection.north end
+    if expectedNorth == "none" then expectedNorth = nil end
+    if not protection or tag.templateClass ~= protection.class
+        or tag.templateName ~= protection.name
+        or tag.templateSprite ~= protection.sprite
+        or tag.templateDirection ~= protection.direction
+        or tag.templateNorth ~= expectedNorth
+        or integer(tag.protectionClass) ~= protection.protectionClass
+        or integer(tag.templateX) ~= protection.x
+        or integer(tag.templateY) ~= protection.y
+        or integer(tag.templateZ) ~= protection.z then
         return false
     end
     local anchor = manifest and manifest.anchor
     if type(anchor) ~= "table" then return false end
-    local expected = templateEntry(captured, index, anchor)
+    local expected = templateEntry(index, anchor)
+    if not ProtectionManifest.matchesLayoutEntry(index, expected, anchor)
+        or integer(tag.templateAnchorX) ~= integer(anchor.x)
+        or integer(tag.templateAnchorY) ~= integer(anchor.y)
+        or integer(tag.templateAnchorZ) ~= integer(anchor.z)
+        or integer(tag.templateWorldX) ~= expected.x
+        or integer(tag.templateWorldY) ~= expected.y
+        or integer(tag.templateWorldZ) ~= expected.z then
+        return false
+    end
+    if expected.class == "IsoObject"
+        and isTemplateFloorObject(expected) ~= (objectIsFloor == true) then
+        return false
+    end
     local xOk, x = ServerUtil.invoke(object, "getX")
     local yOk, y = ServerUtil.invoke(object, "getY")
     local zOk, z = ServerUtil.invoke(object, "getZ")
@@ -522,7 +540,10 @@ local function isWhitelistedTemplateObject(object, boundary, manifest, edges)
     end
     local openable = expected.class == "IsoDoor"
         or expected.class == "IsoWindow"
-    if not openable and not objectMatchesCaptured(object, expected) then
+    local requiresCapturedState = expected.protectionClass
+        ~= ProtectionManifest.FREE_DEMOLITION
+    if not openable and requiresCapturedState
+        and not objectMatchesCaptured(object, expected) then
         return false
     end
     local edge = edges and edges[index] or nil
@@ -558,6 +579,9 @@ local function isWhitelistedGenerator(object, boundary, manifest)
 end
 
 local function currentTemplateTagMismatch(object, expected, edge, boundary)
+    local protection = expected
+        and ProtectionManifest.get(expected.templateIndex) or nil
+    if not protection then return "static protection record is missing" end
     local tag = objectTag(object)
     if not tag then return "tag expected=current identity observed=missing" end
     if not sameIdentity(tag, boundary) then
@@ -565,11 +589,25 @@ local function currentTemplateTagMismatch(object, expected, edge, boundary)
     end
     local checks = {
         { "templateIndex", expected.templateIndex, integer(tag.templateIndex) },
+        { "templateX", protection.x, integer(tag.templateX) },
+        { "templateY", protection.y, integer(tag.templateY) },
+        { "templateZ", protection.z, integer(tag.templateZ) },
         { "templateClass", expected.class, tag.templateClass },
         { "templateName", expected.name, tag.templateName },
         { "templateSprite", expected.sprite, tag.templateSprite },
         { "templateDirection", expected.direction, tag.templateDirection },
         { "templateNorth", expected.north, tag.templateNorth },
+        { "templateWorldX", expected.x, integer(tag.templateWorldX) },
+        { "templateWorldY", expected.y, integer(tag.templateWorldY) },
+        { "templateWorldZ", expected.z, integer(tag.templateWorldZ) },
+        { "templateAnchorX", expected.x - protection.x,
+            integer(tag.templateAnchorX) },
+        { "templateAnchorY", expected.y - protection.y,
+            integer(tag.templateAnchorY) },
+        { "templateAnchorZ", expected.z - protection.z,
+            integer(tag.templateAnchorZ) },
+        { "protectionClass", expected.protectionClass,
+            integer(tag.protectionClass) },
     }
     for i = 1, #checks do
         local check = checks[i]
@@ -630,7 +668,7 @@ local function currentTemplateTarget(object, boundary, targets)
 end
 
 local function currentTemplateClaimIsSafe(object, target, boundary, index,
-    x, y, z, floorTarget)
+    x, y, z, objectIsFloor)
     if not target then return false end
     local expected = target.expected
     local className = objectClassName(object)
@@ -641,21 +679,27 @@ local function currentTemplateClaimIsSafe(object, target, boundary, index,
         or not objectFootprintAllowsRemoval(object, boundary, index, x, y, z) then
         return false
     end
-    if expected.class == "IsoObject" and not floorTarget then return false end
+    if expected.class == "IsoObject"
+        and isTemplateFloorObject(expected) ~= (objectIsFloor == true) then
+        return false
+    end
     return true
 end
 
-local function markMatchingTargetsBlocked(object, targets, blocked)
+local function markMatchingTargetsBlocked(object, targets, blocked, objectIsFloor)
     if protectedWorldObject(object) then return end
     local className = objectClassName(object)
     for i = 1, #targets do
         local expected = targets[i].expected
-        if objectMatchesCapturedIdentity(object, expected)
-            or (className == expected.class)
+        local slotMatches = expected.class ~= "IsoObject"
+            or isTemplateFloorObject(expected) == (objectIsFloor == true)
+        local classMatches = objectMatchesCapturedIdentity(object, expected)
+            or className == expected.class
             or (expected.class ~= "IsoObject"
                 and ServerUtil.classInstance(object, expected.class))
             or (expected.class == "IsoObject"
-                and ServerUtil.classInstance(object, "IsoObject")) then
+                and ServerUtil.classInstance(object, "IsoObject"))
+        if slotMatches and classMatches then
             blocked[expected.templateIndex] = true
         end
     end
@@ -672,31 +716,36 @@ local function collectColumn(cell, x, y, boundary, manifest, index)
             if not snapshotOk or type(objects) ~= "table" then
                 return false, "build-guard object snapshot failed"
             end
-            squares[z] = { square = square, objects = objects }
             local targets = index.byCoordinate[coordinateKey(x, y, z)] or {}
             local floorOk, floor = ServerUtil.invoke(square, "getFloor")
-            if hasTemplateFloorTarget(targets) and not floorOk then
+            if hasTemplateIsoObjectTarget(targets) and not floorOk then
                 return false, "captured floor slot could not be verified"
             end
+            squares[z] = { square = square, objects = objects, floor = floor }
             for i = 1, #objects do
                 local object = objects[i]
                 if not isWhitelistedGenerator(object, boundary, manifest)
                     and not isWhitelistedTemplateObject(object, boundary,
-                        manifest, index.edges) then
-                    local floorTarget = floor == object
+                        manifest, index.edges, floor == object) then
+                    local objectIsFloor = floor == object
+                    local floorTarget = objectIsFloor
                         and hasTemplateFloorTarget(targets)
                     local claimedTarget = currentTemplateTarget(object,
                         boundary, targets)
                     local safeClaimedTarget = currentTemplateClaimIsSafe(
                         object, claimedTarget, boundary, index, x, y, z,
-                        floorTarget)
+                        objectIsFloor)
                     local buildingCandidate = isProtectedBuildingCandidate(
                         object, x, y, z, boundary, index, claimedTarget)
+                    local misplacedVisualCorner = objectIsFloor and claimedTarget
+                        and isVisualCornerTemplate(claimedTarget.expected)
                     local incompleteClaimedFloor = floorTarget and claimedTarget
                         and currentTemplateTagMismatch(object,
                             claimedTarget.expected, claimedTarget.edge,
                             boundary) ~= nil
-                    if incompleteClaimedFloor then
+                    if misplacedVisualCorner then
+                        blocked[claimedTarget.expected.templateIndex] = true
+                    elseif incompleteClaimedFloor then
                         blocked[claimedTarget.expected.templateIndex] = true
                         reportIncompleteClaimedFloorTag(index, object,
                             boundary, claimedTarget.expected,
@@ -714,7 +763,8 @@ local function collectColumn(cell, x, y, boundary, manifest, index)
                             if claimedTarget then
                                 blocked[claimedTarget.expected.templateIndex] = true
                             end
-                            markMatchingTargetsBlocked(object, targets, blocked)
+                            markMatchingTargetsBlocked(object, targets, blocked,
+                                objectIsFloor)
                         end
                     elseif safeClaimedTarget or buildingCandidate then
                         if not removalSeen[object] then
@@ -731,7 +781,8 @@ local function collectColumn(cell, x, y, boundary, manifest, index)
                         if claimedTarget then
                             blocked[claimedTarget.expected.templateIndex] = true
                         end
-                        markMatchingTargetsBlocked(object, targets, blocked)
+                        markMatchingTargetsBlocked(object, targets, blocked,
+                            objectIsFloor)
                     end
                 end
             end
@@ -787,6 +838,14 @@ local function repairTemplateColumn(cell, x, y, squares, removed,
     inPlace, blocked, index, boundary, manifest)
     local targets = index.byColumn[columnKey(x, y)] or {}
     local updatedFloors = {}
+    local anchor = manifest.anchor
+    local tagContext = {
+        rvId = boundary.rvId,
+        bitmapVersion = boundary.bitmapVersion,
+        anchorX = anchor.x,
+        anchorY = anchor.y,
+        anchorZ = anchor.z,
+    }
     for i = 1, #targets do
         local target = targets[i]
         local expected, edge = target.expected, target.edge
@@ -797,13 +856,12 @@ local function repairTemplateColumn(cell, x, y, squares, removed,
             for j = 1, #squareInfo.objects do
                 local object = squareInfo.objects[j]
                 if not removed[object] then
-                    if inPlace[object] and expected.class == "IsoObject" then
+                    if inPlace[object] and isTemplateFloorObject(expected) then
                         if not updatedFloors[object] then
                             local updateOk, updateError = pcall(
                                 createCapturedTemplateObject, cell,
                                 squareInfo.square, expected, boundary.generation,
-                                { rvId = boundary.rvId,
-                                    bitmapVersion = boundary.bitmapVersion }, edge)
+                                tagContext, edge)
                             if not updateOk then
                                 return false, "captured floor repair failed: "
                                     .. tostring(updateError)
@@ -819,7 +877,8 @@ local function repairTemplateColumn(cell, x, y, squares, removed,
                         -- The retained generator can share a floor tile with
                         -- a captured template object.
                     elseif isWhitelistedTemplateObject(object, boundary,
-                            manifest, index.edges) then
+                            manifest, index.edges,
+                            squareInfo.floor == object) then
                         local tag = objectTag(object)
                         if integer(tag.templateIndex) == templateIndex then
                             if present then
@@ -862,45 +921,12 @@ local function repairTemplateColumn(cell, x, y, squares, removed,
             if not present and not ambiguous then
                 local createOk, createError = pcall(createCapturedTemplateObject,
                     cell, squareInfo.square, expected, boundary.generation,
-                    { rvId = boundary.rvId,
-                        bitmapVersion = boundary.bitmapVersion }, edge)
+                    tagContext, edge)
                 if not createOk then
                     return false, "captured template repair failed: "
                         .. tostring(createError)
                 end
             end
-        end
-    end
-    return true
-end
-
-local function repairGeneratorAtColumn(cell, x, y, squares, removed,
-    boundary, manifest)
-    local point = {
-        x = manifest.anchor.x + Constants.GENERATOR_OFFSET.x,
-        y = manifest.anchor.y + Constants.GENERATOR_OFFSET.y,
-        z = manifest.anchor.z + Constants.GENERATOR_OFFSET.z,
-    }
-    if x ~= point.x or y ~= point.y then return true end
-    local squareInfo = squares[point.z]
-    if not squareInfo then return true end
-    local present, ambiguous = false, false
-    for i = 1, #squareInfo.objects do
-        local object = squareInfo.objects[i]
-        if not removed[object] then
-            if isWhitelistedGenerator(object, boundary, manifest) then
-                present = true
-            elseif ServerUtil.classInstance(object, "IsoGenerator") then
-                ambiguous = true
-            end
-        end
-    end
-    if not present and not ambiguous then
-        local ok, err = pcall(createGenerator, cell, squareInfo.square,
-            Constants.SPRITES.generator.sprite, boundary.generation,
-            { rvId = boundary.rvId, bitmapVersion = boundary.bitmapVersion })
-        if not ok then
-            return false, "retained generator repair failed: " .. tostring(err)
         end
     end
     return true
@@ -928,9 +954,131 @@ local function repairQueuedColumn(player, boundary, expectedKey, x, y,
     local repairOk, repairReason = repairTemplateColumn(cell, x, y,
         squares, removed, inPlace, blocked, repairIndex, boundary, manifest)
     if not repairOk then return false, repairReason end
-    local generatorOk, generatorReason = repairGeneratorAtColumn(cell, x, y,
-        squares, removed, boundary, manifest)
-    if not generatorOk then return false, generatorReason end
+    return true
+end
+
+local function rollbackEntryGenerator(square, before, boundary, created)
+    local snapshotOk, objects = pcall(ServerWorld.squareSnapshot, square)
+    if not snapshotOk or type(objects) ~= "table" then
+        return false, "generator rollback snapshot failed"
+    end
+    for i = 1, #objects do
+        local object = objects[i]
+        local candidate = object == created
+        if not candidate and not before[object] then
+            local tagOk, tag = pcall(objectTag, object)
+            local classOk, isGenerator = pcall(ServerUtil.classInstance,
+                object, "IsoGenerator")
+            candidate = tagOk and classOk and tag
+                and sameIdentity(tag, boundary) and tag.role == "generator"
+                and isGenerator == true
+        end
+        if not before[object] and candidate then
+            local removeOk, removeError = pcall(ServerWorld.removeGenericObject,
+                square, object, false)
+            if not removeOk then
+                return false, "generator rollback removal failed: "
+                    .. tostring(removeError)
+            end
+            local containsOk, remains = pcall(ServerWorld.squareContainsObject,
+                square, object)
+            if not containsOk or remains ~= false then
+                return false, "generator rollback removal was not observable"
+            end
+        end
+    end
+    return true
+end
+
+function Boundary.ensureGeneratorForEntry(player, record)
+    if not player or type(record) ~= "table" then
+        return false, Constants.INVALID_RV_DATA
+    end
+    local rv = rawget(_G, "RailroaderRV")
+    local server = rv and rv.Server
+    if not server or type(server.validateCurrentRVRecord) ~= "function" then
+        return false, Constants.INVALID_RV_DATA
+    end
+    local gateOk, accepted, manifest = pcall(
+        server.validateCurrentRVRecord, record)
+    if not gateOk or accepted ~= true or type(manifest) ~= "table"
+        or manifest.state ~= "READY" or manifest.phase ~= "COMMITTED"
+        or not sameIdentity(record, manifest)
+        or not sameIdentity(record, record.boundary)
+        or not sameIdentity(record, manifest.boundary)
+        or manifest.templateVersion ~= Constants.CAPTURED_TEMPLATE_VERSION
+        or type(manifest.anchor) ~= "table" then
+        return false, Constants.INVALID_RV_DATA
+    end
+
+    local anchorX, anchorY, anchorZ = integer(manifest.anchor.x),
+        integer(manifest.anchor.y), integer(manifest.anchor.z)
+    if not anchorX or not anchorY or not anchorZ then
+        return false, Constants.INVALID_RV_DATA
+    end
+    local x = anchorX + Constants.GENERATOR_OFFSET.x
+    local y = anchorY + Constants.GENERATOR_OFFSET.y
+    local z = anchorZ + Constants.GENERATOR_OFFSET.z
+    if not Bitmap.containsScope(record.boundary.bitmap, x, y, z) then
+        return false, Constants.INVALID_RV_DATA
+    end
+
+    local cellOk, cell = pcall(ServerWorld.getCellForPlayer, player)
+    if not cellOk or not cell then
+        return false, "current player cell is unavailable for generator entry check"
+    end
+    local squareOk, square = pcall(ServerWorld.getSquare, cell, x, y, z)
+    if not squareOk or not square then
+        return false, "current RV generator square is unavailable"
+    end
+    local snapshotOk, objects = pcall(ServerWorld.squareSnapshot, square)
+    if not snapshotOk or type(objects) ~= "table" then
+        return false, "current RV generator square could not be inspected"
+    end
+
+    local before, present, ambiguous = {}, false, false
+    for i = 1, #objects do
+        local object = objects[i]
+        before[object] = true
+        if isWhitelistedGenerator(object, record.boundary, manifest) then
+            present = true
+        elseif ServerUtil.classInstance(object, "IsoGenerator") then
+            ambiguous = true
+        end
+    end
+    if ambiguous then return false, Constants.INVALID_RV_DATA end
+    if present then return true end
+
+    local createOk, created = pcall(createGenerator, cell, square,
+        Constants.SPRITES.generator.sprite, record.generation,
+        { rvId = record.rvId, bitmapVersion = record.bitmapVersion })
+    if not createOk or not created then
+        local rollbackCallOk, rollbackOk, rollbackReason = pcall(
+            rollbackEntryGenerator, square, before, record.boundary)
+        local failure = "entry generator creation failed: " .. tostring(created)
+        if not rollbackCallOk or not rollbackOk then
+            failure = failure .. "; " .. tostring(rollbackCallOk
+                and rollbackReason or rollbackOk)
+        end
+        return false, failure
+    end
+
+    local verifyOk, attachedAndCurrent = pcall(function()
+        local containsOk, attached = ServerWorld.squareContainsObject(square,
+            created)
+        return containsOk and attached == true
+            and isWhitelistedGenerator(created, record.boundary, manifest)
+    end)
+    if not verifyOk or attachedAndCurrent ~= true then
+        local rollbackCallOk, rollbackOk, rollbackReason = pcall(
+            rollbackEntryGenerator, square, before, record.boundary, created)
+        local failure = "entry generator creation did not persist"
+        if not rollbackCallOk or not rollbackOk then
+            failure = failure .. "; " .. tostring(rollbackCallOk
+                and rollbackReason or rollbackOk)
+        end
+        return false, failure
+    end
     return true
 end
 

@@ -7,6 +7,7 @@
 require "RailroaderRV/RV_Constants"
 local Bitmap = require "RailroaderRV/RV_Bitmap"
 local Template = require "RailroaderRV/RV_Template"
+local ProtectionManifest = require "RailroaderRV/RV_ProtectionManifest"
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.Layout = RailroaderRV.Layout or {}
@@ -17,9 +18,15 @@ local C = RailroaderRV.Constants
 if type(Template) ~= "table" or Template.schemaVersion ~= C.CAPTURED_TEMPLATE_VERSION
     or type(Template.objects) ~= "table"
     or Template.objectCount ~= #Template.objects
-    or Template.objectCount ~= 357
+    or Template.objectCount ~= 412
     or type(Template.buildCells) ~= "table" or #Template.buildCells ~= 24 then
     error("RailroaderRV: captured user template contract is incomplete")
+end
+local protectionManifestValid, protectionManifestError =
+    ProtectionManifest.validateTemplate(Template)
+if not protectionManifestValid then
+    error("RailroaderRV: captured protection ledger is invalid: "
+        .. tostring(protectionManifestError))
 end
 
 local buildCellSet = {}
@@ -126,12 +133,12 @@ local function shellPriority(entry)
     return 6
 end
 
--- The edge ledger represents only captured shell objects.  The hand-built
--- model has four open/missing edge slots, so those are kept open instead of
--- filled with a synthetic wall.  Multiple captured objects can share one
--- edge host (for example a wall and railing); choose the wall/railing object
--- deterministically for edge ownership while generation still creates every
--- object from the full captured table.
+-- The edge ledger represents captured shell objects and captured invisible
+-- wall supports that close gaps.
+-- Multiple captured objects can share one edge host (for example a wall and
+-- railing); choose the wall/railing object deterministically for edge
+-- ownership while generation still creates every object from the full
+-- captured table.
 local function wallCoordinatesForAnchor(cx, cy, cz)
     local result = {}
     local interiorMinX = cx + C.INTERIOR_MIN_OFFSET_X
@@ -161,7 +168,7 @@ local function wallCoordinatesForAnchor(cx, cy, cz)
         local corner = side == "north" and x == interiorMinX
             and y == interiorMinY
         local role = corner and "corner-nw"
-            or ((side == "north" or side == "south") and "wall-north" or "wall-west")
+            or (north and "wall-north" or "wall-west")
         appendWall(result, x, y, cz, north, selected.object.sprite, role, corner)
         result[#result].templateIndex = selected.index
         result[#result].templateIndices = {}
@@ -173,7 +180,7 @@ local function wallCoordinatesForAnchor(cx, cy, cz)
     for x = interiorMinX, interiorMaxX do
         addCapturedEdge("north", x, interiorMinY, true)
     end
-    for y = interiorMinY + 1, interiorMaxY do
+    for y = interiorMinY, interiorMaxY do
         addCapturedEdge("west", interiorMinX, y, false)
     end
     for y = interiorMinY, interiorMaxY do
@@ -376,12 +383,18 @@ function Layout.make(cx, cy, cz)
     result.wallCornerCount = cornerCount
     for i = 1, #Template.objects do
         local captured = Template.objects[i]
+        local protection = ProtectionManifest.get(i)
+        if not protection then
+            error("RailroaderRV: static protection class is missing at index "
+                .. tostring(i))
+        end
         local copy = {
             templateIndex = i,
             class = captured.class,
             name = captured.name,
             sprite = captured.sprite,
             direction = captured.direction,
+            protectionClass = protection.protectionClass,
             x = cx + captured.x,
             y = cy + captured.y,
             z = cz + captured.z,

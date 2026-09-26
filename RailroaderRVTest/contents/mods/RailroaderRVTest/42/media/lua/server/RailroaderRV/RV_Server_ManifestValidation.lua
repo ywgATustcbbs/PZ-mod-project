@@ -102,9 +102,9 @@ local function currentBoundsValid(bounds, managed, bitmap, anchor)
         or values.roomZ ~= values.z or values.wallZ ~= values.z
         or values.roofZ < values.managedMinZ
         or values.roofZ >= values.managedMaxZ
-        or values.wallObjectCount ~= 54
-        or values.wallCoordinateCount ~= 54
-        or values.northEdges ~= 12 or values.westEdges ~= 42
+        or values.wallObjectCount ~= 59
+        or values.wallCoordinateCount ~= 59
+        or values.northEdges ~= 12 or values.westEdges ~= 47
         or values.wallCornerCount ~= 1 then
         return false
     end

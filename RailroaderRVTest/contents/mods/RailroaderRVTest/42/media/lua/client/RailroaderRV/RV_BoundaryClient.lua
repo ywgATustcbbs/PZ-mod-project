@@ -1,9 +1,7 @@
 -- Client-side RV movement feedback.
 --
--- The server owns the bitmap decision and the authoritative correction.  This
--- module only predicts a blocked transition from an active cell into an
--- inactive cell so the local player does not visibly cross a hole while the
--- next server tick is in flight.  It never creates a collider or wall.
+-- The server owns RV boundary checks and applies corrections.  This module
+-- accepts only identity-scoped corrections from that authority.
 
 require "RailroaderRV/RV_Constants"
 local Bitmap = require "RailroaderRV/RV_Bitmap"
@@ -18,62 +16,6 @@ local states = Client._states or {}
 local clientTick = Client._tick or 0
 Client._snapshots, Client._states = snapshots, states
 Client._tick = clientTick
-
-local BLOCK_HOLD_TICKS = 3
-
--- TEMPORARY PerfTrace counters for correlating client callbacks with CPU
--- samples. Remove after the diagnostic capture is complete.
-local PERF_TRACE_WINDOW_SECONDS = 10
-local function perfWindowStart()
-    local ok, windowStart = pcall(function()
-        if type(os) ~= "table" or type(os.time) ~= "function" then return nil end
-        local now = os.time()
-        if type(now) ~= "number" or now ~= now
-            or now <= -math.huge or now >= math.huge then
-            return nil
-        end
-        return math.floor(now / PERF_TRACE_WINDOW_SECONDS)
-            * PERF_TRACE_WINDOW_SECONDS
-    end)
-    if not ok or type(windowStart) ~= "number" then return nil end
-    return windowStart
-end
-
-local initialPerfWindowStart = perfWindowStart()
-local perfTraceEnabled = initialPerfWindowStart ~= nil
-local perfTrace = {
-    windowStart = initialPerfWindowStart,
-    onTick = 0,
-    onTickActive = 0,
-    onRenderTick = 0,
-    onRenderActive = 0,
-}
-
-local function emitBoundaryPerfTrace(tick)
-    if not perfTraceEnabled then return end
-    local windowStart = perfWindowStart()
-    if windowStart == nil then
-        perfTraceEnabled = false
-        return
-    end
-    if windowStart == perfTrace.windowStart then return end
-    print("[RailroaderRVTest][PerfTrace] client/boundary win="
-        .. tostring(perfTrace.windowStart)
-        .. " t=" .. tostring(tick)
-        .. " ot=" .. tostring(perfTrace.onTick)
-        .. " ota=" .. tostring(perfTrace.onTickActive)
-        .. " ort=" .. tostring(perfTrace.onRenderTick)
-        .. " orta=" .. tostring(perfTrace.onRenderActive))
-    for key in pairs(perfTrace) do
-        if key ~= "windowStart" then perfTrace[key] = 0 end
-    end
-    perfTrace.windowStart = windowStart
-end
-
-local function hasEntries(value)
-    for _ in pairs(value) do return true end
-    return false
-end
 
 local function number(value)
     if type(value) == "number" then return value end
@@ -108,34 +50,6 @@ local function onlineId(player)
     return numOk and integer(playerNum) or nil
 end
 
-local function position(player)
-    local okZ, z = call(player, "getZ")
-    z = number(z)
-    if not okZ or z == nil
-        or math.floor(z) < C.TELEPORT_Z + C.RV_MANAGED_MIN_Z_OFFSET
-        or math.floor(z) >= C.TELEPORT_Z + C.RV_MANAGED_MAX_Z_OFFSET then
-        return nil
-    end
-    local okX, x = call(player, "getX")
-    local okY, y = call(player, "getY")
-    x, y = number(x), number(y)
-    if not okX or not okY or x == nil or y == nil
-        or x < C.TELEPORT_X + C.RV_REGION_MIN_OFFSET_X
-        or x >= C.TELEPORT_X + C.RV_REGION_MIN_OFFSET_X + C.RV_REGION_SIZE
-        or y < C.TELEPORT_Y + C.RV_REGION_MIN_OFFSET_Y
-        or y >= C.TELEPORT_Y + C.RV_REGION_MIN_OFFSET_Y + C.RV_REGION_SIZE then
-        return nil
-    end
-    return { x = x, y = y, z = z }
-end
-
-local function copyPosition(p)
-    if type(p) ~= "table" then return nil end
-    local x, y, z = number(p.x), number(p.y), number(p.z)
-    if not x or not y or not z then return nil end
-    return { x = x, y = y, z = z }
-end
-
 local function localPlayerByOnlineId(id)
     if id == nil or type(getNumActivePlayers) ~= "function"
         or type(getSpecificPlayer) ~= "function" then return nil end
@@ -161,25 +75,6 @@ local function snapshotFresh(snapshot)
     return age >= 0 and age <= (integer(C.BOUNDARY_SNAPSHOT_TIMEOUT_TICKS) or 120)
 end
 
-local function snapshotForPlayer(id)
-    if id == nil then return nil end
-    local current = states[id]
-    if current and snapshotFresh(current.snapshot) then return current.snapshot end
-    -- A reconnect can receive a snapshot before its state is created.
-    for _, snapshot in pairs(snapshots) do
-        if snapshot.onlineId == id and snapshotFresh(snapshot) then return snapshot end
-    end
-    return nil
-end
-
-local function releaseBlock(player, state)
-    if state and state.blocked then
-        call(player, "setBlockMovement", false)
-        state.blocked = false
-        state.blockedUntil = nil
-    end
-end
-
 local function applyPosition(player, target)
     -- Use the same engine teleport primitive as the correction handler, then
     -- refresh the movement-history fields that can otherwise reapply the
@@ -200,23 +95,6 @@ local function applyPosition(player, target)
             target.x, target.y, target.z)
     end
     return changed
-end
-
-local function clampToLastValid(player, snapshot, state, current)
-    local target = state.previous
-    if not target or not Bitmap.isActive(snapshot.bitmap,
-        target.x, target.y, target.z) then
-        target = Bitmap.nearestActive(snapshot.bitmap, current.x, current.y,
-            math.floor(current.z))
-    end
-    if not target then return false end
-    if not applyPosition(player, target) then return false end
-    call(player, "setBlockMovement", true)
-    state.blocked = true
-    state.blockedUntil = clientTick + BLOCK_HOLD_TICKS
-    state.previous = copyPosition(target)
-    state.previousInInner = false
-    return true
 end
 
 local function validSnapshot(args)
@@ -255,28 +133,11 @@ function Client.onBitmap(args)
             and snapshot.bitmapVersion < old.bitmapVersion) then
         return
     end
-    -- Bounds scan the compact 100x100 bitmap once per managed z layer. Keep
-    -- that work on snapshot receipt so movement callbacks only read the cache.
-    Bitmap.prepareWalkBounds(snapshot.bitmap)
     snapshots[snapshot.rvId] = snapshot
     snapshot.receivedTick = clientTick
     local state = states[snapshot.onlineId] or {}
-    if state.blocked then
-        local player = localPlayerByOnlineId(snapshot.onlineId)
-        if player then
-            releaseBlock(player, state)
-        else
-            -- No local object can still be held by setBlockMovement after a
-            -- reconnect; discard the stale visual latch with the state.
-            state.blocked = false
-            state.blockedUntil = nil
-        end
-    end
     state.snapshot = snapshot
     state.lastCorrectionSequence = state.lastCorrectionSequence or 0
-    state.previous = nil
-    state.previousInInner = nil
-    state.blocked = false
     states[snapshot.onlineId] = state
 end
 
@@ -292,8 +153,6 @@ function Client.onBitmapClear(args)
     end
     local state = states[online]
     if state and (key == nil or not state.snapshot or state.snapshot.key == key) then
-        local player = localPlayerByOnlineId(online)
-        if player then releaseBlock(player, state) end
         states[online] = nil
     end
 end
@@ -316,20 +175,16 @@ function Client.onCorrection(args)
         or tostring(snapshot.rvId) ~= tostring(args.rvId)
         or not snapshotFresh(snapshot) then
         -- The server has already applied its authoritative teleport.  Without
-        -- a matching snapshot the client deliberately performs no prediction.
+        -- a matching snapshot the client deliberately ignores the correction.
         return
     end
     if sequence <= (state.lastCorrectionSequence or 0)
         or not Bitmap.isActive(snapshot.bitmap, x, y, z) then return end
     state.lastCorrectionSequence = sequence
-    state.previous = { x = x, y = y, z = z }
-    state.previousInInner = nil
     states[online] = state
-    -- Keep the movement history coherent with the authoritative correction.
-    -- teleportTo alone only writes the coordinates; a stale next/last pair can
-    -- otherwise replay the rejected trajectory on the following update.
+    -- Reset movement history so stale next/last coordinates cannot replay the
+    -- trajectory that the server rejected.
     if not applyPosition(player, { x = x, y = y, z = z }) then return end
-    releaseBlock(player, state)
 end
 
 function Client.onServerCommand(module, command, args)
@@ -343,123 +198,9 @@ function Client.onServerCommand(module, command, args)
     end
 end
 
-function Client.onPlayerUpdate(player)
-    if not player or (type(player.isDead) == "function" and player:isDead()) then return end
-    local current = position(player)
-    if not current then
-        if hasEntries(states) then
-            local id = onlineId(player)
-            local state = id and states[id]
-            if state then
-                state.previous = nil
-                state.previousInInner = nil
-                releaseBlock(player, state)
-            end
-        end
-        return
-    end
-    local id = onlineId(player)
-    if id == nil then return end
-    local snapshot = snapshotForPlayer(id)
-    local state = states[id]
-    if not snapshot then
-        if state then releaseBlock(player, state) end
-        return
-    end
-    state = state or { snapshot = snapshot, lastCorrectionSequence = 0 }
-    state.snapshot = snapshot
-    -- Scope guard precedes prediction.  The client is intentionally inert for
-    -- positions outside its RV-local 100x100xZ region.
-    if not Bitmap.containsScope(snapshot.bitmap, current.x, current.y, current.z) then
-        state.previous = nil
-        state.previousInInner = nil
-        releaseBlock(player, state)
-        states[id] = state
-        return
-    end
-    if clientTick < (state.blockedUntil or 0) then return end
-    local previous = state.previous
-    if previous and previous.x == current.x and previous.y == current.y
-        and previous.z == current.z then
-        -- The exact last-valid position remains valid for this snapshot. A
-        -- stationary player needs no repeated bitmap lookup or segment walk.
-        releaseBlock(player, state)
-        states[id] = state
-        return
-    end
-    local active, inInner = Bitmap.walkableFast(snapshot.bitmap,
-        current.x, current.y, current.z)
-    local sameCell = previous
-        and math.floor(previous.x) == math.floor(current.x)
-        and math.floor(previous.y) == math.floor(current.y)
-        and math.floor(previous.z) == math.floor(current.z)
-    local staysInside = inInner and previous and state.previousInInner
-        and math.floor(previous.z) == math.floor(current.z)
-    local invalidSegment = active and previous and not sameCell and not staysInside
-        and not Bitmap.segmentValid(snapshot.bitmap, previous, current)
-    if not active or invalidSegment then
-        if not clampToLastValid(player, snapshot, state, current) then
-            state.previous = nil
-            state.previousInInner = nil
-        end
-    else
-        if not previous or previous.x ~= current.x or previous.y ~= current.y
-            or previous.z ~= current.z then
-            state.previous = copyPosition(current)
-        end
-        state.previousInInner = inInner
-        releaseBlock(player, state)
-    end
-    states[id] = state
-end
-
-local function updateActivePlayers()
-    if type(getNumActivePlayers) ~= "function" or type(getSpecificPlayer) ~= "function" then
-        return
-    end
-    local ok, count = pcall(getNumActivePlayers)
-    if not ok or type(count) ~= "number" then return end
-    for playerNum = 0, count - 1 do
-        local playerOk, player = pcall(getSpecificPlayer, playerNum)
-        if playerOk and player then Client.onPlayerUpdate(player) end
-    end
-end
-
-local hasRenderTick = Events and Events.OnRenderTick
-    and type(Events.OnRenderTick.Add) == "function"
-
 function Client.onTick()
-    emitBoundaryPerfTrace(clientTick)
     clientTick = clientTick + 1
     Client._tick = clientTick
-    if perfTraceEnabled then perfTrace.onTick = perfTrace.onTick + 1 end
-    for id, state in pairs(states) do
-        local player = localPlayerByOnlineId(id)
-        if player and state.blocked and clientTick >= (state.blockedUntil or 0) then
-            releaseBlock(player, state)
-        end
-    end
-    if not hasEntries(snapshots) then return end
-    if perfTraceEnabled then
-        perfTrace.onTickActive = perfTrace.onTickActive + 1
-    end
-    -- RenderTick handles movement feedback when available. Poll from OnTick
-    -- only as a fallback, avoiding a second local-player scan each tick.
-    if not hasRenderTick then updateActivePlayers() end
-end
-
-function Client.onRenderTick()
-    if perfTraceEnabled then
-        perfTrace.onRenderTick = perfTrace.onRenderTick + 1
-    end
-    -- Render-tick prediction is bounded to active local players and uses the
-    -- exact same canonical segment predicate as OnPlayerUpdate.  It improves
-    -- input latency but never becomes a permission check.
-    if not hasEntries(snapshots) then return end
-    if perfTraceEnabled then
-        perfTrace.onRenderActive = perfTrace.onRenderActive + 1
-    end
-    updateActivePlayers()
 end
 
 if Events and Events.OnServerCommand and type(Events.OnServerCommand.Add) == "function" then
@@ -468,8 +209,4 @@ end
 if Events and Events.OnTick and type(Events.OnTick.Add) == "function" then
     Events.OnTick.Add(Client.onTick)
 end
-if Events and Events.OnRenderTick and type(Events.OnRenderTick.Add) == "function" then
-    Events.OnRenderTick.Add(Client.onRenderTick)
-end
-
 return Client

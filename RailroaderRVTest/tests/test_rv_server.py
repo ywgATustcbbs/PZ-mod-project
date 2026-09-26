@@ -130,14 +130,19 @@ def main() -> int:
         package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_RailroaderContextMenu.lua"
     )
     constants_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_Constants.lua"
+    constants = read_utf8(constants_path) if constants_path.is_file() else ""
     layout_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_Layout.lua"
     template_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_Template.lua"
+    protection_manifest_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_ProtectionManifest.lua"
     bitmap_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_Bitmap.lua"
     mapping_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_RailroaderServer_Mapping.lua"
     manifest_validation_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_ManifestValidation.lua"
     boundary_geometry_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_BoundaryServer_Geometry.lua"
     boundary_server_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_BoundaryServer.lua"
     boundary_client_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_BoundaryClient.lua"
+    boundary_wall_visuals_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_BoundaryWallVisuals.lua"
+    protected_demolition_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_ProtectedDemolition.lua"
+    wardrobe_visuals_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_WardrobeVisuals.lua"
     utility_catalog_path = package_root / "media" / "lua" / "shared" / "RailroaderRV" / "RV_UtilityCatalog.lua"
     utility_context_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_UtilityContextMenu.lua"
     utility_client_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_UtilityClient.lua"
@@ -158,6 +163,7 @@ def main() -> int:
     client_relocation_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_ContextMenu_Relocation.lua"
     world_objects_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_WorldObjects.lua"
     template_repair_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_TemplateRepair.lua"
+    entry_exit_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_RailroaderServer_EntryExit.lua"
     boundary_objects_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_BoundaryServer_Objects.lua"
     start_bat_path = root / "testserver" / "steamcmd" / "380870" / "StartServer64 - test.bat"
     runner_path = root / "testserver" / "run_test.py"
@@ -200,6 +206,7 @@ def main() -> int:
         client_relocation_path,
         world_objects_path,
         template_repair_path,
+        entry_exit_path,
         boundary_objects_path,
     ):
         checks.true(
@@ -213,6 +220,22 @@ def main() -> int:
     checks.true(
         boundary_client_path.is_file(),
         f"boundary client Lua is missing: {boundary_client_path}",
+    )
+    checks.true(
+        boundary_wall_visuals_path.is_file(),
+        f"boundary wall visual Lua is missing: {boundary_wall_visuals_path}",
+    )
+    checks.true(
+        protected_demolition_path.is_file(),
+        f"protected demolition Lua is missing: {protected_demolition_path}",
+    )
+    checks.true(
+        wardrobe_visuals_path.is_file(),
+        f"wardrobe visual Lua is missing: {wardrobe_visuals_path}",
+    )
+    checks.true(
+        protection_manifest_path.is_file(),
+        f"protection manifest Lua is missing: {protection_manifest_path}",
     )
     for utility_path in (
         utility_catalog_path,
@@ -303,10 +326,174 @@ def main() -> int:
             else ""
         )
         captured_template = read_utf8(template_path) if template_path.is_file() else ""
+        protection_manifest = (
+            read_utf8(protection_manifest_path)
+            if protection_manifest_path.is_file()
+            else ""
+        )
         captured_template_rows = re.findall(
             r"(?m)^\s*\{x=-?\d+,\s*y=-?\d+,\s*z=-?\d+,\s*class=",
             captured_template,
         )
+        template_object_pattern = re.compile(
+            r'^\s*\{x=(?P<x>-?\d+), y=(?P<y>-?\d+), z=(?P<z>-?\d+), '
+            r'class="(?P<class>[^"]+)", name="(?P<name>[^"]+)", '
+            r'sprite="(?P<sprite>[^"]+)"(?:, north=(?P<north>true|false))?, '
+            r'direction="(?P<direction>[^"]+)",'
+            r'state=\{(?P<state>[^}]*)\}\},?\s*$',
+            re.MULTILINE,
+        )
+        captured_template_objects = [
+            match.groupdict()
+            for line in captured_template.splitlines()
+            if (match := template_object_pattern.match(line)) is not None
+        ]
+        protection_object_pattern = re.compile(
+            r'^\s*\{templateIndex=(?P<index>\d+), x=(?P<x>-?\d+), '
+            r'y=(?P<y>-?\d+), z=(?P<z>-?\d+), class="(?P<class>[^"]+)", '
+            r'name="(?P<name>[^"]+)", sprite="(?P<sprite>[^"]+)", '
+            r'north=(?P<north>true|false|"none"), direction="(?P<direction>[^"]+)", '
+            r'state=\{(?P<state>[^}]*)\}, protectionClass=(?P<protectionClass>[1-4])\},?\s*$',
+            re.MULTILINE,
+        )
+        protection_objects = [
+            match.groupdict()
+            for line in protection_manifest.splitlines()
+            if (match := protection_object_pattern.match(line)) is not None
+        ]
+        def state_fields(value: str) -> dict[str, str]:
+            return dict(item.split("=", 1) for item in value.split(",") if item)
+
+        protection_identity_matches_template = (
+            len(captured_template_objects) == 412
+            and len(protection_objects) == 412
+            and [int(obj["index"]) for obj in protection_objects] == list(range(1, 413))
+        )
+        if protection_identity_matches_template:
+            for captured, protected in zip(captured_template_objects, protection_objects):
+                static_north = None if protected["north"] == '"none"' else protected["north"]
+                if any(captured[field] != protected[field]
+                    for field in ("x", "y", "z", "class", "name", "sprite", "direction")):
+                    protection_identity_matches_template = False
+                    break
+                if captured["north"] != static_north or state_fields(captured["state"]) != state_fields(protected["state"]):
+                    protection_identity_matches_template = False
+                    break
+        protection_class_by_index = {
+            int(obj["index"]): int(obj["protectionClass"])
+            for obj in protection_objects
+        }
+        protection_class_counts = {
+            protection_class: sum(
+                1 for value in protection_class_by_index.values()
+                if value == protection_class
+            )
+            for protection_class in range(1, 5)
+        }
+        cab_classes_match = len(protection_objects) == 412 and all(
+            protection_class_by_index.get(index) == 1
+            for index, obj in enumerate(captured_template_objects, 1)
+            if int(obj["z"]) == 0
+            and -4 <= int(obj["x"]) <= 1
+            and -2 <= int(obj["y"]) <= 1
+        )
+        east_cab_classes_match = len(protection_objects) == 412 and all(
+            protection_class_by_index.get(index) == 1
+            for index, obj in enumerate(captured_template_objects, 1)
+            if int(obj["z"]) == 0
+            and int(obj["x"]) == 2
+            and -2 <= int(obj["y"]) <= 1
+        )
+        south_shell_floors_stay_protected = len(protection_objects) == 412 and all(
+            protection_class_by_index.get(index) == 3
+            for index, obj in enumerate(captured_template_objects, 1)
+            if int(obj["z"]) == 0
+            and int(obj["x"]) in {-4, -3, -2, -1, 0, 1}
+            and int(obj["y"]) == 2
+            and obj["class"] == "IsoObject"
+        )
+        cab_opening_objects_outside_build_cells = [
+            (index, obj)
+            for index, obj in enumerate(captured_template_objects, 1)
+            if (int(obj["x"]), int(obj["y"]), int(obj["z"]), obj["name"])
+            in {
+                (-4, 2, 0, "Window"),
+                (1, 2, 0, "Wooden Door Frame"),
+                (1, 2, 0, "Wooden Door"),
+            }
+        ]
+        northwest_support_classes = [
+            protection_class_by_index[index]
+            for index, obj in enumerate(captured_template_objects, 1)
+            if obj["name"] == "Wooden Wall"
+            and (int(obj["x"]), int(obj["y"]), int(obj["z"]), obj["north"])
+            in {(-4, -6, 0, "true"), (-4, -6, 0, "false")}
+            and obj["sprite"] in {
+                "walls_interior_house_02_32", "walls_interior_house_02_33"
+            }
+        ]
+        protected_activity_corner_walls = [
+            obj for obj in captured_template_objects
+            if obj["name"] == "Wooden Wall"
+            and (int(obj["x"]), int(obj["y"]), int(obj["z"]), obj["north"])
+            in {
+                (-4, 16, 0, "false"),
+                (2, -6, 0, "false"),
+                (2, 16, 0, "false"),
+                (2, 17, 0, "false"),
+            }
+            and "doRender=false" in obj["state"]
+            and "hoppable=false" in obj["state"]
+        ]
+        protected_wardrobe_tiles = [
+            obj for obj in captured_template_objects
+            if obj["name"] == "Dark Fancy Wardrobe"
+            and obj["sprite"] in {"furniture_storage_01_24", "furniture_storage_01_25"}
+        ]
+        west_cab_wall_tiles = [
+            obj for obj in captured_template_objects
+            if obj["name"] == "Wooden Wall"
+            and int(obj["x"]) == -4
+            and int(obj["y"]) in {-2, -1, 0, 1}
+            and int(obj["z"]) == 0
+            and obj["north"] == "false"
+        ]
+        fence_sprites = {"fixtures_railings_01_36", "fixtures_railings_01_37"}
+        fence_rows = [
+            obj for obj in captured_template_objects
+            if obj["class"] == "IsoThumpable" and obj["sprite"] in fence_sprites
+        ]
+        fence_keys = {
+            (int(obj["x"]), int(obj["y"]), int(obj["z"]), obj["north"])
+            for obj in fence_rows
+        }
+        wall_rows_by_key: dict[tuple[int, int, int, str | None], list[dict[str, str | None]]] = {}
+        for obj in captured_template_objects:
+            if obj["class"] != "IsoThumpable" or obj["name"] != "Wooden Wall":
+                continue
+            key = (int(obj["x"]), int(obj["y"]), int(obj["z"]), obj["north"])
+            wall_rows_by_key.setdefault(key, []).append(obj)
+        perimeter_keys = {
+            *((x, -6, 0, "true") for x in range(-4, 2)),
+            *((-4, y, 0, "false") for y in range(-6, 17)),
+            *((2, y, 0, "false") for y in range(-6, 17)),
+            *((x, 17, 0, "true") for x in range(-4, 2)),
+            (2, 17, 0, "false"),
+        }
+        paired_keys = fence_keys & set(wall_rows_by_key)
+        off_boundary_fence_keys = paired_keys - perimeter_keys
+        boundary_fence_keys = paired_keys & perimeter_keys
+        hidden_boundary_wall_rows = [
+            wall
+            for key in boundary_fence_keys
+            for wall in wall_rows_by_key[key]
+        ]
+        expected_off_boundary_fence_keys = {
+            (-4, -5, 0, "true"),
+            (-4, 16, 0, "true"),
+            (1, -5, 0, "true"),
+            (1, 16, 0, "true"),
+        }
         captured_shell_cells = {
             (int(x), int(y))
             for x, y in re.findall(
@@ -323,6 +510,26 @@ def main() -> int:
                 captured_template,
             )
         }
+        northwest_west_wall_rows = [
+            obj for obj in captured_template_objects
+            if (int(obj["x"]), int(obj["y"]), int(obj["z"]), obj["north"])
+            == (-4, -6, 0, "false")
+            and obj["class"] == "IsoThumpable"
+            and obj["name"] == "Wooden Wall"
+            and obj["sprite"] == "walls_interior_house_02_32"
+            and "doRender=false" in obj["state"]
+            and "hoppable=false" in obj["state"]
+        ]
+        northwest_north_wall_rows = [
+            obj for obj in captured_template_objects
+            if (int(obj["x"]), int(obj["y"]), int(obj["z"]), obj["north"])
+            == (-4, -6, 0, "true")
+            and obj["class"] == "IsoThumpable"
+            and obj["name"] == "Wooden Wall"
+            and obj["sprite"] == "walls_interior_house_02_33"
+            and "doRender=false" in obj["state"]
+            and "hoppable=false" in obj["state"]
+        ]
         boundary_server = (
             read_utf8(boundary_server_path) if boundary_server_path.is_file() else ""
         )
@@ -332,6 +539,22 @@ def main() -> int:
         boundary_client = (
             read_utf8(boundary_client_path) if boundary_client_path.is_file() else ""
         )
+        boundary_wall_visuals = (
+            read_utf8(boundary_wall_visuals_path)
+            if boundary_wall_visuals_path.is_file()
+            else ""
+        )
+        protected_demolition = (
+            read_utf8(protected_demolition_path)
+            if protected_demolition_path.is_file()
+            else ""
+        )
+        wardrobe_visuals = (
+            read_utf8(wardrobe_visuals_path)
+            if wardrobe_visuals_path.is_file()
+            else ""
+        )
+        entry_exit = read_utf8(entry_exit_path) if entry_exit_path.is_file() else ""
         utility_catalog = (
             read_utf8(utility_catalog_path) if utility_catalog_path.is_file() else ""
         )
@@ -484,11 +707,14 @@ def main() -> int:
         checks.true(
             all(token in bitmap for token in (
                 "BITMAP_SCHEMA_VERSION", "newBitset", "toHex", "fromHex",
-                "containsScope", "isActive", "isBuildable", "segmentValid",
-                "nearestActive", "edgeForSide", "bitmapVersion ~= C.BITMAP_VERSION",
-                "local tz = t + offsets[l]",
+                "containsScope", "isActive", "isBuildable", "walkBounds",
+                "inAABB", "edgeForSide", "bitmapVersion ~= C.BITMAP_VERSION",
+            ))
+            and all(token not in bitmap for token in (
+                "segmentValid", "nearestActive", "local function addTime",
+                "local function sortUniqueTimes",
             )),
-            "shared RV bitmap contract is incomplete",
+            "shared RV bitmap contract is incomplete or retains movement-history helpers",
         )
         checks.true(
             "local function exactKeys(value, expected)" in bitmap
@@ -535,20 +761,35 @@ def main() -> int:
             and '"^(N|W):' not in boundary_server,
             "shell edge validators use unsupported Lua pattern alternation",
         )
-        checks.true(
-            all(token in boundary_server for token in (
-                "function updatePlayer", "segmentValid", "Bitmap.nearestActive",
-                "teleportTo", "COMMAND_RV_BITMAP",
-                "COMMAND_RV_BOUNDARY_CORRECTION", "transmitRemoveItemFromSquare",
-                "shellEdgeAllowed", "sameBoundary",
-            ))
-            and "not Bitmap.containsScope(boundary.bitmap" in boundary_server,
-            "server boundary authority/scope guard contract is incomplete",
+        update_guard = section(
+            boundary_geometry,
+            r"local function updatePlayer",
+            r"\n\nctx\.number",
         )
         checks.true(
-            "current square has not been loaded" in boundary_server
-            and "if not ok or current == nil then return false end" in boundary_server
-            and "if not sq then return end" in boundary_server,
+            update_guard is not None
+            and all(token in update_guard for token in (
+                "Bitmap.walkBounds", "if bounds and Bitmap.inAABB(bounds.outer, position.x, position.y)",
+                "currentSquareMatches(player, position)",
+                "correction(player, boundary, state, record.rvPosition)",
+            ))
+            and "not Bitmap.containsScope(boundary.bitmap" in update_guard
+            and all(token not in update_guard for token in (
+                "Bitmap.walkableFast", "Bitmap.isActive", "segmentValid",
+                "nearestActive",
+            ))
+            and all(token not in boundary_geometry for token in (
+                "lastValid", "lastPosition", "invalidSegment",
+                "lastObservedBoundaryTick", "nextValidRecordTick",
+                "recoveryCooldown", "BOUNDARY_RECOVERY_COOLDOWN_TICKS",
+                "copyPosition", "segmentValid", "Bitmap.nearestActive",
+            ))
+            and "BOUNDARY_RECOVERY_COOLDOWN_TICKS" not in constants,
+            "server boundary guard does not use only current AABB and trusted entry correction",
+        )
+        checks.true(
+            "current square has not been loaded" in boundary_geometry
+            and "if not ok or current == nil then return false end" in boundary_geometry,
             "server boundary state advances across unloaded squares",
         )
         checks.true(
@@ -653,11 +894,14 @@ def main() -> int:
         )
         checks.true(
             all(token in boundary_client for token in (
-                "OnPlayerUpdate", "OnServerCommand", "segmentValid",
-                "setBlockMovement", "COMMAND_RV_BITMAP_CLEAR",
+                "OnTick", "OnServerCommand", "COMMAND_RV_BITMAP_CLEAR",
+                "function Client.onCorrection",
             ))
-            and "prediction" in boundary_client.lower(),
-            "client boundary prediction contract is incomplete",
+            and all(token not in boundary_client for token in (
+                "OnPlayerUpdate", "OnRenderTick", "previous",
+                "segmentValid", "nearestActive", "setBlockMovement",
+            )),
+            "client boundary code retains independent previous-position prediction",
         )
         checks.true(
             "applyPosition(player, { x = x, y = y, z = z })" in boundary_client
@@ -1667,7 +1911,6 @@ def main() -> int:
         )
 
         if constants_path.is_file():
-            constants = read_utf8(constants_path)
             checks.true(
                 all(token in constants for token in (
                     "MANIFEST_SCHEMA_VERSION", "MAP_SCHEMA_VERSION",
@@ -1736,15 +1979,143 @@ def main() -> int:
                 "shared constants do not define the final relocation command",
             )
             checks.true(
-                re.search(r"C\.CAPTURED_TEMPLATE_VERSION\s*=\s*2", constants)
+                re.search(r"C\.CAPTURED_TEMPLATE_VERSION\s*=\s*9", constants)
                 is not None
-                and re.search(r"schemaVersion\s*=\s*2", captured_template)
+                and re.search(r"schemaVersion\s*=\s*9", captured_template)
                 is not None
-                and re.search(r"objectCount\s*=\s*357", captured_template)
+                and re.search(r"objectCount\s*=\s*412", captured_template)
                 is not None
-                and len(captured_template_rows) == 357
+                and len(captured_template_rows) == 412
+                and len(captured_template_objects) == 412
+                and protection_identity_matches_template
+                and "protectFromDemolition" not in captured_template
+                and all(
+                    f"{enum} = {value}" in protection_manifest
+                    for enum, value in (
+                        ("P.FREE_DEMOLITION", 1),
+                        ("P.RESTORE_ONLY", 2),
+                        ("P.PROHIBITED", 3),
+                        ("P.SPECIAL", 4),
+                    )
+                )
+                and "P.OBJECT_COUNT = 412" in protection_manifest
+                and "P.EXPECTED_CLASS_COUNTS = { [1] = 54, [2] = 0, [3] = 358, [4] = 0 }" in protection_manifest
+                and "function P.validateTemplate(template)" in protection_manifest
+                and "not sameIdentity(record, captured)" in protection_manifest
+                and protection_class_counts == {1: 54, 2: 0, 3: 358, 4: 0}
+                and cab_classes_match
+                and east_cab_classes_match
+                and south_shell_floors_stay_protected
+                and len(cab_opening_objects_outside_build_cells) == 3
+                and all(protection_class_by_index.get(index) == 1
+                    for index, _ in cab_opening_objects_outside_build_cells)
+                and sorted(northwest_support_classes) == [3, 3]
+                and all(
+                    protection_class_by_index.get(index) == 3
+                    for index, obj in enumerate(captured_template_objects, 1)
+                    if obj["name"] == "Dark Fancy Wardrobe"
+                )
+                and "Hidden RV Corner Block" not in captured_template
+                and len(protected_activity_corner_walls) == 4
+                and {(int(obj["x"]), int(obj["y"]), int(obj["z"]), obj["north"])
+                    for obj in protected_activity_corner_walls}
+                    == {(-4, 16, 0, "false"), (2, -6, 0, "false"),
+                        (2, 16, 0, "false"), (2, 17, 0, "false")}
+                and len(protected_wardrobe_tiles) == 4
+                and {(int(obj["x"]), int(obj["y"]), int(obj["z"]), obj["north"])
+                    for obj in protected_wardrobe_tiles}
+                    == {(-5, -2, 0, "true"), (-5, -1, 0, "true"),
+                        (-5, 0, 0, "true"), (-5, 1, 0, "true")}
                 and len(captured_roof_cells) == 88,
-                "current captured template version/count or unique roof-host count is stale",
+                "current captured template version/count, corner walls, wardrobes, or roof-host count is stale",
+            )
+            checks.true(
+                len(northwest_north_wall_rows) == 1
+                and len(northwest_west_wall_rows) == 1
+                and "for y = interiorMinY, interiorMaxY do" in layout
+                and 'or (north and "wall-north" or "wall-west")' in layout
+                and "northwestEntries.north.role ~= \"corner-nw\"" in server_schema
+                and "northwestEntries.west.role ~= \"wall-west\"" in server_schema
+                and "coordinateKey ~= nwKey" in server_schema
+                and "templateBoundarySupportWall = true" in world_objects
+                and '["wall-west"] = true' in boundary_wall_visuals
+                and "return expected.north == false" in boundary_wall_visuals,
+                "NW corner does not have the exact corner-north/wall-west support pair with current visual tags",
+            )
+            checks.true(
+                re.search(r"C\.MANIFEST_SCHEMA_VERSION\s*=\s*9", constants)
+                and re.search(r"C\.MAP_SCHEMA_VERSION\s*=\s*6", constants)
+                and re.search(r"C\.RV_RECORD_SCHEMA_VERSION\s*=\s*5", constants)
+                and re.search(r"C\.RV_RELATION_SCHEMA_VERSION\s*=\s*4", constants)
+                and re.search(r"C\.BOUNDARY_SCHEMA_VERSION\s*=\s*6", constants)
+                and re.search(r"C\.LAYOUT_SCHEMA_VERSION\s*=\s*11", constants)
+                and re.search(r"C\.BITMAP_VERSION\s*=\s*6", constants),
+                "current manifest, mapping, boundary, layout, and bitmap versions were not advanced",
+            )
+            checks.true(
+                len(captured_template_objects) == 412
+                and len(fence_rows) == 50
+                and len(paired_keys) == 46
+                and len(boundary_fence_keys) == 46
+                and len(hidden_boundary_wall_rows) == 47
+                and not off_boundary_fence_keys
+                and len(expected_off_boundary_fence_keys & fence_keys) == 4
+                and all(
+                    "doRender=false" in wall["state"]
+                    and "hoppable=false" in wall["state"]
+                    for wall in hidden_boundary_wall_rows
+                )
+                and all(
+                    not wall_rows_by_key.get(key)
+                    for key in expected_off_boundary_fence_keys
+                )
+                and len(wall_rows_by_key.get((2, 2, 0, "false"), [])) == 2,
+                "captured fence backing does not match the 46-edge/47-wall boundary contract",
+            )
+            checks.true(
+                'require "RailroaderRV/RV_BoundaryWallVisuals"' in client
+                and "templateBoundarySupportWall = true" in world_objects
+                and 'setIsThumpable", true' in world_objects
+                and 'tag.templateClass ~= "IsoThumpable"' in boundary_wall_visuals
+                and 'expected.name ~= "Wooden Wall"' in boundary_wall_visuals
+                and "supportWallSprites[expected.sprite]" in boundary_wall_visuals
+                and 'boundaryRoles[tag.role]' in boundary_wall_visuals
+                and 'setDoRender", false' in boundary_wall_visuals
+                and "invalidateRenderChunkLevel" in boundary_wall_visuals
+                and "OnObjectAdded" in boundary_wall_visuals
+                and "LoadGridsquare" in boundary_wall_visuals
+                and "ReuseGridsquare" in boundary_wall_visuals,
+                "client does not hide only generation-tagged boundary support walls across sync/load",
+            )
+            checks.true(
+                'require "RailroaderRV/RV_WardrobeVisuals"' in client
+                and 'local Template = require "RailroaderRV/RV_Template"' in wardrobe_visuals
+                and 'entry.state.doRender == false' in wardrobe_visuals
+                and 'data.role ~= "captured-template"' in wardrobe_visuals
+                and "tag.role ~= data.role" in wardrobe_visuals
+                and "integer(tag.bitmapVersion) ~= C.BITMAP_VERSION" in wardrobe_visuals
+                and 'setDoRender", false' in wardrobe_visuals
+                and "getDoRender" in wardrobe_visuals
+                and "invalidateRenderChunkLevel" in wardrobe_visuals
+                and "OnObjectAdded" in wardrobe_visuals
+                and "LoadGridsquare" in wardrobe_visuals
+                and "ReuseGridsquare" in wardrobe_visuals
+                and "Dark Fancy Wardrobe" in wardrobe_visuals,
+                "wardrobes are not hidden through the client entry point with current generation identity and render invalidation",
+            )
+            checks.true(
+                "expected.protectionClass == ProtectionManifest.PROHIBITED" in protected_demolition
+                and "objectMatchesStaticIdentity(object, tag, expected)" in protected_demolition
+                and "ProtectionManifest.get(index)" in protected_demolition
+                and "templateAnchorX" in protected_demolition
+                and "C.TELEPORT_X" not in protected_demolition
+                and re.search(
+                    r"if not indexOk[\s\S]*?or not squareOk or not square then\s*return false",
+                    protected_demolition,
+                ) is not None
+                and "if not expected or not objectMatchesStaticIdentity(object, tag, expected) then\n        return true" in protected_demolition
+                and "action.new(self, character, object, ...)" in protected_demolition,
+                "protected demolition does not block only category 3 after validating the static object identity",
             )
             checks.true(
                 "wallLamp" not in captured_template
@@ -1794,10 +2165,30 @@ def main() -> int:
             checks.true(
                 "Template.objects" in layout
                 and "templateIndex" in layout
-                and "bounds.wallObjectCount ~= 54" in server_schema
-                and "bounds.northEdges ~= 12 or bounds.westEdges ~= 42" in server_schema
-                and "bounds.wallCornerCount ~= 1" in server_schema,
-                "captured shell contract is not 54 objects with N12/W42/corner1",
+                and "bounds.wallObjectCount ~= 59" in server_schema
+                and "bounds.northEdges ~= 12 or bounds.westEdges ~= 47" in server_schema
+                and "bounds.wallCornerCount ~= 1" in server_schema
+                and "values.wallObjectCount ~= 59" in manifest_validation
+                and "values.northEdges ~= 12 or values.westEdges ~= 47" in manifest_validation
+                and "return edgeCount == 59" in boundary_geometry,
+                "captured shell contract is not 59 edges with N12/W47/corner1",
+            )
+            checks.true(
+                "local protection = ProtectionManifest.get(i)" in layout
+                and "protectionClass = protection.protectionClass" in layout
+                and "not ProtectionManifest.matchesLayoutEntry(i, entry, anchor)" in generation_build
+                and "ProtectionManifest.matchesCapturedEntry(entry.templateIndex, entry)" in world_objects
+                and "protectionClass = protection.protectionClass" in world_objects
+                and "templateAnchorX = anchorX" in world_objects
+                and "templateIndex = entry.templateIndex" in world_objects
+                and "local expected = ProtectionManifest.worldEntry(templateIndex, anchor)" in template_repair
+                and "for templateIndex = 1, ProtectionManifest.OBJECT_COUNT do" in template_repair
+                and "local protected = protectionClass == ProtectionManifest.RESTORE_ONLY" in template_repair
+                and "or protectionClass == ProtectionManifest.PROHIBITED" in template_repair
+                and "tag.role ~= \"captured-template\"" in template_repair
+                and len(west_cab_wall_tiles) == 4
+                and "protectFromDemolition" not in layout + generation_build + world_objects + protected_demolition + template_repair,
+                "static protection classes do not flow through layout, generation, tags, client demolition, and repair",
             )
 
         helper = section(
@@ -2192,11 +2583,44 @@ def main() -> int:
             )
             checks.true(
                 'setGenerationPhase(manifest, generation, "CAPTURED_TEMPLATE")' in build_generation
-                and "Template.objectCount ~= 357" in build_generation
+                and "Template.objectCount ~= 412" in build_generation
                 and "createCapturedTemplateObject(cell, square, entry" in build_generation
                 and "captured object differs from the current template" in build_generation,
-                "buildGeneration does not apply the captured 357-object template",
+                "buildGeneration does not apply the current 412-object template",
             )
+
+        entry_generator_helper = section(
+            template_repair,
+            r"function Boundary\.ensureGeneratorForEntry\(player, record\)",
+            r"local function compactQueue",
+        )
+        checks.true(
+            entry_generator_helper is not None,
+            "existing-entry generator check helper is missing",
+        )
+        if entry_generator_helper is not None:
+            checks.true(
+                'manifest.state ~= "READY"' in entry_generator_helper
+                and 'manifest.phase ~= "COMMITTED"' in entry_generator_helper
+                and "not sameIdentity(record, record.boundary)" in entry_generator_helper
+                and "not sameIdentity(record, manifest.boundary)" in entry_generator_helper
+                and "manifest.templateVersion ~= Constants.CAPTURED_TEMPLATE_VERSION" in entry_generator_helper
+                and "if ambiguous then return false" in entry_generator_helper
+                and "if present then return true end" in entry_generator_helper
+                and entry_generator_helper.count("rollbackEntryGenerator") >= 2
+                and "generatorOnClickedSquare" not in template_repair,
+                "entry generator repair does not require the committed current identity or roll back failed creation",
+            )
+        entry_existing_pos = entry_exit.find("local function enterExisting")
+        generator_entry_pos = entry_exit.find("Boundary.ensureGeneratorForEntry", entry_existing_pos)
+        transition_pos = entry_exit.find("Boundary.beginTransition", generator_entry_pos)
+        checks.true(
+            entry_existing_pos >= 0
+            and generator_entry_pos > entry_existing_pos
+            and transition_pos > generator_entry_pos
+            and "if generatorReady ~= true then" in entry_exit,
+            "existing RV entry does not reject a failed generator check before transition/teleport",
+        )
 
         generation = section(
             generation_flow,
@@ -3392,6 +3816,11 @@ def main() -> int:
             r"local function isCabCoordinate",
             r"local function templateEntry",
         )
+        cab_editable = section(
+            template_repair,
+            r"local function isCabEditableCoordinate",
+            r"local function isRemovalScopeCoordinate",
+        )
         template_repair_index = section(
             template_repair,
             r"local function buildRepairIndex",
@@ -3415,23 +3844,32 @@ def main() -> int:
             and all(token in cab_region for token in (
                 "Constants.CAB_MIN_OFFSET_X", "Constants.CAB_MAX_OFFSET_X",
                 "Constants.CAB_MIN_OFFSET_Y", "Constants.CAB_MAX_OFFSET_Y",
-                'edge.side == "north"', 'edge.side == "west"',
                 "return false",
             ))
+            and cab_editable is not None
+            and "index.cabEditableCoordinates[coordinate]" in cab_editable
+            and "index.protectedCoordinates[coordinate]" in cab_editable
+            and "return offsetX ~= Constants.CAB_MAX_OFFSET_X" in cab_editable
             and template_repair_index is not None
-            and "local protected = true" in template_repair_index
-            and "expected.z == anchor.z and isCabCoordinate(expected.x, expected.y, anchor)"
-                in template_repair_index
-            and "if isCabNorthWestWall(edge, anchor) then" in template_repair_index
-            and "elseif not edge then" in template_repair_index
-            and "protected = false" in template_repair_index
+            and "for templateIndex = 1, ProtectionManifest.OBJECT_COUNT do" in template_repair_index
+            and "local protected = protectionClass == ProtectionManifest.RESTORE_ONLY" in template_repair_index
+            and "or protectionClass == ProtectionManifest.PROHIBITED" in template_repair_index
+            and "if not protected then" in template_repair_index
+            and "index.cabEditableCoordinates[coordinateKey(expected.x," in template_repair_index
+            and "function Boundary.sampleBuildGuardPlayer" in template_repair
+            and "for offsetY = -1, 1 do" in template_repair
+            and "for offsetX = -1, 1 do" in template_repair
+            and "enqueueTile(queue, x, y)" in template_repair
+            and "function Boundary.processBuildGuardQueue" in template_repair
+            and "local entry = popTile(selected.queue)" in template_repair
+            and "capturedClasses[captured.class] = true" in template_repair
             and player_build_policy is not None
             and "CAB_MIN_OFFSET_X" in player_build_policy
             and "CAB_MAX_OFFSET_X" in player_build_policy
             and "CAB_MIN_OFFSET_Y" in player_build_policy
             and "CAB_MAX_OFFSET_Y" in player_build_policy
             and "if cabOnly or buildableOnly then return false end" in player_build_policy,
-            "captured cab north/west edges are editable while south/east remain protected",
+            "static repair classes, cab edits, and queued dynamic-object cleanup do not follow the current policy",
         )
 
         building_object_classes = section(
@@ -3650,13 +4088,13 @@ def main() -> int:
             "README does not document the no-metal-floor build and final relocation",
         )
         checks.true(
-            "357 个对象" in readme
+            "412 个模板对象" in readme
             and "6×23" in readme
             and "驾驶室内部 x=-4..1、y=-2..1" in readme
             and "每 10 tick" in readme
-            and "54 条" in readme
-            and "四处缺口" in readme,
-            "README does not document the captured 6x23 RV and 54-edge shell",
+            and "59 条捕获墙边" in readme
+            and "四段隐形墙补齐活动区域边界缺口" in readme,
+            "README does not document the captured 6x23 RV and 59-edge shell",
         )
         checks.true(
             "位于旧、新边界之外的安全格" not in readme,

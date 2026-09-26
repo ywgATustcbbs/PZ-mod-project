@@ -1,11 +1,9 @@
 -- Server-authoritative RV boundary service.
 --
--- This module deliberately does not import or instantiate any Railroader
--- collider/body object.  It borrows only the useful shape of that solution:
--- keep a short-lived previous position, reject a swept transition at the
--- boundary, and correct current/next state together when recovery is needed.
--- The RV bitmap is the canonical geometry and every world operation is
--- clipped to the owning RV's half-open 100x100xZ scope.
+-- This module does not import or instantiate Railroader collider/body objects.
+-- The server checks the current position against that RV floor's bitmap AABB
+-- and returns an out-of-bounds player to the validated RV entry destination.
+-- All guard work remains clipped to the owning RV's half-open 100x100xZ scope.
 
 local function processIsClient()
     if type(isClient) ~= "function" then return false end

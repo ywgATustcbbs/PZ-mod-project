@@ -4,6 +4,14 @@
 -- coordinate.  It sends only operation intent plus a server-revalidated hint.
 
 require("RailroaderRV/RV_Constants")
+-- Register the same isolated sprite used by the server before hidden native
+-- generator objects arrive in complete-object packets.
+local UtilitySprite = require("RailroaderRV/RV_UtilitySprite")
+local hiddenSpritesReady, _, hiddenSpriteReason = UtilitySprite.install()
+if not hiddenSpritesReady then
+    error("RailroaderRVTest: client hidden sprite registration failed: "
+        .. tostring(hiddenSpriteReason))
+end
 local U = require("RailroaderRV/RV_UtilityConstants")
 
 RailroaderRV = RailroaderRV or {}

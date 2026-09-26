@@ -7,6 +7,7 @@ local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local ServerSchema = ctx.ServerSchema
 local Template = require("RailroaderRV/RV_Template")
+local ProtectionManifest = require("RailroaderRV/RV_ProtectionManifest")
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local ensureRoofSquare = ctx.ensureRoofSquare
 local createCapturedTemplateObject = ctx.createCapturedTemplateObject
@@ -138,16 +139,25 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
     local tagContext = {
         rvId = manifest and manifest.rvId,
         bitmapVersion = manifest and manifest.bitmapVersion,
+        anchorX = anchorX,
+        anchorY = anchorY,
+        anchorZ = anchorZ,
     }
     if tagContext.rvId == nil or tostring(tagContext.rvId) == ""
         or ServerUtil.toNumber(tagContext.bitmapVersion) == nil then
         error("RailroaderRVTest: generation boundary identity is incomplete")
     end
     local templateObjects = layout.templateObjects
+    local protectionManifestValid, protectionManifestError =
+        ProtectionManifest.validateTemplate(Template)
     if type(templateObjects) ~= "table" or #templateObjects ~= Template.objectCount
         or Template.schemaVersion ~= Constants.CAPTURED_TEMPLATE_VERSION
-        or Template.objectCount ~= 357 then
+        or Template.objectCount ~= 412 then
         error("RailroaderRVTest: captured template object list is incomplete")
+    end
+    if protectionManifestValid ~= true then
+        error("RailroaderRVTest: captured protection ledger is invalid: "
+            .. tostring(protectionManifestError))
     end
     local shellByTemplateIndex = {}
     for i = 1, #(bounds.wallCoordinates or {}) do
@@ -220,6 +230,7 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
             or entry.class ~= captured.class or entry.name ~= captured.name
             or entry.sprite ~= captured.sprite or entry.north ~= captured.north
             or entry.direction ~= captured.direction
+            or not ProtectionManifest.matchesLayoutEntry(i, entry, anchor)
             or not sameCapturedState(entry.state, captured.state)
             or entry.x ~= anchorX + captured.x
             or entry.y ~= anchorY + captured.y

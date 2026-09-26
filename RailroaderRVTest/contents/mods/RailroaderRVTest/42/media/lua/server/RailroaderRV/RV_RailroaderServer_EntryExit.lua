@@ -319,6 +319,15 @@ local function enterExisting(player, train, record, key, sourceRole,
         or type(Boundary.completeTransition) ~= "function" then
         return false, "RV boundary entry service is unavailable"
     end
+    if type(Boundary.ensureGeneratorForEntry) ~= "function" then
+        return false, "RV generator entry check is unavailable"
+    end
+    local generatorCallOk, generatorReady, generatorReason = pcall(
+        Boundary.ensureGeneratorForEntry, player, record)
+    if not generatorCallOk then generatorReason = generatorReady end
+    if generatorReady ~= true then
+        return false, generatorReason or C.INVALID_RV_DATA
+    end
     local onlineId = playerId(player)
     local target = copyPosition(record.rvPosition)
     if not target then return false, C.INVALID_RV_DATA end

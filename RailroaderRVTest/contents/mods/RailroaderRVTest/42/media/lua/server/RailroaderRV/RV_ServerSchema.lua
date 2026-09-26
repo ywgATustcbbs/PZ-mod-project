@@ -8,12 +8,20 @@
 local Constants = require("RailroaderRV/RV_Constants")
 local Layout = require("RailroaderRV/RV_Layout")
 local Template = require("RailroaderRV/RV_Template")
+local ProtectionManifest = require("RailroaderRV/RV_ProtectionManifest")
 local Bitmap = require("RailroaderRV/RV_Bitmap")
 local ServerUtil = require("RailroaderRV/RV_ServerUtil")
 local ServerWorld = require("RailroaderRV/RV_ServerWorld")
 local WORLD_MIN_Z = -32
 local WORLD_MAX_Z = 31
 local M = {}
+
+local protectionManifestValid, protectionManifestError =
+    ProtectionManifest.validateTemplate(Template)
+if not protectionManifestValid then
+    error("RailroaderRVTest: captured protection ledger is invalid: "
+        .. tostring(protectionManifestError))
+end
 
 local function boundsFor(layout)
     if type(layout) ~= "table" then
@@ -172,13 +180,14 @@ local function walkBounds(cell, bounds, fn)
 end
 
 local function validateWallContract(bounds)
-    if type(bounds.wallCoordinates) ~= "table" or #bounds.wallCoordinates ~= 54
-        or bounds.wallObjectCount ~= 54 or bounds.wallCoordinateCount ~= 54
-        or bounds.northEdges ~= 12 or bounds.westEdges ~= 42
+    if type(bounds.wallCoordinates) ~= "table" or #bounds.wallCoordinates ~= 59
+        or bounds.wallObjectCount ~= 59 or bounds.wallCoordinateCount ~= 59
+        or bounds.northEdges ~= 12 or bounds.westEdges ~= 47
         or bounds.wallCornerCount ~= 1 then
         error("RailroaderRVTest: wall layout contract is invalid")
     end
     local coordinates, orientations, exact, both, templateIndices = {}, {}, {}, {}, {}
+    local northwestEntries = {}
     local uniqueCoordinates, northEdges, westEdges, corners = 0, 0, 0, 0
     local nwKey = tostring(bounds.wallMinX) .. ":" .. tostring(bounds.wallMinY)
         .. ":" .. tostring(bounds.z)
@@ -253,20 +262,29 @@ local function validateWallContract(bounds)
         end
         both[coordinateKey] = both[coordinateKey] or {}
         both[coordinateKey][orientation] = true
-        local expectedRole = entry.corner and "corner-nw" or "wall-" .. orientation
-        if entry.corner ~= (coordinateKey == nwKey) or entry.role ~= expectedRole then
+        local expectedCorner = entry.north == true and coordinateKey == nwKey
+        local expectedRole = expectedCorner and "corner-nw"
+            or "wall-" .. orientation
+        if entry.corner ~= expectedCorner or entry.role ~= expectedRole then
             error("RailroaderRVTest: wall role/corner does not match captured geometry")
+        end
+        if coordinateKey == nwKey then
+            northwestEntries[orientation] = entry
         end
         if entry.north then northEdges = northEdges + 1 else westEdges = westEdges + 1 end
         if entry.corner == true then corners = corners + 1 end
     end
     for coordinateKey, orientationSet in pairs(both) do
-        if orientationSet.north and orientationSet.west then
+        if orientationSet.north and orientationSet.west and coordinateKey ~= nwKey then
             error("RailroaderRVTest: wall ring cannot duplicate an orientation at " .. coordinateKey)
         end
     end
-    if uniqueCoordinates ~= 54 or northEdges ~= 12 or westEdges ~= 42 or corners ~= 1 then
-        error("RailroaderRVTest: captured shell must contain 54 objects, north12/west42/corner1")
+    if not both[nwKey] or not both[nwKey].north or not both[nwKey].west
+        or not northwestEntries.north or northwestEntries.north.role ~= "corner-nw"
+        or not northwestEntries.west or northwestEntries.west.role ~= "wall-west"
+        or uniqueCoordinates ~= 58 or northEdges ~= 12 or westEdges ~= 47
+        or corners ~= 1 then
+        error("RailroaderRVTest: captured shell must contain 59 edges, north12/west47, with the NW corner-north/west pair")
     end
 end
 

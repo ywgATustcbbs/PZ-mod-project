@@ -25,6 +25,20 @@ if processIsClient() and not processIsServer() then
     return {}
 end
 
+local timedActionTraceOk, timedActionTrace = pcall(require,
+    "RailroaderRV/RV_TimedActionTrace")
+if timedActionTraceOk and type(timedActionTrace) == "table"
+    and type(timedActionTrace.install) == "function" then
+    local installedOk, installed, installReason = pcall(timedActionTrace.install)
+    if not installedOk or installed ~= true then
+        print("[RailroaderRVTest] Timed-action trace install failed: "
+            .. tostring(installedOk and installReason or installed))
+    end
+else
+    print("[RailroaderRVTest] Timed-action trace module unavailable: "
+        .. tostring(timedActionTrace))
+end
+
 require("RailroaderRV/RV_Constants")
 local boundaryLoaded, Boundary = pcall(require, "RailroaderRV/RV_BoundaryServer")
 if not boundaryLoaded or type(Boundary) ~= "table" then Boundary = nil end

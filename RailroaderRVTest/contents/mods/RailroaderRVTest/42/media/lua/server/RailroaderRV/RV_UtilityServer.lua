@@ -5,6 +5,7 @@ local C = require("RailroaderRV/RV_Constants")
 local U = require("RailroaderRV/RV_UtilityConstants")
 local Store = require("RailroaderRV/RV_UtilityStore")
 local Power = require("RailroaderRV/RV_UtilityPower")
+local Devices = require("RailroaderRV/RV_UtilityPowerDevices")
 local Util = require("RailroaderRV/RV_ServerUtil")
 
 local M = {}
@@ -12,6 +13,7 @@ local locks = {}
 local sessions = {}
 local mappingSyncState = {}
 local lastTick = -1
+local lastScanTick = -1
 
 local function key(identity)
     return tostring(identity.rvId) .. ":" .. tostring(identity.generation)
@@ -107,9 +109,12 @@ local function validRequest(args)
 end
 
 local function knownOperation(operation)
-    return operation == U.OP_ADD_FUEL or operation == U.OP_REQUEST_SNAPSHOT
-        or operation == U.OP_CONNECT_GENERATOR or operation == U.OP_START_GENERATOR
-        or operation == U.OP_STOP_GENERATOR or operation == U.OP_REPAIR_GENERATOR
+    return operation == U.OP_ADD_FUEL or operation == U.OP_ADD_BATTERY
+        or operation == U.OP_REMOVE_BATTERY or operation == U.OP_INSTALL_CHARGER
+        or operation == U.OP_REMOVE_CHARGER or operation == U.OP_INSTALL_INVERTER
+        or operation == U.OP_REMOVE_INVERTER or operation == U.OP_REFRESH_DEVICES
+        or operation == U.OP_REQUEST_SNAPSHOT or operation == U.OP_START_GENERATOR
+        or operation == U.OP_STOP_GENERATOR
 end
 
 local function acquire(identity)
@@ -181,6 +186,52 @@ local function broadcast(context, record)
     send(context.player, C.COMMAND_RV_UTILITY_SNAPSHOT, payload)
 end
 
+local function broadcastToRV(identity, record)
+    local rv = rawget(_G, "RailroaderRV")
+    local adapter = rv and rv.RailroaderServer
+    if not adapter or type(adapter.onlinePlayersSnapshot) ~= "function" then return end
+    local ok, players = pcall(adapter.onlinePlayersSnapshot)
+    if not ok or type(players) ~= "table" then return end
+    for i = 1, #players do
+        local player = players[i]
+        local contextOk, context = resolveRV(player)
+        if contextOk and tostring(context.identity.rvId) == tostring(identity.rvId)
+            and context.identity.generation == identity.generation
+            and context.identity.bitmapVersion == identity.bitmapVersion then
+            broadcast(context, record)
+        end
+    end
+end
+
+local function currentMappingRecord(identity)
+    local rv = rawget(_G, "RailroaderRV")
+    local adapter = rv and rv.RailroaderServer
+    if not adapter or type(adapter.currentUtilityRecord) ~= "function" then
+        return false, C.INVALID_RV_DATA
+    end
+    local ok, accepted, record = pcall(adapter.currentUtilityRecord, identity)
+    if not ok or accepted ~= true or type(record) ~= "table" then
+        return false, C.INVALID_RV_DATA
+    end
+    return true, record
+end
+
+local function forCurrentRecords(callback)
+    local recordsOk, entries = Store.allRecords()
+    if not recordsOk or type(entries) ~= "table" then
+        print("[RailroaderRVTest] utility power scan skipped: invalid current schema")
+        return
+    end
+    for i = 1, #entries do
+        local entry = entries[i]
+        local identity = entry.identity
+        if Store.validateIdentity(identity) then
+            local mappingOk, mappingRecord = currentMappingRecord(identity)
+            if mappingOk then callback(identity, entry.record, mappingRecord) end
+        end
+    end
+end
+
 function M.handleCommand(player, args)
     local requestOk, requestReason = validRequest(args)
     if not requestOk then return false, requestReason end
@@ -236,18 +287,60 @@ function M.handleCommand(player, args)
     local guardOk, guardReason = withGuard(identity, function()
         local recordOk, recordOrReason = Store.getRecord(identity, false)
         if not recordOk then return false, recordOrReason end
+        local settledBefore = nil
         local accepted, detail
         if args.operation == U.OP_ADD_FUEL then
+            local settled, updated = Power.settleAndRefreshLoad(identity,
+                context.player, recordOrReason)
+            if not settled then return false, updated end
+            settledBefore = updated
             accepted, detail = Power.addFuel(identity, context, args.sourceHint)
+        elseif args.operation == U.OP_REFRESH_DEVICES then
+            local settled, updated = Power.settleAndRefreshLoad(identity,
+                context.player, recordOrReason)
+            if not settled then return false, updated end
+            local scanned, scanReason = Devices.scanAll(identity, context.record,
+                context.player)
+            if not scanned then return false, scanReason end
+            local settled, settledRecord = Power.settleAndRefreshLoad(identity,
+                context.player)
+            accepted, detail = settled, settled and { record = settledRecord }
+                or settledRecord
+        elseif args.operation == U.OP_ADD_BATTERY
+            or args.operation == U.OP_REMOVE_BATTERY
+            or args.operation == U.OP_INSTALL_CHARGER
+            or args.operation == U.OP_REMOVE_CHARGER
+            or args.operation == U.OP_INSTALL_INVERTER
+            or args.operation == U.OP_REMOVE_INVERTER then
+            local settled, updated = Power.settleAndRefreshLoad(identity,
+                context.player, recordOrReason)
+            if not settled then return false, updated end
+            settledBefore = updated
+            local hint = args.targetHint
+            if args.operation == U.OP_ADD_BATTERY
+                or args.operation == U.OP_INSTALL_CHARGER
+                or args.operation == U.OP_INSTALL_INVERTER then
+                hint = args.sourceHint
+            end
+            accepted, detail = Power.handleIntent(identity, context, args.operation, hint)
         elseif args.operation == U.OP_REQUEST_SNAPSHOT then
             accepted, detail = true, { record = recordOrReason }
         else
+            local hint = args.targetHint
+            if args.operation == U.OP_ADD_BATTERY
+                or args.operation == U.OP_INSTALL_CHARGER
+                or args.operation == U.OP_INSTALL_INVERTER then
+                hint = args.sourceHint
+            end
             accepted, detail = Power.handleIntent(identity, context, args.operation,
-                args.targetHint)
+                hint)
         end
-        if accepted ~= true then return false, detail end
+        if accepted ~= true then
+            if settledBefore then broadcastToRV(identity, settledBefore) end
+            return false, detail
+        end
         local appliedRecord = type(detail) == "table" and detail.record or nil
-        broadcast(context, appliedRecord or recordOrReason)
+        broadcastToRV(identity, appliedRecord or recordOrReason)
         return true, detail
     end)
     local response = { ok = guardOk == true, result = guardOk and guardReason or nil,
@@ -293,6 +386,42 @@ function M.onTick(tick)
     end
     lastTick = tick
     if type(tick) == "number" and tick % 30 == 0 then syncUtilityMappings() end
+    if type(tick) ~= "number" or tick % U.POWER.DEVICE_SCAN_INTERVAL_TICKS ~= 0
+        or lastScanTick == tick then return end
+    lastScanTick = tick
+    forCurrentRecords(function(identity, record, mappingRecord)
+        local started = Power.beginRuntime(identity, record)
+        if started then Devices.scanTick(identity, mappingRecord, nil) end
+    end)
+end
+
+function M.onEveryTenMinutes()
+    forCurrentRecords(function(identity, record)
+        local settled, updated = withGuard(identity, function()
+            return Power.settleAndRefreshLoad(identity, nil, record)
+        end)
+        if settled and type(updated) == "table" then
+            broadcastToRV(identity, updated)
+        end
+    end)
+end
+
+function M.onEveryHour()
+    forCurrentRecords(function(identity, record)
+        Power.maintainNativeProxy(identity, record)
+    end)
+end
+
+function M.settleAndRefreshLoad(identity, player)
+    local recordOk, record = Store.getRecord(identity, false)
+    if not recordOk then return false, record end
+    local settled, updated = withGuard(identity, function()
+        return Power.settleAndRefreshLoad(identity, player, record)
+    end)
+    if settled and type(updated) == "table" then
+        broadcastToRV(identity, updated)
+    end
+    return settled, updated
 end
 
 function M.snapshotForPlayer(player)
@@ -314,22 +443,24 @@ end
 function M.initializeRecord(identity, context)
     print("[RailroaderRVTest] utility init begin rv=" .. tostring(identity and identity.rvId)
         .. " generation=" .. tostring(identity and identity.generation))
-    local recordOk, recordOrReason = Store.getRecord(identity, true)
-    if not recordOk then
-        print("[RailroaderRVTest] utility init failed stage=get-record reason="
+    local initialized, recordOrReason = Power.initializeRecord(identity, context)
+    if not initialized then
+        print("[RailroaderRVTest] utility init failed stage=power-init reason="
             .. tostring(recordOrReason))
         return false, recordOrReason
-    end
-    local committed, commitReason = Store.commit(recordOrReason, identity)
-    if not committed then
-        print("[RailroaderRVTest] utility init failed stage=commit reason="
-            .. tostring(commitReason))
-        return false, commitReason
     end
     print("[RailroaderRVTest] utility init committed rv=" .. tostring(identity.rvId)
         .. " generation=" .. tostring(identity.generation))
     if context and context.player then broadcast(context, recordOrReason) end
     return true, recordOrReason
+end
+
+if Events and Events.EveryTenMinutes
+    and type(Events.EveryTenMinutes.Add) == "function" then
+    Events.EveryTenMinutes.Add(M.onEveryTenMinutes)
+end
+if Events and Events.EveryHours and type(Events.EveryHours.Add) == "function" then
+    Events.EveryHours.Add(M.onEveryHour)
 end
 
 return M

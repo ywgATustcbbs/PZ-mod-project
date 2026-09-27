@@ -682,13 +682,10 @@ local function createGenerator(cell, square, sprite, generation, tagContext)
     -- by transaction rollback; the explicit square above makes removal safe.
     ServerWorld.tagObject(generator, generation, "generator", ServerWorld.withTagIdentity(nil, tagContext))
     addSpecialObject(square, generator)
-    if not ServerUtil.callSucceeded(generator, "transmitCompleteItemToClients") then
-        error("RailroaderRVTest: generator initial client transmission failed")
-    end
     if not ServerUtil.callSucceeded(generator, "setCondition", 100)
         or not ServerUtil.callSucceeded(generator, "setFuel", Constants.GENERATOR_INITIAL_FUEL)
         or not ServerUtil.callSucceeded(generator, "setConnected", true)
-        or not ServerUtil.callSucceeded(generator, "setActivated", true) then
+        or not ServerUtil.callSucceeded(generator, "setActivated", false) then
         error("RailroaderRVTest: generator initial state failed")
     end
     if type(cls.updateGenerator) == "function" then

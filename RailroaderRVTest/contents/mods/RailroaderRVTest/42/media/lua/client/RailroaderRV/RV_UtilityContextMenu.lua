@@ -1,7 +1,6 @@
 -- Client-side utility menu hooks.  Every option submits intent only; the
 -- server resolves the player, RV, object, tool, identity and FluidContainer.
 
-local U = require("RailroaderRV/RV_UtilityConstants")
 local Client = require("RailroaderRV/RV_UtilityClient")
 local Dashboard = require("RailroaderRV/RV_UtilityDashboard")
 
@@ -27,34 +26,6 @@ local function localPlayer(playerNum)
     return ok and player or nil
 end
 
-local function generatorCandidate(object)
-    if not object or type(object.getModData) ~= "function" then return false end
-    local ok, data = pcall(function() return object:getModData() end)
-    local tag = ok and type(data) == "table" and data.RailroaderRVTest or nil
-    return type(tag) == "table" and tag.role == "generator"
-end
-
-local function generatorOnClickedSquare(object)
-    if generatorCandidate(object) then return object end
-    if not object or type(object.getSquare) ~= "function" then return nil end
-    local squareOk, square = pcall(function() return object:getSquare() end)
-    if not squareOk or not square or type(square.getObjects) ~= "function" then
-        return nil
-    end
-    local objectsOk, objects = pcall(function() return square:getObjects() end)
-    if not objectsOk or not objects or type(objects.size) ~= "function"
-        or type(objects.get) ~= "function" then
-        return nil
-    end
-    local sizeOk, size = pcall(function() return objects:size() end)
-    if not sizeOk or type(size) ~= "number" or size < 1 then return nil end
-    for index = 0, size - 1 do
-        local objectOk, candidate = pcall(function() return objects:get(index) end)
-        if objectOk and generatorCandidate(candidate) then return candidate end
-    end
-    return nil
-end
-
 local function already(context, label)
     if not context or type(context.options) ~= "table" then return false end
     local count = context.numOptions or #context.options
@@ -69,36 +40,6 @@ end
 
 local function addFuelOption(player, item)
     Client.requestAddFuel(player, item)
-end
-
-local function generatorOption(player, object, operation)
-    Client.requestGenerator(player, operation, object)
-end
-
-local function addGeneratorOptions(player, context, worldObjects, test)
-    if type(worldObjects) ~= "table" then return end
-    for _, object in pairs(worldObjects) do
-        local generator = generatorOnClickedSquare(object)
-        if generator then
-            local options = {
-                { label = "Connect RV generator", operation = U.OP_CONNECT_GENERATOR },
-                { label = "Start RV generator", operation = U.OP_START_GENERATOR },
-                { label = "Stop RV generator", operation = U.OP_STOP_GENERATOR },
-                { label = "Repair RV generator", operation = U.OP_REPAIR_GENERATOR },
-            }
-            for _, option in ipairs(options) do
-                if not already(context, option.label) then
-                    context:addOption(option.label, player, generatorOption,
-                        generator, option.operation)
-                end
-            end
-            if test and ISWorldObjectContextMenu
-                and type(ISWorldObjectContextMenu.setTest) == "function" then
-                pcall(ISWorldObjectContextMenu.setTest)
-            end
-            return
-        end
-    end
 end
 
 local function dashboardOption(player)
@@ -129,7 +70,6 @@ function Menu.onPreFillWorldObjectContextMenu(playerNum, context, worldObjects, 
     local player = localPlayer(playerNum)
     if player then
         addDashboardOption(player, context)
-        addGeneratorOptions(player, context, worldObjects, test)
     end
 end
 
@@ -138,7 +78,6 @@ function Menu.onFillWorldObjectContextMenu(playerNum, context, worldObjects, tes
     local player = localPlayer(playerNum)
     if not player then return end
     addDashboardOption(player, context)
-    addGeneratorOptions(player, context, worldObjects, test)
 end
 
 function Menu.onFillInventoryObjectContextMenu(playerNum, context, items)

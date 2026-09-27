@@ -166,6 +166,35 @@ function Adapter.validateCurrentUtilityIdentity(identity)
     return true, { record = record, train = findTrain(record.locoId) }
 end
 
+function Adapter.currentUtilityRecord(identity)
+    local ok, validated = Adapter.validateCurrentUtilityIdentity(identity)
+    if ok ~= true or type(validated) ~= "table"
+        or type(validated.record) ~= "table" then
+        return false, C.INVALID_RV_DATA
+    end
+    return true, validated.record
+end
+
+local function settleUtilityTransition(record, player, phase)
+    local server = rawget(_G, "RailroaderRV")
+        and RailroaderRV.Server or nil
+    if not server or type(server.settleRVUtilityLoad) ~= "function" then
+        print("[RailroaderRVTest] utility transition settlement unavailable phase="
+            .. tostring(phase))
+        return false
+    end
+    local ok, accepted, reason = pcall(server.settleRVUtilityLoad, {
+        rvId = tostring(record.rvId), generation = record.generation,
+        bitmapVersion = record.bitmapVersion,
+    }, player)
+    if not ok or accepted ~= true then
+        print("[RailroaderRVTest] utility transition settlement failed phase="
+            .. tostring(phase) .. " reason=" .. tostring(ok and reason or accepted))
+        return false
+    end
+    return true
+end
+
 local function sendResult(player, ok, reason)
     local onlineId = playerId(player)
     if onlineId == nil then return end
@@ -376,6 +405,7 @@ local function enterExisting(player, train, record, key, sourceRole,
     if Boundary and type(Boundary.completeTransition) == "function" then
         Boundary.completeTransition(player, transitionToken)
     end
+    settleUtilityTransition(record, player, "entry")
     record.locoPosition = trainPose(train) or record.locoPosition
     -- The server has just moved the player into the persisted RV footprint;
     -- perform the official add/remove-floor neighbour invalidation before the
@@ -551,6 +581,15 @@ local function commitGeneration(player, data, prepared)
         return false, utilityOk and (utilityReason or C.INVALID_RV_DATA)
             or tostring(utilityAccepted)
     end
+    if type(server.settleRVUtilityLoad) == "function" then
+        local settleOk, settled, settleReason = pcall(server.settleRVUtilityLoad,
+            { rvId = tostring(record.rvId), generation = record.generation,
+                bitmapVersion = record.bitmapVersion }, player)
+        if not settleOk or settled ~= true then
+            print("[RailroaderRVTest] new RV entry load refresh failed reason="
+                .. tostring(settleOk and settleReason or settled))
+        end
+    end
     -- RV_Server owns the transition close after FinalRelocateAck and the
     -- current-manifest readiness proof. Do not release the lease from this
     -- mapping commit hook before that final client proof.
@@ -606,6 +645,7 @@ local function exitPlayer(player)
                 return false, "RV boundary exit transition could not be armed"
             end
         end
+        settleUtilityTransition(record, player, "exit-before-teleport")
         local moved = movePlayer(player, target, "exit", {
             locoId = record.locoId, role = "beside", seat = nil,
             rvId = record.locoId, generation = record.generation,
@@ -666,6 +706,7 @@ local function exitPlayer(player)
         end
         return false, "locomotive seat became occupied"
     end
+    settleUtilityTransition(record, player, "exit-before-teleport")
     local moved = movePlayer(player, target, "exit", {
         locoId = trainId(train), role = role, seat = seat,
         rvId = record.locoId, generation = record.generation,

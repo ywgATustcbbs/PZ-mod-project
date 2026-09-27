@@ -105,6 +105,29 @@ function Client.requestAddFuel(player, item)
     return hint and Client.send(player, U.OP_ADD_FUEL, nil, hint) or false
 end
 
+function Client.requestAddBattery(player, item)
+    local hint = hintForItem(item)
+    return hint and Client.send(player, U.OP_ADD_BATTERY, nil, hint) or false
+end
+
+function Client.requestInstallComponent(player, operation, item)
+    local hint = hintForItem(item)
+    return hint and Client.send(player, operation, nil, hint) or false
+end
+
+function Client.requestRemoveBattery(player, batteryId)
+    return Client.send(player, U.OP_REMOVE_BATTERY,
+        { batteryId = batteryId }, nil)
+end
+
+function Client.requestPowerOperation(player, operation)
+    return Client.send(player, operation, nil, nil)
+end
+
+function Client.requestRefreshDevices(player)
+    return Client.send(player, U.OP_REFRESH_DEVICES, nil, nil)
+end
+
 function Client.requestSnapshot(player)
     return Client.send(player, U.OP_REQUEST_SNAPSHOT, nil, nil)
 end
@@ -116,8 +139,17 @@ end
 
 local function showInvalidRVData(player)
     if player and type(player.setHaloNote) == "function" then
+        local message = "RV data is invalid. Delete this test save and recreate it."
+        if type(getText) == "function" then
+            local ok, translated = pcall(getText,
+                "UI_RailroaderRVTest_InvalidRVData")
+            if ok and type(translated) == "string" and translated ~= ""
+                and translated ~= "UI_RailroaderRVTest_InvalidRVData" then
+                message = translated
+            end
+        end
         pcall(function()
-            player:setHaloNote("RV data is invalid", 255, 255, 255, 5000)
+            player:setHaloNote(message, 255, 255, 255, 5000)
         end)
     end
 end

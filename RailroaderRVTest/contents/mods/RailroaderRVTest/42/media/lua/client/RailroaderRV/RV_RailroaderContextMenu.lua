@@ -640,6 +640,16 @@ function Menu.OnServerCommand(module, command, args)
         or type(args) ~= "table" then return end
     local onlineId = finiteInteger(args.onlineId)
     if args.ok == false then
+        if args.reason == C.INVALID_RV_DATA then
+            local player = onlineId and localPlayerByOnlineId(onlineId) or nil
+            if player and type(player.setHaloNote) == "function" then
+                local message = text("UI_RailroaderRVTest_InvalidRVData",
+                    "RV data is invalid. Delete this test save and recreate it.")
+                pcall(function()
+                    player:setHaloNote(message, 255, 255, 255, 5000)
+                end)
+            end
+        end
         if args.reason then print("[RailroaderRVTest] " .. tostring(args.reason)) end
         return
     end

@@ -1,0 +1,73 @@
+module RailroaderRVTest
+{
+	imports
+	{
+		Base
+	}
+
+	item RVCharger
+	{
+		DisplayCategory = Electronics,
+		Weight = 2.0,
+		Type = Normal,
+		DisplayName = RV Battery Charger,
+		Icon = CarBatteryCharger,
+		ConditionMax = 1000,
+		ConditionLowerChanceOneIn = 0,
+	}
+
+	item RVInverter
+	{
+		DisplayCategory = Electronics,
+		Weight = 1.5,
+		Type = Normal,
+		DisplayName = RV Power Inverter,
+		Icon = Radio,
+		ConditionMax = 1000,
+		ConditionLowerChanceOneIn = 0,
+	}
+
+	craftRecipe Assemble RV Battery Charger
+	{
+		time = 120,
+		timedAction = Making,
+		Tags = InHandCraft,
+		category = Electronics,
+		SkillRequired = Electricity:3,
+		OnCreate = Recipe.OnCreate.RVUtilityCharger,
+		inputs
+		{
+			item 1 [Base.CarBatteryCharger],
+			item 2 [Base.SheetMetal],
+			item 4 [Base.ElectronicsScrap],
+			item 2 [Base.Wire],
+			item 1 [Base.Screwdriver] mode:keep,
+		}
+		outputs
+		{
+			item 1 RailroaderRVTest.RVCharger,
+		}
+	}
+
+	craftRecipe Assemble RV Power Inverter
+	{
+		time = 100,
+		timedAction = Making,
+		Tags = InHandCraft,
+		category = Electronics,
+		SkillRequired = Electricity:3,
+		OnCreate = Recipe.OnCreate.RVUtilityInverter,
+		inputs
+		{
+			item 1 [Base.CarBatteryCharger],
+			item 1 [Base.SheetMetal],
+			item 3 [Base.ElectronicsScrap],
+			item 3 [Base.Wire],
+			item 1 [Base.Screwdriver] mode:keep,
+		}
+		outputs
+		{
+			item 1 RailroaderRVTest.RVInverter,
+		}
+	}
+}

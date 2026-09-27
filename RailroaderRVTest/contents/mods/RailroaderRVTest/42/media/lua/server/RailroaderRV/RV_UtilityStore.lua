@@ -5,6 +5,7 @@
 local C = require("RailroaderRV/RV_Constants")
 local U = require("RailroaderRV/RV_UtilityConstants")
 local Catalog = require("RailroaderRV/RV_UtilityCatalog")
+local PowerConfig = require("RailroaderRV/RV_UtilityPowerConfig")
 
 local M = {}
 
@@ -59,7 +60,28 @@ local function copyTable(value)
 end
 
 local function finite(value)
-    return number(value) ~= nil
+    value = number(value)
+    return value ~= nil and value == value and value < math.huge and value > -math.huge
+end
+
+local function validPlainData(value, depth, seen)
+    if type(value) ~= "table" then
+        if type(value) == "number" then
+            return finite(value)
+        end
+        return type(value) == "string" or type(value) == "boolean"
+    end
+    if depth > 6 or seen[value] then return false end
+    seen[value] = true
+    for key, nested in pairs(value) do
+        if (type(key) ~= "string" and type(key) ~= "number")
+            or not validPlainData(nested, depth + 1, seen) then
+            seen[value] = nil
+            return false
+        end
+    end
+    seen[value] = nil
+    return true
 end
 
 local function identityValid(identity)
@@ -212,21 +234,97 @@ local function validGenerator(value, identity)
         and type(value.objectFingerprint) == "string" and value.objectFingerprint ~= ""
 end
 
+local BATTERY_TYPES = {
+    ["Base.CarBattery"] = true,
+    ["Base.CarBattery1"] = true,
+    ["Base.CarBattery2"] = true,
+    ["Base.CarBattery3"] = true,
+}
+
+local function validBattery(value)
+    local keys = { "id", "fullType", "condition", "maxCondition", "usedDelta", "modData" }
+    return exactKeys(value, keys) and integer(value.id) ~= nil and value.id >= 1
+        and BATTERY_TYPES[value.fullType] == true
+        and integer(value.condition) ~= nil and integer(value.maxCondition) ~= nil
+        and value.maxCondition > 0 and value.condition >= 0
+        and value.condition <= value.maxCondition and finite(value.usedDelta)
+        and value.usedDelta >= 0 and value.usedDelta <= 1
+        and type(value.modData) == "table" and validPlainData(value.modData, 1, {})
+end
+
+local function validComponent(value, fullType)
+    if value == nil then return true end
+    local keys = { "fullType", "condition", "conditionMax", "modData" }
+    return exactKeys(value, keys) and value.fullType == fullType
+        and integer(value.condition) ~= nil
+        and integer(value.conditionMax) == PowerConfig.COMPONENT_CONDITION_MAX
+        and value.condition > 0 and value.condition <= value.conditionMax
+        and type(value.modData) == "table" and validPlainData(value.modData, 1, {})
+end
+
 local function validPower(value, identity)
-    local keys = { "schemaVersion", "generator", "circuitState", "devicePolicy",
-        "sequence", "state" }
+    local keys = { "schemaVersion", "generator", "circuitState", "generatorEnabled",
+        "virtualFuelL", "batteryWh", "batteryCapacityWh", "maxChargePowerW",
+        "maxDischargePowerW", "generationPowerW", "currentLoadW", "chargerEfficiency",
+        "inverterEfficiency", "batteries", "nextBatteryId", "charger", "inverter",
+        "lastUpdateTime", "lastSettlementTime", "sequence", "state" }
     if not exactKeysWithOptional(value, keys,
-        { "schemaVersion", "circuitState", "devicePolicy", "sequence", "state" })
+        { "schemaVersion", "circuitState", "generatorEnabled", "virtualFuelL",
+            "batteryWh", "batteryCapacityWh", "maxChargePowerW", "maxDischargePowerW",
+            "generationPowerW", "currentLoadW", "chargerEfficiency", "inverterEfficiency",
+            "batteries", "nextBatteryId", "lastUpdateTime", "lastSettlementTime",
+            "sequence", "state" })
         or integer(value.schemaVersion) ~= U.POWER_SCHEMA_VERSION
         or not validGenerator(value.generator, identity)
         or (value.circuitState ~= U.CIRCUIT_OFF and value.circuitState ~= U.CIRCUIT_ON)
-        or type(value.devicePolicy) ~= "table" or integer(value.sequence) == nil
+        or type(value.generatorEnabled) ~= "boolean"
+        or not finite(value.virtualFuelL) or value.virtualFuelL < 0
+        or value.virtualFuelL > PowerConfig.VIRTUAL_FUEL_CAPACITY_L
+        or not finite(value.batteryWh) or value.batteryWh < 0
+        or not finite(value.batteryCapacityWh) or value.batteryCapacityWh < 0
+        or not finite(value.maxChargePowerW) or value.maxChargePowerW < 0
+        or not finite(value.maxDischargePowerW) or value.maxDischargePowerW < 0
+        or not finite(value.generationPowerW) or value.generationPowerW < 0
+        or value.generationPowerW > PowerConfig.GAS_GENERATOR_POWER_W
+        or not finite(value.currentLoadW) or value.currentLoadW < 0
+        or not finite(value.chargerEfficiency) or value.chargerEfficiency <= 0
+        or value.chargerEfficiency > 1
+        or not finite(value.inverterEfficiency) or value.inverterEfficiency <= 0
+        or value.inverterEfficiency > 1
+        or type(value.batteries) ~= "table" or integer(value.nextBatteryId) == nil
+        or value.nextBatteryId < 1 or not validComponent(value.charger,
+            "RailroaderRVTest.RVCharger")
+        or not validComponent(value.inverter, "RailroaderRVTest.RVInverter")
+        or not finite(value.lastUpdateTime) or value.lastUpdateTime < 0
+        or not finite(value.lastSettlementTime) or value.lastSettlementTime < 0
+        or integer(value.sequence) == nil
         or value.sequence < 0 or (value.state ~= U.POWER_STATE_READY
             and value.state ~= U.POWER_STATE_DEGRADED) then return false end
-    for key, flag in pairs(value.devicePolicy) do
-        if type(key) ~= "string" or type(flag) ~= "boolean" then return false end
+    local count, capacity, chargePower, dischargePower, largestId = 0, 0, 0, 0, 0
+    for key, battery in pairs(value.batteries) do
+        if integer(key) == nil or key < 1 or not validBattery(battery) then return false end
+        local parameters = PowerConfig.batteryParameters(battery.condition,
+            battery.maxCondition)
+        if not parameters then return false end
+        count = count + 1
+        capacity = capacity + parameters.capacityWh
+        chargePower = chargePower + parameters.maxChargePowerW
+        dischargePower = dischargePower + parameters.maxDischargePowerW
+        largestId = math.max(largestId, battery.id)
     end
-    return true
+    if count ~= #value.batteries or value.nextBatteryId <= largestId
+        or math.abs(value.batteryCapacityWh - capacity) > PowerConfig.PERSISTED_POWER_TOLERANCE
+        or math.abs(value.maxChargePowerW - chargePower) > PowerConfig.PERSISTED_POWER_TOLERANCE
+        or math.abs(value.maxDischargePowerW - dischargePower) > PowerConfig.PERSISTED_POWER_TOLERANCE
+        or value.batteryWh > value.batteryCapacityWh + PowerConfig.PERSISTED_POWER_TOLERANCE then return false end
+    local expectedCharger = value.charger
+        and value.charger.condition / value.charger.conditionMax
+        or PowerConfig.DEFAULT_CHARGER_EFFICIENCY
+    local expectedInverter = value.inverter
+        and value.inverter.condition / value.inverter.conditionMax
+        or PowerConfig.DEFAULT_INVERTER_EFFICIENCY
+    return math.abs(value.chargerEfficiency - expectedCharger) <= PowerConfig.NUMERIC_EPSILON
+        and math.abs(value.inverterEfficiency - expectedInverter) <= PowerConfig.NUMERIC_EPSILON
 end
 
 local function validRecord(value, identity)
@@ -320,7 +418,14 @@ end
 
 local function newPower()
     return { schemaVersion = U.POWER_SCHEMA_VERSION, generator = nil,
-        circuitState = U.CIRCUIT_OFF, devicePolicy = {}, sequence = 0,
+        circuitState = U.CIRCUIT_OFF, generatorEnabled = false,
+        virtualFuelL = 0, batteryWh = 0, batteryCapacityWh = 0,
+        maxChargePowerW = 0, maxDischargePowerW = 0, generationPowerW = 0,
+        currentLoadW = 0,
+        chargerEfficiency = PowerConfig.DEFAULT_CHARGER_EFFICIENCY,
+        inverterEfficiency = PowerConfig.DEFAULT_INVERTER_EFFICIENCY,
+        batteries = {}, nextBatteryId = 1, charger = nil, inverter = nil,
+        lastUpdateTime = 0, lastSettlementTime = 0, sequence = 0,
         state = U.POWER_STATE_READY }
 end
 
@@ -352,6 +457,9 @@ function M.getRecord(identity, allowCreate)
             if not validRecord(persisted, identity) then
                 return false, C.INVALID_RV_DATA
             end
+            if type(persisted.power) ~= "table" or persisted.power.generator == nil then
+                return false, C.INVALID_RV_DATA
+            end
             record = copyTable(persisted)
         end
     end
@@ -362,15 +470,22 @@ end
 function M.commit(record, identity)
     local gateOk, gateReason = currentIdentityGate(identity)
     if not gateOk then return false, gateReason end
-    if not validRecord(record, identity) then return false, C.INVALID_RV_DATA end
+    if not validRecord(record, identity) or record.power.generator == nil then
+        return false, C.INVALID_RV_DATA
+    end
     local ok, value = pcall(root, true)
     if not ok then return false, C.INVALID_RV_DATA end
     -- Keep the caller's working copy detached even after a successful commit;
     -- later mutations must require another explicit commit.
-    value.records[tostring(identity.rvId)] = copyTable(record)
+    local id = tostring(identity.rvId)
+    local previous = value.records[id]
+    value.records[id] = copyTable(record)
     if ModData and type(ModData.transmit) == "function" then
         local sent, result = pcall(ModData.transmit, U.STORE_KEY)
         if not sent or result == false then
+            -- Callers compensate inventory changes when commit fails. Restore
+            -- the canonical in-memory record first so both sides stay aligned.
+            value.records[id] = previous
             return false, U.REASONS.CANONICAL_COMMIT_FAILED
         end
     end
@@ -384,7 +499,8 @@ function M.allRecords()
     if value == nil or empty(value) then return true, result end
     for id, record in pairs(value.records) do
         if type(id) ~= "string" or type(record) ~= "table"
-            or tostring(record.rvId) ~= id then return false, C.INVALID_RV_DATA end
+            or tostring(record.rvId) ~= id or type(record.power) ~= "table"
+            or record.power.generator == nil then return false, C.INVALID_RV_DATA end
         local identity = { rvId = record.rvId, generation = record.generation,
             bitmapVersion = record.bitmapVersion }
         if not validRecord(record, identity) then return false, C.INVALID_RV_DATA end
@@ -415,8 +531,12 @@ function M.validateGenerationUtilityState(identity)
 end
 
 function M.snapshot(record)
+    local power = copyTable(record.power)
+    for _, battery in ipairs(power.batteries) do battery.modData = nil end
+    if power.charger then power.charger.modData = nil end
+    if power.inverter then power.inverter.modData = nil end
     return { rvId = record.rvId, generation = record.generation,
-        bitmapVersion = record.bitmapVersion, power = copyTable(record.power) }
+        bitmapVersion = record.bitmapVersion, power = power }
 end
 
 return M

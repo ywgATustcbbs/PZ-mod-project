@@ -97,6 +97,9 @@ local requireCurrentManifest
 if UtilityServer and type(UtilityServer.initializeRecord) == "function" then
     RV.Server.initializeUtilityRecord = UtilityServer.initializeRecord
 end
+if UtilityServer and type(UtilityServer.settleAndRefreshLoad) == "function" then
+    RV.Server.settleRVUtilityLoad = UtilityServer.settleAndRefreshLoad
+end
 
 -- The client acknowledgement requires a full server -> client -> server
 -- round trip.  Keep an additional cross-tick guard before touching the old

@@ -8,7 +8,7 @@ local currentServerTick = 0
 local handlers = {
     utility = { label = "utility-fixture" },
     roomguard = { label = "room-ownership" },
-    shellrepair = { label = "shell-roof-repair" },
+    ["roof-refresh-wall"] = { label = "roof-refresh-wall" },
 }
 
 local function finiteNumber(value)
@@ -36,7 +36,7 @@ local function reset(handler)
     handler.preconditionReject = 0
     handler.candidate = 0
     handler.strictMatch = 0
-    handler.repairQueued = 0
+    handler.refreshQueued = 0
     handler.aboutToRemoveTotal = 0
     handler.destroyThumpableTotal = 0
     handler.firstTick = nil
@@ -54,7 +54,7 @@ local function emit(id, handler)
     -- `n` and objectRemoveTotal combine both removal callbacks. Keep their
     -- per-entry totals beside them so older OnObjectAboutToBeRemoved counts
     -- can be compared directly with aboutToRemoveTotal.
-    local stageText = id == "shellrepair"
+    local stageText = id == "roof-refresh-wall"
         and (" objectRemoveTotal=" .. tostring(handler.calls)
             .. " aboutToRemoveTotal=" .. tostring(handler.aboutToRemoveTotal)
             .. " destroyThumpableTotal=" .. tostring(handler.destroyThumpableTotal)
@@ -62,7 +62,7 @@ local function emit(id, handler)
             .. " cheapReject=" .. tostring(handler.cheapReject)
             .. " candidate=" .. tostring(handler.candidate)
             .. " strictMatch=" .. tostring(handler.strictMatch)
-            .. " repairQueued=" .. tostring(handler.repairQueued)) or ""
+            .. " refreshQueued=" .. tostring(handler.refreshQueued)) or ""
     print("[RailroaderRVTest][PerfTrace] server/object-remove handler="
         .. handlers[id].label
         .. " winMs=" .. tostring(handler.window * WINDOW_MS)
@@ -138,11 +138,11 @@ end
 
 function M.count(id, stage)
     local handler = handlers[id]
-    if not handler or id ~= "shellrepair" or handler.window == nil then return end
+    if not handler or id ~= "roof-refresh-wall" or handler.window == nil then return end
     if stage == "aboutToRemoveTotal" or stage == "destroyThumpableTotal"
         or stage == "preconditionReject" or stage == "cheapReject"
         or stage == "candidate" or stage == "strictMatch"
-        or stage == "repairQueued" then
+        or stage == "refreshQueued" then
         handler[stage] = handler[stage] + 1
     end
 end

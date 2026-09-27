@@ -9,7 +9,7 @@ module RailroaderRVTest
 	{
 		DisplayCategory = Electronics,
 		Weight = 2.0,
-		Type = Normal,
+		ItemType = base:normal,
 		DisplayName = RV Battery Charger,
 		Icon = CarBatteryCharger,
 		ConditionMax = 1000,
@@ -20,7 +20,7 @@ module RailroaderRVTest
 	{
 		DisplayCategory = Electronics,
 		Weight = 1.5,
-		Type = Normal,
+		ItemType = base:normal,
 		DisplayName = RV Power Inverter,
 		Icon = Radio,
 		ConditionMax = 1000,

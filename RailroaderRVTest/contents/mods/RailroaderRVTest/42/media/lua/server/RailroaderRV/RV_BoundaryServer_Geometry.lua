@@ -524,7 +524,8 @@ function Boundary.registerGeneration(rvId, generation, boundary, record)
     return true
 end
 
-function Boundary.boundaryForPlayer(player, knownIdentity, deferValidationMiss)
+function Boundary.boundaryForPlayer(player, knownIdentity, deferValidationMiss,
+    forceValidationRefresh, roofRefreshContextRead, roofRefreshGuardRead)
     local id = knownIdentity or identity(player)
     if not id then return nil end
     -- The complete current-only map/record validator lives in the Railroader
@@ -535,15 +536,21 @@ function Boundary.boundaryForPlayer(player, knownIdentity, deferValidationMiss)
     local adapter = rv and rv.RailroaderServer
     local validator = adapter and adapter.validateCurrentBoundaryPlayer
     if type(validator) ~= "function" then return nil end
-    local hookOk, boundary, record, relation, validatedIdentity = pcall(
-        validator, player, id, deferValidationMiss == true)
+    local hookOk, boundary, record, relation, validatedIdentity, manifest = pcall(
+        validator, player, id, deferValidationMiss == true,
+        forceValidationRefresh == true, roofRefreshContextRead == true,
+        roofRefreshGuardRead == true)
     if hookOk and boundary == nil and record == "validation-deferred" then
         return nil, record
     end
     if not hookOk or type(boundary) ~= "table"
         or type(record) ~= "table" or type(relation) ~= "table"
         or type(validatedIdentity) ~= "table"
-        or validatedIdentity.key ~= id.key then
+        or validatedIdentity.key ~= id.key
+        or type(manifest) ~= "table" or type(manifest.anchor) ~= "table"
+        or tostring(manifest.rvId) ~= tostring(record.rvId)
+        or integer(manifest.generation) ~= integer(record.generation)
+        or integer(manifest.bitmapVersion) ~= integer(record.bitmapVersion) then
         return nil
     end
     local loaded = loadedBoundary(boundary)
@@ -553,7 +560,7 @@ function Boundary.boundaryForPlayer(player, knownIdentity, deferValidationMiss)
         or loaded.bitmapVersion ~= integer(record.bitmapVersion) then
         return nil
     end
-    return loaded, record, relation, validatedIdentity
+    return loaded, record, relation, validatedIdentity, manifest
 end
 
 local function stateFor(player, knownIdentity)
@@ -561,13 +568,45 @@ local function stateFor(player, knownIdentity)
     if not id then return nil end
     local state = Boundary._states[id.key]
     if not state then
-        state = { identity = id, correctionSequence = 0,
-            snapshotKey = nil }
+        state = { identity = id, correctionSequence = 0 }
         Boundary._states[id.key] = state
     else
         state.identity = id
     end
     return state
+end
+
+-- Small lifecycle interface for independent services that must yield while
+-- an authoritative player relocation is in flight. Listeners do not own or
+-- alter transition state; failures are contained so they cannot block travel.
+local transitionLifecycleListeners =
+    Boundary._transitionLifecycleListeners
+if type(transitionLifecycleListeners) ~= "table" then
+    transitionLifecycleListeners = {}
+    Boundary._transitionLifecycleListeners = transitionLifecycleListeners
+end
+
+function Boundary.addTransitionLifecycleListener(name, listener)
+    if type(name) ~= "string" or name == ""
+        or type(listener) ~= "function" then
+        return false
+    end
+    transitionLifecycleListeners[name] = listener
+    return true
+end
+
+local function notifyTransitionLifecycle(eventName, player, state)
+    for name, listener in pairs(transitionLifecycleListeners) do
+        if type(listener) == "function" then
+            local ok, reason = pcall(listener, eventName, player, state,
+                Boundary._tick)
+            if not ok then
+                print("[RailroaderRVTest] boundary transition listener failed name="
+                    .. tostring(name) .. " event=" .. tostring(eventName)
+                    .. " reason=" .. tostring(reason))
+            end
+        end
+    end
 end
 
 function Boundary.beginTransition(player, rvId, generation, token, kind,
@@ -579,16 +618,6 @@ function Boundary.beginTransition(player, rvId, generation, token, kind,
     end
     local state = stateFor(player)
     if not state then return false end
-    -- A transition invalidates any prior client prediction snapshot before
-    -- the player is moved or the new generation is committed.  This is only
-    -- a client-feedback reset; it never changes the server mapping or world.
-    if state.snapshotKey then
-        callGlobal("sendServerCommand", player, C.MOD_ID,
-            C.COMMAND_RV_BITMAP_CLEAR, {
-                onlineId = state.identity and state.identity.onlineId,
-                key = state.snapshotKey,
-            })
-    end
     state.rvId = rvId and tostring(rvId) or nil
     state.generation = integer(generation)
     state.bitmapVersion = version
@@ -596,8 +625,8 @@ function Boundary.beginTransition(player, rvId, generation, token, kind,
     state.transitionKind = kind or "relocation"
     state.transitionUntil = Boundary._tick
         + (integer(C.BOUNDARY_TRANSITION_TIMEOUT_TICKS) or 120)
-    state.snapshotKey = nil
-    state.snapshotSentTick = nil
+    state.validationRefreshTick = nil
+    notifyTransitionLifecycle("begin", player, state)
     return true
 end
 
@@ -608,6 +637,7 @@ function Boundary.completeTransition(player, token)
     state.transitionToken = nil
     state.transitionKind = nil
     state.transitionUntil = Boundary._tick + 2
+    notifyTransitionLifecycle("complete", player, state)
     return true
 end
 
@@ -635,11 +665,8 @@ function Boundary.clearPlayer(player)
     local id = identity(player)
     if id then
         local state = Boundary._states[id.key]
-        callGlobal("sendServerCommand", player, C.MOD_ID,
-            C.COMMAND_RV_BITMAP_CLEAR, {
-                onlineId = id.onlineId, key = state and state.snapshotKey,
-            })
         Boundary._states[id.key] = nil
+        notifyTransitionLifecycle("clear", player, state)
     end
     return true
 end
@@ -648,39 +675,14 @@ local function transitionActive(state)
     if not state or not state.transitionToken then return false end
     if Boundary._tick <= (state.transitionUntil or 0) then return true end
     state.transitionToken, state.transitionKind, state.transitionUntil = nil, nil, nil
+    notifyTransitionLifecycle("timeout", nil, state)
     return false
 end
 
-local function snapshotPayload(boundary, onlineId)
-    local encoded = boundary.encoded
-    if type(encoded) ~= "table" or type(encoded.bitmap) ~= "table" then
-        return nil
-    end
-    local bitmap = encoded.bitmap
-    return {
-        rvId = boundary.rvId, generation = boundary.generation,
-        bitmapVersion = boundary.bitmapVersion, onlineId = onlineId,
-        schemaVersion = bitmap.schemaVersion,
-        originX = bitmap.originX, originY = bitmap.originY,
-        width = bitmap.width, height = bitmap.height,
-        minZ = bitmap.minZ, maxZ = bitmap.maxZ,
-        layers = bitmap.layers, encoding = "hex",
-    }
-end
-
-function Boundary.sendSnapshot(player, boundary, state)
-    if not boundary or not player then return false end
-    local onlineId = playerOnlineId(player)
-    local payload = snapshotPayload(boundary, onlineId)
-    if not payload then return false end
-    local sent = callGlobal("sendServerCommand", player, C.MOD_ID,
-        C.COMMAND_RV_BITMAP, payload)
-    if not sent and processIsServer() then return false end
-    if state then
-        state.snapshotKey = boundaryKey(boundary)
-        state.snapshotSentTick = Boundary._tick
-    end
-    return true
+local function boundaryTracePoint(position)
+    if type(position) ~= "table" then return "unavailable" end
+    return tostring(position.x) .. "," .. tostring(position.y) .. ","
+        .. tostring(position.z)
 end
 
 local function correction(player, boundary, state, target)
@@ -810,11 +812,37 @@ function Boundary.diagnoseGuardState(player, knownIdentity, position,
 end
 
 local function updatePlayer(player, position, knownIdentity, deferValidationMiss)
+    local stateIdentity = knownIdentity or identity(player)
+    local priorState = stateIdentity and Boundary._states[stateIdentity.key] or nil
+    local refreshTicks = integer(C.BOUNDARY_SNAPSHOT_REFRESH_TICKS) or 60
+    local validationRefreshAge = priorState and Boundary._tick
+        - (integer(priorState.validationRefreshTick) or -math.huge) or 0
+    local forceValidationRefresh = priorState ~= nil
+        and (integer(priorState.validationRefreshTick) == nil
+            or validationRefreshAge >= refreshTicks)
     local boundary, record, relation, id = Boundary.boundaryForPlayer(player,
-        knownIdentity, deferValidationMiss)
-    if not boundary then return nil end
+        knownIdentity, deferValidationMiss, forceValidationRefresh, false, true)
+    if not boundary then
+        print("[RailroaderRVTest][TransitionTrace] path=Boundary.updatePlayer.noBoundary"
+            .. " tick=" .. tostring(Boundary._tick)
+            .. " onlineId=" .. tostring(playerOnlineId(player))
+            .. " position=" .. boundaryTracePoint(position)
+            .. " deferValidationMiss=" .. tostring(deferValidationMiss == true)
+            .. " forceValidationRefresh=" .. tostring(forceValidationRefresh)
+            .. " validationDetail=" .. tostring(type(record) == "string"
+                and record or "unavailable"))
+        return nil
+    end
     local state = stateFor(player, id or knownIdentity)
-    if not state then return nil end
+    if not state then
+        print("[RailroaderRVTest][TransitionTrace] path=Boundary.updatePlayer.noState"
+            .. " tick=" .. tostring(Boundary._tick)
+            .. " onlineId=" .. tostring(playerOnlineId(player))
+            .. " rvId=" .. tostring(boundary.rvId)
+            .. " generation=" .. tostring(boundary.generation)
+            .. " bitmapVersion=" .. tostring(boundary.bitmapVersion))
+        return nil
+    end
     if state.boundaryReference ~= boundary
         or state.rvId ~= boundary.rvId
         or state.generation ~= boundary.generation
@@ -822,14 +850,26 @@ local function updatePlayer(player, position, knownIdentity, deferValidationMiss
         state.rvId, state.generation, state.bitmapVersion = boundary.rvId,
             boundary.generation, boundary.bitmapVersion
         state.boundaryReference = boundary
-        state.snapshotKey = nil
+        state.validationRefreshTick = nil
     end
-    local snapshotAge = Boundary._tick
-        - (integer(state.snapshotSentTick) or -math.huge)
-    local refreshTicks = integer(C.BOUNDARY_SNAPSHOT_REFRESH_TICKS) or 60
-    if state.snapshotKey ~= boundaryKey(boundary) or snapshotAge >= refreshTicks then
-        Boundary.sendSnapshot(player, boundary, state)
+    if state.validationRefreshTick == nil or forceValidationRefresh then
+        state.validationRefreshTick = Boundary._tick
     end
+    print("[RailroaderRVTest][TransitionTrace] path=Boundary.updatePlayer.validationRefresh"
+        .. " tick=" .. tostring(Boundary._tick)
+        .. " player=" .. tostring(id and id.key or "unknown")
+        .. " pos=" .. boundaryTracePoint(position)
+        .. " rvId=" .. tostring(boundary.rvId)
+        .. " generation=" .. tostring(boundary.generation)
+        .. " bitmapVersion=" .. tostring(boundary.bitmapVersion)
+        .. " validationRefreshTick=" .. tostring(state.validationRefreshTick)
+        .. " validationRefreshAge=" .. tostring(Boundary._tick
+            - (integer(state.validationRefreshTick) or -math.huge))
+        .. " refreshTicks=" .. tostring(refreshTicks)
+        .. " forceValidationRefresh=" .. tostring(forceValidationRefresh)
+        .. " transitionToken=" .. tostring(state.transitionToken)
+        .. " transitionKind=" .. tostring(state.transitionKind)
+        .. " transitionUntil=" .. tostring(state.transitionUntil))
     if transitionActive(state) then return boundary end
     if not position then return boundary end
     -- Scope guard is intentionally before every correction path.  An inside

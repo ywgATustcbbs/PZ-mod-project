@@ -3,7 +3,7 @@ return function(ctx)
 local Constants = ctx.Constants
 local Boundary = ctx.Boundary
 local Bitmap = ctx.Bitmap
-local RoofRepair = ctx.RoofRepair
+local RoofRefresh = ctx.RoofRefresh
 local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
 local function safeErrorText(...) return ctx.safeErrorText(...) end
@@ -12,7 +12,7 @@ local armTargetedClientRoomOwnershipGuard = ctx.armTargetedClientRoomOwnershipGu
 local manifestTable = ctx.manifestTable
 local playerIdentity = ctx.playerIdentity
 local currentManifestValid = ctx.currentManifestValid
-local currentRoofRepairContext = ctx.currentRoofRepairContext
+local currentRoofRefreshContext = ctx.currentRoofRefreshContext
 local queueGeneration = ctx.queueGeneration
 
 function RV.Server.setRailroaderValidationHook(callback)
@@ -415,10 +415,10 @@ end
 
 -- Rebuild the captured south-window floor's room/roof neighbours after an
 -- existing RV entry or reconnect. The current manifest gate must pass before
--- persisted geometry or generation identity reaches the repair helper.
-function RV.Server.repairRoofVisuals(player)
-    if not RoofRepair then
-        return false, "roof repair module is unavailable"
+-- persisted geometry or generation identity reaches the roof refresh helper.
+function RV.Server.refreshRoofVisuals(player)
+    if not RoofRefresh then
+        return false, "roof refresh module is unavailable"
     end
     local manifestOk, manifestOrError = pcall(manifestTable)
     if not manifestOk or type(manifestOrError) ~= "table" then
@@ -431,7 +431,7 @@ function RV.Server.repairRoofVisuals(player)
     end
     local identityOk, identityOrReason = playerIdentity(player)
     if not identityOk then return false, identityOrReason end
-    local contextOk, contextOrReason = currentRoofRepairContext(player, {
+    local contextOk, contextOrReason = currentRoofRefreshContext(player, {
         rvId = manifest.rvId,
         generation = manifest.generation,
         bitmapVersion = manifest.bitmapVersion,
@@ -439,7 +439,7 @@ function RV.Server.repairRoofVisuals(player)
     })
     if not contextOk then return false, contextOrReason end
     local bounds = manifest.bounds
-    local ok, result, reason = pcall(RoofRepair.run, player, bounds, {
+    local ok, result, reason = pcall(RoofRefresh.run, player, bounds, {
         rvId = manifest.rvId,
         generation = manifest.generation,
         bitmapVersion = manifest.bitmapVersion,

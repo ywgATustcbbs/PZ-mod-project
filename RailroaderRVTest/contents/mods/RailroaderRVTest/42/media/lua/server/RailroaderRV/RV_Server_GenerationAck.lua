@@ -13,7 +13,7 @@ local RELOCATION_MIN_TICKS = ctx.RELOCATION_MIN_TICKS
 local RELOCATION_POST_ACK_TICKS = ctx.RELOCATION_POST_ACK_TICKS
 local ROOF_RELOCATION_RETRY_TICKS = ctx.ROOF_RELOCATION_RETRY_TICKS
 local GENERATION_RELOCATION_RETRY_TICKS = ctx.GENERATION_RELOCATION_RETRY_TICKS
-local ROOF_REPAIR_TEMP_Z = ctx.ROOF_REPAIR_TEMP_Z
+local ROOF_REFRESH_TEMP_Z = ctx.ROOF_REFRESH_TEMP_Z
 local notifyFailure = ctx.notifyFailure
 local removeGeneration = ctx.removeGeneration
 local manifestTable = ctx.manifestTable
@@ -24,17 +24,17 @@ local pauseGenerationForDisconnect = ctx.pauseGenerationForDisconnect
 local resumeGenerationAfterDisconnect = ctx.resumeGenerationAfterDisconnect
 local rearmGenerationTransition = ctx.rearmGenerationTransition
 local resendGenerationPhase = ctx.resendGenerationPhase
-local resolveRoofRepairGroupPlayer = ctx.resolveRoofRepairGroupPlayer
+local resolveRoofRefreshGroupPlayer = ctx.resolveRoofRefreshGroupPlayer
 local validateAuthoritativePlayer = ctx.validateAuthoritativePlayer
 local authoritativePlayerPosition = ctx.authoritativePlayerPosition
 local playerIdentity = ctx.playerIdentity
 local resolvePendingPlayer = ctx.resolvePendingPlayer
 local relocationPositionsEqual = ctx.relocationPositionsEqual
-local currentRoofRepairContext = ctx.currentRoofRepairContext
-local applyRoofRepairTeleport = ctx.applyRoofRepairTeleport
-local roofRepairTargetReady = ctx.roofRepairTargetReady
-local roofRepairGroupMember = ctx.roofRepairGroupMember
-local failRoofRepairRelocationGroup = ctx.failRoofRepairRelocationGroup
+local currentRoofRefreshContext = ctx.currentRoofRefreshContext
+local applyRoofRefreshTeleport = ctx.applyRoofRefreshTeleport
+local roofRefreshTargetReady = ctx.roofRefreshTargetReady
+local roofRefreshGroupMember = ctx.roofRefreshGroupMember
+local failRoofRefreshRelocationGroup = ctx.failRoofRefreshRelocationGroup
 
 local function ackPayloadToken(args)
     if args == nil then
@@ -65,12 +65,12 @@ local function ackPayloadToken(args)
 end
 
 local function acknowledgeRelocation(player, args)
-    if ctx.roofRepairRelocationGroup then
+    if ctx.roofRefreshRelocationGroup then
         local token = ackPayloadToken(args)
-        local member = token and roofRepairGroupMember(
-            ctx.roofRepairRelocationGroup, player, token) or nil
+        local member = token and roofRefreshGroupMember(
+            ctx.roofRefreshRelocationGroup, player, token) or nil
         if not member then
-            return false, "unexpected or malformed roof repair group acknowledgement"
+            return false, "unexpected or malformed roof refresh group acknowledgement"
         end
         local resolved, playerOrReason = resolvePendingPlayer(member)
         if not resolved then
@@ -368,34 +368,34 @@ local function cancelPending(reason)
         .. safeErrorText(reason))
 end
 
-local function roofRepairRelocationPositionStillSyncing(reason)
-    return reason == "server player has not reached the roof repair destination"
-        or reason == "server player has no current square after roof repair relocation"
-        or reason == "server player current square does not match roof repair destination"
-        or reason == "roof repair temporary destination cell is not loaded"
-        or reason == "roof repair temporary destination square is not loaded"
-        or reason == "roof repair temporary destination is still room geometry"
+local function roofRefreshRelocationPositionStillSyncing(reason)
+    return reason == "server player has not reached the roof refresh destination"
+        or reason == "server player has no current square after roof refresh relocation"
+        or reason == "server player current square does not match roof refresh destination"
+        or reason == "roof refresh temporary destination cell is not loaded"
+        or reason == "roof refresh temporary destination square is not loaded"
+        or reason == "roof refresh temporary destination is still room geometry"
 end
 
-local function processRoofRepairRelocationGroup()
-    local group = ctx.roofRepairRelocationGroup
+local function processRoofRefreshRelocationGroup()
+    local group = ctx.roofRefreshRelocationGroup
     if not group then return end
     -- A live process owns the exact-float group across a player disconnect.
     -- Defer all phase work until every stable identity has a live IsoPlayer;
     -- this avoids converting a reconnect into a failed/cancelled transaction.
     for i = 1, #(group.members or {}) do
-        local resolved = resolveRoofRepairGroupPlayer(group,
+        local resolved = resolveRoofRefreshGroupPlayer(group,
             group.members[i])
         if not resolved then return end
     end
     if ctx.serverTick > (group.deadlineTick or ctx.serverTick) then
-        failRoofRepairRelocationGroup("roof repair group relocation transaction timed out")
+        failRoofRefreshRelocationGroup("roof refresh group relocation transaction timed out")
         return
     end
     for i = 1, #(group.members or {}) do
         local member = group.members[i]
         if not member.arrived then
-            local resolved, playerOrReason = resolveRoofRepairGroupPlayer(
+            local resolved, playerOrReason = resolveRoofRefreshGroupPlayer(
                 group, member)
             if not resolved then
                 return
@@ -403,15 +403,15 @@ local function processRoofRepairRelocationGroup()
             local stateCallOk, stateOk, stateOrReason = pcall(
                 validateAuthoritativePlayer, playerOrReason)
             if not stateCallOk then
-                failRoofRepairRelocationGroup(safeErrorText(stateOk))
+                failRoofRefreshRelocationGroup(safeErrorText(stateOk))
                 return
             end
             if not stateOk then
-                failRoofRepairRelocationGroup(stateOrReason)
+                failRoofRefreshRelocationGroup(stateOrReason)
                 return
             end
             local contextCallOk, contextOk, contextOrReason = pcall(
-                currentRoofRepairContext, playerOrReason, {
+                currentRoofRefreshContext, playerOrReason, {
                     rvId = member.rvId, generation = member.generation,
                     bitmapVersion = member.bitmapVersion,
                     identityKey = member.identityKey,
@@ -421,7 +421,7 @@ local function processRoofRepairRelocationGroup()
                 contextOk = false
             end
             if not contextOk then
-                failRoofRepairRelocationGroup(contextOrReason)
+                failRoofRefreshRelocationGroup(contextOrReason)
                 return
             end
             local target = group.phase == "temporary"
@@ -431,13 +431,13 @@ local function processRoofRepairRelocationGroup()
                     tryAuthoritativePlayerPosition(playerOrReason)
                 -- The client ACK plus floor/z proof is enough to stop a
                 -- duplicate return packet.  If the engine normalized a
-                -- fractional x/y, completeRoofRepairRelocation reasserts the
+                -- fractional x/y, completeRoofRefreshRelocation reasserts the
                 -- captured float before it releases the lease.
                 local atTarget = exactCallOk and type(exactPosition) == "table"
                     and math.floor(exactPosition.x) == math.floor(target.x)
                     and math.floor(exactPosition.y) == math.floor(target.y)
                     and math.floor(exactPosition.z) == math.floor(target.z)
-                    and exactPosition.z ~= ROOF_REPAIR_TEMP_Z
+                    and exactPosition.z ~= ROOF_REFRESH_TEMP_Z
                 if not atTarget then
                     local waitLogTick = member.returnTargetLogTick or -math.huge
                     if ctx.serverTick - waitLogTick >= 30 then
@@ -447,7 +447,7 @@ local function processRoofRepairRelocationGroup()
                                 .. tostring(exactPosition.y) .. ","
                                 .. tostring(exactPosition.z))
                             or safeErrorText(exactPosition)
-                        print("[RailroaderRVTest] roof repair group return target wait room="
+                        print("[RailroaderRVTest] roof refresh group return target wait room="
                             .. tostring(group.roomKey or "unknown") .. " player="
                             .. tostring(member.identityKey) .. " position="
                             .. positionText .. " target=" .. tostring(target.x) .. ","
@@ -462,7 +462,7 @@ local function processRoofRepairRelocationGroup()
                         -- the remote point.  Reassert server coordinates only;
                         -- the normal target/current-square proof below still
                         -- gates arrival and lease release.
-                        local moved = applyRoofRepairTeleport(playerOrReason,
+                        local moved = applyRoofRefreshTeleport(playerOrReason,
                             target, false)
                         member.relocationNeedsResend = not moved
                         if moved then
@@ -473,7 +473,7 @@ local function processRoofRepairRelocationGroup()
                                 and math.floor(exactPosition.x) == math.floor(target.x)
                                 and math.floor(exactPosition.y) == math.floor(target.y)
                                 and math.floor(exactPosition.z) == math.floor(target.z)
-                                and exactPosition.z ~= ROOF_REPAIR_TEMP_Z
+                                and exactPosition.z ~= ROOF_REFRESH_TEMP_Z
                         end
                     else
                         -- A stale/fallen member without an ACK needs the same
@@ -485,14 +485,14 @@ local function processRoofRepairRelocationGroup()
                         if ctx.serverTick < (member.relocationRetryAtTick or 0) then
                             -- Wait for the bounded retry cadence below.
                         elseif type(member.returnPayload) ~= "table" then
-                            failRoofRepairRelocationGroup(
-                                "roof repair group return payload is unavailable")
+                            failRoofRefreshRelocationGroup(
+                                "roof refresh group return payload is unavailable")
                             return
                         else
                             local sentOk = ServerUtil.callGlobalSucceeded("sendServerCommand",
                                 playerOrReason, COMMAND_MODULE, COMMAND_RELOCATE,
                                 member.returnPayload)
-                            local moved = applyRoofRepairTeleport(playerOrReason,
+                            local moved = applyRoofRefreshTeleport(playerOrReason,
                                 target, false)
                             member.relocationLastSentTick = ctx.serverTick
                             member.relocationRetryAtTick = ctx.serverTick
@@ -518,24 +518,24 @@ local function processRoofRepairRelocationGroup()
                 -- do not treat an absent ACK as a permanent failure yet.
             else
                     local readyCallOk, ready, readyReason = pcall(
-                        roofRepairTargetReady, playerOrReason, target,
+                        roofRefreshTargetReady, playerOrReason, target,
                         group.phase, group.allowedPlayers)
                     if not readyCallOk then
                         readyReason = safeErrorText(ready)
                         ready = false
                     end
                 if not ready then
-                    if roofRepairRelocationPositionStillSyncing(readyReason) then
+                    if roofRefreshRelocationPositionStillSyncing(readyReason) then
                         -- Wait for the authoritative square/current cell to
                         -- settle on the next server tick.
                     else
-                        failRoofRepairRelocationGroup(readyReason)
+                        failRoofRefreshRelocationGroup(readyReason)
                         return
                     end
                 else
                     member.arrived = true
                     member.arrivedAtTick = ctx.serverTick
-                    print("[RailroaderRVTest] roof repair group member arrived room="
+                    print("[RailroaderRVTest] roof refresh group member arrived room="
                         .. tostring(group.roomKey or "unknown") .. " player="
                         .. tostring(member.identityKey) .. " phase="
                         .. tostring(group.phase) .. " target="
@@ -551,5 +551,5 @@ end
 ctx.acknowledgeRelocation = acknowledgeRelocation
 ctx.acknowledgeFinalRelocation = acknowledgeFinalRelocation
 ctx.cancelPending = cancelPending
-ctx.processRoofRepairRelocationGroup = processRoofRepairRelocationGroup
+ctx.processRoofRefreshRelocationGroup = processRoofRefreshRelocationGroup
 end

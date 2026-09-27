@@ -2,7 +2,7 @@
 return function(ctx)
 local Adapter = ctx.Adapter
 local C = ctx.C
-local pendingWallRoofRepairs = ctx.pendingWallRoofRepairs
+local pendingWallRoofRefreshes = ctx.pendingWallRoofRefreshes
 local followUpWallRemovalEvents = ctx.followUpWallRemovalEvents
 local WALL_REMOVAL_FOLLOWUP_TICKS = ctx.WALL_REMOVAL_FOLLOWUP_TICKS
 local function recordForLoco(...) return ctx.recordForLoco(...) end
@@ -11,27 +11,27 @@ local call = ctx.call
 local findTrain = ctx.findTrain
 local trainPose = ctx.trainPose
 local mapData = ctx.mapData
-local transmitMap = ctx.transmitMap
+local markMappingChanged = ctx.markMappingChanged
 local validRecord = ctx.validRecord
-local pruneRoofRepairDedupeState = ctx.pruneRoofRepairDedupeState
-local pruneRoofRepairRooms = ctx.pruneRoofRepairRooms
+local pruneRoofRefreshDedupeState = ctx.pruneRoofRefreshDedupeState
+local pruneRoofRefreshRooms = ctx.pruneRoofRefreshRooms
 local restoreAfterGenerationFailure = ctx.restoreAfterGenerationFailure
 local commitGeneration = ctx.commitGeneration
 local validateGeneration = ctx.validateGeneration
 local processStatelessRelocationSentinel = ctx.processStatelessRelocationSentinel
-local repairInsidePlayers = ctx.repairInsidePlayers
+local sampleRoofRefreshPlayers = ctx.sampleRoofRefreshPlayers
 local pauseFollowUpWallRemovalDeadlines = ctx.pauseFollowUpWallRemovalDeadlines
-local clearRoofRepairRuntimeState = ctx.clearRoofRepairRuntimeState
-local cancelPendingWallRoofRepair = ctx.cancelPendingWallRoofRepair
-local expireQueuedWallRoofRepairs = ctx.expireQueuedWallRoofRepairs
-local processPendingWallRoofRepairGroup = ctx.processPendingWallRoofRepairGroup
+local clearRoofRefreshRuntimeState = ctx.clearRoofRefreshRuntimeState
+local cancelPendingWallRoofRefresh = ctx.cancelPendingWallRoofRefresh
+local expireQueuedWallRoofRefreshes = ctx.expireQueuedWallRoofRefreshes
+local processPendingWallRoofRefreshGroup = ctx.processPendingWallRoofRefreshGroup
 local promoteFollowUpWallRemoval = ctx.promoteFollowUpWallRemoval
-local revalidateQueuedRoofRepairAfterGeneration = ctx.revalidateQueuedRoofRepairAfterGeneration
+local revalidateQueuedRoofRefreshAfterGeneration = ctx.revalidateQueuedRoofRefreshAfterGeneration
 
-local function processPendingWallRoofRepairs()
+local function processPendingWallRoofRefreshes()
     local now = Adapter._ticks or 0
     local hasWork = false
-    for _ in pairs(pendingWallRoofRepairs) do
+    for _ in pairs(pendingWallRoofRefreshes) do
         hasWork = true
         break
     end
@@ -48,7 +48,7 @@ local function processPendingWallRoofRepairs()
     end
     if not hasWork then return end
     local server = RailroaderRV and RailroaderRV.Server
-    if not server or type(server.getRoofRepairRelocationState) ~= "function"
+    if not server or type(server.getRoofRefreshRelocationState) ~= "function"
         or type(server.isGenerationTransactionActive) ~= "function" then
         return
     end
@@ -63,7 +63,7 @@ local function processPendingWallRoofRepairs()
         if pauseFollowUpWallRemovalDeadlines then
             pauseFollowUpWallRemovalDeadlines(now)
         end
-        for roomKey, pending in pairs(pendingWallRoofRepairs) do
+        for roomKey, pending in pairs(pendingWallRoofRefreshes) do
             if type(pending) == "table"
                 and pending.relocationPhase == "queued"
                 and pending.relocationStarted ~= true
@@ -75,16 +75,16 @@ local function processPendingWallRoofRepairs()
                 if pending.waitingForGeneration ~= true then
                     local queuedDeadline = integer(pending.queuedDeadlineTick)
                     if queuedDeadline == nil then
-                        cancelPendingWallRoofRepair(roomKey, pending,
-                            "malformed queued roof repair deadline")
+                        cancelPendingWallRoofRefresh(roomKey, pending,
+                            "malformed queued roof refresh deadline")
                     elseif now >= queuedDeadline then
-                        cancelPendingWallRoofRepair(roomKey, pending,
-                            "queued roof repair member rebind deadline expired")
+                        cancelPendingWallRoofRefresh(roomKey, pending,
+                            "queued roof refresh member rebind deadline expired")
                     else
                         pending.waitingForGeneration = true
                     end
                 end
-                if pendingWallRoofRepairs[roomKey] == pending
+                if pendingWallRoofRefreshes[roomKey] == pending
                     and pending.waitingForGeneration == true then
                     -- Both the queued deadline and this revalidation window
                     -- are paused while generation owns the scope.  Refreshing
@@ -100,7 +100,7 @@ local function processPendingWallRoofRepairs()
     end
     -- A queued item marked waiting above must first pass the current-record
     -- revalidation below; only then may its fresh queued deadline run.
-    expireQueuedWallRoofRepairs(now)
+    expireQueuedWallRoofRefreshes(now)
     local mapOk, mapOrReason = pcall(mapData)
     if not mapOk or type(mapOrReason) ~= "table" then
         -- A transient ModData read/engine exception must not silently erase an
@@ -109,57 +109,57 @@ local function processPendingWallRoofRepairs()
         -- below is the only path allowed to reject it.
         local detail = type(mapOrReason) == "string" and mapOrReason or ""
         if string.find(detail, C.INVALID_RV_DATA, 1, true) then
-            clearRoofRepairRuntimeState(true)
+            clearRoofRefreshRuntimeState(true)
         end
         return
     end
     local map = mapOrReason
     for roomKey in pairs(followUpWallRemovalEvents) do
-        if pendingWallRoofRepairs[roomKey] == nil then
+        if pendingWallRoofRefreshes[roomKey] == nil then
             promoteFollowUpWallRemoval(map, roomKey)
         end
     end
-    for roomKey, pending in pairs(pendingWallRoofRepairs) do
+    for roomKey, pending in pairs(pendingWallRoofRefreshes) do
         if type(pending) ~= "table"
             or integer(pending.generation) == nil
             or integer(pending.bitmapVersion) ~= C.BITMAP_VERSION
             or type(pending.returnPosition) ~= "table" then
-            cancelPendingWallRoofRepair(roomKey, pending, "malformed roof repair schedule")
-        elseif pendingWallRoofRepairs[roomKey] == pending then
-            local revalidation = revalidateQueuedRoofRepairAfterGeneration(
+            cancelPendingWallRoofRefresh(roomKey, pending, "malformed roof refresh schedule")
+        elseif pendingWallRoofRefreshes[roomKey] == pending then
+            local revalidation = revalidateQueuedRoofRefreshAfterGeneration(
                 map, roomKey, pending, now)
             if revalidation == "wait" or revalidation == "revalidated" then
                 -- The current generation is still unavailable, or the queue
                 -- was moved to its new room key.  Both remain in memory for
                 -- the next successful current-schema read.
             elseif revalidation == "expired" then
-                cancelPendingWallRoofRepair(roomKey, pending,
-                    "roof repair generation revalidation expired")
+                cancelPendingWallRoofRefresh(roomKey, pending,
+                    "roof refresh generation revalidation expired")
             else
-                local state, stateDetail = server.getRoofRepairRelocationState(
+                local state, stateDetail = server.getRoofRefreshRelocationState(
                     pending.rvId, pending.generation, pending.bitmapVersion,
                     pending.relocationToken or pending.returnToken)
                 if state == "failed" then
-                    server.consumeRoofRepairRelocationFailure(pending.rvId,
+                    server.consumeRoofRefreshRelocationFailure(pending.rvId,
                         pending.generation, pending.bitmapVersion,
                         pending.relocationToken or pending.returnToken)
-                    cancelPendingWallRoofRepair(roomKey, pending,
-                        stateDetail or "roof repair relocation failed")
+                    cancelPendingWallRoofRefresh(roomKey, pending,
+                        stateDetail or "roof refresh relocation failed")
                 else
                     local record = recordForLoco(map, pending.rvId)
                     if not record or tostring(record.rvId) ~= pending.rvId
                         or integer(record.generation) ~= pending.generation
                         or integer(record.bitmapVersion) ~= pending.bitmapVersion
                         or not validRecord(record) then
-                        cancelPendingWallRoofRepair(roomKey, pending,
+                        cancelPendingWallRoofRefresh(roomKey, pending,
                             "identity-mismatch")
                     else
                         if type(pending.players) == "table" then
-                            processPendingWallRoofRepairGroup(map, pending,
+                            processPendingWallRoofRefreshGroup(map, pending,
                                 record, server, now)
                         else
-                            cancelPendingWallRoofRepair(roomKey, pending,
-                                "roof repair schedule has no grouped authoritative players")
+                            cancelPendingWallRoofRefresh(roomKey, pending,
+                                "roof refresh schedule has no grouped authoritative players")
                         end
                     end
                 end
@@ -171,10 +171,10 @@ end
 function Adapter.OnTick()
     Adapter._ticks = (Adapter._ticks or 0) + 1
     if Adapter._ticks % 30 == 0 then
-        pruneRoofRepairDedupeState(Adapter._ticks)
-        pruneRoofRepairRooms(Adapter._ticks)
+        pruneRoofRefreshDedupeState(Adapter._ticks)
+        pruneRoofRefreshRooms(Adapter._ticks)
     end
-    processPendingWallRoofRepairs()
+    processPendingWallRoofRefreshes()
     -- Run the stateless z=-15 safety net only after ordinary in-memory roof
     -- transactions have had their phase/claim opportunity for this tick.
     processStatelessRelocationSentinel()
@@ -188,7 +188,7 @@ function Adapter.OnTick()
         end
         local detail = type(mapOrReason) == "string" and mapOrReason or ""
         if string.find(detail, C.INVALID_RV_DATA, 1, true) then
-            clearRoofRepairRuntimeState(true)
+            clearRoofRefreshRuntimeState(true)
         end
         return
     end
@@ -212,8 +212,8 @@ function Adapter.OnTick()
             end
         end
     end
-    repairInsidePlayers(map)
-    if changed then transmitMap(false) end
+    sampleRoofRefreshPlayers(map)
+    if changed then markMappingChanged(false) end
 end
 
 -- PZ loads files in this directory alphabetically, so this adapter can be

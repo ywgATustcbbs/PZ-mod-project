@@ -5,6 +5,7 @@ local Constants = ctx.Constants
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local ProtectionManifest = require("RailroaderRV/RV_ProtectionManifest")
+local TemplateGeometry = require("RailroaderRV/RV_TemplateGeometry")
 
 local function applyIntegerState(object, state, key, setter, getter)
     local expected = state[key]
@@ -239,15 +240,27 @@ local function capturedTagData(entry, edge, tagContext)
         error("RailroaderRVTest: captured protection identity is incomplete at index "
             .. tostring(entry.templateIndex))
     end
-    local protection = ProtectionManifest.get(entry.templateIndex)
+    local templateObject, resolvedIndex, protection =
+        TemplateGeometry.lookupObjectByIndex(entry.templateIndex)
+    if type(templateObject) ~= "table" or resolvedIndex ~= entry.templateIndex
+        or type(protection) ~= "table" then
+        error("RailroaderRVTest: captured template lookup failed at index "
+            .. tostring(entry.templateIndex))
+    end
     local anchorX = ServerUtil.requiredInteger(tagContext and tagContext.anchorX,
         "captured tag anchorX")
     local anchorY = ServerUtil.requiredInteger(tagContext and tagContext.anchorY,
         "captured tag anchorY")
     local anchorZ = ServerUtil.requiredInteger(tagContext and tagContext.anchorZ,
         "captured tag anchorZ")
-    if entry.x ~= anchorX + protection.x or entry.y ~= anchorY + protection.y
-        or entry.z ~= anchorZ + protection.z then
+    local relative = TemplateGeometry.worldToTemplate(
+        { x = entry.x, y = entry.y, z = entry.z },
+        { x = anchorX, y = anchorY, z = anchorZ })
+    if not relative
+        or relative.x ~= protection.x or relative.y ~= protection.y
+        or relative.z ~= protection.z
+        or relative.x ~= templateObject.x or relative.y ~= templateObject.y
+        or relative.z ~= templateObject.z then
         error("RailroaderRVTest: captured tag coordinates differ from static ledger at index "
             .. tostring(entry.templateIndex))
     end

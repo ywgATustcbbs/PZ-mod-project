@@ -162,7 +162,7 @@ def main() -> int:
     client_room_ownership_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_ContextMenu_RoomOwnership.lua"
     client_relocation_path = package_root / "media" / "lua" / "client" / "RailroaderRV" / "RV_ContextMenu_Relocation.lua"
     world_objects_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_WorldObjects.lua"
-    template_repair_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_TemplateRepair.lua"
+    template_protection_repair_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_Server_TemplateProtectionRepair.lua"
     entry_exit_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_RailroaderServer_EntryExit.lua"
     boundary_objects_path = package_root / "media" / "lua" / "server" / "RailroaderRV" / "RV_BoundaryServer_Objects.lua"
     start_bat_path = root / "testserver" / "steamcmd" / "380870" / "StartServer64 - test.bat"
@@ -205,7 +205,7 @@ def main() -> int:
         client_room_ownership_path,
         client_relocation_path,
         world_objects_path,
-        template_repair_path,
+        template_protection_repair_path,
         entry_exit_path,
         boundary_objects_path,
     ):
@@ -292,8 +292,8 @@ def main() -> int:
         world_objects = (
             read_utf8(world_objects_path) if world_objects_path.is_file() else ""
         )
-        template_repair = (
-            read_utf8(template_repair_path) if template_repair_path.is_file() else ""
+        template_protection_repair = (
+            read_utf8(template_protection_repair_path) if template_protection_repair_path.is_file() else ""
         )
         # Existing contract checks intentionally inspect one logical server
         # surface.  Include each require chunk, then normalize only the
@@ -839,7 +839,7 @@ def main() -> int:
             "generation cleanup lacks the current manifest and full object identity gates",
         )
         repair_context = section(
-            template_repair,
+            template_protection_repair,
             r"local function validCurrentContext",
             r"local function isCabCoordinate",
         )
@@ -851,7 +851,7 @@ def main() -> int:
             and "sameIdentity(manifest, boundary)" in repair_context
             and "manifest.bounds.schemaVersion ~= Constants.LAYOUT_SCHEMA_VERSION"
                 in repair_context,
-            "template repair does not require the current committed manifest before using bounds",
+            "template protection repair does not require the current committed manifest before using bounds",
         )
         checks.true(
             "local function rectInside" in server_schema
@@ -1157,7 +1157,7 @@ def main() -> int:
             and "persistedBesidePosition" in railroader_server
             and "type(record.boundary) ~= \"table\"" in railroader_server
             and "record.bitmapVersion" in railroader_server
-            and "roofRepairRoomKey" in railroader_server
+            and "roofRefreshRoomKey" in railroader_server
             and "tostring(record.bitmapVersion)" in railroader_server
             and '"outside-rv"' in railroader_server
             and "trainPose(train)" in railroader_server
@@ -1187,7 +1187,7 @@ def main() -> int:
 
         presence_monitor = section(
             railroader_server,
-            r"local function repairInsidePlayers",
+            r"local function sampleRoofRefreshPlayers",
             r"function Adapter\.OnTick",
         )
         checks.true(
@@ -1235,12 +1235,12 @@ def main() -> int:
 
         wall_removal = section(
             railroader_server,
-            r"local function queueWallRoofRepairForObject",
+            r"local function queueWallRoofRefreshForObject",
             r"insidePlayersForRecord = function",
         )
         checks.true(
             wall_removal is not None,
-            "Railroader server has no object-removal roof-repair hook",
+            "Railroader server has no object-removal roof-refresh hook",
         )
         if wall_removal is not None:
             checks.true(
@@ -1251,7 +1251,7 @@ def main() -> int:
                         "Boundary.isCurrentShellWall",
                         "validRecord(record)",
                         "wall removal matched",
-                        "wall roof repair queued",
+                        "wall roof refresh queued",
                     )
                 ),
                 "wall-removal matcher does not use server identity and room-key debounce",
@@ -1268,19 +1268,19 @@ def main() -> int:
             )
             checks.true(
                 "token = group.token" in server
-                and "roofRepairGroupFailure.token == token" in server
+                and "roofRefreshGroupFailure.token == token" in server
                 and "pending.relocationToken or pending.returnToken" in railroader_server
                 and "another RV relocation or generation is in progress" in railroader_server,
                 "failed roof cycles are not token-scoped for in-memory return and queued independent operations",
             )
         scheduled_roof = section(
             railroader_server,
-            r"scheduleRoofRepair = function",
-            r"local function queueWallRoofRepairForObject",
+            r"scheduleRoofRefresh = function",
+            r"local function queueWallRoofRefreshForObject",
         )
         checks.true(
             scheduled_roof is not None,
-            "delayed roof repair scheduler is missing",
+            "delayed roof refresh scheduler is missing",
         )
         if scheduled_roof is not None:
             checks.true(
@@ -1289,22 +1289,22 @@ def main() -> int:
                     for token in (
                         "validRecord(record)",
                         "insidePlayersForRecord(map, record)",
-                        "pendingWallRoofRepairs[roomKey]",
-                        "ROOF_REPAIR_QUEUED_DEADLINE_TICKS",
+                        "pendingWallRoofRefreshes[roomKey]",
+                        "ROOF_REFRESH_QUEUED_DEADLINE_TICKS",
                         "queuedDeadlineTick",
                         "dueTicks",
                         "nextAttempt",
-                        "ROOF_REPAIR_DELAY_TICKS",
-                        "ROOF_REPAIR_ATTEMPTS",
+                        "ROOF_REFRESH_DELAY_TICKS",
+                        "ROOF_REFRESH_ATTEMPTS",
                     )
                 ),
-                "roof repair scheduler does not enforce current identity/inside player or bounded retries",
+                "roof refresh scheduler does not enforce current identity/inside player or bounded retries",
             )
             checks.true(
-                "ROOF_REPAIR_DELAY_TICKS = 5" in railroader_server
-                and "ROOF_REPAIR_ATTEMPTS = 3" in railroader_server
-                and "ROOF_REPAIR_QUEUED_DEADLINE_TICKS = 600" in railroader_server
-                and "queued roof repair member rebind deadline expired"
+                "ROOF_REFRESH_DELAY_TICKS = 5" in railroader_server
+                and "ROOF_REFRESH_ATTEMPTS = 3" in railroader_server
+                and "ROOF_REFRESH_QUEUED_DEADLINE_TICKS = 600" in railroader_server
+                and "queued roof refresh member rebind deadline expired"
                 in railroader_server
                 and "pending.dueTicks[attempt] = now"
                 in railroader_server,
@@ -1312,42 +1312,42 @@ def main() -> int:
             )
         checks.true(
             "function Adapter.onObjectAboutToBeRemoved" in railroader_server
-            and "queueWallRoofRepairForObject(object, \"object-about-to-be-removed\")"
+            and "queueWallRoofRefreshForObject(object, \"object-about-to-be-removed\")"
             in railroader_server
             and "function Adapter.onDestroyIsoThumpable" in railroader_server
-            and "queueWallRoofRepairForObject(object, \"destroy-iso-thumpable\")"
+            and "queueWallRoofRefreshForObject(object, \"destroy-iso-thumpable\")"
             in railroader_server,
             "wall-removal events do not share the strict de-duplicated matcher",
         )
-        tick_repair = section(
+        tick_refresh = section(
             railroader_server,
             r"function Adapter\.OnTick",
             r"-- PZ loads files in this directory alphabetically",
         )
         checks.true(
-            tick_repair is not None
-            and "processPendingWallRoofRepairs()" in tick_repair
-            and "if Adapter._ticks % 30 ~= 0 then return end" in tick_repair
-            and "repairInsidePlayers(map)" in tick_repair,
-            "delayed roof repair is not deferred into the server 30-tick presence path",
+            tick_refresh is not None
+            and "processPendingWallRoofRefreshes()" in tick_refresh
+            and "if Adapter._ticks % 30 ~= 0 then return end" in tick_refresh
+            and "sampleRoofRefreshPlayers(map)" in tick_refresh,
+            "delayed roof refresh is not deferred into the server 30-tick presence path",
         )
         runtime_clear = section(
             railroader_server,
-            r"local function clearRoofRepairRuntimeState",
-            r"local function processPendingWallRoofRepairs",
+            r"local function clearRoofRefreshRuntimeState",
+            r"local function processPendingWallRoofRefreshes",
         )
         checks.true(
             runtime_clear is not None
             and "roomTransitionStates = {}" in runtime_clear
-            and "pendingWallRoofRepairs[roomKey] = nil" in runtime_clear
-            and "clearRoofRepairRuntimeState(true)" in tick_repair
+            and "pendingWallRoofRefreshes[roomKey] = nil" in runtime_clear
+            and "clearRoofRefreshRuntimeState(true)" in tick_refresh
             and "followUpWallRemovalEvents = {}" in runtime_clear,
             "schema failure rejects queued roof state while transient reads retain it",
         )
         room_transition = section(
             railroader_server,
             r"local function authoritativeRoomState",
-            r"local function repairInsidePlayers",
+            r"local function sampleRoofRefreshPlayers",
         )
         checks.true(
             room_transition is not None,
@@ -1370,12 +1370,12 @@ def main() -> int:
         transition_monitor = section(
             railroader_server,
             r"observeRoomTransitions = function",
-            r"local function processPendingWallRoofRepairs",
+            r"local function processPendingWallRoofRefreshes",
         )
         checks.true(
             transition_monitor is not None
             and "previous.inRoom == true" in transition_monitor
-            and 'scheduleRoofRepair(map, observed.record, "room-transition")'
+            and 'scheduleRoofRefresh(map, observed.record, "room-transition")'
             in transition_monitor
             and "consumeSuppressedRoomTransition(roomKey)" in transition_monitor
             and "suppressed=" in transition_monitor
@@ -1392,12 +1392,12 @@ def main() -> int:
         )
         delayed_attempts = section(
             railroader_server,
-            r"local function processPendingWallRoofRepairs",
+            r"local function processPendingWallRoofRefreshes",
             r"function Adapter\.OnTick",
         )
         checks.true(
             delayed_attempts is not None
-            and "processPendingWallRoofRepairGroup(map, pending," in delayed_attempts
+            and "processPendingWallRoofRefreshGroup(map, pending," in delayed_attempts
             and "identity-mismatch" in delayed_attempts
             and "no grouped authoritative players" in delayed_attempts,
             "delayed roof attempts do not remain on the grouped authoritative path",
@@ -1405,17 +1405,17 @@ def main() -> int:
         checks.true(
             delayed_attempts is not None
             and "isGenerationTransactionActive" in delayed_attempts
-            and "expireQueuedWallRoofRepairs(now)" in delayed_attempts
+            and "expireQueuedWallRoofRefreshes(now)" in delayed_attempts
             and "waitingForGeneration" in delayed_attempts
             and "local queuedDeadline = integer(pending.queuedDeadlineTick)" in delayed_attempts
             and "now >= queuedDeadline" in delayed_attempts
             and "pending.waitingForGeneration ~= true" in delayed_attempts
-            and "malformed queued roof repair deadline" in delayed_attempts
-            and "revalidateQueuedRoofRepairAfterGeneration" in railroader_server
+            and "malformed queued roof refresh deadline" in delayed_attempts
+            and "revalidateQueuedRoofRefreshAfterGeneration" in railroader_server
             and "revalidateUntilTick" in railroader_server
             and "pending.revalidateUntilTick = now" in delayed_attempts
             and "pending.queuedDeadlineTick = now" in railroader_server
-            and "roof repair queue revalidated after generation room=" in railroader_server
+            and "roof refresh queue revalidated after generation room=" in railroader_server
             and "currentRoomKey ~= roomKey" in railroader_server
             and "followUpWallRemovalEvents[currentRoomKey]" in railroader_server
             and "event.roomKey = currentRoomKey" in railroader_server,
@@ -1424,19 +1424,19 @@ def main() -> int:
         follow_up_wait = section(
             railroader_server,
             r"local function promoteFollowUpWallRemoval",
-            r"local function revalidateQueuedRoofRepairAfterGeneration",
+            r"local function revalidateQueuedRoofRefreshAfterGeneration",
         )
         checks.true(
             follow_up_wait is not None
             and "event.waitingForGeneration ~= true" in follow_up_wait
             and "event.expiresAtTick = now" in follow_up_wait
-            and "ROOF_REPAIR_QUEUED_DEADLINE_TICKS" in follow_up_wait
+            and "ROOF_REFRESH_QUEUED_DEADLINE_TICKS" in follow_up_wait
             and "wall removal follow-up cancelled room=" in follow_up_wait,
             "generation-held wall follow-ups do not pause, revalidate, and renew their bounded lease",
         )
         follow_up_prune = section(
             railroader_server,
-            r"local function pruneRoofRepairDedupeState",
+            r"local function pruneRoofRefreshDedupeState",
             r"local function wallRemovalEventKey",
         )
         checks.true(
@@ -1449,7 +1449,7 @@ def main() -> int:
         )
         queued_disconnect = section(
             railroader_server,
-            r"local function processPendingWallRoofRepairGroup",
+            r"local function processPendingWallRoofRefreshGroup",
             r"if pending.relocationPhase == \"temporary\"",
         )
         checks.true(
@@ -1458,15 +1458,15 @@ def main() -> int:
             and "relocationStarted ~= true" in queued_disconnect
             and "pending.relocationToken == nil" in queued_disconnect
             and "pending.returnToken == nil" in queued_disconnect
-            and "cancelPendingWallRoofRepair(pending.roomKey, pending," in queued_disconnect
-            and "queued roof repair member rebind deadline expired" in queued_disconnect
+            and "cancelPendingWallRoofRefresh(pending.roomKey, pending," in queued_disconnect
+            and "queued roof refresh member rebind deadline expired" in queued_disconnect
             and "for i = 1, #pending.players do" in queued_disconnect
             and "resolveSavedPlayer(pending.players[i])" in queued_disconnect,
             "queued roof refresh has no bounded offline rebind cancellation before relocation",
         )
         roof_relocation = section(
             server,
-            r"local function currentRoofRepairContext",
+            r"local function currentRoofRefreshContext",
             r"local function validateRequest",
         )
         checks.true(
@@ -1474,20 +1474,20 @@ def main() -> int:
             and "currentRVRecordGeometryConsistent" in roof_relocation
             and "originX + math.floor(width / 2)" in roof_relocation
             and "originY + math.floor(height / 2)" in roof_relocation
-            and "ROOF_REPAIR_REMOTE_OFFSET_X" in roof_relocation
-            and "ROOF_REPAIR_REMOTE_OFFSET_Y" in roof_relocation
-            and "ROOF_REPAIR_REMOTE_OFFSET_Z" in roof_relocation
-            and "centerZ - ROOF_REPAIR_REMOTE_OFFSET_Z" in roof_relocation
+            and "ROOF_REFRESH_REMOTE_OFFSET_X" in roof_relocation
+            and "ROOF_REFRESH_REMOTE_OFFSET_Y" in roof_relocation
+            and "ROOF_REFRESH_REMOTE_OFFSET_Z" in roof_relocation
+            and "centerZ - ROOF_REFRESH_REMOTE_OFFSET_Z" in roof_relocation
             and "targetKind=rv-center-minus-offset" in server
-            and "roofRepairTemporarySquareSafe" in roof_relocation
-            and "roof repair temporary destination is still room geometry"
+            and "roofRefreshTemporarySquareSafe" in roof_relocation
+            and "roof refresh temporary destination is still room geometry"
             in roof_relocation,
             "roof relocation does not derive a current-schema remote center-minus-offset target",
         )
         roof_relocation_service = section(
             server,
-            r"function RV.Server.beginRoofRepairRelocationGroup",
-            r"function RV.Server.consumeRoofRepairRelocationArrival",
+            r"function RV.Server.beginRoofRefreshRelocationGroup",
+            r"function RV.Server.consumeRoofRefreshRelocationArrival",
         )
         checks.true(
             roof_relocation_service is not None
@@ -1502,19 +1502,19 @@ def main() -> int:
         )
         roof_server_tick = section(
             server,
-            r"local function processRoofRepairRelocationGroup",
+            r"local function processRoofRefreshRelocationGroup",
             r"function RV.Server.OnTick",
         )
         checks.true(
             roof_server_tick is not None
-            and "roofRepairTargetReady" in roof_server_tick
+            and "roofRefreshTargetReady" in roof_server_tick
             and "RelocateAck" not in roof_server_tick
-            and "roofRepairRelocationGroup" in roof_server_tick,
+            and "roofRefreshRelocationGroup" in roof_server_tick,
             "roof relocation server tick does not wait for authoritative arrival/readiness",
         )
         checks.true(
             roof_server_tick is not None
-            and "applyRoofRepairTeleport" in roof_server_tick
+            and "applyRoofRefreshTeleport" in roof_server_tick
             and "return target wait" in roof_server_tick
             and "returnTargetLogTick" in roof_server_tick,
             "roof return does not reassert server float coordinates or expose target proof waits",
@@ -1526,23 +1526,23 @@ def main() -> int:
             and "pending.roofRepairTransition" in client
             and "pending.roofRepairPhase == \"temporary\"" in client
             and "pending.roofRepairPhase == \"return\"" in client
-            and "completeRoofRepairRelocation" in server
-            and "roofRepairSquaresLoaded" in server,
+            and "completeRoofRefreshRelocation" in server
+            and "roofRefreshSquaresLoaded" in server,
             "remote roof relocation cannot acknowledge a valid unloaded target across ticks",
         )
         checks.true(
             all(token in client for token in (
                 "roofRepairTransition", "roofRepairPhase",
                 "generationTransition", "generationPhase",
-                "GENERATION_HALO_TEXT", "ROOF_REPAIR_HALO_TEXT",
+                "GENERATION_HALO_TEXT", "ROOF_REFRESH_HALO_TEXT",
                 "setHaloNote", "RelocateAck",
             )),
             "client roof relocation handler lacks display-only halo and token ACK contract",
         )
         checks.true(
-            "if not roofRepairTransition and roofRepairPhase ~= nil then" in client
+            "if not roofRefreshTransition and roofRefreshPhase ~= nil then" in client
             and "if not generationTransition and generationPhase ~= nil then" in client
-            and "or roofRepairTransition) then" in client,
+            and "or roofRefreshTransition) then" in client,
             "client does not fail closed on mixed relocation phase markers",
         )
         relocation_services = section(
@@ -1592,8 +1592,8 @@ def main() -> int:
         )
         roof_rebind = section(
             server,
-            r"local function resendRoofRepairMemberPhase",
-            r"function RV.Server.consumeRoofRepairRelocationArrival",
+            r"local function resendRoofRefreshMemberPhase",
+            r"function RV.Server.consumeRoofRefreshRelocationArrival",
         )
         checks.true(
             roof_rebind is not None
@@ -1640,24 +1640,24 @@ def main() -> int:
         )
         mutex_gate = section(
             server,
-            r"function RV.Server.beginRoofRepairRelocationGroup",
+            r"function RV.Server.beginRoofRefreshRelocationGroup",
             r"function RV.Server.isRelocationIdentityClaimed",
         )
         checks.true(
             mutex_gate is not None
             and "transactionBusy" in mutex_gate
             and "pendingGeneration ~= nil" in mutex_gate
-            and "roofRepairRelocationGroup ~= nil" in mutex_gate
-            and "roofRepairGroupFinalReturn ~= nil" in mutex_gate,
+            and "roofRefreshRelocationGroup ~= nil" in mutex_gate
+            and "roofRefreshGroupFinalReturn ~= nil" in mutex_gate,
             "roof/generation relocation service does not enforce the server-side bidirectional mutex",
         )
         checks.true(
             "function RV.Server.isGenerationTransactionActive" in server
-            and "function RV.Server.isRoofRepairTransactionActive" in server
+            and "function RV.Server.isRoofRefreshTransactionActive" in server
             and "function RV.Server.validateCurrentRVRecord" in server
-            and "function RV.Server.isRoofRepairTransactionActive(_rvId)" in server
+            and "function RV.Server.isRoofRefreshTransactionActive(_rvId)" in server
             and "active roof transaction must never be bypassed" in server
-            and "roof repair refresh is in progress" in server
+            and "roof refresh is in progress" in server
             and "another RV relocation or generation is in progress" in server,
             "server transaction mutex does not expose active roof/generation state and explicit rejection reasons",
         )
@@ -1670,30 +1670,30 @@ def main() -> int:
             adapter_mutex is not None
             and "serverTransactionMutexStatus" in adapter_mutex
             and "isGenerationTransactionActive" in adapter_mutex
-            and "isRoofRepairTransactionActive" in adapter_mutex
-            and "isRoofRepairTransactionActive, nil" in adapter_mutex
-            and "pendingWallRoofRepairs" in adapter_mutex
+            and "isRoofRefreshTransactionActive" in adapter_mutex
+            and "isRoofRefreshTransactionActive, nil" in adapter_mutex
+            and "pendingWallRoofRefreshes" in adapter_mutex
             and "INVALID_RV_DATA" in adapter_mutex
             and all(
                 token in railroader_server
                 for token in (
-                    "local roofBlocked, roofReason = roofRepairTransactionBlocks(record.rvId)",
-                    "local roofBlocked, roofReason = roofRepairTransactionBlocks(locoId)",
+                    "local roofBlocked, roofReason = roofRefreshTransactionBlocks(record.rvId)",
+                    "local roofBlocked, roofReason = roofRefreshTransactionBlocks(locoId)",
                 )
             ),
                 "all-player Enter/Exit paths do not honor the current RV roof transaction mutex",
         )
         roof_owner = section(
             railroader_server,
-            r"roofRepairOwnsPlayer = function",
+            r"roofRefreshOwnsPlayer = function",
             r"serverTransactionMutexStatus = function",
         )
         checks.true(
             roof_owner is not None
-            and "queuedRoofRepairClaims(identityKey)" in roof_owner
-            and "isRoofRepairTransactionActive" in roof_owner
+            and "queuedRoofRefreshClaims(identityKey)" in roof_owner
+            and "isRoofRefreshTransactionActive" in roof_owner
             and "roofActive ~= true" in roof_owner,
-            "adapter roof-owner gate confuses a generation claim with roof repair",
+            "adapter roof-owner gate confuses a generation claim with roof refresh",
         )
         checks.true(
             "local function currentGeometryGate" in railroader_server
@@ -1756,7 +1756,7 @@ def main() -> int:
             and "sentinelPosition" in railroader_server
             and "player left the temporary cell" in railroader_server
             and "sentinelRecordManifestConsistent" in railroader_server
-            and "queuedRoofRepairClaims" in railroader_server
+            and "queuedRoofRefreshClaims" in railroader_server
             and "for _, saved in pairs(pending.players or {})" in railroader_server
             and "sentinelWarn" in railroader_server
             and "relocation sentinel matched no current RV records" in railroader_server
@@ -1771,7 +1771,7 @@ def main() -> int:
         checks.true(
             sentinel_mutex is not None
             and "isGenerationTransactionActive" in sentinel_mutex
-            and "isRoofRepairTransactionActive" in sentinel_mutex
+            and "isRoofRefreshTransactionActive" in sentinel_mutex
             and "if generationActive or roofActive then return end" in sentinel_mutex,
             "stateless sentinel can race an active generation or roof transaction",
         )
@@ -1780,16 +1780,16 @@ def main() -> int:
             and "recoveryOnly" not in server
             and "RECOVERY_REQUIRED" not in server
             and "setGenerationRecoveryValidator" not in server
-            and "setRoofRepairRecoveryValidator" not in server
-            and "setRoofRepairRecoveryRepairer" not in server,
+            and "setRoofRefreshRecoveryValidator" not in server
+            and "setRoofRefreshRecoveryRepairer" not in server,
             "server still contains the retired restart-recovery state machine",
         )
         checks.true(
             "returnRepairDeadline" not in railroader_server
-            and "ROOF_REPAIR_RETURN_TIMEOUT_TICKS" not in railroader_server
-            and "repairRetryAtTick" in railroader_server
+            and "ROOF_REFRESH_RETURN_TIMEOUT_TICKS" not in railroader_server
+            and "refreshRetryAtTick" in railroader_server
             and "continuously required post-return step" in railroader_server,
-            "roof repair still exposes a fake return deadline instead of a retry cadence",
+            "roof refresh still exposes a fake return deadline instead of a retry cadence",
         )
         checks.true(
             "GENERATION_HALO_REFRESH_TICKS" in client
@@ -1808,51 +1808,51 @@ def main() -> int:
         )
         roof_return = section(
             server,
-            r"local function rollbackRoofRepairRelocation",
-            r"local function roofRepairGroupMatches",
+            r"local function rollbackRoofRefreshRelocation",
+            r"local function roofRefreshGroupMatches",
         )
         checks.true(
             roof_return is not None
-            and "currentPosition.z == ROOF_REPAIR_TEMP_Z" in roof_return
-            and "roof repair player remains at temporary z=-15" in roof_return
-            and "currentPosition.z ~= ROOF_REPAIR_TEMP_Z" in roof_return
+            and "currentPosition.z == ROOF_REFRESH_TEMP_Z" in roof_return
+            and "roof refresh player remains at temporary z=-15" in roof_return
+            and "currentPosition.z ~= ROOF_REFRESH_TEMP_Z" in roof_return
             and "token = pending.token" in roof_return,
             "roof return does not reject an authoritative player still at z=-15",
         )
         checks.true(
-            "keepRoofRepairFinalReturnAlive" in server
+            "keepRoofRefreshFinalReturnAlive" in server
             and "reason=authoritative-return-required" in server
             and "Boundary.beginTransition" in server
-            and "roof repair final return exhausted" not in server
-            and "roof repair group final return exhausted" not in server,
+            and "roof refresh final return exhausted" not in server
+            and "roof refresh group final return exhausted" not in server,
             "roof return failure can exhaust and discard its context instead of continuing in-memory return",
         )
         checks.true(
-            "server.completeRoofRepairRelocation" in railroader_server
-            and "roofRepairSquaresLoaded" in railroader_server
+            "server.completeRoofRefreshRelocation" in railroader_server
+            and "roofRefreshSquaresLoaded" in railroader_server
             and "pending.dueTicks[attempt] = now" in railroader_server
-            and "attempt * ROOF_REPAIR_DELAY_TICKS" in railroader_server
+            and "attempt * ROOF_REFRESH_DELAY_TICKS" in railroader_server
             and "originalPosition = copyPosition(position)" in railroader_server
-            and "beginRoofRepairRelocationGroup" in railroader_server
+            and "beginRoofRefreshRelocationGroup" in railroader_server
             and "remote-reload-return" in railroader_server
             and "pending.relocationStarted" in railroader_server,
             "Railroader adapter does not implement grouped remote reload, repair and captured-position return",
         )
         group_flow = section(
             railroader_server,
-            r"local function processPendingWallRoofRepairGroup",
-            r"beginRoofRepairPhase = function",
+            r"local function processPendingWallRoofRefreshGroup",
+            r"beginRoofRefreshPhase = function",
         )
         checks.true(
             group_flow is not None
-            and "server.completeRoofRepairRelocation" in group_flow
-            and "pcall(\n                    repairRoofForPlayer" in group_flow
-            and "repairWorldApplied" in group_flow
-            and "repairCompleted" in group_flow
+            and "server.completeRoofRefreshRelocation" in group_flow
+            and "pcall(\n                    refreshRoofForPlayer" in group_flow
+            and "refreshWorldApplied" in group_flow
+            and "refreshCompleted" in group_flow
             and "if not allCompleted then return end" in group_flow
-            and "completeRoofRepairRepair" in group_flow
-            and group_flow.find("server.completeRoofRepairRelocation")
-                < group_flow.find("server.roofRepairSquaresLoaded"),
+            and "completeRoofRefresh" in group_flow
+            and group_flow.find("server.completeRoofRefreshRelocation")
+                < group_flow.find("server.roofRefreshSquaresLoaded"),
             "group return does not complete per-player return before isolating repair callbacks",
         )
         checks.true(
@@ -1920,9 +1920,9 @@ def main() -> int:
                     "RELOCATION_SENTINEL_Z",
                     "RELOCATION_SENTINEL_INTERVAL_TICKS",
                     "RELOCATION_SENTINEL_RETRY_COOLDOWN_TICKS",
-                    "ROOF_REPAIR_REMOTE_OFFSET_X",
-                    "ROOF_REPAIR_REMOTE_OFFSET_Y",
-                    "ROOF_REPAIR_REMOTE_OFFSET_Z",
+                    "ROOF_REFRESH_REMOTE_OFFSET_X",
+                    "ROOF_REFRESH_REMOTE_OFFSET_Y",
+                    "ROOF_REFRESH_REMOTE_OFFSET_Z",
                     "INVALID_RV_DATA",
                 ))
                 and 'C.INVALID_RV_DATA = "RailroaderRVTest: RV data is invalid"' in constants,
@@ -2181,13 +2181,13 @@ def main() -> int:
                 and "protectionClass = protection.protectionClass" in world_objects
                 and "templateAnchorX = anchorX" in world_objects
                 and "templateIndex = entry.templateIndex" in world_objects
-                and "local expected = ProtectionManifest.worldEntry(templateIndex, anchor)" in template_repair
-                and "for templateIndex = 1, ProtectionManifest.OBJECT_COUNT do" in template_repair
-                and "local protected = protectionClass == ProtectionManifest.RESTORE_ONLY" in template_repair
-                and "or protectionClass == ProtectionManifest.PROHIBITED" in template_repair
-                and "tag.role ~= \"captured-template\"" in template_repair
+                and "local expected = ProtectionManifest.worldEntry(templateIndex, anchor)" in template_protection_repair
+                and "for templateIndex = 1, ProtectionManifest.OBJECT_COUNT do" in template_protection_repair
+                and "local protected = protectionClass == ProtectionManifest.RESTORE_ONLY" in template_protection_repair
+                and "or protectionClass == ProtectionManifest.PROHIBITED" in template_protection_repair
+                and "tag.role ~= \"captured-template\"" in template_protection_repair
                 and len(west_cab_wall_tiles) == 4
-                and "protectFromDemolition" not in layout + generation_build + world_objects + protected_demolition + template_repair,
+                and "protectFromDemolition" not in layout + generation_build + world_objects + protected_demolition + template_protection_repair,
                 "static protection classes do not flow through layout, generation, tags, client demolition, and repair",
             )
 
@@ -2590,7 +2590,7 @@ def main() -> int:
             )
 
         entry_generator_helper = section(
-            template_repair,
+            template_protection_repair,
             r"function Boundary\.ensureGeneratorForEntry\(player, record\)",
             r"local function compactQueue",
         )
@@ -2608,7 +2608,7 @@ def main() -> int:
                 and "if ambiguous then return false" in entry_generator_helper
                 and "if present then return true end" in entry_generator_helper
                 and entry_generator_helper.count("rollbackEntryGenerator") >= 2
-                and "generatorOnClickedSquare" not in template_repair,
+                and "generatorOnClickedSquare" not in template_protection_repair,
                 "entry generator repair does not require the committed current identity or roll back failed creation",
             )
         entry_existing_pos = entry_exit.find("local function enterExisting")
@@ -2838,7 +2838,7 @@ def main() -> int:
             wait_helper = section(
                 roof_destinations,
                 r"local function relocationPositionStillSyncing\(reason\)",
-                r"local function roofRepairPosition",
+                r"local function roofRefreshPosition",
             )
             checks.true(
                 wait_helper is not None,
@@ -3113,7 +3113,7 @@ def main() -> int:
                 "server stale-room guard is not cleaned after completion/timeout",
             )
             checks.true(
-                "ctx.roofRepairRelocationGroup ~= nil or ctx.roofRepairGroupFinalReturn ~= nil"
+                "ctx.roofRefreshRelocationGroup ~= nil or ctx.roofRefreshGroupFinalReturn ~= nil"
                 in server_guard_tick
                 and "pause only this non-transactional cleanup until the member returns"
                 in server_guard_tick,
@@ -3812,17 +3812,17 @@ def main() -> int:
         )
 
         cab_region = section(
-            template_repair,
+            template_protection_repair,
             r"local function isCabCoordinate",
             r"local function templateEntry",
         )
         cab_editable = section(
-            template_repair,
+            template_protection_repair,
             r"local function isCabEditableCoordinate",
             r"local function isRemovalScopeCoordinate",
         )
-        template_repair_index = section(
-            template_repair,
+        template_protection_repair_index = section(
+            template_protection_repair,
             r"local function buildRepairIndex",
             r"local function footprintAllowsRemoval",
         )
@@ -3850,19 +3850,19 @@ def main() -> int:
             and "index.cabEditableCoordinates[coordinate]" in cab_editable
             and "index.protectedCoordinates[coordinate]" in cab_editable
             and "return offsetX ~= Constants.CAB_MAX_OFFSET_X" in cab_editable
-            and template_repair_index is not None
-            and "for templateIndex = 1, ProtectionManifest.OBJECT_COUNT do" in template_repair_index
-            and "local protected = protectionClass == ProtectionManifest.RESTORE_ONLY" in template_repair_index
-            and "or protectionClass == ProtectionManifest.PROHIBITED" in template_repair_index
-            and "if not protected then" in template_repair_index
-            and "index.cabEditableCoordinates[coordinateKey(expected.x," in template_repair_index
-            and "function Boundary.sampleBuildGuardPlayer" in template_repair
-            and "for offsetY = -1, 1 do" in template_repair
-            and "for offsetX = -1, 1 do" in template_repair
-            and "enqueueTile(queue, x, y)" in template_repair
-            and "function Boundary.processBuildGuardQueue" in template_repair
-            and "local entry = popTile(selected.queue)" in template_repair
-            and "capturedClasses[captured.class] = true" in template_repair
+            and template_protection_repair_index is not None
+            and "for templateIndex = 1, ProtectionManifest.OBJECT_COUNT do" in template_protection_repair_index
+            and "local protected = protectionClass == ProtectionManifest.RESTORE_ONLY" in template_protection_repair_index
+            and "or protectionClass == ProtectionManifest.PROHIBITED" in template_protection_repair_index
+            and "if not protected then" in template_protection_repair_index
+            and "index.cabEditableCoordinates[coordinateKey(expected.x," in template_protection_repair_index
+            and "function Boundary.sampleTemplateProtectionRepairPlayer" in template_protection_repair
+            and "for offsetY = -1, 1 do" in template_protection_repair
+            and "for offsetX = -1, 1 do" in template_protection_repair
+            and "enqueueTile(queue, x, y)" in template_protection_repair
+            and "function Boundary.processTemplateProtectionRepairQueue" in template_protection_repair
+            and "local entry = popTile(selected.queue)" in template_protection_repair
+            and "capturedClasses[captured.class] = true" in template_protection_repair
             and player_build_policy is not None
             and "CAB_MIN_OFFSET_X" in player_build_policy
             and "CAB_MAX_OFFSET_X" in player_build_policy
@@ -3873,27 +3873,27 @@ def main() -> int:
         )
 
         building_object_classes = section(
-            template_repair,
+            template_protection_repair,
             r"local buildingObjectClasses = {",
             r"local structuralSpriteFlagNames",
         )
         plain_structural = section(
-            template_repair,
+            template_protection_repair,
             r"local function isStructuralPlainObject",
             r"local function objectAtCoordinate",
         )
         structural_flags = section(
-            template_repair,
+            template_protection_repair,
             r"local function hasStructuralSpriteFlag",
             r"local function hasStructuralObjectType",
         )
         structural_types = section(
-            template_repair,
+            template_protection_repair,
             r"local function hasStructuralObjectType",
             r"local function isStructuralPlainObject",
         )
         protected_candidate = section(
-            template_repair,
+            template_protection_repair,
             r"local function isProtectedBuildingCandidate",
             r"local function isWhitelistedTemplateObject",
         )

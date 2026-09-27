@@ -58,10 +58,10 @@ if not bitmapLoaded or type(Bitmap) ~= "table" then
     Bitmap = nil
     print("[RailroaderRVTest] RV bitmap contract unavailable")
 end
-local roofRepairOk, RoofRepair = pcall(require, "RailroaderRV/RV_RoofRepair")
-if not roofRepairOk or type(RoofRepair) ~= "table"
-    or type(RoofRepair.run) ~= "function" then
-    RoofRepair = nil
+local roofRefreshOk, RoofRefresh = pcall(require, "RailroaderRV/RV_RoofRefresh")
+if not roofRefreshOk or type(RoofRefresh) ~= "table"
+    or type(RoofRefresh.run) ~= "function" then
+    RoofRefresh = nil
 end
 
 local RV = rawget(_G, "RailroaderRV") or {}
@@ -84,10 +84,10 @@ local pendingGeneration = nil
 -- RV scope as one transaction.  The target is derived from the current
 -- bitmap/layout center and offset by the current contract vector; it is not a
 -- persisted coordinate or a client-provided destination.
-local roofRepairRelocationGroup = nil
-local roofRepairGroupFailure = nil
-local roofRepairGroupFinalReturn = nil
-local roofRepairGroupSerial = 0
+local roofRefreshRelocationGroup = nil
+local roofRefreshGroupFailure = nil
+local roofRefreshGroupFinalReturn = nil
+local roofRefreshGroupSerial = 0
 local pendingSerial = 0
 local serverTick = 0
 local roomOwnershipGuards = {}
@@ -108,13 +108,13 @@ end
 local RELOCATION_MIN_TICKS = 3
 local RELOCATION_POST_ACK_TICKS = 2
 local RELOCATION_TIMEOUT_TICKS = 600
-local ROOF_REPAIR_RETURN_RETRY_TICKS = 5
+local ROOF_REFRESH_RETURN_RETRY_TICKS = 5
 local ROOF_RELOCATION_RETRY_TICKS = 5
 local GENERATION_RELOCATION_RETRY_TICKS = 5
-local ROOF_REPAIR_REMOTE_OFFSET_X = Constants.ROOF_REPAIR_REMOTE_OFFSET_X
-local ROOF_REPAIR_REMOTE_OFFSET_Y = Constants.ROOF_REPAIR_REMOTE_OFFSET_Y
-local ROOF_REPAIR_REMOTE_OFFSET_Z = Constants.ROOF_REPAIR_REMOTE_OFFSET_Z
-local ROOF_REPAIR_TEMP_Z = Constants.RELOCATION_SENTINEL_Z
+local ROOF_REFRESH_REMOTE_OFFSET_X = Constants.ROOF_REFRESH_REMOTE_OFFSET_X
+local ROOF_REFRESH_REMOTE_OFFSET_Y = Constants.ROOF_REFRESH_REMOTE_OFFSET_Y
+local ROOF_REFRESH_REMOTE_OFFSET_Z = Constants.ROOF_REFRESH_REMOTE_OFFSET_Z
+local ROOF_REFRESH_TEMP_Z = Constants.RELOCATION_SENTINEL_Z
 local GENERATION_STAGING_Z = Constants.RELOCATION_SENTINEL_Z
 
 -- IsoRegions does not expose a Lua callback for completion of its asynchronous
@@ -147,7 +147,7 @@ local ctx = {
     Constants = Constants,
     Boundary = Boundary,
     Bitmap = Bitmap,
-    RoofRepair = RoofRepair,
+    RoofRefresh = RoofRefresh,
     RV = RV,
     ServerUtil = ServerUtil,
     ServerWorld = ServerWorld,
@@ -156,10 +156,10 @@ local ctx = {
     transactionBusy = transactionBusy,
     transactionPlayer = transactionPlayer,
     pendingGeneration = pendingGeneration,
-    roofRepairRelocationGroup = roofRepairRelocationGroup,
-    roofRepairGroupFailure = roofRepairGroupFailure,
-    roofRepairGroupFinalReturn = roofRepairGroupFinalReturn,
-    roofRepairGroupSerial = roofRepairGroupSerial,
+    roofRefreshRelocationGroup = roofRefreshRelocationGroup,
+    roofRefreshGroupFailure = roofRefreshGroupFailure,
+    roofRefreshGroupFinalReturn = roofRefreshGroupFinalReturn,
+    roofRefreshGroupSerial = roofRefreshGroupSerial,
     pendingSerial = pendingSerial,
     serverTick = serverTick,
     roomOwnershipGuards = roomOwnershipGuards,
@@ -168,13 +168,13 @@ local ctx = {
     RELOCATION_MIN_TICKS = RELOCATION_MIN_TICKS,
     RELOCATION_POST_ACK_TICKS = RELOCATION_POST_ACK_TICKS,
     RELOCATION_TIMEOUT_TICKS = RELOCATION_TIMEOUT_TICKS,
-    ROOF_REPAIR_RETURN_RETRY_TICKS = ROOF_REPAIR_RETURN_RETRY_TICKS,
+    ROOF_REFRESH_RETURN_RETRY_TICKS = ROOF_REFRESH_RETURN_RETRY_TICKS,
     ROOF_RELOCATION_RETRY_TICKS = ROOF_RELOCATION_RETRY_TICKS,
     GENERATION_RELOCATION_RETRY_TICKS = GENERATION_RELOCATION_RETRY_TICKS,
-    ROOF_REPAIR_REMOTE_OFFSET_X = ROOF_REPAIR_REMOTE_OFFSET_X,
-    ROOF_REPAIR_REMOTE_OFFSET_Y = ROOF_REPAIR_REMOTE_OFFSET_Y,
-    ROOF_REPAIR_REMOTE_OFFSET_Z = ROOF_REPAIR_REMOTE_OFFSET_Z,
-    ROOF_REPAIR_TEMP_Z = ROOF_REPAIR_TEMP_Z,
+    ROOF_REFRESH_REMOTE_OFFSET_X = ROOF_REFRESH_REMOTE_OFFSET_X,
+    ROOF_REFRESH_REMOTE_OFFSET_Y = ROOF_REFRESH_REMOTE_OFFSET_Y,
+    ROOF_REFRESH_REMOTE_OFFSET_Z = ROOF_REFRESH_REMOTE_OFFSET_Z,
+    ROOF_REFRESH_TEMP_Z = ROOF_REFRESH_TEMP_Z,
     GENERATION_STAGING_Z = GENERATION_STAGING_Z,
     ROOM_OWNERSHIP_MIN_TICKS = ROOM_OWNERSHIP_MIN_TICKS,
     ROOM_OWNERSHIP_STABLE_TICKS = ROOM_OWNERSHIP_STABLE_TICKS,
@@ -189,7 +189,7 @@ require("RailroaderRV/RV_Server_GenerationBuild")(ctx)
 require("RailroaderRV/RV_Server_PlayerValidation")(ctx)
 require("RailroaderRV/RV_Server_LayoutBuilder")(ctx)
 require("RailroaderRV/RV_Server_ManifestValidation")(ctx)
-require("RailroaderRV/RV_Server_TemplateRepair")(ctx)
+require("RailroaderRV/RV_Server_TemplateProtectionRepair")(ctx)
 require("RailroaderRV/RV_Server_RoofDestinations")(ctx)
 require("RailroaderRV/RV_Server_RoofRelocation")(ctx)
 require("RailroaderRV/RV_Server_RoofApi")(ctx)

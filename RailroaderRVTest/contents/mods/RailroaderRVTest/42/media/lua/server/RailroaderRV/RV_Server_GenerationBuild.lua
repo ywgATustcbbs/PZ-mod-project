@@ -37,9 +37,6 @@ local function setManifestState(manifest, state, reason)
     if reason then
         manifest.lastError = safeErrorText(reason)
     end
-    if ModData and type(ModData.transmit) == "function" then
-        pcall(ModData.transmit, MANIFEST_KEY)
-    end
 end
 
 local function manifestTable()
@@ -58,9 +55,6 @@ local function setGenerationPhase(manifest, generation, phase)
         manifest.phase = phase
         manifest.phaseGeneration = generation
         manifest.phaseUpdatedAt = math.floor(os.time())
-        if ModData and type(ModData.transmit) == "function" then
-            pcall(ModData.transmit, MANIFEST_KEY)
-        end
     end
     print("[RailroaderRVTest] generation=" .. tostring(generation)
         .. " phase=" .. tostring(phase))

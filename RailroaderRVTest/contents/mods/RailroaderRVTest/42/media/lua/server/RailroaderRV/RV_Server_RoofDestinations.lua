@@ -10,10 +10,10 @@ local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local function requireCurrentManifest(...) return ctx.requireCurrentManifest(...) end
-local ROOF_REPAIR_REMOTE_OFFSET_X = ctx.ROOF_REPAIR_REMOTE_OFFSET_X
-local ROOF_REPAIR_REMOTE_OFFSET_Y = ctx.ROOF_REPAIR_REMOTE_OFFSET_Y
-local ROOF_REPAIR_REMOTE_OFFSET_Z = ctx.ROOF_REPAIR_REMOTE_OFFSET_Z
-local ROOF_REPAIR_TEMP_Z = ctx.ROOF_REPAIR_TEMP_Z
+local ROOF_REFRESH_REMOTE_OFFSET_X = ctx.ROOF_REFRESH_REMOTE_OFFSET_X
+local ROOF_REFRESH_REMOTE_OFFSET_Y = ctx.ROOF_REFRESH_REMOTE_OFFSET_Y
+local ROOF_REFRESH_REMOTE_OFFSET_Z = ctx.ROOF_REFRESH_REMOTE_OFFSET_Z
+local ROOF_REFRESH_TEMP_Z = ctx.ROOF_REFRESH_TEMP_Z
 local GENERATION_STAGING_Z = ctx.GENERATION_STAGING_Z
 local WORLD_MIN_Z = ctx.WORLD_MIN_Z
 local WORLD_MAX_Z = ctx.WORLD_MAX_Z
@@ -57,7 +57,7 @@ local function squareIsSafeForRelocation(square, countCharacters)
     return true
 end
 
-local function squareHasRoofRepairOccupant(square, allowedPlayers)
+local function squareHasRoofRefreshOccupant(square, allowedPlayers)
     if not square then return true end
     local collections = {
         "getObjects", "getSpecialObjects", "getStaticMovingObjects",
@@ -101,9 +101,9 @@ end
 -- The remote experiment may land on a layer without an ordinary floor. Still
 -- reject any room/vehicle/object occupancy; if the engine presents a normal
 -- solid floor, retain the stricter shared relocation check above.
-local function roofRepairTemporarySquareSafe(square, allowedPlayers)
+local function roofRefreshTemporarySquareSafe(square, allowedPlayers)
     if squareIsSafeForRelocation(square, false) then return true end
-    if not square or squareHasRoofRepairOccupant(square, allowedPlayers) then
+    if not square or squareHasRoofRefreshOccupant(square, allowedPlayers) then
         return false
     end
     local roomOk, room = ServerUtil.invoke(square, "getRoom")
@@ -199,16 +199,16 @@ local function relocationPositionStillSyncing(reason)
         or reason == "server player current square does not match relocation destination"
 end
 
-local function roofRepairPosition(position, label)
+local function roofRefreshPosition(position, label)
     if type(position) ~= "table" then
-        error("RailroaderRVTest: roof repair " .. tostring(label)
+        error("RailroaderRVTest: roof refresh " .. tostring(label)
             .. " position is unavailable")
     end
-    local x = ServerUtil.requiredNumber(position.x, "roof repair " .. tostring(label) .. " x")
-    local y = ServerUtil.requiredNumber(position.y, "roof repair " .. tostring(label) .. " y")
-    local z = ServerUtil.requiredNumber(position.z, "roof repair " .. tostring(label) .. " z")
+    local x = ServerUtil.requiredNumber(position.x, "roof refresh " .. tostring(label) .. " x")
+    local y = ServerUtil.requiredNumber(position.y, "roof refresh " .. tostring(label) .. " y")
+    local z = ServerUtil.requiredNumber(position.z, "roof refresh " .. tostring(label) .. " z")
     if z < WORLD_MIN_Z or z > WORLD_MAX_Z then
-        error("RailroaderRVTest: roof repair " .. tostring(label)
+        error("RailroaderRVTest: roof refresh " .. tostring(label)
             .. " z is outside the legal world range")
     end
     -- Keep the exact finite server position in the transaction.  Bitmap and
@@ -217,16 +217,16 @@ local function roofRepairPosition(position, label)
     return { x = x, y = y, z = z }
 end
 
-local function roofRepairWorldCoordinateValid(destination)
+local function roofRefreshWorldCoordinateValid(destination)
     local worldOk, world = ServerUtil.callGlobal("getWorld")
     if not worldOk or not world then
-        return false, "roof repair world is unavailable"
+        return false, "roof refresh world is unavailable"
     end
     local validOk, valid = ServerUtil.invoke(world, "isValidSquare",
         math.floor(destination.x), math.floor(destination.y),
         math.floor(destination.z))
     if not validOk or valid ~= true then
-        return false, "roof repair relocation target is outside the legal world"
+        return false, "roof refresh relocation target is outside the legal world"
     end
     return true
 end
@@ -236,7 +236,7 @@ end
 -- geometry.  Rechecking the current manifest
 -- here keeps the generic relocation bridge safe if a generation changes between
 -- the wall event and the next server tick.
-local function currentRoofRepairContext(player, request)
+local function currentRoofRefreshContext(player, request)
     local requestGeneration = type(request) == "table"
         and ServerUtil.integer(request.generation) or nil
     local requestBitmapVersion = type(request) == "table"
@@ -251,7 +251,7 @@ local function currentRoofRepairContext(player, request)
         return false, "RV boundary service is unavailable"
     end
     local boundaryOk, boundary, record, relation, boundaryIdentity = pcall(
-        Boundary.boundaryForPlayer, player)
+        Boundary.boundaryForPlayer, player, nil, false, false, true)
     if not boundaryOk or type(boundary) ~= "table"
         or type(record) ~= "table" or type(relation) ~= "table"
         or type(boundaryIdentity) ~= "table" then
@@ -319,23 +319,23 @@ local function currentRoofRepairContext(player, request)
     }
 end
 
-local function roofRepairDestination(context, request)
+local function roofRefreshDestination(context, request)
     local bitmap = context and context.bitmap
     if type(bitmap) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
     local phase = tostring(request.phase or "")
     if phase == "temporary" then
-        local width = ServerUtil.requiredInteger(bitmap.width, "roof repair bitmap width")
-        local height = ServerUtil.requiredInteger(bitmap.height, "roof repair bitmap height")
-        local originX = ServerUtil.requiredInteger(bitmap.originX, "roof repair bitmap originX")
-        local originY = ServerUtil.requiredInteger(bitmap.originY, "roof repair bitmap originY")
+        local width = ServerUtil.requiredInteger(bitmap.width, "roof refresh bitmap width")
+        local height = ServerUtil.requiredInteger(bitmap.height, "roof refresh bitmap height")
+        local originX = ServerUtil.requiredInteger(bitmap.originX, "roof refresh bitmap originX")
+        local originY = ServerUtil.requiredInteger(bitmap.originY, "roof refresh bitmap originY")
         if width ~= Constants.RV_MANAGED_WIDTH
             or height ~= Constants.RV_MANAGED_HEIGHT then
             return false, Constants.INVALID_RV_DATA
         end
         local centerZ = ServerUtil.requiredInteger(bitmap.minZ,
-            "roof repair bitmap center z")
+            "roof refresh bitmap center z")
         if centerZ < WORLD_MIN_Z or centerZ > WORLD_MAX_Z then
             return false, Constants.INVALID_RV_DATA
         end
@@ -346,10 +346,10 @@ local function roofRepairDestination(context, request)
         -- edge/staging square.
         local destination = {
             x = originX + math.floor(width / 2)
-                - ROOF_REPAIR_REMOTE_OFFSET_X,
+                - ROOF_REFRESH_REMOTE_OFFSET_X,
             y = originY + math.floor(height / 2)
-                - ROOF_REPAIR_REMOTE_OFFSET_Y,
-            z = centerZ - ROOF_REPAIR_REMOTE_OFFSET_Z,
+                - ROOF_REFRESH_REMOTE_OFFSET_Y,
+            z = centerZ - ROOF_REFRESH_REMOTE_OFFSET_Z,
         }
         if destination.z < WORLD_MIN_Z or destination.z > WORLD_MAX_Z then
             return false, Constants.INVALID_RV_DATA
@@ -357,33 +357,33 @@ local function roofRepairDestination(context, request)
         return true, destination
     end
     if phase ~= "return" then
-        return false, "roof repair relocation phase is invalid"
+        return false, "roof refresh relocation phase is invalid"
     end
-    local destinationOk, destination = pcall(roofRepairPosition,
+    local destinationOk, destination = pcall(roofRefreshPosition,
         request.returnPosition, "return")
     if not destinationOk then return false, Constants.INVALID_RV_DATA end
     local x, y, z = math.floor(destination.x), math.floor(destination.y),
         math.floor(destination.z)
     if not Bitmap.containsScope(bitmap, x, y, z)
         or not Bitmap.isActive(bitmap, x, y, z) then
-        return false, "roof repair return position is not current active RV geometry"
+        return false, "roof refresh return position is not current active RV geometry"
     end
     return true, destination
 end
 
-local function playerAtRoofRepairDestination(player, destination,
+local function playerAtRoofRefreshDestination(player, destination,
     allowMissingSquare)
     local playerOk, positionOrReason = validateAuthoritativePlayer(player)
     if not playerOk then return false, positionOrReason end
     if math.floor(positionOrReason.x) ~= math.floor(destination.x)
         or math.floor(positionOrReason.y) ~= math.floor(destination.y)
         or math.floor(positionOrReason.z) ~= math.floor(destination.z) then
-        return false, "server player has not reached the roof repair destination"
+        return false, "server player has not reached the roof refresh destination"
     end
     local squareOk, current = ServerUtil.invoke(player, "getCurrentSquare")
     if not squareOk or current == nil then
         if allowMissingSquare then return true end
-        return false, "server player has no current square after roof repair relocation"
+        return false, "server player has no current square after roof refresh relocation"
     end
     local xOk, x = ServerUtil.invoke(current, "getX")
     local yOk, y = ServerUtil.invoke(current, "getY")
@@ -393,7 +393,7 @@ local function playerAtRoofRepairDestination(player, destination,
         or ServerUtil.toNumber(y) ~= math.floor(destination.y)
         or ServerUtil.toNumber(z) ~= math.floor(destination.z) then
         return false,
-            "server player current square does not match roof repair destination"
+            "server player current square does not match roof refresh destination"
     end
     return true, current
 end
@@ -404,7 +404,7 @@ end
 -- values through the official setters after every grouped move.  The client
 -- ACK remains token-only; these setters are server-owned and are followed by
 -- the normal position/current-square proof.
-local function applyRoofRepairTeleport(player, target, temporary)
+local function applyRoofRefreshTeleport(player, target, temporary)
     if type(target) ~= "table"
         or type(target.x) ~= "number" or type(target.y) ~= "number"
         or type(target.z) ~= "number" then
@@ -420,15 +420,15 @@ local function applyRoofRepairTeleport(player, target, temporary)
         and ServerUtil.callSucceeded(player, "setLastY", y)
 end
 
-local function roofRepairTargetReady(player, destination, phase, allowedPlayers)
+local function roofRefreshTargetReady(player, destination, phase, allowedPlayers)
     -- Both grouped phases can cross a chunk boundary.  On the return hop the
     -- original RV chunk may still be streaming, so the server may have the
     -- exact authoritative x/y/z and a valid token ACK before its current
     -- square is rebound.  Keep the group lease in force; the later
-    -- completeRoofRepairRelocation/roofRepairSquaresLoaded gates still require
-    -- the normal loaded-square proof before repair is released.
+    -- completeRoofRefreshRelocation/roofRefreshSquaresLoaded gates still require
+    -- the normal loaded-square proof before the roof refresh is released.
     local allowMissingSquare = type(allowedPlayers) == "table"
-    local atDestination, destinationReason = playerAtRoofRepairDestination(
+    local atDestination, destinationReason = playerAtRoofRefreshDestination(
         player, destination, allowMissingSquare)
     if not atDestination then return false, destinationReason end
     if phase ~= "temporary" then return true end
@@ -443,31 +443,31 @@ local function roofRepairTargetReady(player, destination, phase, allowedPlayers)
         local square = ServerWorld.getSquare(cell, math.floor(destination.x),
             math.floor(destination.y), math.floor(destination.z))
         if not square then return true end
-        if not roofRepairTemporarySquareSafe(square, allowedPlayers) then
-            return false, "roof repair temporary destination is still room geometry"
+        if not roofRefreshTemporarySquareSafe(square, allowedPlayers) then
+            return false, "roof refresh temporary destination is still room geometry"
         end
         return true
     end
     local cellOk, cell = pcall(ServerWorld.getCellForPlayer, player)
     if not cellOk or not cell then
-        return false, "roof repair temporary destination cell is not loaded"
+        return false, "roof refresh temporary destination cell is not loaded"
     end
     local square = ServerWorld.getSquare(cell, math.floor(destination.x),
         math.floor(destination.y), math.floor(destination.z))
     if not square then
-        return false, "roof repair temporary destination square is not loaded"
+        return false, "roof refresh temporary destination square is not loaded"
     end
     -- The temporary move is only considered complete after the player has left
     -- the dynamic room geometry.  A wall-removal callback can arrive before
     -- IsoRegions has retired the old room, so this remains a retryable status
     -- until the bounded relocation timeout expires.
-    if not roofRepairTemporarySquareSafe(square, allowedPlayers) then
-        return false, "roof repair temporary destination is still room geometry"
+    if not roofRefreshTemporarySquareSafe(square, allowedPlayers) then
+        return false, "roof refresh temporary destination is still room geometry"
     end
     return true
 end
 
-local function copyRoofRepairPosition(position)
+local function copyRoofRefreshPosition(position)
     if type(position) ~= "table" then return nil end
     local x, y, z = ServerUtil.toNumber(position.x), ServerUtil.toNumber(position.y),
         ServerUtil.toNumber(position.z)
@@ -481,7 +481,7 @@ end
 -- return attempt.  No client coordinate is accepted and no old mapping or
 -- geometry can be used as a fallback.  This gate deliberately re-reads the
 -- current boundary/manifest identity so a stale transaction fails closed.
-local function validatedRoofRepairReturn(pending)
+local function validatedRoofRefreshReturn(pending)
     if type(pending) ~= "table" or not pending.player
         or not pending.identity then
         return false, Constants.INVALID_RV_DATA
@@ -491,15 +491,15 @@ local function validatedRoofRepairReturn(pending)
     local livePlayer = livePlayerOrReason
     local identityOk, identityOrReason = playerIdentity(livePlayer)
     if not identityOk or identityOrReason.key ~= pending.identity.key then
-        return false, identityOk and "roof repair return identity changed"
+        return false, identityOk and "roof refresh return identity changed"
             or identityOrReason
     end
-    local contextOk, contextOrReason = currentRoofRepairContext(livePlayer,
+    local contextOk, contextOrReason = currentRoofRefreshContext(livePlayer,
         { rvId = pending.rvId, generation = pending.generation,
             bitmapVersion = pending.bitmapVersion,
             identityKey = identityOrReason.key })
     if not contextOk then return false, contextOrReason end
-    local returnPosition = copyRoofRepairPosition(pending.returnPosition)
+    local returnPosition = copyRoofRefreshPosition(pending.returnPosition)
     if not returnPosition then return false, Constants.INVALID_RV_DATA end
     local returnX, returnY, returnZ = math.floor(returnPosition.x),
         math.floor(returnPosition.y), math.floor(returnPosition.z)
@@ -507,7 +507,7 @@ local function validatedRoofRepairReturn(pending)
         returnZ)
         or not Bitmap.isActive(contextOrReason.bitmap, returnX, returnY,
             returnZ) then
-        return false, "roof repair return position is not current active RV geometry"
+        return false, "roof refresh return position is not current active RV geometry"
     end
     return true, {
         identity = identityOrReason,
@@ -521,13 +521,13 @@ end
 -- schema changes.  It never edits ModData or world objects.  The client gets
 -- the same server-authored RVTeleport bridge used by normal entry/exit, while
 -- the authoritative server object is moved first/alongside it.
-local function rollbackRoofRepairRelocation(pending)
+local function rollbackRoofRefreshRelocation(pending)
     if type(pending) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
-    local targetOk, targetOrReason = validatedRoofRepairReturn(pending)
+    local targetOk, targetOrReason = validatedRoofRefreshReturn(pending)
     if not targetOk then
-        print("[RailroaderRVTest] roof repair rollback refused room="
+        print("[RailroaderRVTest] roof refresh rollback refused room="
             .. tostring(pending.roomKey or "unknown") .. " reason="
             .. safeErrorText(targetOrReason))
         return false, targetOrReason
@@ -540,16 +540,16 @@ local function rollbackRoofRepairRelocation(pending)
         tryAuthoritativePlayerPosition(player)
     if not liveCallOk or type(livePositionOrReason) ~= "table" then
         local reason = livePositionOrReason
-        print("[RailroaderRVTest] roof repair rollback refused room="
+        print("[RailroaderRVTest] roof refresh rollback refused room="
             .. tostring(pending.roomKey or "unknown") .. " reason="
             .. safeErrorText(reason) .. " return="
             .. tostring(returnPosition.x) .. "," .. tostring(returnPosition.y)
             .. "," .. tostring(returnPosition.z))
         return false, reason
     end
-    local worldOk, worldReason = roofRepairWorldCoordinateValid(returnPosition)
+    local worldOk, worldReason = roofRefreshWorldCoordinateValid(returnPosition)
     if not worldOk then
-        print("[RailroaderRVTest] roof repair rollback refused room="
+        print("[RailroaderRVTest] roof refresh rollback refused room="
             .. tostring(pending.roomKey or "unknown") .. " reason="
             .. safeErrorText(worldReason) .. " return=" .. tostring(returnPosition.x)
             .. "," .. tostring(returnPosition.y) .. ","
@@ -559,7 +559,7 @@ local function rollbackRoofRepairRelocation(pending)
 
     local payload = {
         ok = true,
-        action = "roof-repair-cancel",
+        action = "roof-refresh-cancel",
         token = pending.token,
         onlineId = identity.onlineId,
         rvId = tostring(pending.rvId),
@@ -571,13 +571,13 @@ local function rollbackRoofRepairRelocation(pending)
     }
     local sentOk = ServerUtil.callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
         COMMAND_RELOCATE, payload)
-    local moved = applyRoofRepairTeleport(player, returnPosition, false)
+    local moved = applyRoofRefreshTeleport(player, returnPosition, false)
     -- A successful teleport call is not enough: the authoritative object must
     -- have actually left the remote z=-15 target and be back on the exact
     -- server-captured active square before the lease/context may be retired.
     local positionOk, currentPosition = authoritativePlayerPosition(player)
     local atCapturedReturn = positionOk
-        and currentPosition.z ~= ROOF_REPAIR_TEMP_Z
+        and currentPosition.z ~= ROOF_REFRESH_TEMP_Z
         and currentPosition.x == returnPosition.x
         and currentPosition.y == returnPosition.y
         and currentPosition.z == returnPosition.z
@@ -594,7 +594,7 @@ local function rollbackRoofRepairRelocation(pending)
     -- The bounded/async final-return owner retries this same current-schema
     -- context instead of stranding the player after a finite retry budget.
     local rolledBack = sentOk and moved and atCapturedReturn and leaseComplete
-    print("[RailroaderRVTest] roof repair rollback room="
+    print("[RailroaderRVTest] roof refresh rollback room="
         .. tostring(pending.roomKey or "unknown") .. " result="
         .. (rolledBack and "complete" or "failed") .. " current="
         .. tostring(livePositionOrReason.x) .. "," .. tostring(livePositionOrReason.y) .. ","
@@ -602,29 +602,29 @@ local function rollbackRoofRepairRelocation(pending)
         .. "," .. tostring(returnPosition.y) .. ","
         .. tostring(returnPosition.z))
     if rolledBack then return true end
-    if currentPosition and currentPosition.z == ROOF_REPAIR_TEMP_Z then
-        return false, "roof repair player remains at temporary z=-15"
+    if currentPosition and currentPosition.z == ROOF_REFRESH_TEMP_Z then
+        return false, "roof refresh player remains at temporary z=-15"
     end
     if not atCapturedReturn then
-        return false, "roof repair player has not reached the captured return square"
+        return false, "roof refresh player has not reached the captured return square"
     end
     if not leaseComplete then
-        return false, "roof repair boundary transition could not be completed"
+        return false, "roof refresh boundary transition could not be completed"
     end
-    return false, "roof repair return command or authoritative teleport failed"
+    return false, "roof refresh return command or authoritative teleport failed"
 end
 
 
 ctx.selectGenerationStagingDestination = selectGenerationStagingDestination
 ctx.playerIsAtStagingDestination = playerIsAtStagingDestination
 ctx.relocationPositionStillSyncing = relocationPositionStillSyncing
-ctx.roofRepairPosition = roofRepairPosition
-ctx.roofRepairWorldCoordinateValid = roofRepairWorldCoordinateValid
-ctx.currentRoofRepairContext = currentRoofRepairContext
-ctx.roofRepairDestination = roofRepairDestination
-ctx.playerAtRoofRepairDestination = playerAtRoofRepairDestination
-ctx.applyRoofRepairTeleport = applyRoofRepairTeleport
-ctx.roofRepairTargetReady = roofRepairTargetReady
-ctx.copyRoofRepairPosition = copyRoofRepairPosition
-ctx.rollbackRoofRepairRelocation = rollbackRoofRepairRelocation
+ctx.roofRefreshPosition = roofRefreshPosition
+ctx.roofRefreshWorldCoordinateValid = roofRefreshWorldCoordinateValid
+ctx.currentRoofRefreshContext = currentRoofRefreshContext
+ctx.roofRefreshDestination = roofRefreshDestination
+ctx.playerAtRoofRefreshDestination = playerAtRoofRefreshDestination
+ctx.applyRoofRefreshTeleport = applyRoofRefreshTeleport
+ctx.roofRefreshTargetReady = roofRefreshTargetReady
+ctx.copyRoofRefreshPosition = copyRoofRefreshPosition
+ctx.rollbackRoofRefreshRelocation = rollbackRoofRefreshRelocation
 end

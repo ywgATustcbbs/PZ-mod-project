@@ -186,7 +186,7 @@ if ISCollapsableWindow then
             AddBattery = "Add battery", RemoveBattery = "Remove battery",
             InstallCharger = "Install charger", RemoveCharger = "Remove charger",
             InstallInverter = "Install inverter", RemoveInverter = "Remove inverter",
-            RefreshDevices = "刷新用电设备",
+            RefreshDevices = "Refresh devices",
         }
         for index, entry in ipairs(buttons) do
             local row = math.floor((index - 1) / 3)

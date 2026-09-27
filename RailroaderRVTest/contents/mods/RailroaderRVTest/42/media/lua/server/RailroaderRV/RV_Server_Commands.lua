@@ -29,8 +29,8 @@ local validateGenerationPermission = ctx.validateGenerationPermission
 local resolvePendingPlayer = ctx.resolvePendingPlayer
 local playerIsAtStagingDestination = ctx.playerIsAtStagingDestination
 local relocationPositionStillSyncing = ctx.relocationPositionStillSyncing
-local processRoofRepairGroupFinalReturn = ctx.processRoofRepairGroupFinalReturn
-local keepRoofRepairTransitionAlive = ctx.keepRoofRepairTransitionAlive
+local processRoofRefreshGroupFinalReturn = ctx.processRoofRefreshGroupFinalReturn
+local keepRoofRefreshTransitionAlive = ctx.keepRoofRefreshTransitionAlive
 local validateRequest = ctx.validateRequest
 local generateForPlayer = ctx.generateForPlayer
 local finalizeGenerationAfterRelocate = ctx.finalizeGenerationAfterRelocate
@@ -38,7 +38,7 @@ local queueGeneration = ctx.queueGeneration
 local acknowledgeRelocation = ctx.acknowledgeRelocation
 local acknowledgeFinalRelocation = ctx.acknowledgeFinalRelocation
 local cancelPending = ctx.cancelPending
-local processRoofRepairRelocationGroup = ctx.processRoofRepairRelocationGroup
+local processRoofRefreshRelocationGroup = ctx.processRoofRefreshRelocationGroup
 
 function RV.Server.OnTick()
     ctx.serverTick = ctx.serverTick + 1
@@ -47,14 +47,14 @@ function RV.Server.OnTick()
     -- roof transaction may temporarily place the player outside the active
     -- bitmap while the engine settles room state; correction must stay paused
     -- for that bounded transaction only.
-    if not keepRoofRepairTransitionAlive() then return end
+    if not keepRoofRefreshTransitionAlive() then return end
     if not keepGenerationTransitionAlive() then return end
     if Boundary and type(Boundary.onTick) == "function" then
         pcall(Boundary.onTick)
     end
     processServerRoomOwnershipGuards()
-    processRoofRepairRelocationGroup()
-    processRoofRepairGroupFinalReturn()
+    processRoofRefreshRelocationGroup()
+    processRoofRefreshGroupFinalReturn()
     if UtilityServer and type(UtilityServer.onTick) == "function" then
         local utilityOk, utilityError = pcall(UtilityServer.onTick, ctx.serverTick)
         if not utilityOk then

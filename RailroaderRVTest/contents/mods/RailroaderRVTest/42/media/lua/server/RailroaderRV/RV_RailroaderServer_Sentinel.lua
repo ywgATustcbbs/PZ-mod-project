@@ -5,15 +5,15 @@ local Boundary = ctx.Boundary
 local Bitmap = ctx.Bitmap
 local Adapter = ctx.Adapter
 local C = ctx.C
-local pendingWallRoofRepairs = ctx.pendingWallRoofRepairs
+local pendingWallRoofRefreshes = ctx.pendingWallRoofRefreshes
 local followUpWallRemovalEvents = ctx.followUpWallRemovalEvents
 local RELOCATION_SENTINEL_Z = ctx.RELOCATION_SENTINEL_Z
-local ROOF_REPAIR_REMOTE_OFFSET_X = ctx.ROOF_REPAIR_REMOTE_OFFSET_X
-local ROOF_REPAIR_REMOTE_OFFSET_Y = ctx.ROOF_REPAIR_REMOTE_OFFSET_Y
-local ROOF_REPAIR_REMOTE_OFFSET_Z = ctx.ROOF_REPAIR_REMOTE_OFFSET_Z
+local ROOF_REFRESH_REMOTE_OFFSET_X = ctx.ROOF_REFRESH_REMOTE_OFFSET_X
+local ROOF_REFRESH_REMOTE_OFFSET_Y = ctx.ROOF_REFRESH_REMOTE_OFFSET_Y
+local ROOF_REFRESH_REMOTE_OFFSET_Z = ctx.ROOF_REFRESH_REMOTE_OFFSET_Z
 local relocationSentinelWarnings = ctx.relocationSentinelWarnings
-local function roofRepairOwnsPlayer(...) return ctx.roofRepairOwnsPlayer(...) end
-local function roofRepairTransactionBlocks(...) return ctx.roofRepairTransactionBlocks(...) end
+local function roofRefreshOwnsPlayer(...) return ctx.roofRefreshOwnsPlayer(...) end
+local function roofRefreshTransactionBlocks(...) return ctx.roofRefreshTransactionBlocks(...) end
 local function currentGeometryGate(...) return ctx.currentGeometryGate(...) end
 local function serverTransactionMutexStatus(...) return ctx.serverTransactionMutexStatus(...) end
 local integer = ctx.integer
@@ -48,8 +48,8 @@ function Adapter.OnClientCommand(module, command, player, args)
     -- uninitialised `ok` below overwrites its real reason with `false`, which
     -- renders as the misleading "unknown reason" to the client.
     local ok, result, reason = true, nil, nil
-    if roofRepairOwnsPlayer(player) then
-        result, reason = false, "roof repair refresh is in progress"
+    if roofRefreshOwnsPlayer(player) then
+        result, reason = false, "roof refresh refresh is in progress"
     elseif command == C.COMMAND_RV_ENTER then
         local locoId = commandArgument(args, "locoId")
         if locoId == nil then
@@ -165,9 +165,9 @@ local function sentinelIdentity(player)
     return tostring(id) .. ":" .. tostring(name), id, name
 end
 
-local function queuedRoofRepairClaims(identityKey)
+local function queuedRoofRefreshClaims(identityKey)
     if type(identityKey) ~= "string" or identityKey == "" then return false end
-    for _, pending in pairs(pendingWallRoofRepairs) do
+    for _, pending in pairs(pendingWallRoofRefreshes) do
         if type(pending) == "table"
             and pending.relocationPhase ~= "complete" then
             if pending.identityKey == identityKey then return true end
@@ -183,7 +183,7 @@ local function queuedRoofRepairClaims(identityKey)
 end
 
 local function sentinelClaimState(server, identityKey)
-    if queuedRoofRepairClaims(identityKey) then return true end
+    if queuedRoofRefreshClaims(identityKey) then return true end
     if not server or type(server.isRelocationIdentityClaimed) ~= "function" then
         return nil
     end
@@ -195,19 +195,19 @@ end
 -- Enter/Exit and the sentinel use the same narrow stable-identity claim
 -- query.  A queued grouped wall refresh owns every member identity in its
 -- saved descriptor list, even when the original userdata has been replaced.
-roofRepairOwnsPlayer = function(player)
+roofRefreshOwnsPlayer = function(player)
     local identityKey = sentinelIdentity(player)
     if not identityKey then return false end
     -- isRelocationIdentityClaimed also reports the generation owner.  That
-    -- shared claim must not be labelled as a roof repair: the actual mutex
+    -- shared claim must not be labelled as a roof refresh: the actual mutex
     -- check below will return the generation-specific rejection reason.
-    if not queuedRoofRepairClaims(identityKey) then
+    if not queuedRoofRefreshClaims(identityKey) then
         local server = RailroaderRV and RailroaderRV.Server
-        if not server or type(server.isRoofRepairTransactionActive) ~= "function" then
+        if not server or type(server.isRoofRefreshTransactionActive) ~= "function" then
             return false
         end
         local roofCallOk, roofActive = pcall(
-            server.isRoofRepairTransactionActive, nil)
+            server.isRoofRefreshTransactionActive, nil)
         if not roofCallOk or roofActive ~= true then
             return false
         end
@@ -224,13 +224,13 @@ serverTransactionMutexStatus = function()
     local server = RailroaderRV and RailroaderRV.Server
     if not server
         or type(server.isGenerationTransactionActive) ~= "function"
-        or type(server.isRoofRepairTransactionActive) ~= "function" then
+        or type(server.isRoofRefreshTransactionActive) ~= "function" then
         return nil, nil, "transaction gate is unavailable"
     end
     local generationCallOk, generationActive = pcall(
         server.isGenerationTransactionActive)
     local roofCallOk, roofActive, roofReason = pcall(
-        server.isRoofRepairTransactionActive, nil)
+        server.isRoofRefreshTransactionActive, nil)
     if not generationCallOk or type(generationActive) ~= "boolean"
         or not roofCallOk or type(roofActive) ~= "boolean" then
         return nil, nil, C.INVALID_RV_DATA
@@ -242,7 +242,7 @@ end
 -- the affected RV, not only the members captured by the grouped relocation.
 -- A queued wall event is also held here: its member snapshot is already an
 -- accepted operation and must not race a new mapping/geometry mutation.
-roofRepairTransactionBlocks = function(rvId)
+roofRefreshTransactionBlocks = function(rvId)
     local generationBusy, roofBusy, mutexReason =
         serverTransactionMutexStatus()
     if generationBusy == nil then
@@ -253,14 +253,14 @@ roofRepairTransactionBlocks = function(rvId)
     end
     if roofBusy then
         return true, type(mutexReason) == "string" and mutexReason ~= ""
-            and mutexReason or "roof repair refresh is in progress"
+            and mutexReason or "roof refresh refresh is in progress"
     end
-    for _, pending in pairs(pendingWallRoofRepairs) do
+    for _, pending in pairs(pendingWallRoofRefreshes) do
         if type(pending) ~= "table" then
             return true, C.INVALID_RV_DATA
         end
         if pending.relocationPhase ~= "complete" then
-            return true, "roof repair refresh is in progress (rvId="
+            return true, "roof refresh refresh is in progress (rvId="
                 .. tostring(pending.rvId or "unknown") .. ")"
         end
     end
@@ -275,7 +275,7 @@ roofRepairTransactionBlocks = function(rvId)
             local expiresAt = integer(event.expiresAtTick)
             if expiresAt == nil then return true, C.INVALID_RV_DATA end
             if expiresAt >= (Adapter._ticks or 0) then
-                return true, "roof repair refresh is in progress (rvId="
+                return true, "roof refresh refresh is in progress (rvId="
                     .. tostring(event.rvId or "unknown") .. ")"
             end
         end
@@ -427,11 +427,11 @@ local function sentinelRecordCandidate(map, player, server)
                 and math.floor(position.z) == RELOCATION_SENTINEL_Z
             local roofMatch = center ~= nil
                 and math.floor(position.x)
-                    == center.centerX - ROOF_REPAIR_REMOTE_OFFSET_X
+                    == center.centerX - ROOF_REFRESH_REMOTE_OFFSET_X
                 and math.floor(position.y)
-                    == center.centerY - ROOF_REPAIR_REMOTE_OFFSET_Y
+                    == center.centerY - ROOF_REFRESH_REMOTE_OFFSET_Y
                 and math.floor(position.z)
-                    == center.centerZ - ROOF_REPAIR_REMOTE_OFFSET_Z
+                    == center.centerZ - ROOF_REFRESH_REMOTE_OFFSET_Z
             if generationMatch or roofMatch then
                 if not validRecord(record) or not centerOk
                     or not sentinelRelationsConsistent(map, record) then
@@ -645,6 +645,6 @@ ctx.sentinelRecordCandidate = sentinelRecordCandidate
 ctx.sentinelReturnToRV = sentinelReturnToRV
 ctx.warnSentinelPlayersAtTemporaryCell = warnSentinelPlayersAtTemporaryCell
 ctx.serverTransactionMutexStatus = serverTransactionMutexStatus
-ctx.roofRepairTransactionBlocks = roofRepairTransactionBlocks
+ctx.roofRefreshTransactionBlocks = roofRefreshTransactionBlocks
 ctx.currentGeometryGate = currentGeometryGate
 end

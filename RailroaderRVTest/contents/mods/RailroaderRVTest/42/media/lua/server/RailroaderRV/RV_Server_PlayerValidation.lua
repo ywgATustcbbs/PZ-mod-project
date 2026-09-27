@@ -378,7 +378,7 @@ end
 -- A reconnect can replace the IsoPlayer userdata while the stable identity
 -- remains the same.  Keep the temporary occupancy allow-list in sync with the
 -- rebound object so a valid member is not mistaken for a foreign occupant.
-local function resolveRoofRepairGroupPlayer(group, member)
+local function resolveRoofRefreshGroupPlayer(group, member)
     local previous = type(member) == "table" and member.player or nil
     local resolved, current = resolvePendingPlayer(member)
     if resolved and type(group) == "table"
@@ -399,7 +399,7 @@ ctx.resumeGenerationAfterDisconnect = resumeGenerationAfterDisconnect
 ctx.rearmGenerationTransition = rearmGenerationTransition
 ctx.resendGenerationPhase = resendGenerationPhase
 ctx.keepGenerationTransitionAlive = keepGenerationTransitionAlive
-ctx.resolveRoofRepairGroupPlayer = resolveRoofRepairGroupPlayer
+ctx.resolveRoofRefreshGroupPlayer = resolveRoofRefreshGroupPlayer
 ctx.validateAuthoritativePlayer = validateAuthoritativePlayer
 ctx.authoritativePlayerPosition = authoritativePlayerPosition
 ctx.validateGenerationPermission = validateGenerationPermission

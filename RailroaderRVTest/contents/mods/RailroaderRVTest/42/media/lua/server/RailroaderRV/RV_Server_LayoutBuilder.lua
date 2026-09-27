@@ -326,8 +326,7 @@ end
 
 captureStore = function()
     if not ModData or type(ModData.get) ~= "function"
-        or type(ModData.getOrCreate) ~= "function"
-        or type(ModData.transmit) ~= "function" then
+        or type(ModData.getOrCreate) ~= "function" then
         error("layout capture ModData API is unavailable")
     end
     local readOk, store = pcall(ModData.get, C.LAYOUT_CAPTURE_KEY)
@@ -530,13 +529,10 @@ local function finishBuild(player, actor)
     }
     if not validCapture(capture) then error("captured layout failed current-schema validation") end
 
-    local previous = store.capture
     store.capture = capture
-    local transmitOk, transmitResult = pcall(ModData.transmit, C.LAYOUT_CAPTURE_KEY)
-    if not transmitOk or transmitResult == false then
-        store.capture = previous
-        error("layout capture persistence failed")
-    end
+    -- The server owns this captured object ledger. ModData.transmit would send
+    -- the full 100x100 capture to every client; live ModData is saved by the
+    -- server independently of client replication.
     logCapture(capture)
     return true
 end

@@ -7,7 +7,7 @@ local COMMAND_RELOCATE = ctx.COMMAND_RELOCATE
 local COMMAND_RELOCATE_ACK = ctx.COMMAND_RELOCATE_ACK
 local COMMAND_FINAL_RELOCATE = ctx.COMMAND_FINAL_RELOCATE
 local COMMAND_FINAL_RELOCATE_ACK = ctx.COMMAND_FINAL_RELOCATE_ACK
-local ROOF_REPAIR_HALO_TEXT = ctx.ROOF_REPAIR_HALO_TEXT
+local ROOF_REFRESH_HALO_TEXT = ctx.ROOF_REFRESH_HALO_TEXT
 local GENERATION_HALO_RENDER_TEXT = ctx.GENERATION_HALO_RENDER_TEXT
 local COMMAND_REFRESH_ROOM_OWNERSHIP = ctx.COMMAND_REFRESH_ROOM_OWNERSHIP
 local roomOwnershipGuards = ctx.roomOwnershipGuards
@@ -265,8 +265,8 @@ function Client.onServerCommand(module, command, args)
     local rvId = args.rvId
     local generation = finiteInteger(args.generation)
     local bitmapVersion = finiteInteger(args.bitmapVersion)
-    local roofRepairTransition = args.roofRepairTransition == true
-    local roofRepairPhase = args.roofRepairPhase
+    local roofRefreshTransition = args.roofRepairTransition == true
+    local roofRefreshPhase = args.roofRepairPhase
     local generationTransition = args.generationTransition == true
     local generationPhase = args.generationPhase
     if type(token) ~= "string" or token == "" or onlineId == nil
@@ -275,16 +275,16 @@ function Client.onServerCommand(module, command, args)
         or x == nil or y == nil or z == nil or z < -32 or z > 31 then
         return
     end
-    if roofRepairTransition
-        and roofRepairPhase ~= "temporary" and roofRepairPhase ~= "return" then
+    if roofRefreshTransition
+        and roofRefreshPhase ~= "temporary" and roofRefreshPhase ~= "return" then
         return
     end
-    if not roofRepairTransition and roofRepairPhase ~= nil then
+    if not roofRefreshTransition and roofRefreshPhase ~= nil then
         return
     end
     if generationTransition
         and (generationPhase ~= "temporary" and generationPhase ~= "return"
-            or roofRepairTransition) then
+            or roofRefreshTransition) then
         return
     end
     if not generationTransition and generationPhase ~= nil then
@@ -295,10 +295,10 @@ function Client.onServerCommand(module, command, args)
         print("[RailroaderRVTest] client relocation command ignored: local player unavailable")
         return
     end
-    if roofRepairTransition and roofRepairPhase == "temporary"
+    if roofRefreshTransition and roofRefreshPhase == "temporary"
         and type(playerObj.setHaloNote) == "function" then
         pcall(function()
-            playerObj:setHaloNote(ROOF_REPAIR_HALO_TEXT, 255, 255, 255, 1500)
+            playerObj:setHaloNote(ROOF_REFRESH_HALO_TEXT, 255, 255, 255, 1500)
         end)
     end
     if generationTransition and generationPhase == "temporary"
@@ -329,11 +329,13 @@ function Client.onServerCommand(module, command, args)
             return
         end
     end
+    -- The roofRepair* names below are existing relocation wire fields for
+    -- RoofRefresh; keep their wire spelling synchronized with the server.
     -- This is a targeted server instruction, not a client-selected build
     -- coordinate.  Do not inspect the target square here: teleportTo is the
     -- streaming trigger for a remote destination, and the server waits for
     -- its complete footprint before mutating the world.
-    local exactReturn = (roofRepairTransition and roofRepairPhase == "return")
+    local exactReturn = (roofRefreshTransition and roofRefreshPhase == "return")
         or (generationTransition and generationPhase == "return")
     local teleportX = exactReturn and x or x + 0.5
     local teleportY = exactReturn and y or y + 0.5
@@ -342,13 +344,13 @@ function Client.onServerCommand(module, command, args)
     end)
     if not relocated then
         print("[RailroaderRVTest] client relocation teleport failed phase="
-            .. tostring(roofRepairPhase or generationPhase or "none"))
+            .. tostring(roofRefreshPhase or generationPhase or "none"))
         return
     end
     -- teleportTo updates coordinates immediately, while IsoMovingObject's
     -- current square is refreshed by a later game update.  Delay the ack
     -- until OnTick observes that refresh; an immediate getCurrentSquare()
-    -- check would still see the room that is about to be rebuilt.
+    -- check would still see stale room metadata before the roof refresh.
     ctx.pendingRelocation = {
         token = token,
         onlineId = onlineId,
@@ -358,15 +360,16 @@ function Client.onServerCommand(module, command, args)
         x = x,
         y = y,
         z = z,
-        roofRepairTransition = roofRepairTransition,
-        roofRepairPhase = roofRepairPhase,
+        -- These two names are the existing relocation wire fields.
+        roofRepairTransition = roofRefreshTransition,
+        roofRepairPhase = roofRefreshPhase,
         generationTransition = generationTransition,
         generationPhase = generationPhase,
         ticks = 0,
         ackAttemptLogged = false,
     }
     print("[RailroaderRVTest] client relocation staged phase="
-        .. tostring(roofRepairPhase or generationPhase or "none")
+        .. tostring(roofRefreshPhase or generationPhase or "none")
         .. " target=" .. tostring(x) .. "," .. tostring(y) .. "," .. tostring(z))
 end
 

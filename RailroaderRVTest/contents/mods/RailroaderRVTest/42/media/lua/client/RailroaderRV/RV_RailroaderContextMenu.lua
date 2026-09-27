@@ -61,6 +61,13 @@ local function playerPosition(player)
     return { x = x, y = y, z = z }
 end
 
+local function tracePosition(player)
+    local position = playerPosition(player)
+    if not position then return "unavailable" end
+    return tostring(position.x) .. "," .. tostring(position.y) .. ","
+        .. tostring(position.z)
+end
+
 local function targetRegion()
     local minX = finiteInteger(C.TELEPORT_X) + finiteInteger(C.RV_REGION_MIN_OFFSET_X)
     local minY = finiteInteger(C.TELEPORT_Y) + finiteInteger(C.RV_REGION_MIN_OFFSET_Y)
@@ -170,19 +177,41 @@ local function requestEnter(player, locoId)
 end
 
 local function requestExit(player)
-    if not player then return end
+    print("[RailroaderRVTest][ExitMenuTrace] requestExit.enter playerPresent="
+        .. tostring(player ~= nil) .. " position=" .. tracePosition(player))
+    if not player then
+        print("[RailroaderRVTest][ExitMenuTrace] requestExit.return reason=no-player")
+        return
+    end
+    print("[RailroaderRVTest][ExitMenuTrace] requestExit.send command=ExitRV position="
+        .. tracePosition(player))
     print("[RailroaderRVTest] sending ExitRV")
     sendClientCommand(player, C.MOD_ID, C.COMMAND_RV_EXIT, {})
 end
 
 local function addExit(playerNum, context, test)
+    print("[RailroaderRVTest][ExitMenuTrace] addExit.enter playerNum="
+        .. tostring(playerNum) .. " contextPresent=" .. tostring(context ~= nil)
+        .. " test=" .. tostring(test))
     local label = text("ContextMenu_RailroaderRVTest_Exit", "Exit RV")
-    if optionAlreadyExists(context, label) then return true end
+    if optionAlreadyExists(context, label) then
+        print("[RailroaderRVTest][ExitMenuTrace] addExit.return reason=option-exists label="
+            .. tostring(label))
+        return true
+    end
+    local optionPlayer = localPlayer(playerNum)
+    print("[RailroaderRVTest][ExitMenuTrace] addExit.create playerPresent="
+        .. tostring(optionPlayer ~= nil) .. " position=" .. tracePosition(optionPlayer)
+        .. " label=" .. tostring(label))
     if test then
-        context:addOption(label, localPlayer(playerNum), requestExit)
+        context:addOption(label, optionPlayer, requestExit)
+        print("[RailroaderRVTest][ExitMenuTrace] addExit.added test=true label="
+            .. tostring(label))
         return markTest()
     end
-    context:addOption(label, localPlayer(playerNum), requestExit)
+    context:addOption(label, optionPlayer, requestExit)
+    print("[RailroaderRVTest][ExitMenuTrace] addExit.added test=false label="
+        .. tostring(label))
     return true
 end
 
@@ -405,7 +434,7 @@ end
 -- IsoMovingObject.current untouched until a normal movement/collision update.
 -- Refresh that client cache only after the server-selected teleport.  The
 -- official three-argument overload performs a read-only grid lookup and then
--- assigns current; it does not replace the server-authoritative roof repair
+-- assigns current; it does not replace the server-authoritative roof refresh
 -- (the server's temporary west-neighbour floor transaction does that).
 -- Never assign Java IsoPlayer fields from Lua here: Kahlua userdata is not a
 -- table, so a field write raises "attempted index of non-table" every tick.
@@ -597,13 +626,27 @@ local function worldLocomotive(worldObjects)
 end
 
 function Menu.OnFillWorldObjectContextMenu(playerNum, context, worldObjects, test)
+    print("[RailroaderRVTest][ExitMenuTrace] OnFill.enter playerNum="
+        .. tostring(playerNum) .. " contextPresent=" .. tostring(context ~= nil)
+        .. " test=" .. tostring(test))
     if not context then return end
     local player = localPlayer(playerNum)
-    if not player then return end
+    if not player then
+        print("[RailroaderRVTest][ExitMenuTrace] OnFill.return reason=no-player playerNum="
+            .. tostring(playerNum))
+        return
+    end
     local dead = false
     pcall(function() dead = player:isDead() end)
-    if dead then return end
-    if mapContainsPlayer(player) then
+    if dead then
+        print("[RailroaderRVTest][ExitMenuTrace] OnFill.return reason=dead position="
+            .. tracePosition(player))
+        return
+    end
+    local inside = mapContainsPlayer(player)
+    print("[RailroaderRVTest][ExitMenuTrace] OnFill.gate position="
+        .. tracePosition(player) .. " mapContainsPlayer=" .. tostring(inside))
+    if inside then
         return addExit(playerNum, context, test)
     end
     return addEnter(playerNum, context, worldLocomotive(worldObjects), test)
@@ -626,12 +669,27 @@ end
 -- Exit is a player-state action and must remain available on those empty
 -- squares, including after reconnect when the live locomotive may be absent.
 function Menu.OnPreFillWorldObjectContextMenu(playerNum, context, worldObjects, test)
+    print("[RailroaderRVTest][ExitMenuTrace] OnPreFill.enter playerNum="
+        .. tostring(playerNum) .. " contextPresent=" .. tostring(context ~= nil)
+        .. " test=" .. tostring(test))
     if not context then return end
     local player = localPlayer(playerNum)
-    if not player then return end
+    if not player then
+        print("[RailroaderRVTest][ExitMenuTrace] OnPreFill.return reason=no-player playerNum="
+            .. tostring(playerNum))
+        return
+    end
     local dead = false
     pcall(function() dead = player:isDead() end)
-    if dead or not mapContainsPlayer(player) then return end
+    if dead then
+        print("[RailroaderRVTest][ExitMenuTrace] OnPreFill.return reason=dead position="
+            .. tracePosition(player))
+        return
+    end
+    local inside = mapContainsPlayer(player)
+    print("[RailroaderRVTest][ExitMenuTrace] OnPreFill.gate position="
+        .. tracePosition(player) .. " mapContainsPlayer=" .. tostring(inside))
+    if not inside then return end
     addExit(playerNum, context, test)
 end
 

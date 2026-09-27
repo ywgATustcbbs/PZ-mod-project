@@ -1,6 +1,6 @@
 -- Hide only the four generation-tagged wardrobe tiles placed west of the cab.
 -- Keep the IsoThumpable object itself in the square so its collision and the
--- existing demolition protection/template repair continue to work.
+-- existing demolition protection/template protection repair continue to work.
 
 local C = require "RailroaderRV/RV_Constants"
 local Template = require "RailroaderRV/RV_Template"

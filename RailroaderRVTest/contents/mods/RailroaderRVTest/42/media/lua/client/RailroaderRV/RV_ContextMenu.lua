@@ -28,7 +28,7 @@ local COMMAND_RELOCATE_ACK = "RelocateAck"
 local COMMAND_FINAL_RELOCATE = C.COMMAND_FINAL_RELOCATE or "FinalRelocate"
 local COMMAND_FINAL_RELOCATE_ACK = C.COMMAND_FINAL_RELOCATE_ACK
     or "FinalRelocateAck"
-local ROOF_REPAIR_HALO_TEXT = "Refreshing room"
+local ROOF_REFRESH_HALO_TEXT = "Refreshing room"
 local GENERATION_HALO_TEXT = "正在生成房车"
 -- The current B42 renderer displays non-ASCII halo text as replacement
 -- characters. Keep the local Chinese semantic label above for the client
@@ -61,7 +61,7 @@ local ctx = {
     COMMAND_RELOCATE_ACK = COMMAND_RELOCATE_ACK,
     COMMAND_FINAL_RELOCATE = COMMAND_FINAL_RELOCATE,
     COMMAND_FINAL_RELOCATE_ACK = COMMAND_FINAL_RELOCATE_ACK,
-    ROOF_REPAIR_HALO_TEXT = ROOF_REPAIR_HALO_TEXT,
+    ROOF_REFRESH_HALO_TEXT = ROOF_REFRESH_HALO_TEXT,
     GENERATION_HALO_RENDER_TEXT = GENERATION_HALO_RENDER_TEXT,
     COMMAND_REFRESH_ROOM_OWNERSHIP = COMMAND_REFRESH_ROOM_OWNERSHIP,
     pendingRelocation = pendingRelocation,

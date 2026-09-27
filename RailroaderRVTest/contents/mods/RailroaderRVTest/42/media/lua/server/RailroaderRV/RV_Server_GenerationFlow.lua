@@ -476,9 +476,9 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     -- Generation and roof refresh both mutate the current managed scope and
     -- stream the same world region.  The roof group owns the service-wide
     -- mutex until its active/repair/final-return state has fully retired.
-    if ctx.roofRepairRelocationGroup ~= nil
-        or ctx.roofRepairGroupFinalReturn ~= nil then
-        return false, "roof repair refresh is in progress"
+    if ctx.roofRefreshRelocationGroup ~= nil
+        or ctx.roofRefreshGroupFinalReturn ~= nil then
+        return false, "roof refresh refresh is in progress"
     end
     local identityOk, identityOrReason = playerIdentity(player)
     if not identityOk then

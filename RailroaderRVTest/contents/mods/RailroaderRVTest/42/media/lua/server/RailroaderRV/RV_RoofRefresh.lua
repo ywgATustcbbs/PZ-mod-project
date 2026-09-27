@@ -1,17 +1,17 @@
--- Server-authoritative roof-cache repair for generated RV rooms.
+-- Server-authoritative room/roof metadata refresh for generated RV rooms.
 --
--- Rebuild the room and roof neighbours around the captured tile outside the
--- cab's south window. The tile already owns a captured floor, so this uses the
--- Architect-style square synchronization path and never adds or replaces it.
+-- Recalculate room and roof-neighbour state around the existing captured floor
+-- outside the cab's south window. The same floor is identity-checked before
+-- and after synchronization; this path does not add or remove floor objects.
 
 require("RailroaderRV/RV_Constants")
 local Template = require("RailroaderRV/RV_Template")
 local ServerWorld = require("RailroaderRV/RV_ServerWorld")
 
 RailroaderRV = RailroaderRV or {}
-RailroaderRV.RoofRepair = RailroaderRV.RoofRepair or {}
+RailroaderRV.RoofRefresh = RailroaderRV.RoofRefresh or {}
 
-local Repair = RailroaderRV.RoofRepair
+local Refresh = RailroaderRV.RoofRefresh
 local C = RailroaderRV.Constants
 local unpackFn = (table and table.unpack) or unpack
 
@@ -52,7 +52,7 @@ end
 local function integer(value, label)
     local numeric = toNumber(value)
     if numeric == nil or math.floor(numeric) ~= numeric then
-        error("RailroaderRVTest: roof repair " .. tostring(label)
+        error("RailroaderRVTest: roof refresh " .. tostring(label)
             .. " is not an integer")
     end
     return numeric
@@ -80,7 +80,7 @@ end
 
 local function southWindowFloorTarget(bounds)
     if type(bounds) ~= "table" then
-        error("RailroaderRVTest: roof repair bounds are unavailable")
+        error("RailroaderRVTest: roof refresh bounds are unavailable")
     end
     local roomMinX = integer(bounds.roomMinX, "roomMinX")
     local roomMinY = integer(bounds.roomMinY, "roomMinY")
@@ -157,8 +157,8 @@ end
 
 -- B42 may expose the player square before all neighbouring wall/roof squares
 -- have streamed into the same IsoCell. Keep readiness bounded to the current
--- manifest's wall/roof geometry and the exact template-derived repair square.
-local function loadedRepairSquares(player, bounds)
+-- manifest's wall/roof geometry and the exact template-derived refresh square.
+local function loadedRefreshSquares(player, bounds)
     if type(bounds) ~= "table" then
         return false, "RV bounds are unavailable"
     end
@@ -170,11 +170,11 @@ local function loadedRepairSquares(player, bounds)
         if seen[key] then return true end
         seen[key] = true
         if not worldSquareIsValid(x, y, z) then
-            return false, "roof repair " .. tostring(role)
+            return false, "roof refresh " .. tostring(role)
                 .. " is outside the legal world"
         end
         if not getSquare(cell, x, y, z) then
-            return false, "roof repair squares are not loaded"
+            return false, "roof refresh squares are not loaded"
         end
         return true
     end
@@ -210,8 +210,8 @@ local function loadedRepairSquares(player, bounds)
     return true
 end
 
-function Repair.isLoaded(player, bounds)
-    local ok, loaded, reason = pcall(loadedRepairSquares, player, bounds)
+function Refresh.isLoaded(player, bounds)
+    local ok, loaded, reason = pcall(loadedRefreshSquares, player, bounds)
     if not ok then return false, tostring(loaded) end
     return loaded == true, reason
 end
@@ -315,7 +315,7 @@ local function reportFloorIdentityMismatch(target, identity, detail)
         .. " failed=" .. detail)
 end
 
-local function repairInternal(player, bounds, identity)
+local function refreshRoomMetadata(player, bounds, identity)
     if type(bounds) ~= "table" then return false, "RV bounds are unavailable" end
     local cell = getCell(player)
     if not cell then return false, "server IsoCell is unavailable" end
@@ -350,13 +350,13 @@ local function repairInternal(player, bounds, identity)
         .. tostring(target.y) .. "," .. tostring(target.z)
 end
 
-function Repair.run(player, bounds, identity)
-    if Repair._busy then return false, "roof repair is already in progress" end
-    Repair._busy = true
-    local ok, repaired, reason = pcall(repairInternal, player, bounds, identity)
-    Repair._busy = false
-    if not ok then return false, tostring(repaired) end
-    return repaired == true, reason
+function Refresh.run(player, bounds, identity)
+    if Refresh._busy then return false, "roof refresh is already in progress" end
+    Refresh._busy = true
+    local ok, refreshed, reason = pcall(refreshRoomMetadata, player, bounds, identity)
+    Refresh._busy = false
+    if not ok then return false, tostring(refreshed) end
+    return refreshed == true, reason
 end
 
-return Repair
+return Refresh

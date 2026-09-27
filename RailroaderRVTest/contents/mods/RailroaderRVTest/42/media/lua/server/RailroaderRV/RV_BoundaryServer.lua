@@ -1,8 +1,9 @@
 -- Server-authoritative RV boundary service.
 --
 -- This module does not import or instantiate Railroader collider/body objects.
--- The server checks the current position against that RV floor's bitmap AABB
--- and returns an out-of-bounds player to the validated RV entry destination.
+-- The AABB-based BoundaryGuard checks current player positions and returns an
+-- out-of-bounds player to the validated RV entry destination. It is separate
+-- from the TemplateProtectionRepair object queue and the RoofRefresh room path.
 -- All guard work remains clipped to the owning RV's half-open 100x100xZ scope.
 
 local function processIsClient()

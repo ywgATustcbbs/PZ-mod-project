@@ -658,7 +658,7 @@ local function processServerRoomOwnershipGuards()
     -- the same tick that must advance the relocation.  The roof service
     -- already owns the boundary lease and keeps the player out of the room;
     -- pause only this non-transactional cleanup until the member returns.
-    if ctx.roofRepairRelocationGroup ~= nil or ctx.roofRepairGroupFinalReturn ~= nil then
+    if ctx.roofRefreshRelocationGroup ~= nil or ctx.roofRefreshGroupFinalReturn ~= nil then
         return
     end
     -- Positions are read once per tick. Share each local square probe across

@@ -74,6 +74,15 @@ end
 
 function Boundary.onTick()
     Boundary._tick = Boundary._tick + 1
+    if type(Boundary.observeTemplateProtectionRepairTransitions) == "function" then
+        local observeOk, observeResult = pcall(
+            Boundary.observeTemplateProtectionRepairTransitions,
+            Boundary._tick)
+        if not observeOk or observeResult == false then
+            print("[RailroaderRVTest] template-protection-repair transition observation skipped: "
+                .. tostring(observeOk and "transition state unavailable" or observeResult))
+        end
+    end
     local players = onlinePlayersSnapshot()
     local activePlayers, activeBoundaries = {}, {}
     for i = 1, #players do
@@ -102,14 +111,14 @@ function Boundary.onTick()
         end
     end
 
-    if type(Boundary.shouldSampleBuildGuard) == "function"
-        and Boundary.shouldSampleBuildGuard(Boundary._tick) then
+    if type(Boundary.shouldSampleTemplateProtectionRepair) == "function"
+        and Boundary.shouldSampleTemplateProtectionRepair(Boundary._tick) then
         for i = 1, #activePlayers do
             local item = activePlayers[i]
-            local ok, reason = pcall(Boundary.sampleBuildGuardPlayer,
+            local ok, reason = pcall(Boundary.sampleTemplateProtectionRepairPlayer,
                 item.boundary, item.player)
             if not ok or reason == false then
-                print("[RailroaderRVTest] build-guard player sampling skipped: "
+                print("[RailroaderRVTest] template-protection-repair player sampling skipped: "
                     .. tostring(ok and "current mapping rejected" or reason))
             end
         end
@@ -118,10 +127,10 @@ function Boundary.onTick()
     -- One queued XY tile is checked globally per server tick. Queue state is
     -- generation-scoped and processing pauses when no validated RV player is
     -- currently inside the owning 100x100 region.
-    if type(Boundary.processBuildGuardQueue) == "function" then
-        local ok, reason = pcall(Boundary.processBuildGuardQueue, activeBoundaries)
+    if type(Boundary.processTemplateProtectionRepairQueue) == "function" then
+        local ok, reason = pcall(Boundary.processTemplateProtectionRepairQueue, activeBoundaries)
         if not ok then
-            print("[RailroaderRVTest] build-guard queue step skipped: "
+            print("[RailroaderRVTest] template-protection-repair queue step skipped: "
                 .. tostring(reason))
         end
     end

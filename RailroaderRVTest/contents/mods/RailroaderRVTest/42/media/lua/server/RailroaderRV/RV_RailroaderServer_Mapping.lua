@@ -5,13 +5,13 @@ local Adapter = ctx.Adapter
 local C = ctx.C
 local WORLD_MIN_Z = ctx.WORLD_MIN_Z
 local WORLD_MAX_Z = ctx.WORLD_MAX_Z
-local roofRepairRooms = ctx.roofRepairRooms
-local ROOF_REPAIR_CACHE_TTL_TICKS = ctx.ROOF_REPAIR_CACHE_TTL_TICKS
-local roofRepairPlayers = ctx.roofRepairPlayers
+local roofRefreshRooms = ctx.roofRefreshRooms
+local ROOF_REFRESH_CACHE_TTL_TICKS = ctx.ROOF_REFRESH_CACHE_TTL_TICKS
+local roofRefreshPlayers = ctx.roofRefreshPlayers
 local followUpWallRemovalEvents = ctx.followUpWallRemovalEvents
 local suppressedRoomTransitions = ctx.suppressedRoomTransitions
 local seenWallRemovalEvents = ctx.seenWallRemovalEvents
-local ROOF_REPAIR_TRANSITION_SUPPRESSION_TICKS = ctx.ROOF_REPAIR_TRANSITION_SUPPRESSION_TICKS
+local ROOF_REFRESH_TRANSITION_SUPPRESSION_TICKS = ctx.ROOF_REFRESH_TRANSITION_SUPPRESSION_TICKS
 local function validateMapSchema(...) return ctx.validateMapSchema(...) end
 local function recordForLoco(...) return ctx.recordForLoco(...) end
 local function serverTransactionMutexStatus(...) return ctx.serverTransactionMutexStatus(...) end
@@ -106,16 +106,16 @@ local function mapData()
     return map
 end
 
-local function transmitMap(boundaryChanged)
+local function markMappingChanged(boundaryChanged)
     Adapter._mappingEpoch = (Adapter._mappingEpoch or 0) + 1
     if boundaryChanged ~= false then
         Adapter._boundaryValidationEpoch =
             (Adapter._boundaryValidationEpoch or 0) + 1
         invalidateBoundaryValidationCache()
     end
-    if ModData and type(ModData.transmit) == "function" then
-        pcall(ModData.transmit, C.RV_MAP_KEY)
-    end
+    -- The train map is server-persistent authority. ModData.transmit sends its
+    -- entire table, including the static boundary bitmap; no client code reads
+    -- this key, so keep the epoch/cache updates local and send no map snapshot.
 end
 
 local function rvRegion()
@@ -337,7 +337,7 @@ boundaryValidation = require("RailroaderRV/RV_RailroaderServer_BoundaryValidatio
         return {}
     end,
 })
-local function roofRepairRoomKey(record)
+local function roofRefreshRoomKey(record)
     if type(record) ~= "table" or record.locoId == nil
         or record.rvId == nil or tostring(record.rvId) == ""
         or tostring(record.rvId) ~= tostring(record.locoId)
@@ -364,7 +364,7 @@ local function markSuppressedRoomTransition(pending)
         roomKey = pending.roomKey,
         token = pending.relocationToken or pending.returnToken,
         expiresAtTick = (Adapter._ticks or 0)
-            + ROOF_REPAIR_TRANSITION_SUPPRESSION_TICKS,
+            + ROOF_REFRESH_TRANSITION_SUPPRESSION_TICKS,
     }
 end
 
@@ -385,7 +385,7 @@ end
 -- The two removal hooks use only the stable coordinate/object-index event key
 -- for the short duplicate-callback window.  Never retain userdata; the current
 -- RV identity/room key owns the actual transaction below.
-local function pruneRoofRepairDedupeState(now)
+local function pruneRoofRefreshDedupeState(now)
     now = integer(now) or (Adapter._ticks or 0)
     -- Follow-up expiry is paused while generation owns the shared scope.  If
     -- the mutex query is temporarily unavailable, fail closed by preserving
@@ -481,29 +481,29 @@ local function wallRemovalEventKey(object, roomKey)
     return coordinateKey .. ":fallback-wall", coordinateKey
 end
 
--- The repair is deliberately best-effort: a missing target chunk must not
+-- The roof refresh is deliberately best-effort: a missing target chunk must not
 -- reject an otherwise valid RV entry.  OnTick retries it after the player has
 -- streamed the persisted room into the authoritative server cell.
-local function repairRoofForPlayer(player, record, force, reason)
+local function refreshRoofForPlayer(player, record, force, reason)
     local server = RailroaderRV and RailroaderRV.Server
-    if not server or type(server.repairRoofVisuals) ~= "function" then
-        return false, "roof repair service is unavailable"
+    if not server or type(server.refreshRoofVisuals) ~= "function" then
+        return false, "roof refresh service is unavailable"
     end
-    local roomKey = roofRepairRoomKey(record)
+    local roomKey = roofRefreshRoomKey(record)
     if not roomKey then return false, "RV generation key is unavailable" end
-    local cached = roofRepairRooms[roomKey]
+    local cached = roofRefreshRooms[roomKey]
     local cacheMatches = type(cached) == "table"
         and tostring(cached.rvId) == tostring(record.rvId)
         and integer(cached.generation) == integer(record.generation)
         and integer(cached.bitmapVersion) == integer(record.bitmapVersion)
-    if not force and cacheMatches then return true, "already repaired" end
-    local ok, repaired, detail = pcall(server.repairRoofVisuals, player)
+    if not force and cacheMatches then return true, "already refreshed" end
+    local ok, refreshed, detail = pcall(server.refreshRoofVisuals, player)
     if not ok then
-        print("[RailroaderRVTest] roof visual repair error: " .. tostring(repaired))
-        return false, tostring(repaired)
+        print("[RailroaderRVTest] roof refresh error: " .. tostring(refreshed))
+        return false, tostring(refreshed)
     end
-    if repaired == true then
-        roofRepairRooms[roomKey] = {
+    if refreshed == true then
+        roofRefreshRooms[roomKey] = {
             roomKey = roomKey,
             rvId = tostring(record.rvId),
             generation = integer(record.generation),
@@ -511,7 +511,7 @@ local function repairRoofForPlayer(player, record, force, reason)
             updatedAtTick = Adapter._ticks or 0,
         }
         local name = playerName(player)
-        if name then roofRepairPlayers[name .. ":" .. roomKey] = true end
+        if name then roofRefreshPlayers[name .. ":" .. roomKey] = true end
         -- This confirms the server-side room/roof neighbour synchronization;
         -- it cannot prove that every client's rendered cache updated.
         print("[RailroaderRVTest] roof room synchronization applied room=" .. roomKey
@@ -519,21 +519,21 @@ local function repairRoofForPlayer(player, record, force, reason)
             .. " detail=" .. tostring(detail or "ok"))
         return true, detail
     end
-    print("[RailroaderRVTest] roof visual repair deferred room=" .. roomKey
+    print("[RailroaderRVTest] roof refresh deferred room=" .. roomKey
         .. " reason=" .. tostring(reason or "entry")
         .. ": " .. tostring(detail or "unknown"))
     return false, detail
 end
 
-local function pruneRoofRepairRooms(now)
+local function pruneRoofRefreshRooms(now)
     now = integer(now) or (Adapter._ticks or 0)
-    for roomKey, cached in pairs(roofRepairRooms) do
+    for roomKey, cached in pairs(roofRefreshRooms) do
         if type(cached) ~= "table"
             or type(cached.roomKey) ~= "string"
             or cached.roomKey ~= roomKey
             or now - (integer(cached.updatedAtTick) or 0)
-                > ROOF_REPAIR_CACHE_TTL_TICKS then
-            roofRepairRooms[roomKey] = nil
+                > ROOF_REFRESH_CACHE_TTL_TICKS then
+            roofRefreshRooms[roomKey] = nil
         end
     end
 end
@@ -593,21 +593,21 @@ end
 -- gate is run again so a water request cannot use a stale mapping snapshot.
 
 ctx.mapData = mapData
-ctx.transmitMap = transmitMap
+ctx.markMappingChanged = markMappingChanged
 ctx.rvRegion = rvRegion
 ctx.inRegion = inRegion
 ctx.validRegion = validRegion
 ctx.validMapRelation = validMapRelation
 ctx.validMappingRecord = validMappingRecord
 ctx.validRecord = validRecord
-ctx.roofRepairRoomKey = roofRepairRoomKey
+ctx.roofRefreshRoomKey = roofRefreshRoomKey
 ctx.isWallRemovalSource = isWallRemovalSource
 ctx.markSuppressedRoomTransition = markSuppressedRoomTransition
 ctx.consumeSuppressedRoomTransition = consumeSuppressedRoomTransition
-ctx.pruneRoofRepairDedupeState = pruneRoofRepairDedupeState
+ctx.pruneRoofRefreshDedupeState = pruneRoofRefreshDedupeState
 ctx.wallRemovalEventKey = wallRemovalEventKey
-ctx.repairRoofForPlayer = repairRoofForPlayer
-ctx.pruneRoofRepairRooms = pruneRoofRepairRooms
+ctx.refreshRoofForPlayer = refreshRoofForPlayer
+ctx.pruneRoofRefreshRooms = pruneRoofRefreshRooms
 ctx.armRoomOwnershipMonitor = armRoomOwnershipMonitor
 ctx.recordAtPlayerCoordinate = recordAtPlayerCoordinate
 ctx.recordForLoco = recordForLoco

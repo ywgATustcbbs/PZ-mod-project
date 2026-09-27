@@ -1,33 +1,194 @@
--- RV_RailroaderServer: WallRepair responsibilities.
+-- RV_RailroaderServer: RoofRefreshFlow responsibilities.
 return function(ctx)
 local Boundary = ctx.Boundary
 local Adapter = ctx.Adapter
 local C = ctx.C
-local roofRepairRooms = ctx.roofRepairRooms
-local pendingWallRoofRepairs = ctx.pendingWallRoofRepairs
+local pendingWallRoofRefreshes = ctx.pendingWallRoofRefreshes
 local followUpWallRemovalEvents = ctx.followUpWallRemovalEvents
+local roofRefreshPlayers = ctx.roofRefreshPlayers
+local roomMonitorPlayers = ctx.roomMonitorPlayers
 local roomTransitionStates = ctx.roomTransitionStates
 local suppressedRoomTransitions = ctx.suppressedRoomTransitions
 local seenWallRemovalEvents = ctx.seenWallRemovalEvents
-local ROOF_REPAIR_DELAY_TICKS = ctx.ROOF_REPAIR_DELAY_TICKS
-local ROOF_REPAIR_ATTEMPTS = ctx.ROOF_REPAIR_ATTEMPTS
+local ROOF_REFRESH_DELAY_TICKS = ctx.ROOF_REFRESH_DELAY_TICKS
+local ROOF_REFRESH_ATTEMPTS = ctx.ROOF_REFRESH_ATTEMPTS
 local WALL_REMOVAL_FOLLOWUP_TICKS = ctx.WALL_REMOVAL_FOLLOWUP_TICKS
 local WALL_REMOVAL_FOLLOWUP_MAX = ctx.WALL_REMOVAL_FOLLOWUP_MAX
-local ROOF_REPAIR_QUEUED_DEADLINE_TICKS = ctx.ROOF_REPAIR_QUEUED_DEADLINE_TICKS
+local ROOF_REFRESH_QUEUED_DEADLINE_TICKS = ctx.ROOF_REFRESH_QUEUED_DEADLINE_TICKS
 local function recordForLoco(...) return ctx.recordForLoco(...) end
 local function insidePlayersForRecord(...) return ctx.insidePlayersForRecord(...) end
-local function scheduleRoofRepair(...) return ctx.scheduleRoofRepair(...) end
-local function beginRoofRepairPhase(...) return ctx.beginRoofRepairPhase(...) end
+local function scheduleRoofRefresh(...) return ctx.scheduleRoofRefresh(...) end
+local function beginRoofRefreshPhase(...) return ctx.beginRoofRefreshPhase(...) end
 local integer = ctx.integer
 local validRecord = ctx.validRecord
-local roofRepairRoomKey = ctx.roofRepairRoomKey
+local roofRefreshRoomKey = ctx.roofRefreshRoomKey
 local markSuppressedRoomTransition = ctx.markSuppressedRoomTransition
-local repairRoofForPlayer = ctx.repairRoofForPlayer
+local refreshRoofForPlayer = ctx.refreshRoofForPlayer
+local armRoomOwnershipMonitor = ctx.armRoomOwnershipMonitor
 local sendResult = ctx.sendResult
 local resolveSavedPlayer = ctx.resolveSavedPlayer
 local rememberFollowUpWallRemoval = ctx.rememberFollowUpWallRemoval
+local playerName = ctx.playerName
+local playerId = ctx.playerId
+local playerPosition = ctx.playerPosition
 
-local function clearRoofRepairRuntimeState(rejectQueued)
+local function tracePosition(position)
+    if type(position) ~= "table" then return "unavailable" end
+    return tostring(position.x) .. "," .. tostring(position.y) .. ","
+        .. tostring(position.z)
+end
+
+local function traceRoofRefreshGroup(path, map, pending, record)
+    if type(pending) ~= "table" then
+        print("[RailroaderRVTest][TransitionTrace] path=" .. tostring(path)
+            .. " tick=" .. tostring(Adapter._ticks or "unknown")
+            .. " pending=nil")
+        return
+    end
+    local eventKeyCount = 0
+    for _ in pairs(pending.wallEventKeys or {}) do
+        eventKeyCount = eventKeyCount + 1
+    end
+    print("[RailroaderRVTest][TransitionTrace] path=" .. tostring(path)
+        .. " tick=" .. tostring(Adapter._ticks or "unknown")
+        .. " room=" .. tostring(pending.roomKey)
+        .. " rvId=" .. tostring(pending.rvId)
+        .. " generation=" .. tostring(pending.generation)
+        .. " bitmapVersion=" .. tostring(pending.bitmapVersion)
+        .. " phase=" .. tostring(pending.relocationPhase)
+        .. " source=" .. tostring(pending.source)
+        .. " scheduledAtTick=" .. tostring(pending.scheduledAtTick)
+        .. " identityKey=" .. tostring(pending.identityKey)
+        .. " relocationToken=" .. tostring(pending.relocationToken)
+        .. " returnToken=" .. tostring(pending.returnToken)
+        .. " refreshWorldApplied=" .. tostring(pending.refreshWorldApplied)
+        .. " refreshCompleted=" .. tostring(pending.refreshCompleted)
+        .. " returnArrived=" .. tostring(pending.returnArrived)
+        .. " returnCompleted=" .. tostring(pending.returnCompleted ~= nil)
+        .. " event=" .. tostring(pending.wallEventKey)
+        .. " coordinate=" .. tostring(pending.wallCoordinateKey)
+        .. " eventKeyCount=" .. tostring(eventKeyCount)
+        .. " memberCount=" .. tostring(type(pending.players) == "table"
+            and #pending.players or 0))
+    for i = 1, #(pending.players or {}) do
+        local saved = pending.players[i]
+        local player = type(saved) == "table" and saved.player or nil
+        local posOk, position = pcall(playerPosition, player)
+        if not posOk then position = nil end
+        local name = player and playerName(player) or nil
+        local relation = type(map) == "table" and name and map.players
+            and map.players[name] or nil
+        local rider = type(record) == "table" and name and record.players
+            and record.players[name] or nil
+        local presenceKey = name and pending.roomKey
+            and name .. ":" .. tostring(pending.roomKey) or nil
+        local state = type(saved) == "table" and saved.identityKey
+            and Boundary and Boundary._states
+            and Boundary._states[saved.identityKey] or nil
+        print("[RailroaderRVTest][TransitionTrace] path=" .. tostring(path)
+            .. ".member tick=" .. tostring(Adapter._ticks or "unknown")
+            .. " room=" .. tostring(pending.roomKey)
+            .. " index=" .. tostring(i)
+            .. " identity=" .. tostring(saved and saved.identityKey or "unknown")
+            .. " onlineId=" .. tostring(player and playerId(player) or "unavailable")
+            .. " position=" .. tracePosition(position)
+            .. " originalPosition=" .. tracePosition(saved and saved.originalPosition)
+            .. " target=" .. tracePosition(saved and saved.target)
+            .. " mappingInside=" .. tostring(relation and relation.inside)
+            .. " riderInside=" .. tostring(rider and rider.inside)
+            .. " mappingOnlineId=" .. tostring(relation and relation.onlineId)
+            .. " riderOnlineId=" .. tostring(rider and rider.onlineId)
+            .. " remoteArrived=" .. tostring(saved and saved.remoteArrived)
+            .. " returnArrived=" .. tostring(saved and saved.returnArrived)
+            .. " returnCompleted=" .. tostring(pending.returnCompleted
+                and pending.returnCompleted[i])
+            .. " presenceCached=" .. tostring(presenceKey
+                and roofRefreshPlayers[presenceKey])
+            .. " monitorCached=" .. tostring(presenceKey
+                and roomMonitorPlayers[presenceKey] == player)
+            .. " boundaryValidationRefreshTick=" .. tostring(state and state.validationRefreshTick or "nil")
+            .. " boundaryTransitionToken=" .. tostring(state and state.transitionToken or "nil"))
+    end
+end
+
+local function restoreReturnedPresenceCaches(map, pending, record)
+    if type(map) ~= "table" or type(pending) ~= "table"
+        or type(record) ~= "table"
+        or tostring(record.rvId) ~= tostring(pending.rvId)
+        or integer(record.generation) ~= integer(pending.generation)
+        or integer(record.bitmapVersion) ~= integer(pending.bitmapVersion)
+        or roofRefreshRoomKey(record) ~= pending.roomKey
+        or type(pending.returnToken) ~= "string"
+        or pending.refreshWorldApplied ~= true
+        or pending.refreshCompleted ~= true
+        or type(pending.returnCompleted) ~= "table" then
+        return
+    end
+
+    local returned = {}
+    local hasReturnedPlayer = false
+    for i = 1, #(pending.players or {}) do
+        local saved = pending.players[i]
+        if pending.returnCompleted[i] == true
+            and type(saved) == "table"
+            and type(saved.identityKey) == "string" then
+            returned[saved.identityKey] = true
+            hasReturnedPlayer = true
+        end
+    end
+    if not hasReturnedPlayer then return end
+
+    local insideCallOk, insidePlayers = pcall(insidePlayersForRecord,
+        map, record)
+    if not insideCallOk or type(insidePlayers) ~= "table" then return end
+
+    local restored = 0
+    for i = 1, #insidePlayers do
+        local member = insidePlayers[i]
+        if type(member) == "table" and returned[member.identityKey] == true
+            and member.player then
+            local name = playerName(member.player)
+            if type(name) == "string" and name ~= "" then
+                local presenceKey = name .. ":" .. pending.roomKey
+                roofRefreshPlayers[presenceKey] = true
+                local monitorCallOk, monitorReady = pcall(
+                    armRoomOwnershipMonitor, member.player, record,
+                    "roof-refresh-return")
+                if monitorCallOk and monitorReady == true then
+                    roomMonitorPlayers[presenceKey] = member.player
+                else
+                    roomMonitorPlayers[presenceKey] = nil
+                end
+                restored = restored + 1
+            end
+        end
+    end
+
+    if restored > 0 then
+        print("[RailroaderRVTest] roof refresh group returned presence restored room="
+            .. tostring(pending.roomKey) .. " members=" .. tostring(restored))
+    end
+end
+
+local function finishCompletedRoofRefresh(map, pending, record)
+    local callOk, detail = pcall(restoreReturnedPresenceCaches, map, pending,
+        record)
+    if not callOk then
+        print("[RailroaderRVTest] roof refresh presence restoration retry room="
+            .. tostring(pending.roomKey) .. " detail=" .. tostring(detail))
+        return false
+    end
+    if pendingWallRoofRefreshes[pending.roomKey] == pending then
+        pendingWallRoofRefreshes[pending.roomKey] = nil
+    end
+    print("[RailroaderRVTest] roof refresh group transaction complete room="
+        .. tostring(pending.roomKey) .. " members="
+        .. tostring(type(pending.players) == "table" and #pending.players or 0)
+        .. " refresh=applied return=acknowledged")
+    return true
+end
+
+local function clearRoofRefreshRuntimeState(rejectQueued)
     -- These are transient requests and observations only; no persisted map
     -- field is changed. Keep an active grouped relocation alive when map
     -- validation is unavailable: its in-memory return loop still owns members.
@@ -50,36 +211,36 @@ local function clearRoofRepairRuntimeState(rejectQueued)
         end
         followUpWallRemovalEvents = {}
     end
-    for roomKey in pairs(pendingWallRoofRepairs) do
-        local pending = pendingWallRoofRepairs[roomKey]
+    for roomKey in pairs(pendingWallRoofRefreshes) do
+        local pending = pendingWallRoofRefreshes[roomKey]
         local relocationActive = pending
             and pending.relocationPhase ~= "complete"
         if not relocationActive then
-            print("[RailroaderRVTest] roof repair schedule cancelled room="
+            print("[RailroaderRVTest] roof refresh schedule cancelled room="
                 .. tostring(roomKey) .. " reason=" .. C.INVALID_RV_DATA)
-            pendingWallRoofRepairs[roomKey] = nil
+            pendingWallRoofRefreshes[roomKey] = nil
         end
     end
 end
 
-local function cancelPendingWallRoofRepair(roomKey, pending, reason)
+local function cancelPendingWallRoofRefresh(roomKey, pending, reason)
     local server = RailroaderRV and RailroaderRV.Server
     if pending and pending.relocationStarted and server
-        and type(server.cancelRoofRepairRelocation) == "function" then
-        pcall(server.cancelRoofRepairRelocation, reason)
+        and type(server.cancelRoofRefreshRelocation) == "function" then
+        pcall(server.cancelRoofRefreshRelocation, reason)
     end
-    if pendingWallRoofRepairs[roomKey] == pending then
-        pendingWallRoofRepairs[roomKey] = nil
+    if pendingWallRoofRefreshes[roomKey] == pending then
+        pendingWallRoofRefreshes[roomKey] = nil
     end
-    print("[RailroaderRVTest] roof repair schedule cancelled room="
+    print("[RailroaderRVTest] roof refresh schedule cancelled room="
         .. tostring(roomKey) .. " reason=" .. tostring(reason))
 end
 
 -- Expire unstarted queued ownership before reading map data.  This keeps the
 -- finite pre-relocation lease effective even during a transient ModData read
 -- failure; no Boundary lease, Relocate or return action exists to unwind.
-local function expireQueuedWallRoofRepairs(now)
-    for roomKey, pending in pairs(pendingWallRoofRepairs) do
+local function expireQueuedWallRoofRefreshes(now)
+    for roomKey, pending in pairs(pendingWallRoofRefreshes) do
         if type(pending) == "table"
             and pending.relocationPhase == "queued"
             and pending.waitingForGeneration ~= true
@@ -88,26 +249,32 @@ local function expireQueuedWallRoofRepairs(now)
             and pending.returnToken == nil then
             local deadline = integer(pending.queuedDeadlineTick)
             if deadline == nil then
-                cancelPendingWallRoofRepair(roomKey, pending,
-                    "malformed queued roof repair deadline")
+                cancelPendingWallRoofRefresh(roomKey, pending,
+                    "malformed queued roof refresh deadline")
             elseif now >= deadline then
-                cancelPendingWallRoofRepair(roomKey, pending,
-                    "queued roof repair member rebind deadline expired")
+                cancelPendingWallRoofRefresh(roomKey, pending,
+                    "queued roof refresh member rebind deadline expired")
             end
         end
     end
 end
 
-local function processPendingWallRoofRepairGroup(map, pending, record, server,
+local function processPendingWallRoofRefreshGroup(map, pending, record, server,
     now)
+    traceRoofRefreshGroup("RoofRefreshFlow.processPendingWallRoofRefreshGroup", map,
+        pending, record)
+    if pending.relocationPhase == "complete" then
+        finishCompletedRoofRefresh(map, pending, record)
+        return
+    end
     if type(pending.players) ~= "table" or #pending.players < 1 then
-        cancelPendingWallRoofRepair(pending.roomKey, pending,
-            "roof repair group has no saved authoritative players")
+        cancelPendingWallRoofRefresh(pending.roomKey, pending,
+            "roof refresh group has no saved authoritative players")
         return
     end
     -- No Relocate or Boundary lease exists while the phase is queued.  A
     -- disconnected member can therefore be safely abandoned after this
-    -- bounded rebind window; temporary/repair/return phases never use this
+    -- bounded rebind window; temporary/room-refresh/return phases never use this
     -- deadline and retain their existing in-memory retry context.
     if pending.relocationPhase == "queued"
         and pending.relocationStarted ~= true
@@ -115,13 +282,13 @@ local function processPendingWallRoofRepairGroup(map, pending, record, server,
         and pending.returnToken == nil then
         local queuedDeadline = integer(pending.queuedDeadlineTick)
         if queuedDeadline == nil then
-            cancelPendingWallRoofRepair(pending.roomKey, pending,
-                "malformed queued roof repair deadline")
+            cancelPendingWallRoofRefresh(pending.roomKey, pending,
+                "malformed queued roof refresh deadline")
             return
         end
         if now >= queuedDeadline then
-            cancelPendingWallRoofRepair(pending.roomKey, pending,
-                "queued roof repair member rebind deadline expired")
+            cancelPendingWallRoofRefresh(pending.roomKey, pending,
+                "queued roof refresh member rebind deadline expired")
             return
         end
     end
@@ -134,7 +301,7 @@ local function processPendingWallRoofRepairGroup(map, pending, record, server,
     end
     if pending.relocationPhase == "queued" then
         if now >= (pending.startTick or now + 1) then
-            local started, detail = beginRoofRepairPhase(nil, pending,
+            local started, detail = beginRoofRefreshPhase(nil, pending,
                 "temporary")
             if not started then
                 -- A second wall operation may be observed while the first
@@ -147,13 +314,13 @@ local function processPendingWallRoofRepairGroup(map, pending, record, server,
                     or detail == "requesting player disconnected or was replaced" then
                     pending.startTick = now + 1
                 else
-                    cancelPendingWallRoofRepair(pending.roomKey, pending, detail)
+                    cancelPendingWallRoofRefresh(pending.roomKey, pending, detail)
                 end
             else
                 pending.relocationStarted = true
                 pending.relocationPhase = "temporary"
                 pending.relocationToken = detail
-                print("[RailroaderRVTest] roof repair group temporary relocation started room="
+                print("[RailroaderRVTest] roof refresh group temporary relocation started room="
                     .. pending.roomKey .. " members="
                     .. tostring(#pending.players) .. " token=" .. tostring(detail))
             end
@@ -161,73 +328,73 @@ local function processPendingWallRoofRepairGroup(map, pending, record, server,
         return
     end
     if pending.relocationPhase == "temporary" then
-        local readyFn = type(server.roofRepairRelocationGroupReady) == "function"
-            and server.roofRepairRelocationGroupReady
+        local readyFn = type(server.roofRefreshRelocationGroupReady) == "function"
+            and server.roofRefreshRelocationGroupReady
         local ready = readyFn and readyFn(pending.rvId, pending.generation,
             pending.bitmapVersion) or false
         if not ready then return end
         for i = 1, #pending.players do
             local saved = pending.players[i]
             if not resolveSavedPlayer(saved) then return end
-            local arrival = server.consumeRoofRepairRelocationArrival(
+            local arrival = server.consumeRoofRefreshRelocationArrival(
                 saved.player)
             if not arrival then return end
             saved.player = arrival.player or saved.player
             saved.remoteArrived = true
         end
-        pending.relocationPhase = "repairing"
-        pending.repairStartTick = now
+        pending.relocationPhase = "refreshing"
+        pending.refreshStartTick = now
         pending.dueTicks = {}
         pending.nextAttempt = 1
-        for attempt = 1, ROOF_REPAIR_ATTEMPTS do
+        for attempt = 1, ROOF_REFRESH_ATTEMPTS do
             pending.dueTicks[attempt] = now
-                + attempt * ROOF_REPAIR_DELAY_TICKS
+                + attempt * ROOF_REFRESH_DELAY_TICKS
         end
-        print("[RailroaderRVTest] roof repair group remote relocation ready room="
+        print("[RailroaderRVTest] roof refresh group remote relocation ready room="
             .. pending.roomKey .. " members=" .. tostring(#pending.players)
             .. " target=rv-center-minus-offset dueTicks="
             .. table.concat(pending.dueTicks, ","))
         return
     end
-    if pending.relocationPhase == "repairing" then
+    if pending.relocationPhase == "refreshing" then
         local attempt = integer(pending.nextAttempt)
         local dueTick = attempt and pending.dueTicks
             and integer(pending.dueTicks[attempt]) or nil
-        if not attempt or attempt < 1 or attempt > ROOF_REPAIR_ATTEMPTS
+        if not attempt or attempt < 1 or attempt > ROOF_REFRESH_ATTEMPTS
             or not dueTick then
-            cancelPendingWallRoofRepair(pending.roomKey, pending,
-                "malformed roof repair group remote wait schedule")
+            cancelPendingWallRoofRefresh(pending.roomKey, pending,
+                "malformed roof refresh group remote wait schedule")
             return
         end
         if now < dueTick then return end
         -- Keep the complete group remote for the requested cross-tick cycle;
-        -- repair is intentionally invoked only after every member returns.
-        print("[RailroaderRVTest] roof repair group remote wait room="
+        -- room refresh is intentionally invoked only after every member returns.
+        print("[RailroaderRVTest] roof refresh group remote wait room="
             .. pending.roomKey .. " attempt=" .. tostring(attempt) .. "/"
-            .. tostring(ROOF_REPAIR_ATTEMPTS) .. " result=deferred")
+            .. tostring(ROOF_REFRESH_ATTEMPTS) .. " result=deferred")
         pending.nextAttempt = attempt + 1
-        if attempt >= ROOF_REPAIR_ATTEMPTS then
-            local started, detail = beginRoofRepairPhase(nil, pending, "return")
+        if attempt >= ROOF_REFRESH_ATTEMPTS then
+            local started, detail = beginRoofRefreshPhase(nil, pending, "return")
             if not started then
                 if detail == "requesting player disconnected or was replaced"
                     or detail == "another RV relocation or generation is in progress" then
                     pending.nextAttempt = attempt
                     return
                 end
-                cancelPendingWallRoofRepair(pending.roomKey, pending, detail)
+                cancelPendingWallRoofRefresh(pending.roomKey, pending, detail)
             else
                 pending.relocationPhase = "returning"
                 pending.returnToken = detail
                 pending.returnArrived = false
                 pending.returnCompleted = {}
-                pending.repairWorldApplied = false
-                pending.repairCompleted = false
-                pending.repairContextIndex = nil
-                -- Repair is a continuously required post-return step.  This
+                pending.refreshWorldApplied = false
+                pending.refreshCompleted = false
+                pending.refreshContextIndex = nil
+                -- Room refresh is a continuously required post-return step. This
                 -- is only a retry cadence, never a deadline that can retire
                 -- the in-memory transaction while the squares are unloaded.
-                pending.repairRetryAtTick = now
-                print("[RailroaderRVTest] roof repair group return relocation started room="
+                pending.refreshRetryAtTick = now
+                print("[RailroaderRVTest] roof refresh group return relocation started room="
                     .. pending.roomKey .. " members="
                     .. tostring(#pending.players) .. " token=" .. tostring(detail))
             end
@@ -238,7 +405,7 @@ local function processPendingWallRoofRepairGroup(map, pending, record, server,
         for i = 1, #pending.players do
             local saved = pending.players[i]
             if not saved.returnArrived then
-                local arrival = server.consumeRoofRepairRelocationArrival(
+                local arrival = server.consumeRoofRefreshRelocationArrival(
                     saved.player)
                 if arrival then
                     saved.player = arrival.player or saved.player
@@ -256,29 +423,29 @@ local function processPendingWallRoofRepairGroup(map, pending, record, server,
         if not allArrived then return end
 
         -- Complete the authoritative return for every member before invoking
-        -- any repair/refresh callback.  A repair exception or a temporarily
+        -- any room-refresh callback. A refresh exception or a temporarily
         -- unavailable chunk must never strand a player in the remote target.
         for i = 1, #pending.players do
             local saved = pending.players[i]
             if not pending.returnCompleted[i] then
                 local completeCallOk, completed, detail = pcall(
-                    server.completeRoofRepairRelocation, saved.player,
+                    server.completeRoofRefreshRelocation, saved.player,
                     pending.returnToken)
                 if completeCallOk and completed == true then
                     pending.returnCompleted[i] = true
                 elseif completeCallOk then
-                    print("[RailroaderRVTest] roof repair group return wait player="
+                    print("[RailroaderRVTest] roof refresh group return wait player="
                         .. tostring(saved.identityKey) .. " detail="
                         .. tostring(detail or completed))
                 else
-                    print("[RailroaderRVTest] roof repair group return error player="
+                    print("[RailroaderRVTest] roof refresh group return error player="
                         .. tostring(saved.identityKey) .. " detail="
                         .. tostring(completed))
                 end
             end
         end
 
-        -- This is a hard phase barrier. A repair callback is never allowed
+        -- This is a hard phase barrier. A refresh callback is never allowed
         -- to mask one member's failed/unfinished authoritative return.
         local allCompleted = true
         for i = 1, #pending.players do
@@ -289,90 +456,86 @@ local function processPendingWallRoofRepairGroup(map, pending, record, server,
         end
         if not allCompleted then return end
 
-        -- This is the same server-authoritative roof/geometry repair path used
+        -- This is the same server-authoritative roof/room refresh path used
         -- by existing RV entry. It runs only after the physical return has
         -- been observed; every callback is bounded/isolated so it cannot
         -- interrupt the remaining members' return handling.
-        local representative = pending.repairContextIndex
-            and pending.players[pending.repairContextIndex] or nil
+        local representative = pending.refreshContextIndex
+            and pending.players[pending.refreshContextIndex] or nil
         if not representative then
             representative = pending.players[1]
-            pending.repairContextIndex = 1
+            pending.refreshContextIndex = 1
         end
-        if pending.repairWorldApplied ~= true
-            and now >= (pending.repairRetryAtTick or 0) then
+        if pending.refreshWorldApplied ~= true
+            and now >= (pending.refreshRetryAtTick or 0) then
             local loaded, loadedDetail = false,
-                "roof repair squares are not loaded after return"
+                "roof refresh squares are not loaded after return"
             local loadedCallOk, loadedResult, loadedReason = pcall(
-                server.roofRepairSquaresLoaded, representative.player, record)
+                server.roofRefreshSquaresLoaded, representative.player, record)
             if loadedCallOk then
                 loaded, loadedDetail = loadedResult, loadedReason
             else
                 loadedDetail = tostring(loadedResult)
             end
             if loaded == true then
-                local repairCallOk, repaired, detail = pcall(
-                    repairRoofForPlayer, representative.player, record, true,
+                local refreshCallOk, refreshed, detail = pcall(
+                    refreshRoofForPlayer, representative.player, record, true,
                     "remote-reload-return")
-                if not repairCallOk then
-                    detail = tostring(repaired)
-                    repaired = false
+                if not refreshCallOk then
+                    detail = tostring(refreshed)
+                    refreshed = false
                 end
-                print("[RailroaderRVTest] roof repair returned room="
+                print("[RailroaderRVTest] roof refresh returned room="
                     .. tostring(pending.roomKey) .. " result="
-                    .. (repaired and "applied" or "deferred") .. " detail="
+                    .. (refreshed and "applied" or "deferred") .. " detail="
                     .. tostring(detail or "unknown"))
-                if repaired == true then
-                    pending.repairWorldApplied = true
-                    pending.repairRetryAtTick = nil
+                if refreshed == true then
+                    pending.refreshWorldApplied = true
+                    pending.refreshRetryAtTick = nil
                 else
-                    pending.repairRetryAtTick = now + ROOF_REPAIR_DELAY_TICKS
+                    pending.refreshRetryAtTick = now + ROOF_REFRESH_DELAY_TICKS
                     sendResult(representative.player, false,
-                        detail or "roof repair after remote reload was deferred")
+                        detail or "roof refresh after remote reload was deferred")
                 end
             else
-                pending.repairRetryAtTick = now + ROOF_REPAIR_DELAY_TICKS
-                print("[RailroaderRVTest] roof repair after return deferred room="
+                pending.refreshRetryAtTick = now + ROOF_REFRESH_DELAY_TICKS
+                print("[RailroaderRVTest] roof refresh after return deferred room="
                     .. tostring(pending.roomKey) .. " detail=" .. tostring(loadedDetail
-                        or "roof repair squares are not loaded after return"))
+                        or "roof refresh squares are not loaded after return"))
             end
         end
-        if pending.repairWorldApplied == true
-            and pending.repairCompleted ~= true then
+        if pending.refreshWorldApplied == true
+            and pending.refreshCompleted ~= true then
             local ackCallOk, acknowledged, ackDetail = pcall(
-                server.completeRoofRepairRepair, representative.player,
+                server.completeRoofRefresh, representative.player,
                 pending.returnToken)
             if ackCallOk and acknowledged == true then
-                pending.repairCompleted = true
+                pending.refreshCompleted = true
             else
-                print("[RailroaderRVTest] roof repair completion remains pending room="
+                print("[RailroaderRVTest] roof refresh completion remains pending room="
                     .. tostring(pending.roomKey) .. " detail="
                     .. tostring(ackCallOk and ackDetail or acknowledged))
             end
         end
-        if allCompleted and pending.repairCompleted == true then
+        if allCompleted and pending.refreshCompleted == true then
             pending.relocationPhase = "complete"
             markSuppressedRoomTransition(pending)
-            pendingWallRoofRepairs[pending.roomKey] = nil
-            roofRepairRooms[pending.roomKey] = nil
-            print("[RailroaderRVTest] roof repair group transaction complete room="
-                .. pending.roomKey .. " members=" .. tostring(#pending.players)
-                .. " repair=applied return=acknowledged")
+            finishCompletedRoofRefresh(map, pending, record)
         end
         return
     end
-    cancelPendingWallRoofRepair(pending.roomKey, pending,
-        "unknown roof repair group transaction phase")
+    cancelPendingWallRoofRefresh(pending.roomKey, pending,
+        "unknown roof refresh group transaction phase")
 end
 
-beginRoofRepairPhase = function(player, pending, phase)
+beginRoofRefreshPhase = function(player, pending, phase)
     local server = RailroaderRV and RailroaderRV.Server
     if not server then
-        return false, "roof repair relocation service is unavailable"
+        return false, "roof refresh relocation service is unavailable"
     end
     if type(pending.players) == "table" then
-        if type(server.beginRoofRepairRelocationGroup) ~= "function" then
-            return false, "roof repair group relocation service is unavailable"
+        if type(server.beginRoofRefreshRelocationGroup) ~= "function" then
+            return false, "roof refresh group relocation service is unavailable"
         end
         local descriptors = {}
         for i = 1, #pending.players do
@@ -384,7 +547,7 @@ beginRoofRepairPhase = function(player, pending, phase)
             }
         end
         local ok, started, detail = pcall(
-            server.beginRoofRepairRelocationGroup, {
+            server.beginRoofRefreshRelocationGroup, {
                 roomKey = pending.roomKey,
                 rvId = pending.rvId,
                 generation = pending.generation,
@@ -394,14 +557,14 @@ beginRoofRepairPhase = function(player, pending, phase)
             })
         if not ok then return false, tostring(started) end
         if started ~= true then
-            return false, detail or "roof repair group relocation was rejected"
+            return false, detail or "roof refresh group relocation was rejected"
         end
         return true, detail
     end
 end
 
 local function promoteFollowUpWallRemoval(map, roomKey)
-    if pendingWallRoofRepairs[roomKey] ~= nil then return false end
+    if pendingWallRoofRefreshes[roomKey] ~= nil then return false end
     local events = followUpWallRemovalEvents[roomKey]
     if type(events) ~= "table" then return false end
     local now = Adapter._ticks or 0
@@ -422,7 +585,7 @@ local function promoteFollowUpWallRemoval(map, roomKey)
                 end
                 events[eventKey] = nil
             else
-                local currentRoomKey = roofRepairRoomKey(record)
+                local currentRoomKey = roofRefreshRoomKey(record)
                 if not currentRoomKey then
                     if waitingForGeneration then
                         print("[RailroaderRVTest] wall removal follow-up cancelled room="
@@ -452,7 +615,7 @@ local function promoteFollowUpWallRemoval(map, roomKey)
                                 -- bitmapVersion is now proven complete.  Give
                                 -- this accepted event a fresh full lease.
                                 event.expiresAtTick = now
-                                    + ROOF_REPAIR_QUEUED_DEADLINE_TICKS
+                                    + ROOF_REFRESH_QUEUED_DEADLINE_TICKS
                                 event.waitingForGeneration = nil
                             end
                             currentEvents[eventKey] = event
@@ -479,10 +642,10 @@ local function promoteFollowUpWallRemoval(map, roomKey)
                         -- record.  Only now does the follow-up re-enter its
                         -- bounded offline/rebind wait.
                         event.expiresAtTick = now
-                            + ROOF_REPAIR_QUEUED_DEADLINE_TICKS
+                            + ROOF_REFRESH_QUEUED_DEADLINE_TICKS
                         event.waitingForGeneration = nil
                     end
-                    local scheduled = scheduleRoofRepair(map, record,
+                    local scheduled = scheduleRoofRefresh(map, record,
                         "follow-up-wall-removal", eventKey,
                         event.coordinateKey)
                     if scheduled then
@@ -509,7 +672,7 @@ end
 -- is already moving the same managed scope.  Keep the queued operation
 -- entirely in memory, then re-read the current record after generation has
 -- released its mutex; never start a roof group against the old generation.
-local function revalidateQueuedRoofRepairAfterGeneration(map, roomKey,
+local function revalidateQueuedRoofRefreshAfterGeneration(map, roomKey,
     pending, now)
     if type(pending) ~= "table" or pending.relocationPhase ~= "queued" then
         return "ready"
@@ -520,7 +683,7 @@ local function revalidateQueuedRoofRepairAfterGeneration(map, roomKey,
     pending.revalidateUntilTick = deadline
     local record = recordForLoco(map, pending.rvId)
     local currentRoomKey = record and validRecord(record)
-        and roofRepairRoomKey(record) or nil
+        and roofRefreshRoomKey(record) or nil
     local identityMatches = currentRoomKey == roomKey
         and integer(record and record.generation) == integer(pending.generation)
         and integer(record and record.bitmapVersion)
@@ -554,7 +717,7 @@ local function revalidateQueuedRoofRepairAfterGeneration(map, roomKey,
         -- deadline into the new generation.
         if waitingForGeneration then
             pending.queuedDeadlineTick = now
-                + ROOF_REPAIR_QUEUED_DEADLINE_TICKS
+                + ROOF_REFRESH_QUEUED_DEADLINE_TICKS
         end
         pending.waitingForGeneration = nil
         pending.revalidateUntilTick = nil
@@ -569,7 +732,7 @@ local function revalidateQueuedRoofRepairAfterGeneration(map, roomKey,
         if now <= deadline then return "wait" end
         return "expired"
     end
-    local existing = pendingWallRoofRepairs[currentRoomKey]
+    local existing = pendingWallRoofRefreshes[currentRoomKey]
     if existing ~= nil and existing ~= pending then
         -- A room observation may have accepted a fresh current-generation
         -- schedule on the same tick.  Keep the older wall event as a bounded
@@ -578,12 +741,12 @@ local function revalidateQueuedRoofRepairAfterGeneration(map, roomKey,
         if type(eventKey) == "string" and eventKey ~= "" then
             rememberFollowUpWallRemoval(record, currentRoomKey, eventKey,
                 pending.wallCoordinateKey, now)
-            pendingWallRoofRepairs[roomKey] = nil
+            pendingWallRoofRefreshes[roomKey] = nil
             return "revalidated"
         end
         return "wait"
     end
-    pendingWallRoofRepairs[roomKey] = nil
+    pendingWallRoofRefreshes[roomKey] = nil
     pending.roomKey = currentRoomKey
     pending.player = players[1].player
     pending.players = players
@@ -593,7 +756,7 @@ local function revalidateQueuedRoofRepairAfterGeneration(map, roomKey,
     pending.identityKey = players[1].identityKey
     pending.returnPosition = players[1].originalPosition
     pending.startTick = now + 1
-    pending.queuedDeadlineTick = now + ROOF_REPAIR_QUEUED_DEADLINE_TICKS
+    pending.queuedDeadlineTick = now + ROOF_REFRESH_QUEUED_DEADLINE_TICKS
     pending.dueTicks = nil
     pending.nextAttempt = 1
     pending.relocationStarted = false
@@ -602,17 +765,17 @@ local function revalidateQueuedRoofRepairAfterGeneration(map, roomKey,
     pending.returnToken = nil
     pending.waitingForGeneration = nil
     pending.revalidateUntilTick = nil
-    pendingWallRoofRepairs[currentRoomKey] = pending
-    print("[RailroaderRVTest] roof repair queue revalidated after generation room="
+    pendingWallRoofRefreshes[currentRoomKey] = pending
+    print("[RailroaderRVTest] roof refresh queue revalidated after generation room="
         .. currentRoomKey .. " source=" .. tostring(pending.source))
     return "revalidated"
 end
 
 
-ctx.clearRoofRepairRuntimeState = clearRoofRepairRuntimeState
-ctx.cancelPendingWallRoofRepair = cancelPendingWallRoofRepair
-ctx.expireQueuedWallRoofRepairs = expireQueuedWallRoofRepairs
-ctx.processPendingWallRoofRepairGroup = processPendingWallRoofRepairGroup
+ctx.clearRoofRefreshRuntimeState = clearRoofRefreshRuntimeState
+ctx.cancelPendingWallRoofRefresh = cancelPendingWallRoofRefresh
+ctx.expireQueuedWallRoofRefreshes = expireQueuedWallRoofRefreshes
+ctx.processPendingWallRoofRefreshGroup = processPendingWallRoofRefreshGroup
 ctx.promoteFollowUpWallRemoval = promoteFollowUpWallRemoval
-ctx.revalidateQueuedRoofRepairAfterGeneration = revalidateQueuedRoofRepairAfterGeneration
+ctx.revalidateQueuedRoofRefreshAfterGeneration = revalidateQueuedRoofRefreshAfterGeneration
 end

@@ -6,7 +6,7 @@ local Boundary = ctx.Boundary
 local Adapter = ctx.Adapter
 local C = ctx.C
 local function recordForLoco(...) return ctx.recordForLoco(...) end
-local function roofRepairTransactionBlocks(...) return ctx.roofRepairTransactionBlocks(...) end
+local function roofRefreshTransactionBlocks(...) return ctx.roofRefreshTransactionBlocks(...) end
 local function currentGeometryGate(...) return ctx.currentGeometryGate(...) end
 local function sourceWithinRange(...) return ctx.sourceWithinRange(...) end
 local number = ctx.number
@@ -37,14 +37,46 @@ local forgetTrainSeat = ctx.forgetTrainSeat
 local putPassenger = ctx.putPassenger
 local putDriver = ctx.putDriver
 local mapData = ctx.mapData
-local transmitMap = ctx.transmitMap
+local markMappingChanged = ctx.markMappingChanged
 local rvRegion = ctx.rvRegion
 local validRegion = ctx.validRegion
 local validMappingRecord = ctx.validMappingRecord
 local validRecord = ctx.validRecord
-local repairRoofForPlayer = ctx.repairRoofForPlayer
+local refreshRoofForPlayer = ctx.refreshRoofForPlayer
 local armRoomOwnershipMonitor = ctx.armRoomOwnershipMonitor
 local recordAtPlayerCoordinate = ctx.recordAtPlayerCoordinate
+
+local function transitionPositionText(position)
+    if type(position) ~= "table" then return "unavailable" end
+    return tostring(position.x) .. "," .. tostring(position.y) .. ","
+        .. tostring(position.z)
+end
+
+local function traceTransition(path, player, record, detail)
+    local id = playerId(player)
+    local name = playerName(player)
+    local positionOk, position = pcall(playerPosition, player)
+    if not positionOk then position = nil end
+    local stateKey = id ~= nil and name
+        and (tostring(id) .. ":" .. tostring(name)) or nil
+    local state = stateKey and Boundary and Boundary._states
+        and Boundary._states[stateKey] or nil
+    local validationRefreshAge = state and Boundary and Boundary._tick ~= nil
+        and (Boundary._tick - (integer(state.validationRefreshTick) or -math.huge))
+        or "unavailable"
+    print("[RailroaderRVTest][TransitionTrace] path=" .. tostring(path)
+        .. " tick=" .. tostring(Adapter._ticks or "unknown")
+        .. " player=" .. tostring(stateKey or name or "unknown")
+        .. " pos=" .. transitionPositionText(position)
+        .. " rvId=" .. tostring(record and record.rvId or "unknown")
+        .. " generation=" .. tostring(record and record.generation or "unknown")
+        .. " bitmapVersion=" .. tostring(record and record.bitmapVersion or "unknown")
+        .. " boundaryValidationRefreshTick=" .. tostring(state and state.validationRefreshTick or "nil")
+        .. " boundaryValidationRefreshAge=" .. tostring(validationRefreshAge)
+        .. " boundaryTransition=" .. tostring(state and state.transitionKind or "nil")
+        .. " boundaryTransitionToken=" .. tostring(state and state.transitionToken or "nil")
+        .. " detail=" .. tostring(detail or "none"))
+end
 
 function Adapter.resolveCurrentUtilityRV(player)
     if not player or playerDead(player) then
@@ -340,10 +372,21 @@ end
 
 local function enterExisting(player, train, record, key, sourceRole,
     sourceSeat, sourcePosition, map)
-    local roofBlocked, roofReason = roofRepairTransactionBlocks(record.rvId)
-    if roofBlocked then return false, roofReason end
+    traceTransition("EntryExit.enterExisting.begin", player, record,
+        "sourceRole=" .. tostring(sourceRole) .. " sourceSeat=" .. tostring(sourceSeat)
+            .. " sourcePos=" .. transitionPositionText(sourcePosition))
+    local roofBlocked, roofReason = roofRefreshTransactionBlocks(record.rvId)
+    if roofBlocked then
+        traceTransition("EntryExit.enterExisting.roofRefreshBlocked", player,
+            record, roofReason)
+        return false, roofReason
+    end
     local geometryOk, geometryReason = currentGeometryGate(record)
-    if not geometryOk then return false, geometryReason end
+    if not geometryOk then
+        traceTransition("EntryExit.enterExisting.geometryRejected", player,
+            record, geometryReason)
+        return false, geometryReason
+    end
     if not Boundary or type(Boundary.beginTransition) ~= "function"
         or type(Boundary.completeTransition) ~= "function" then
         return false, "RV boundary entry service is unavailable"
@@ -388,6 +431,9 @@ local function enterExisting(player, train, record, key, sourceRole,
         rvId = record.locoId, generation = record.generation,
         bitmapVersion = record.bitmapVersion,
     })
+    traceTransition("EntryExit.enterExisting.teleportResult", player, record,
+        "moved=" .. tostring(moved) .. " target=" .. transitionPositionText(target)
+            .. " phase=entry")
     if not moved then
         map.players[playerName(player)] = oldRelation
         record.players = oldRiders
@@ -405,20 +451,24 @@ local function enterExisting(player, train, record, key, sourceRole,
     if Boundary and type(Boundary.completeTransition) == "function" then
         Boundary.completeTransition(player, transitionToken)
     end
+    traceTransition("EntryExit.enterExisting.mappingCommitted", player, record,
+        "transitionToken=" .. tostring(transitionToken) .. " inside=true")
     settleUtilityTransition(record, player, "entry")
     record.locoPosition = trainPose(train) or record.locoPosition
     -- The server has just moved the player into the persisted RV footprint;
-    -- perform the official add/remove-floor neighbour invalidation before the
-    -- first repeat-entry frame is rendered.  A failed/deferred repair is
-    -- retried by OnTick without rejecting the successful teleport.
-    repairRoofForPlayer(player, record, true, "existing-entry")
-    transmitMap()
-    RemovalTrace.lifecycle("mapping", "sync", "sent", ctx.serverTick)
+    -- synchronize room and roof metadata around the existing captured floor
+    -- before the first repeat-entry frame is rendered. A failed or deferred
+    -- refresh is retried by OnTick without rejecting the successful teleport.
+    refreshRoofForPlayer(player, record, true, "existing-entry")
+    markMappingChanged()
+    RemovalTrace.lifecycle("mapping", "server-state", "updated", ctx.serverTick)
     RemovalTrace.lifecycle("entry", "RV", "complete", ctx.serverTick)
     return true
 end
 
 local function enterPlayer(player, locoId)
+    traceTransition("EntryExit.enterPlayer.begin", player, nil,
+        "requestedLocoId=" .. tostring(locoId))
     if not player or playerDead(player) then
         return false, "player is unavailable"
     end
@@ -427,11 +477,19 @@ local function enterPlayer(player, locoId)
     -- Check before removing a Railroader seat or changing mapping state.  The
     -- generation service repeats the global check authoritatively, but this
     -- early RV-specific gate avoids a temporary seat mutation on rejection.
-    local roofBlocked, roofReason = roofRepairTransactionBlocks(locoId)
-    if roofBlocked then return false, roofReason end
+    local roofBlocked, roofReason = roofRefreshTransactionBlocks(locoId)
+    if roofBlocked then
+        traceTransition("EntryExit.enterPlayer.roofRefreshBlocked", player, nil,
+            "requestedLocoId=" .. tostring(locoId) .. " reason=" .. tostring(roofReason))
+        return false, roofReason
+    end
     local map = mapData()
     local existingRecord, existingKey, _, lookupState =
         recordAtPlayerCoordinate(map, player)
+    traceTransition("EntryExit.enterPlayer.coordinateLookup", player,
+        existingRecord, "requestedLocoId=" .. tostring(locoId)
+            .. " lookupState=" .. tostring(lookupState)
+            .. " existingKey=" .. tostring(existingKey))
     if lookupState == "unmapped-rv" then
         return false, C.INVALID_RV_DATA
     end
@@ -593,9 +651,9 @@ local function commitGeneration(player, data, prepared)
     -- RV_Server owns the transition close after FinalRelocateAck and the
     -- current-manifest readiness proof. Do not release the lease from this
     -- mapping commit hook before that final client proof.
-    repairRoofForPlayer(player, record, true, "generation-entry")
-    transmitMap()
-    RemovalTrace.lifecycle("mapping", "sync", "sent", ctx.serverTick)
+    refreshRoofForPlayer(player, record, true, "generation-entry")
+    markMappingChanged()
+    RemovalTrace.lifecycle("mapping", "server-state", "updated", ctx.serverTick)
     return true
 end
 
@@ -610,6 +668,7 @@ local function validateGeneration(player, data)
 end
 
 local function exitPlayer(player)
+    traceTransition("EntryExit.exitPlayer.begin", player, nil, "request=ExitRV")
     if not player or playerDead(player) then
         return false, "player is unavailable"
     end
@@ -620,16 +679,27 @@ local function exitPlayer(player)
     local map = mapData()
     local record, key, train, lookupState =
         recordAtPlayerCoordinate(map, player)
+    traceTransition("EntryExit.exitPlayer.coordinateLookup", player, record,
+        "lookupState=" .. tostring(lookupState) .. " key=" .. tostring(key)
+            .. " trainPresent=" .. tostring(train ~= nil))
     if lookupState == "outside-rv" then
         return false, "player is outside the RV area"
     end
     if not record then
         return false, C.INVALID_RV_DATA
     end
-    local roofBlocked, roofReason = roofRepairTransactionBlocks(record.rvId)
-    if roofBlocked then return false, roofReason end
+    local roofBlocked, roofReason = roofRefreshTransactionBlocks(record.rvId)
+    if roofBlocked then
+        traceTransition("EntryExit.exitPlayer.roofRefreshBlocked", player,
+            record, roofReason)
+        return false, roofReason
+    end
     local geometryOk, geometryReason = currentGeometryGate(record)
-    if not geometryOk then return false, geometryReason end
+    if not geometryOk then
+        traceTransition("EntryExit.exitPlayer.geometryRejected", player,
+            record, geometryReason)
+        return false, geometryReason
+    end
     if not train then
         local target = persistedBesidePosition(record)
         if not target then return false, C.INVALID_RV_DATA end
@@ -651,6 +721,9 @@ local function exitPlayer(player)
             rvId = record.locoId, generation = record.generation,
             bitmapVersion = record.bitmapVersion,
         })
+        traceTransition("EntryExit.exitPlayer.inactiveTeleportResult", player,
+            record, "moved=" .. tostring(moved) .. " target="
+                .. transitionPositionText(target))
         if not moved then
             if Boundary and type(Boundary.completeTransition) == "function" then
                 Boundary.completeTransition(player, transitionToken)
@@ -661,8 +734,8 @@ local function exitPlayer(player)
         if Boundary and type(Boundary.clearPlayer) == "function" then
             Boundary.clearPlayer(player)
         end
-        transmitMap()
-        RemovalTrace.lifecycle("mapping", "sync", "sent", ctx.serverTick)
+        markMappingChanged()
+        RemovalTrace.lifecycle("mapping", "server-state", "updated", ctx.serverTick)
         RemovalTrace.lifecycle("exit", "RV", "complete", ctx.serverTick)
         return true
     end
@@ -712,6 +785,10 @@ local function exitPlayer(player)
         rvId = record.locoId, generation = record.generation,
         bitmapVersion = record.bitmapVersion,
     })
+    traceTransition("EntryExit.exitPlayer.teleportResult", player, record,
+        "moved=" .. tostring(moved) .. " role=" .. tostring(role)
+            .. " seat=" .. tostring(seat) .. " target="
+            .. transitionPositionText(target))
     if not moved then
         if role ~= "beside" then forgetTrainSeat(train, player, onlineId) end
         if Boundary and type(Boundary.completeTransition) == "function" then
@@ -724,8 +801,8 @@ local function exitPlayer(player)
     if Boundary and type(Boundary.clearPlayer) == "function" then
         Boundary.clearPlayer(player)
     end
-    transmitMap()
-    RemovalTrace.lifecycle("mapping", "sync", "sent", ctx.serverTick)
+    markMappingChanged()
+    RemovalTrace.lifecycle("mapping", "server-state", "updated", ctx.serverTick)
     RemovalTrace.lifecycle("exit", "RV", "complete", ctx.serverTick)
     return true
 end

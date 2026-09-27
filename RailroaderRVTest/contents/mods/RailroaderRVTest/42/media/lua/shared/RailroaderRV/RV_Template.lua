@@ -2,12 +2,16 @@
 -- Coordinates are relative to the captured player cell (51,44,0), which
 -- is aligned to the generated RV arrival anchor. Do not infer old templates.
 -- snapshots require every captured identity field used by the generator.
-local buildCells = {}
-for x = -4, 1 do
-    for y = -2, 1 do
-        buildCells[#buildCells + 1] = { x = x, y = y }
-    end
-end
+-- Cab build cells are part of the authored template contract. Keep them
+-- explicit so client and server consume the same immutable layout data.
+local buildCells = {
+    { x = -4, y = -2 }, { x = -4, y = -1 }, { x = -4, y = 0 }, { x = -4, y = 1 },
+    { x = -3, y = -2 }, { x = -3, y = -1 }, { x = -3, y = 0 }, { x = -3, y = 1 },
+    { x = -2, y = -2 }, { x = -2, y = -1 }, { x = -2, y = 0 }, { x = -2, y = 1 },
+    { x = -1, y = -2 }, { x = -1, y = -1 }, { x = -1, y = 0 }, { x = -1, y = 1 },
+    { x = 0, y = -2 }, { x = 0, y = -1 }, { x = 0, y = 0 }, { x = 0, y = 1 },
+    { x = 1, y = -2 }, { x = 1, y = -1 }, { x = 1, y = 0 }, { x = 1, y = 1 },
+}
 
 return {
     schemaVersion = 9,

@@ -8,7 +8,7 @@ P.RESTORE_ONLY = 2
 P.PROHIBITED = 3
 P.SPECIAL = 4
 P.OBJECT_COUNT = 412
-P.EXPECTED_CLASS_COUNTS = { [1] = 54, [2] = 0, [3] = 358, [4] = 0 }
+P.EXPECTED_CLASS_COUNTS = { [1] = 49, [2] = 0, [3] = 363, [4] = 0 }
 
 P.objects = {
     {templateIndex=1, x=-4, y=-6, z=0, class="IsoObject", name="IsoObject", sprite="industry_01_13", north="none", direction="N", state={hoppable=false}, protectionClass=3},
@@ -254,7 +254,7 @@ P.objects = {
     {templateIndex=241, x=1, y=1, z=0, class="IsoObject", name="IsoObject", sprite="industry_01_39", north="none", direction="N", state={hoppable=false}, protectionClass=1},
     {templateIndex=242, x=1, y=2, z=0, class="IsoObject", name="IsoObject", sprite="industry_01_12", north="none", direction="N", state={hoppable=false}, protectionClass=3},
     {templateIndex=243, x=1, y=2, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_02_32", north=false, direction="N", state={health=250,hoppable=false,locked=false,maxHealth=250}, protectionClass=3},
-    {templateIndex=244, x=1, y=2, z=0, class="IsoThumpable", name="Wooden Door Frame", sprite="walls_interior_house_02_43", north=true, direction="N", state={health=350,hoppable=false,locked=false,maxHealth=350}, protectionClass=1},
+    {templateIndex=244, x=1, y=2, z=0, class="IsoThumpable", name="Wooden Door Frame", sprite="walls_interior_house_02_43", north=true, direction="N", state={health=350,hoppable=false,locked=false,maxHealth=350}, protectionClass=3},
     {templateIndex=245, x=1, y=2, z=0, class="IsoDoor", name="Wooden Door", sprite="location_restaurant_pileocrepe_01_49", north=true, direction="N", state={}, protectionClass=1},
     {templateIndex=246, x=1, y=3, z=0, class="IsoObject", name="IsoObject", sprite="industry_01_38", north="none", direction="N", state={hoppable=false}, protectionClass=3},
     {templateIndex=247, x=1, y=3, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_02_32", north=false, direction="N", state={health=250,hoppable=false,locked=false,maxHealth=250}, protectionClass=3},
@@ -292,12 +292,12 @@ P.objects = {
     {templateIndex=279, x=2, y=-4, z=0, class="IsoThumpable", name="Thumpable", sprite="fixtures_railings_01_36", north=false, direction="N", state={health=250,hoppable=true,locked=false,maxHealth=250}, protectionClass=3},
     {templateIndex=280, x=2, y=-3, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_02_32", north=false, direction="N", state={doRender=false,health=250,hoppable=false,locked=false,maxHealth=250}, protectionClass=3},
     {templateIndex=281, x=2, y=-3, z=0, class="IsoThumpable", name="Thumpable", sprite="fixtures_railings_01_36", north=false, direction="N", state={health=250,hoppable=true,locked=false,maxHealth=250}, protectionClass=3},
-    {templateIndex=282, x=2, y=-2, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_02_32", north=false, direction="N", state={health=200,hoppable=false,locked=false,maxHealth=200}, protectionClass=1},
-    {templateIndex=283, x=2, y=-1, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_10_28", north=false, direction="N", state={health=350,hoppable=false,locked=false,maxHealth=350}, protectionClass=1},
+    {templateIndex=282, x=2, y=-2, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_02_32", north=false, direction="N", state={health=200,hoppable=false,locked=false,maxHealth=200}, protectionClass=3},
+    {templateIndex=283, x=2, y=-1, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_10_28", north=false, direction="N", state={health=350,hoppable=false,locked=false,maxHealth=350}, protectionClass=3},
     {templateIndex=284, x=2, y=-1, z=0, class="IsoWindow", name="Window", sprite="fixtures_windows_metal_28", north=false, direction="N", state={health=50,hoppable=false,locked=false}, protectionClass=1},
-    {templateIndex=285, x=2, y=0, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_10_24", north=false, direction="N", state={health=350,hoppable=false,locked=false,maxHealth=350}, protectionClass=1},
+    {templateIndex=285, x=2, y=0, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_10_24", north=false, direction="N", state={health=350,hoppable=false,locked=false,maxHealth=350}, protectionClass=3},
     {templateIndex=286, x=2, y=0, z=0, class="IsoWindow", name="Window", sprite="fixtures_windows_metal_24", north=false, direction="N", state={health=50,hoppable=false,locked=false}, protectionClass=1},
-    {templateIndex=287, x=2, y=1, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_02_32", north=false, direction="N", state={health=200,hoppable=false,locked=false,maxHealth=200}, protectionClass=1},
+    {templateIndex=287, x=2, y=1, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_02_32", north=false, direction="N", state={health=200,hoppable=false,locked=false,maxHealth=200}, protectionClass=3},
     {templateIndex=288, x=2, y=2, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_02_35", north=false, direction="N", state={doRender=false,health=250,hoppable=false,locked=false,maxHealth=250}, protectionClass=3},
     {templateIndex=289, x=2, y=2, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_02_32", north=false, direction="N", state={doRender=false,health=250,hoppable=false,locked=false,maxHealth=250}, protectionClass=3},
     {templateIndex=290, x=2, y=2, z=0, class="IsoThumpable", name="Thumpable", sprite="fixtures_railings_01_36", north=false, direction="N", state={health=250,hoppable=true,locked=false,maxHealth=250}, protectionClass=3},
@@ -460,7 +460,7 @@ local function sameIdentity(record, captured)
 end
 
 function P.validateTemplate(template)
-    if type(template) ~= "table" or template.schemaVersion ~= 9
+    if type(template) ~= "table" or template.schemaVersion ~= 10
         or template.objectCount ~= P.OBJECT_COUNT or type(template.objects) ~= "table"
         or #template.objects ~= P.OBJECT_COUNT then
         return false, "captured object list does not use the current protection schema"

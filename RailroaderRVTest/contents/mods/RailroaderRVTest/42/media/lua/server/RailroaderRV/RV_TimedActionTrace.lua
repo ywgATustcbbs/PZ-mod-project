@@ -277,7 +277,16 @@ function Trace.install()
         local context = describeAction(self, "complete.enter", count)
         emit(context)
         emitCallPath(context .. " callPath")
-        local results = pack(originalComplete(self, ...))
+        local args = pack(...)
+        local ok, result = pcall(function()
+            return pack(originalComplete(self, unpackValues(args, 1, args.n)))
+        end)
+        if not ok then
+            emit("seq=" .. safeText(sequenceFor(self)) .. " stage=complete.error error="
+                .. safeText(result) .. " " .. describeItem(self.item))
+            error(result, 0)
+        end
+        local results = result
         emit("seq=" .. safeText(sequenceFor(self)) .. " stage=complete.return values="
             .. packedValues(results) .. " " .. describeItem(self.item))
         return unpackValues(results, 1, results.n)

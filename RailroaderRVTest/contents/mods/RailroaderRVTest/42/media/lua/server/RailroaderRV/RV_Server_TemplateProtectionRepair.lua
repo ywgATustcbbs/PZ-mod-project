@@ -5,6 +5,7 @@ local Constants = ctx.Constants
 local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
+local ensureRoofSquare = ctx.ensureRoofSquare
 local Bitmap = require("RailroaderRV/RV_Bitmap")
 local manifestTable = ctx.manifestTable
 local requireCurrentManifest = ctx.requireCurrentManifest
@@ -18,6 +19,7 @@ if not Boundary or type(ServerWorld) ~= "table"
     or type(ServerWorld.objectModData) ~= "function"
     or type(ServerWorld.removeGenericObject) ~= "function"
     or type(ServerWorld.squareContainsObject) ~= "function"
+    or type(ensureRoofSquare) ~= "function"
     or type(ServerWorld.isPlayerObject) ~= "function"
     or type(ServerWorld.isVehicleObject) ~= "function"
     or type(manifestTable) ~= "function"
@@ -33,6 +35,7 @@ end
 
 local queues = {}
 local templateProtectionRepairIndexes = {}
+local reportedQueueFailures = {}
 local configuredDoorFrames = setmetatable({}, { __mode = "k" })
 local capturedClasses = {}
 for i = 1, #Template.objects do
@@ -140,12 +143,58 @@ local function queueKey(boundary, record)
         .. ":" .. tostring(bitmapVersion)
 end
 
-local function columnKey(x, y)
+local function coordinateKey(x, y, z)
+    return tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
+end
+
+local function xyKey(x, y)
     return tostring(x) .. ":" .. tostring(y)
 end
 
-local function coordinateKey(x, y, z)
-    return tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
+local function currentProtectedCoordinateTargets(index, boundary, x, y, z)
+    if type(index) ~= "table" or type(boundary) ~= "table"
+        or tostring(index.rvId) ~= tostring(boundary.rvId)
+        or integer(index.generation) ~= integer(boundary.generation)
+        or integer(index.bitmapVersion) ~= integer(boundary.bitmapVersion) then
+        return nil
+    end
+    local targets = type(index.byCoordinate) == "table"
+        and index.byCoordinate[coordinateKey(x, y, z)] or nil
+    return type(targets) == "table" and #targets > 0 and targets or nil
+end
+
+local function traceCurrentProtectedCoordinate(index, boundary, path, x, y, z,
+    detail, eventName)
+    if type(index) ~= "table" or type(boundary) ~= "table"
+        or tostring(index.rvId) ~= tostring(boundary.rvId)
+        or integer(index.generation) ~= integer(boundary.generation)
+        or integer(index.bitmapVersion) ~= integer(boundary.bitmapVersion) then
+        return
+    end
+    local targets = currentProtectedCoordinateTargets(index, boundary, x, y, z)
+    local events = index.reportedCoordinateDiagnostics
+    if type(events) ~= "table" then return end
+    local seen = events[eventName]
+    if type(seen) ~= "table" then
+        seen = {}
+        events[eventName] = seen
+    end
+    local key = coordinateKey(x, y, z)
+    if seen[key] then return end
+    seen[key] = true
+    print("[RailroaderRVTest][TemplateProtectionTrace] path=" .. path
+        .. " rvId=" .. tostring(index.rvId)
+        .. " generation=" .. tostring(index.generation)
+        .. " bitmapVersion=" .. tostring(index.bitmapVersion)
+        .. " x=" .. tostring(x) .. " y=" .. tostring(y)
+        .. " z=" .. tostring(z)
+        .. " protectedTargetCount=" .. tostring(targets and #targets or 0)
+        .. " " .. tostring(detail))
+end
+
+local function traceToken(value)
+    return (string.gsub(tostring(value == nil and "nil" or value),
+        "[%s,=]+", "_"))
 end
 
 local function repairIdentityKey(rvId, generation, bitmapVersion)
@@ -162,6 +211,7 @@ end
 local function clearQueuedIdentity(identityKey)
     if type(identityKey) ~= "string" then return end
     queues[identityKey] = nil
+    reportedQueueFailures[identityKey] = nil
 end
 
 local transitionPauseUntil = Boundary._templateProtectionRepairPauseUntil
@@ -302,21 +352,16 @@ if type(Boundary.addTransitionLifecycleListener) == "function" then
         onBoundaryTransitionLifecycle)
 end
 
-local function loadedColumnForCell(cell, boundary, x, y)
-    if not cell then return false end
-    for z = boundary.bitmap.minZ, boundary.bitmap.maxZ - 1 do
-        local chunkOk, chunk = ServerUtil.invoke(cell,
-            "getChunkForGridSquare", x, y, z)
-        if not chunkOk or not chunk then return false end
-        local loadedOk, loaded = pcall(function() return chunk.loaded end)
-        if not loadedOk or loaded ~= true then return false end
-    end
+local function loadedLayerForCell(cell, x, y, z)
+    if not cell then return false, "cell unavailable" end
+    local chunkOk, chunk = ServerUtil.invoke(cell,
+        "getChunkForGridSquare", x, y, z)
+    if not chunkOk then return false, "chunk lookup failed" end
+    if not chunk then return false, "chunk missing" end
+    local loadedOk, loaded = pcall(function() return chunk.loaded end)
+    if not loadedOk then return false, "loaded flag lookup failed" end
+    if loaded ~= true then return false, "chunk not loaded" end
     return true
-end
-
-local function loadedColumnForPlayer(player, boundary, x, y)
-    local cellOk, cell = pcall(ServerWorld.getCellForPlayer, player)
-    return cellOk and loadedColumnForCell(cell, boundary, x, y)
 end
 
 local function objectTag(object)
@@ -533,12 +578,13 @@ local function buildRepairIndex(boundary, manifest)
         anchorY = integer(anchor.y),
         anchorZ = integer(anchor.z),
         edges = edges,
-        byColumn = {},
         byCoordinate = {},
         protectedCoordinates = {},
         cabEditableCoordinates = {},
         reportedSafetyBlocks = {},
         reportedIdentityBlocks = {},
+        reportedCoordinateDiagnostics = {},
+        reportedBuildObjects = setmetatable({}, { __mode = "k" }),
     }
     for offsetX = Constants.CAB_MIN_OFFSET_X, Constants.CAB_MAX_OFFSET_X do
         for offsetY = Constants.CAB_MIN_OFFSET_Y, Constants.CAB_MAX_OFFSET_Y do
@@ -567,15 +613,8 @@ local function buildRepairIndex(boundary, manifest)
             expected.y, expected.z, index)
             and (expected.class == "IsoDoor" or expected.class == "IsoWindow")
         if protected and not editableCab and not sideDoorOrWindow then
-            local column = columnKey(expected.x, expected.y)
             local coordinate = coordinateKey(expected.x, expected.y, expected.z)
             local target = { expected = expected, edge = edge }
-            local columnTargets = index.byColumn[column]
-            if not columnTargets then
-                columnTargets = {}
-                index.byColumn[column] = columnTargets
-            end
-            columnTargets[#columnTargets + 1] = target
             local coordinateTargets = index.byCoordinate[coordinate]
             if not coordinateTargets then
                 coordinateTargets = {}
@@ -718,7 +757,7 @@ local function isRemovalScopeCoordinate(boundary, index, x, y, z)
         and not isCabEditableCoordinate(x, y, z, index)
 end
 
-local function footprintAllowsRemoval(tag, boundary, index, x, y, z)
+local function footprintAllowsRemoval(tag, boundary, index, x, y, z, cell)
     if type(tag) ~= "table" then return true end
     local footprint = tag.footprint
     if tag.multiTile == true and type(footprint) ~= "table" then return false end
@@ -735,6 +774,7 @@ local function footprintAllowsRemoval(tag, boundary, index, x, y, z)
             or not isRemovalScopeCoordinate(boundary, index, fx, fy, fz) then
             return false
         end
+        if not loadedLayerForCell(cell, fx, fy, fz) then return false end
         local coordinate = coordinateKey(fx, fy, fz)
         if seen[coordinate] then return false end
         seen[coordinate] = true
@@ -744,24 +784,26 @@ local function footprintAllowsRemoval(tag, boundary, index, x, y, z)
     return count == #footprint and count > 0 and hostSeen
 end
 
-local function objectFootprintAllowsRemoval(object, boundary, index, x, y, z)
+local function objectFootprintAllowsRemoval(object, boundary, index, x, y, z,
+    cell)
     local data = ServerWorld.objectModData(object)
     if type(data) ~= "table" then return true end
     local nested = data.RailroaderRVTest
-    if not footprintAllowsRemoval(data, boundary, index, x, y, z) then
+    if not footprintAllowsRemoval(data, boundary, index, x, y, z, cell) then
         return false
     end
     return type(nested) ~= "table"
-        or footprintAllowsRemoval(nested, boundary, index, x, y, z)
+        or footprintAllowsRemoval(nested, boundary, index, x, y, z, cell)
 end
 
-local function reportUnsafeRemoval(index, object, boundary, x, y, z)
+local function reportUnsafeRemoval(index, object, boundary, x, y, z, cell)
     local className = objectClassName(object)
     local reason
     if hasStoredContainerItems(object, className) then
         reason = "container contents are present or could not be verified"
-    elseif not objectFootprintAllowsRemoval(object, boundary, index, x, y, z) then
-        reason = "object footprint is invalid or leaves the RV removal scope"
+    elseif not objectFootprintAllowsRemoval(object, boundary, index, x, y, z,
+        cell) then
+        reason = "object footprint is invalid, unloaded, or leaves the RV removal scope"
     else
         return
     end
@@ -772,12 +814,18 @@ local function reportUnsafeRemoval(index, object, boundary, x, y, z)
 end
 
 local function isProtectedBuildingCandidate(object, x, y, z, boundary,
-    index, claimedTarget)
-    if isCabSideDoorOrWindow(object, x, y, z, index) then return false end
-    if not isRemovalScopeCoordinate(boundary, index, x, y, z)
-        or not objectAtCoordinate(object, x, y, z)
-        or protectedWorldObject(object) then
-        return false
+    index, claimedTarget, cell)
+    if isCabSideDoorOrWindow(object, x, y, z, index) then
+        return false, "cab-side-opening"
+    end
+    if not isRemovalScopeCoordinate(boundary, index, x, y, z) then
+        return false, "outside-removal-scope"
+    end
+    if not objectAtCoordinate(object, x, y, z) then
+        return false, "object-coordinate-mismatch"
+    end
+    if protectedWorldObject(object) then
+        return false, "protected-world-object"
     end
     local className = objectClassName(object)
     if claimedTarget and (claimedTarget.expected.class ~= className
@@ -785,18 +833,52 @@ local function isProtectedBuildingCandidate(object, x, y, z, boundary,
         or claimedTarget.expected.z ~= z) then
         claimedTarget = nil
     end
-    if not className
-        or hasStoredContainerItems(object, className)
-        or not objectFootprintAllowsRemoval(object, boundary, index, x, y, z) then
-        return false
+    if not className then return false, "object-class-unavailable" end
+    if hasStoredContainerItems(object, className) then
+        return false, "container-not-empty-or-unverified"
+    end
+    if not objectFootprintAllowsRemoval(object, boundary, index, x, y, z,
+        cell) then
+        return false, "object-footprint-unsafe"
     end
     -- RV-managed coordinates are exclusive, regardless of foreign mod-data
     -- claims or structural sprite metadata.
     if not ServerUtil.classInstance(object, "IsoObject") then
-        return false
+        return false, "object-class-not-IsoObject"
     end
-    if isBloodOrSplat(object) then return false end
-    return true
+    if isBloodOrSplat(object) then return false, "blood-or-splat" end
+    return true, "candidate"
+end
+
+local function traceProtectedBuildObject(index, boundary, x, y, z, object,
+    objectIsFloor, claimedTarget, safeClaimedTarget, buildingCandidate,
+    candidateReason)
+    if tostring(index.rvId) ~= tostring(boundary.rvId)
+        or integer(index.generation) ~= integer(boundary.generation)
+        or integer(index.bitmapVersion) ~= integer(boundary.bitmapVersion)
+        or not isRemovalScopeCoordinate(boundary, index, x, y, z)
+        or index.reportedBuildObjects[object] then
+        return
+    end
+    index.reportedBuildObjects[object] = true
+    local nameOk, name = ServerUtil.invoke(object, "getName")
+    local spriteOk, sprite = pcall(ServerWorld.getSpriteName, object)
+    local claimedIndex = claimedTarget
+        and claimedTarget.expected.templateIndex or nil
+    print("[RailroaderRVTest][TemplateProtectionTrace] path=buildObject"
+        .. " rvId=" .. tostring(index.rvId)
+        .. " generation=" .. tostring(index.generation)
+        .. " bitmapVersion=" .. tostring(index.bitmapVersion)
+        .. " x=" .. tostring(x) .. " y=" .. tostring(y)
+        .. " z=" .. tostring(z)
+        .. " floor=" .. tostring(objectIsFloor == true)
+        .. " class=" .. traceToken(objectClassName(object))
+        .. " name=" .. traceToken(nameOk and name or "unavailable")
+        .. " sprite=" .. traceToken(spriteOk and sprite or "unavailable")
+        .. " claimedTemplateIndex=" .. tostring(claimedIndex or "none")
+        .. " safeClaimedTarget=" .. tostring(safeClaimedTarget == true)
+        .. " buildingCandidate=" .. tostring(buildingCandidate == true)
+        .. " candidateReason=" .. traceToken(candidateReason))
 end
 
 local function isWhitelistedTemplateObject(object, boundary, manifest, edges,
@@ -973,7 +1055,7 @@ local function currentTemplateTarget(object, boundary, targets)
 end
 
 local function currentTemplateClaimIsSafe(object, target, boundary, index,
-    x, y, z, objectIsFloor)
+    x, y, z, objectIsFloor, cell)
     if not target then return false end
     local expected = target.expected
     local className = objectClassName(object)
@@ -981,7 +1063,8 @@ local function currentTemplateClaimIsSafe(object, target, boundary, index,
         or className ~= expected.class or protectedWorldObject(object)
         or isBloodOrSplat(object)
         or hasStoredContainerItems(object, className)
-        or not objectFootprintAllowsRemoval(object, boundary, index, x, y, z) then
+        or not objectFootprintAllowsRemoval(object, boundary, index, x, y, z,
+            cell) then
         return false
     end
     if expected.class == "IsoObject"
@@ -1010,91 +1093,103 @@ local function markMatchingTargetsBlocked(object, targets, blocked, objectIsFloo
     end
 end
 
-local function collectColumn(cell, x, y, boundary, manifest, index)
-    local squares, removals, removalSeen, blocked = {}, {}, {}, {}
-    local bitmap = boundary.bitmap
-    for z = bitmap.minZ, bitmap.maxZ - 1 do
-        local squareOk, square = pcall(ServerWorld.getSquare, cell, x, y, z)
-        if not squareOk then return false, "template-protection-repair square lookup failed" end
-        if square then
-            local snapshotOk, objects = pcall(ServerWorld.squareSnapshot, square)
-            if not snapshotOk or type(objects) ~= "table" then
-                return false, "template-protection-repair object snapshot failed"
-            end
-            local targets = index.byCoordinate[coordinateKey(x, y, z)] or {}
-            local floorOk, floor = ServerUtil.invoke(square, "getFloor")
-            if hasTemplateIsoObjectTarget(targets) and not floorOk then
-                return false, "captured floor slot could not be verified"
-            end
-            squares[z] = { square = square, objects = objects, floor = floor }
-            for i = 1, #objects do
-                local object = objects[i]
-                if not isCabSideDoorOrWindow(object, x, y, z, index)
-                    and not isWhitelistedGenerator(object, boundary, manifest)
-                    and not isWhitelistedTemplateObject(object, boundary,
-                        manifest, index.edges, floor == object) then
-                    local objectIsFloor = floor == object
-                    local floorTarget = objectIsFloor
-                        and hasTemplateFloorTarget(targets)
-                    local claimedTarget = currentTemplateTarget(object,
-                        boundary, targets)
-                    local safeClaimedTarget = currentTemplateClaimIsSafe(
-                        object, claimedTarget, boundary, index, x, y, z,
-                        objectIsFloor)
-                    local buildingCandidate = isProtectedBuildingCandidate(
-                        object, x, y, z, boundary, index, claimedTarget)
-                    local misplacedVisualCorner = objectIsFloor and claimedTarget
-                        and isVisualCornerTemplate(claimedTarget.expected)
-                    local incompleteClaimedFloor = floorTarget and claimedTarget
-                        and currentTemplateTagMismatch(object,
-                            claimedTarget.expected, claimedTarget.edge,
-                            boundary) ~= nil
-                    if misplacedVisualCorner then
-                        blocked[claimedTarget.expected.templateIndex] = true
-                    elseif incompleteClaimedFloor then
-                        blocked[claimedTarget.expected.templateIndex] = true
-                        reportIncompleteClaimedFloorTag(index, object,
-                            boundary, claimedTarget.expected,
-                            claimedTarget.edge)
-                    elseif (safeClaimedTarget or buildingCandidate) and floorTarget then
-                        if not protectedWorldObject(object)
-                            and not hasStoredContainerItems(object,
-                                objectClassName(object)) then
-                            removals[#removals + 1] = {
-                                object = object, square = square, inPlace = true,
-                            }
-                            removalSeen[object] = true
-                        else
-                            reportUnsafeRemoval(index, object, boundary, x, y, z)
-                            if claimedTarget then
-                                blocked[claimedTarget.expected.templateIndex] = true
-                            end
-                            markMatchingTargetsBlocked(object, targets, blocked,
-                                objectIsFloor)
-                        end
-                    elseif safeClaimedTarget or buildingCandidate then
-                        if not removalSeen[object] then
-                            removalSeen[object] = true
-                            removals[#removals + 1] = {
-                                object = object, square = square,
-                            }
-                        end
+local function collectCoordinate(cell, x, y, z, boundary, manifest, index)
+    local removals, removalSeen, blocked = {}, {}, {}
+    local targets = index.byCoordinate[coordinateKey(x, y, z)] or {}
+    local squareOk, square = pcall(ServerWorld.getSquare, cell, x, y, z)
+    if not squareOk then
+        return false, "template-protection-repair square lookup failed"
+    end
+    local squareInfo
+    if square then
+        local snapshotOk, objects = pcall(ServerWorld.squareSnapshot, square)
+        if not snapshotOk or type(objects) ~= "table" then
+            return false, "template-protection-repair object snapshot failed"
+        end
+        local floorOk, floor = ServerUtil.invoke(square, "getFloor")
+        if hasTemplateIsoObjectTarget(targets) and not floorOk then
+            return false, "captured floor slot could not be verified"
+        end
+        squareInfo = { square = square, objects = objects, floor = floor }
+        for i = 1, #objects do
+            local object = objects[i]
+            if not isCabSideDoorOrWindow(object, x, y, z, index)
+                and not isWhitelistedGenerator(object, boundary, manifest)
+                and not isWhitelistedTemplateObject(object, boundary,
+                    manifest, index.edges, floor == object) then
+                local objectIsFloor = floor == object
+                local floorTarget = objectIsFloor
+                    and hasTemplateFloorTarget(targets)
+                local claimedTarget = currentTemplateTarget(object,
+                    boundary, targets)
+                local safeClaimedTarget = currentTemplateClaimIsSafe(
+                    object, claimedTarget, boundary, index, x, y, z,
+                    objectIsFloor, cell)
+                local buildingCandidate, candidateReason =
+                    isProtectedBuildingCandidate(object, x, y, z, boundary,
+                        index, claimedTarget, cell)
+                traceProtectedBuildObject(index, boundary, x, y, z, object,
+                    objectIsFloor, claimedTarget, safeClaimedTarget,
+                    buildingCandidate, candidateReason)
+                local misplacedVisualCorner = objectIsFloor and claimedTarget
+                    and isVisualCornerTemplate(claimedTarget.expected)
+                local incompleteClaimedFloor = floorTarget and claimedTarget
+                    and currentTemplateTagMismatch(object,
+                        claimedTarget.expected, claimedTarget.edge,
+                        boundary) ~= nil
+                if misplacedVisualCorner then
+                    blocked[claimedTarget.expected.templateIndex] = true
+                elseif incompleteClaimedFloor then
+                    blocked[claimedTarget.expected.templateIndex] = true
+                    reportIncompleteClaimedFloorTag(index, object,
+                        boundary, claimedTarget.expected,
+                        claimedTarget.edge)
+                elseif (safeClaimedTarget or buildingCandidate) and floorTarget then
+                    if not protectedWorldObject(object)
+                        and not hasStoredContainerItems(object,
+                            objectClassName(object)) then
+                        removals[#removals + 1] = {
+                            object = object, square = square, inPlace = true,
+                        }
+                        removalSeen[object] = true
                     else
-                        if #targets > 0 then
-                            reportUnsafeRemoval(index, object, boundary,
-                                x, y, z)
-                        end
+                        reportUnsafeRemoval(index, object, boundary, x, y, z,
+                            cell)
                         if claimedTarget then
                             blocked[claimedTarget.expected.templateIndex] = true
                         end
                         markMatchingTargetsBlocked(object, targets, blocked,
                             objectIsFloor)
                     end
+                elseif safeClaimedTarget or buildingCandidate then
+                    if not removalSeen[object] then
+                        removalSeen[object] = true
+                        removals[#removals + 1] = {
+                            object = object, square = square,
+                        }
+                    end
+                else
+                    if #targets > 0 then
+                        reportUnsafeRemoval(index, object, boundary,
+                            x, y, z, cell)
+                    end
+                    if claimedTarget then
+                        blocked[claimedTarget.expected.templateIndex] = true
+                    end
+                    markMatchingTargetsBlocked(object, targets, blocked,
+                        objectIsFloor)
                 end
             end
         end
     end
-    return true, squares, removals, blocked
+    if #targets > 0 or (squareInfo and #squareInfo.objects > 0) then
+        traceCurrentProtectedCoordinate(index, boundary, "coordinateScan",
+            x, y, z, "squarePresent=" .. tostring(square ~= nil)
+                .. " objectCount=" .. tostring(squareInfo and #squareInfo.objects or 0)
+                .. " targetCount=" .. tostring(#targets)
+                .. " removalCount=" .. tostring(#removals), "scan")
+    end
+    return true, squareInfo, removals, blocked
 end
 
 local function removeCandidates(removals)
@@ -1139,9 +1234,10 @@ local function removeDuplicateTemplate(square, object)
     return true
 end
 
-local function repairTemplateProtectionColumn(cell, x, y, squares, removed,
-    inPlace, blocked, index, boundary, manifest)
-    local targets = index.byColumn[columnKey(x, y)] or {}
+local function repairTemplateProtectionCoordinate(cell, x, y, z, squareInfo,
+    removed, inPlace, blocked, index, boundary, manifest)
+    local targets = index.byCoordinate[coordinateKey(x, y, z)] or {}
+    if #targets == 0 then return true end
     local updatedFloors = {}
     local anchor = manifest.anchor
     local tagContext = {
@@ -1154,7 +1250,36 @@ local function repairTemplateProtectionColumn(cell, x, y, squares, removed,
     for i = 1, #targets do
         local target = targets[i]
         local expected, edge = target.expected, target.edge
-        local squareInfo = squares[expected.z]
+        if expected.x ~= x or expected.y ~= y or expected.z ~= z then
+            return false, Constants.INVALID_RV_DATA
+        end
+        if not squareInfo then
+            if not Bitmap.containsScope(boundary.bitmap, expected.x,
+                expected.y, expected.z) then
+                return false, Constants.INVALID_RV_DATA
+            end
+            if not loadedLayerForCell(cell, expected.x, expected.y,
+                expected.z) then
+                return false, "protected template layer became unloaded before square creation"
+            end
+            local squareOk, square = pcall(ensureRoofSquare, cell,
+                expected.x, expected.y, expected.z)
+            if not squareOk or not square then
+                return false, "protected template grid square creation failed: "
+                    .. tostring(square)
+            end
+            local snapshotOk, objects = pcall(ServerWorld.squareSnapshot, square)
+            if not snapshotOk or type(objects) ~= "table" then
+                return false, "protected template grid square snapshot failed"
+            end
+            local floorOk, floor = ServerUtil.invoke(square, "getFloor")
+            local coordinateTargets = index.byCoordinate[
+                coordinateKey(expected.x, expected.y, expected.z)] or {}
+            if hasTemplateIsoObjectTarget(coordinateTargets) and not floorOk then
+                return false, "captured floor slot could not be verified"
+            end
+            squareInfo = { square = square, objects = objects, floor = floor }
+        end
         if squareInfo then
             local templateIndex = expected.templateIndex
             local present, ambiguous = false, blocked[templateIndex] == true
@@ -1237,28 +1362,82 @@ local function repairTemplateProtectionColumn(cell, x, y, squares, removed,
     return true
 end
 
-local function repairQueuedTemplateProtectionColumn(player, boundary, expectedKey, x, y,
+local function repairTemplateProtectionLayer(cell, x, y, z, boundary, manifest,
     repairIndex)
+    if not Bitmap.containsScope(boundary.bitmap, x, y, z)
+        or isCabEditableCoordinate(x, y, z, repairIndex) then
+        return true
+    end
+    local loaded, loadReason = loadedLayerForCell(cell, x, y, z)
+    if not loaded then
+        traceCurrentProtectedCoordinate(repairIndex, boundary,
+            "layerSkipped", x, y, z, "reason=" .. traceToken(loadReason),
+            "unloaded")
+        return true
+    end
+    local scanOk, squareInfo, removals, blocked = collectCoordinate(cell,
+        x, y, z, boundary, manifest, repairIndex)
+    if not scanOk then return false, squareInfo end
+    local removeOk, removed, inPlace = removeCandidates(removals)
+    if not removeOk then return false, removed end
+    local repairOk, repairReason = repairTemplateProtectionCoordinate(cell,
+        x, y, z, squareInfo, removed, inPlace, blocked, repairIndex,
+        boundary, manifest)
+    if not repairOk then return false, repairReason end
+    if (squareInfo and #squareInfo.objects > 0)
+        or #removals > 0
+        or repairIndex.byCoordinate[coordinateKey(x, y, z)] then
+        local targets = repairIndex.byCoordinate[coordinateKey(x, y, z)] or {}
+        traceCurrentProtectedCoordinate(repairIndex, boundary,
+            "coordinateRepair", x, y, z,
+            "removalCount=" .. tostring(#removals)
+                .. " targetCount=" .. tostring(#targets), "repair")
+    end
+    return true
+end
+
+local function repairQueuedTemplateProtectionXY(player, boundary, expectedKey,
+    x, y)
     local contextOk, currentBoundary, record, manifest =
         validCurrentContext(player, boundary)
     local currentKey = contextOk and queueKey(currentBoundary, record) or nil
-    if not contextOk or currentKey ~= expectedKey
-        or type(repairIndex) ~= "table" or repairIndex.key ~= expectedKey then
-        return false, contextOk and "queued RV generation is stale" or currentBoundary
+    if not contextOk or currentKey ~= expectedKey then
+        return false, contextOk and "queued RV generation is stale"
+            or currentBoundary
     end
-    if not Bitmap.containsScope(boundary.bitmap, x, y, boundary.bitmap.minZ) then
-        return true
+    local repairIndex = templateProtectionRepairIndexes[expectedKey]
+    if not repairIndex then
+        local indexCallOk, builtIndex = pcall(buildRepairIndex, currentBoundary,
+            manifest)
+        if not indexCallOk or type(builtIndex) ~= "table" then
+            return false, Constants.INVALID_RV_DATA
+        end
+        builtIndex.key = expectedKey
+        templateProtectionRepairIndexes[expectedKey] = builtIndex
+        repairIndex = builtIndex
+    end
+    if repairIndex.key ~= expectedKey then
+        return false, "queued template-protection index is stale"
     end
     local cellOk, cell = pcall(ServerWorld.getCellForPlayer, player)
-    if not cellOk or not cell then return false, "current player cell is unavailable" end
-    local scanOk, squares, removals, blocked = collectColumn(cell, x, y,
-        boundary, manifest, repairIndex)
-    if not scanOk then return false, squares end
-    local removeOk, removed, inPlace = removeCandidates(removals)
-    if not removeOk then return false, removed end
-    local repairOk, repairReason = repairTemplateProtectionColumn(cell, x, y,
-        squares, removed, inPlace, blocked, repairIndex, boundary, manifest)
-    if not repairOk then return false, repairReason end
+    if not cellOk or not cell then
+        local traceZ = integer(boundary.bitmap.minZ) or 0
+        traceCurrentProtectedCoordinate(repairIndex, boundary,
+            "xySkipped", x, y, traceZ, "reason=player_cell_unavailable",
+            "cellUnavailable")
+        return true
+    end
+    for z = boundary.bitmap.minZ, boundary.bitmap.maxZ - 1 do
+        local layerCallOk, layerRepaired, layerReason = pcall(
+            repairTemplateProtectionLayer, cell, x, y, z, boundary,
+            manifest, repairIndex)
+        if not layerCallOk or layerRepaired ~= true then
+            traceCurrentProtectedCoordinate(repairIndex, boundary,
+                "layerFailed", x, y, z,
+                "reason=" .. traceToken(layerCallOk and layerReason
+                    or layerRepaired), "layerFailure")
+        end
+    end
     return true
 end
 
@@ -1418,8 +1597,8 @@ local function compactQueue(queue)
     queue.entries, queue.head, queue.tail = compacted, 1, count
 end
 
-local function enqueueTile(queue, x, y)
-    local tileKey = columnKey(x, y)
+local function enqueueXY(queue, x, y)
+    local tileKey = xyKey(x, y)
     if queue.pending[tileKey] then return end
     queue.tail = queue.tail + 1
     queue.entries[queue.tail] = { x = x, y = y, key = tileKey }
@@ -1439,62 +1618,44 @@ local function purgePreviousGenerations(rvId, currentKey)
             templateProtectionRepairIndexes[key] = nil
         end
     end
+    local prefix = tostring(rvId) .. ":"
+    for key in pairs(reportedQueueFailures) do
+        if string.sub(key, 1, #prefix) == prefix and key ~= currentKey then
+            reportedQueueFailures[key] = nil
+        end
+    end
 end
 
 function Boundary.sampleTemplateProtectionRepairPlayer(expectedBoundary, player)
-    local contextOk, boundary, record, manifest, identity =
-        validCurrentContext(player, expectedBoundary)
-    if not contextOk then return false, boundary end
-    local xOk, playerX = ServerUtil.invoke(player, "getX")
-    local yOk, playerY = ServerUtil.invoke(player, "getY")
-    playerX, playerY = xOk and ServerUtil.toNumber(playerX),
-        yOk and ServerUtil.toNumber(playerY)
-    if not playerX or not playerY then return false, "player position is unavailable" end
-    local centerX, centerY = math.floor(playerX), math.floor(playerY)
-    local key = queueKey(boundary, record)
-    if not key then return false, Constants.INVALID_RV_DATA end
-    if isIdentityPaused(key, Boundary._tick) then
-        clearQueuedIdentity(key)
-        return true
-    end
-    local cellOk, cell = pcall(ServerWorld.getCellForPlayer, player)
-    if not cellOk or not cell then
-        clearQueuedIdentity(key)
-        return true
-    end
-    purgePreviousGenerations(boundary.rvId, key)
-    local index = templateProtectionRepairIndexes[key]
-    if not index then
-        local indexOk, builtIndex = pcall(buildRepairIndex, boundary, manifest)
-        if not indexOk or type(builtIndex) ~= "table" then
-            return false, Constants.INVALID_RV_DATA
+    pcall(function()
+        if player == nil then return end
+        if type(expectedBoundary) ~= "table" then return end
+        local key = repairIdentityKey(expectedBoundary.rvId,
+            expectedBoundary.generation, expectedBoundary.bitmapVersion)
+        if not key then return end
+        local xOk, playerX = ServerUtil.invoke(player, "getX")
+        local yOk, playerY = ServerUtil.invoke(player, "getY")
+        playerX, playerY = xOk and ServerUtil.toNumber(playerX),
+            yOk and ServerUtil.toNumber(playerY)
+        if not playerX or not playerY then return end
+        local centerX, centerY = math.floor(playerX), math.floor(playerY)
+        purgePreviousGenerations(expectedBoundary.rvId, key)
+        local queue = queues[key]
+        if not queue then
+            queue = { rvId = tostring(expectedBoundary.rvId), entries = {},
+                head = 1, tail = 0, pending = {}, count = 0 }
+            queues[key] = queue
         end
-        builtIndex.key = key
-        templateProtectionRepairIndexes[key] = builtIndex
-        index = builtIndex
-    end
-    local queue = queues[key]
-    if not queue then
-        queue = { rvId = tostring(boundary.rvId), entries = {}, head = 1,
-            tail = 0, pending = {}, count = 0, index = index }
-        queues[key] = queue
-    elseif queue.index ~= index then
-        return false, Constants.INVALID_RV_DATA
-    end
-    for offsetY = -1, 1 do
-        for offsetX = -1, 1 do
-            local x, y = centerX + offsetX, centerY + offsetY
-            if Bitmap.containsScope(boundary.bitmap, x, y,
-                    boundary.bitmap.minZ)
-                and loadedColumnForCell(cell, boundary, x, y) then
-                enqueueTile(queue, x, y)
+        for offsetY = -1, 1 do
+            for offsetX = -1, 1 do
+                enqueueXY(queue, centerX + offsetX, centerY + offsetY)
             end
         end
-    end
+    end)
     return true
 end
 
-local function popTile(queue)
+local function popXY(queue)
     local entry = queue.entries[queue.head]
     if not entry then return nil end
     queue.entries[queue.head] = nil
@@ -1506,12 +1667,15 @@ local function popTile(queue)
 end
 
 function Boundary.processTemplateProtectionRepairQueue(activeBoundaries)
-    if type(activeBoundaries) ~= "table" then return false end
+    if type(activeBoundaries) ~= "table" then
+        return false, "active RV boundary list is unavailable"
+    end
     local ready = {}
     for _, item in pairs(activeBoundaries) do
         if type(item) == "table" and item.boundary and item.player then
-            local contextOk, boundary, record, manifest, identity =
-                validCurrentContext(item.player, item.boundary)
+            local contextCallOk, contextOk, boundary, record, manifest = pcall(
+                validCurrentContext, item.player, item.boundary)
+            if not contextCallOk then contextOk = false end
             if contextOk then
                 local key = queueKey(boundary, record)
                 if key then
@@ -1523,6 +1687,15 @@ function Boundary.processTemplateProtectionRepairQueue(activeBoundaries)
                         ready[#ready + 1] = { key = key, queue = queue,
                             boundary = boundary, player = item.player }
                     end
+                end
+            else
+                local staleKey = type(item.boundary) == "table"
+                    and repairIdentityKey(item.boundary.rvId,
+                        item.boundary.generation,
+                        item.boundary.bitmapVersion) or nil
+                if staleKey then
+                    clearQueuedIdentity(staleKey)
+                    templateProtectionRepairIndexes[staleKey] = nil
                 end
             end
         end
@@ -1539,27 +1712,29 @@ function Boundary.processTemplateProtectionRepairQueue(activeBoundaries)
         end
     end
     lastServedQueueKey = selected.key
-    local nextEntry = selected.queue.entries[selected.queue.head]
-    if nextEntry and not loadedColumnForPlayer(selected.player,
-        selected.boundary, nextEntry.x, nextEntry.y) then
-        -- Chunk streaming can unload a column after sampling. Drop the entire
-        -- identity queue; the next loaded sample will rebuild it from current
-        -- player proximity instead of carrying stale work across the unload.
-        clearQueuedIdentity(selected.key)
-        return false
-    end
-    local entry = popTile(selected.queue)
+    local entry = popXY(selected.queue)
     if selected.queue.count == 0 then queues[selected.key] = nil end
-    if not entry then return false end
-    local callOk, repaired, reason = pcall(repairQueuedTemplateProtectionColumn, selected.player,
-        selected.boundary, selected.key, entry.x, entry.y,
-        selected.queue.index)
+    if not entry then return false, "template-protection repair queue entry is unavailable" end
+    local callOk, repaired, reason = pcall(
+        repairQueuedTemplateProtectionXY, selected.player,
+        selected.boundary, selected.key, entry.x, entry.y)
     if not callOk or repaired ~= true then
-        -- Dequeue failures safely. A nearby player will enqueue the tile again
-        -- at the next ten-tick sampling interval; no unbounded retry is kept.
-        print("[RailroaderRVTest] template-protection-repair tile deferred: "
-            .. tostring(callOk and reason or repaired))
-        return false
+        local failure = tostring(callOk and reason or repaired)
+        local failures = reportedQueueFailures[selected.key]
+        if type(failures) ~= "table" then
+            failures = {}
+            reportedQueueFailures[selected.key] = failures
+        end
+        if not failures[entry.key] then
+            failures[entry.key] = true
+            print("[RailroaderRVTest][TemplateProtectionTrace] path=xyProcessingFailed"
+                .. " rvId=" .. tostring(selected.boundary.rvId)
+                .. " generation=" .. tostring(selected.boundary.generation)
+                .. " bitmapVersion=" .. tostring(selected.boundary.bitmapVersion)
+                .. " x=" .. tostring(entry.x) .. " y=" .. tostring(entry.y)
+                .. " reason=" .. traceToken(failure))
+        end
+        return false, failure
     end
     return true
 end

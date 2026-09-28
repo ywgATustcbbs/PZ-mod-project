@@ -3,6 +3,10 @@
 RailroaderRVTest 是 Railroader RV 的内部技术验证包，不承诺对外功能。Lua 命名空间为
 RailroaderRV；当前技术版本以 mod.info 和共享常量中的声明为准。
 
+## 重构草案
+
+模块边界、接口、复用映射和位图/z 层约束见[房车重构设计细化草案](REFACTOR_DESIGN.md)。
+
 ## 设计与安全边界
 
 路线和房屋由服务端按需程序化生成，不内置地图。客户端只提交操作意图；服务端验证玩家、

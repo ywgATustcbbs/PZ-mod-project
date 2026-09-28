@@ -14,7 +14,7 @@ local buildCells = {
 }
 
 return {
-    schemaVersion = 9,
+    schemaVersion = 10,
     sourceTarget = { x = 51, y = 44, z = 0 },
     objectCount = 412,
     -- Cab z0 build/demolish permission is the full 6x4 rectangle. The

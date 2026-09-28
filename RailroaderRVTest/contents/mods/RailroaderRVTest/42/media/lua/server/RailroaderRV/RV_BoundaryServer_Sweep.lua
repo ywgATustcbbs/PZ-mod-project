@@ -115,11 +115,12 @@ function Boundary.onTick()
         and Boundary.shouldSampleTemplateProtectionRepair(Boundary._tick) then
         for i = 1, #activePlayers do
             local item = activePlayers[i]
-            local ok, reason = pcall(Boundary.sampleTemplateProtectionRepairPlayer,
+            local callOk, sampled, reason = pcall(
+                Boundary.sampleTemplateProtectionRepairPlayer,
                 item.boundary, item.player)
-            if not ok or reason == false then
+            if not callOk or sampled ~= true then
                 print("[RailroaderRVTest] template-protection-repair player sampling skipped: "
-                    .. tostring(ok and "current mapping rejected" or reason))
+                    .. tostring(callOk and reason or sampled))
             end
         end
     end
@@ -128,10 +129,11 @@ function Boundary.onTick()
     -- generation-scoped and processing pauses when no validated RV player is
     -- currently inside the owning 100x100 region.
     if type(Boundary.processTemplateProtectionRepairQueue) == "function" then
-        local ok, reason = pcall(Boundary.processTemplateProtectionRepairQueue, activeBoundaries)
-        if not ok then
+        local callOk, processed, reason = pcall(
+            Boundary.processTemplateProtectionRepairQueue, activeBoundaries)
+        if not callOk or processed ~= true and reason ~= nil then
             print("[RailroaderRVTest] template-protection-repair queue step skipped: "
-                .. tostring(reason))
+                .. tostring(callOk and reason or processed))
         end
     end
 

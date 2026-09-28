@@ -184,9 +184,10 @@ local function traceTimedActionMethod(action, actionName, methodName)
     action["_rvDemolitionTraceWrapped_" .. methodName] = true
 end
 
-local function tagMatchesStaticIdentity(tag, expected)
+local function tagMatchesStaticIdentity(tag, expected, templateIndex,
+    protectionClass)
     if type(tag) ~= "table" or type(expected) ~= "table"
-        or finiteInteger(tag.templateIndex) ~= expected.templateIndex
+        or finiteInteger(tag.templateIndex) ~= templateIndex
         or finiteInteger(tag.templateX) ~= expected.x
         or finiteInteger(tag.templateY) ~= expected.y
         or finiteInteger(tag.templateZ) ~= expected.z
@@ -194,7 +195,7 @@ local function tagMatchesStaticIdentity(tag, expected)
         or tag.templateName ~= expected.name
         or tag.templateSprite ~= expected.sprite
         or tag.templateDirection ~= expected.direction
-        or finiteInteger(tag.protectionClass) ~= expected.protectionClass then
+        or finiteInteger(tag.protectionClass) ~= protectionClass then
         return false
     end
     if expected.north == "none" then
@@ -306,20 +307,22 @@ local function rejectInvalidRVData(character, reason)
     return true
 end
 
-local function objectMatchesStaticIdentity(object, tag, expected)
+local function objectMatchesStaticIdentity(object, tag, expected,
+    templateIndex, protectionClass)
     demolitionTrace("static-identity.enter", "expected={index="
-        .. tostring(expected.templateIndex) .. ",class=" .. tostring(expected.class)
+        .. tostring(templateIndex) .. ",class=" .. tostring(expected.class)
         .. ",name=" .. tostring(expected.name) .. ",sprite="
         .. tostring(expected.sprite) .. ",direction="
         .. tostring(expected.direction) .. ",protectionClass="
-        .. tostring(expected.protectionClass) .. "} " .. tagSummary(nil, tag)
+        .. tostring(protectionClass) .. "} " .. tagSummary(nil, tag)
         .. " " .. objectCoordinateSummary(object))
     local function fail(reason, detail)
         demolitionTrace("static-identity.return", "result=false reason=" .. reason
             .. " " .. tostring(detail or ""))
         return false
     end
-    if not tagMatchesStaticIdentity(tag, expected) then
+    if not tagMatchesStaticIdentity(tag, expected, templateIndex,
+        protectionClass) then
         return fail("template-tag-static-fields-mismatch")
     end
     local indexOk, objectIndex = call(object, "getObjectIndex")
@@ -366,7 +369,7 @@ local function objectMatchesStaticIdentity(object, tag, expected)
         end
     end
     demolitionTrace("static-identity.return", "result=true index="
-        .. tostring(expected.templateIndex))
+        .. tostring(templateIndex))
     return true
 end
 
@@ -450,16 +453,24 @@ local function isCurrentProhibitedObject(object, character)
     end
 
     if type(tag) ~= "table" then
-        demolitionTrace("object-check.return", "blocked=false reason=template-tag-unavailable")
-        return false
+        return rejectInvalidRVData(character, "template-tag-unavailable")
+    end
+    local tagFailure = templateTagFailureReason(data, tag)
+    if tagFailure then
+        return rejectInvalidRVData(character, tagFailure)
     end
 
     local expected, index, protection, anchor, world, offset =
         resolveTemplateObject(object, tag)
     if not expected then
-        demolitionTrace("object-check.return", "blocked=false reason="
-            .. tostring(index or "template-object-unrecognized"))
-        return false
+        return rejectInvalidRVData(character,
+            index or "template-object-unrecognized")
+    end
+    if not tagMatchesStaticIdentity(tag, expected, index,
+        protection.protectionClass)
+        or not objectMatchesStaticIdentity(object, tag, expected, index,
+            protection.protectionClass) then
+        return rejectInvalidRVData(character, "template-static-identity-mismatch")
     end
     if TemplateGeometry.cabContainsWorld(world, anchor, Template) then
         demolitionTrace("object-check.return", "blocked=false reason=cab-coordinate-allowed"
@@ -477,47 +488,63 @@ local function isCurrentProhibitedObject(object, character)
             .. " templateIndex=" .. tostring(index))
         return false
     end
-    if not tagMatchesStaticIdentity(tag, expected)
-        or not objectMatchesStaticIdentity(object, tag, expected) then
-        demolitionTrace("object-check.return", "blocked=false reason=template-identity-unrecognized"
-            .. " templateIndex=" .. tostring(index))
-        return false
-    end
     demolitionTrace("object-check.return", "blocked=true reason=protected-template-object"
         .. " templateIndex=" .. tostring(index))
     return true
 end
 
-local function wrapAction(action, actionName)
+local function actionIsBlocked(actionName, character, object)
+    local clientCall = type(isClient) == "function" and isClient()
+    demolitionTrace("action.new.enter", "action=" .. tostring(actionName)
+        .. " isClient=" .. tostring(clientCall)
+        .. " onlineId=" .. playerIdentity(character) .. " object="
+        .. objectCoordinateSummary(object))
+    local blocked = clientCall and isCurrentProhibitedObject(object, character)
+    demolitionTrace("action.new.decision", "action=" .. tostring(actionName)
+        .. " onlineId=" .. playerIdentity(character)
+        .. " blocked=" .. tostring(blocked))
+    if blocked then
+        demolitionTrace("action.new.return", "action=" .. tostring(actionName)
+            .. " result=ignoreAction")
+        return true
+    end
+    demolitionTrace("action.new.call-original", "action=" .. tostring(actionName)
+        .. " onlineId=" .. playerIdentity(character))
+    return false
+end
+
+local function wrapDestroyAction(action)
     if type(action) ~= "table" or type(action.new) ~= "function"
         or action._rvProtectedDemolitionWrapped == true then
         return
     end
     local originalNew = action.new
-    action.new = function(self, character, object, ...)
-        local clientCall = type(isClient) == "function" and isClient()
-        demolitionTrace("action.new.enter", "action=" .. tostring(actionName)
-            .. " isClient=" .. tostring(clientCall)
-            .. " onlineId=" .. playerIdentity(character) .. " object="
-            .. objectCoordinateSummary(object))
-        local blocked = clientCall and isCurrentProhibitedObject(object, character)
-        demolitionTrace("action.new.decision", "action=" .. tostring(actionName)
-            .. " onlineId=" .. playerIdentity(character)
-            .. " blocked=" .. tostring(blocked))
-        if blocked then
-            demolitionTrace("action.new.return", "action=" .. tostring(actionName)
-                .. " result=ignoreAction")
+    action.new = function(self, character, item, cornerCounter)
+        if actionIsBlocked("ISDestroyStuffAction", character, item) then
             return { ignoreAction = true }
         end
-        demolitionTrace("action.new.call-original", "action=" .. tostring(actionName)
-            .. " onlineId=" .. playerIdentity(character))
-        return originalNew(self, character, object, ...)
+        return originalNew(self, character, item, cornerCounter)
     end
     action._rvProtectedDemolitionWrapped = true
 end
 
-wrapAction(rawget(_G, "ISDestroyStuffAction"), "ISDestroyStuffAction")
-wrapAction(rawget(_G, "ISDismantleAction"), "ISDismantleAction")
+local function wrapDismantleAction(action)
+    if type(action) ~= "table" or type(action.new) ~= "function"
+        or action._rvProtectedDemolitionWrapped == true then
+        return
+    end
+    local originalNew = action.new
+    action.new = function(self, character, thumpable)
+        if actionIsBlocked("ISDismantleAction", character, thumpable) then
+            return { ignoreAction = true }
+        end
+        return originalNew(self, character, thumpable)
+    end
+    action._rvProtectedDemolitionWrapped = true
+end
+
+wrapDestroyAction(rawget(_G, "ISDestroyStuffAction"))
+wrapDismantleAction(rawget(_G, "ISDismantleAction"))
 
 local destroyAction = rawget(_G, "ISDestroyStuffAction")
 for _, methodName in ipairs({ "isValid", "start", "stop", "perform", "complete" }) do

@@ -1,6 +1,6 @@
 # Railroader RV 重构设计细化草案
 
-本文细化模块 0–10，并纳入追加的 GUI 模块 11。它是待实施的设计约定；本次只整理接口与复用边界，不移动或修改运行时代码。所有会读写世界、存档或联机状态的接口归服务端；客户端只提交意图和显示服务端结果。
+本文记录 RailroaderRV 当前目录拆分后的模块边界与接口，并保留后续设计约定。运行时代码已按 `Core`、`Common`、`Construction`、`RVMapping`、`BoundaryGuard`、`RoofRefresh`、`DemolitionProtection`、`TemplateRecovery`、`Power`、`Water`、`RoomTemplate` 和 `GUI` 分组；各节须结合当前实现状态阅读。目录迁移本身不授权修改运行时行为、当前 schema 声明或存档门逻辑。所有会读写世界、存档或联机状态的接口归服务端；客户端只提交意图和显示服务端结果。
 
 ## 关键设计决定
 
@@ -24,34 +24,27 @@
 | 固定遍历 `z=-32..31` 并访问 `celldef[z]` | 每个 XY 固定 64 次层查找，容易实现且可在同一顺序处理中建造。 | 每个 XY 固定 64 次层查找，可将清理和定义层恢复合并为一趟；空层也能被识别。 |
 | `pairs(celldef.layers)` 遍历已定义层 | 遍历键时先用 `supportsZ(z)` 过滤，仅解释/生成 `z=-32..31`；对稀疏模板通常少于 64 次逐层索引，层间顺序无要求时适合生成。 | 单独遍历不能发现缺失的层键。仍须做有效 Z 清理扫描，或者使用能准确列出所有现存 RV 对象的当前 schema ledger；若额外再 `pairs` 建造，会多一次模板遍历。 |
 
-这里的成本是 Lua 模板表访问/迭代次数，不会减少必须的 world 清理操作。当前没有完整的当前 generation 实例对象层 ledger：`RV_ProtectionManifest.lua:1–2, 13` 是静态模板身份/保护清单；`RV_Server_RoomOwnership.lua:128–136` 通过 `RV_ServerSchema.walkBounds` 清理旧 generation，而 `walkBounds` 固定遍历每个有效 z/x/y 并调用 `getSquare`（`RV_ServerSchema.lua:169–180`），`RV_ServerWorld.clearSquare` 再检查 square 内对象的 generation 身份（`RV_ServerWorld.lua:430–451`）。因此 restore 不能把三段全空误作无需世界检查；段标志只省去该段的 Lua `celldef` 索引。若以后有完整、严格校验且随每次对象增删原子更新的实例 ledger，才可由它枚举实际待清理对象并重新比较方案。
+这里的成本是 Lua 模板表访问/迭代次数，不会减少必须的 world 清理操作。当前没有完整的 generation 实例对象层 ledger：`RoomTemplate/` 保存静态模板身份/保护清单，`server/RailroaderRV/RoofRefresh/RV_Server_RoomOwnership.lua` 负责房间所有权扫描；普通构建回滚由 `Construction/` 按当前 generation 处理，通用旧代清理因没有完整 undo 而拒绝。因此不能把模板段摘要当成世界对象清单，也不能据它跳过需要的 world 检查。若未来另行授权完整、严格校验且随每次对象增删原子更新的实例 ledger，才可由它枚举实际待清理对象并重新比较方案。
 
-推荐按操作分流：全量建造必须先按权限/身份策略清理 `z=-32..31`，随后对每个非空 `celldef` cell 用 `pairs(layers)` 遍历，并仅在 `supportsZ(z)` 为真时解释或生成该层；恢复则每 XY 顺序检查 `z=-32..31`，利用三布尔摘要跳过空段的模板查找，但仍逐层执行安全的 world 清理。定义层内对象按有序数组处理；跨 z 的层顺序允许无序，不创建每次排序的索引。Lua 5.1 规范明确 `next` 的键枚举顺序未指定，`pairs` 基于 `next` 遍历所有键；Kahlua 手册将 `next`、`pairs`、`ipairs` 列为与 Lua 行为相同。当前没有游戏内 benchmark，所以“稀疏建造时 `pairs` 较少做查找”和“三段标志减少空段查表”是基于循环/查表数量的性能推断，不是实测结论；密集层、Kahlua 表迭代成本及 world API 成本都可能改变实际用时。
+下表比较模板层遍历方案的查表成本，不描述当前 Generate 的清理策略。当前 Generate 使用稀疏 bounds walker，只访问目标 cell 中已存在的 square；缺失的非模板 square 会跳过，目标不空或枚举不完整则在修改世界前 fail closed。它不要求 10,000 个管理区基面 square 预先存在。当前完整建造、清理和回滚约束见下方 Construction 一节。
 
-现有生成代码按模板对象清单顺序创建对象，全部创建后才执行结构重算，再创建 generator（`RV_Server_GenerationBuild.lua:218–259`）；当前模板有 `z=0` 与 `z=1` 定义（`RV_Template.lua:24–25, 341–347`），未发现要求这两个 z 之间固定先后的代码契约。依用户确认，跨 z 顺序可以任意；每个 `celldef[z]` 的对象数组仍保留模板顺序，以免改变同格多对象顺序。依据：[Lua 5.1 `next`/`pairs`](https://www.lua.org/manual/5.1/manual.html#pdf-next)、[Kahlua 手册中与 Lua 相同行为的函数](https://github.com/krka/kahlua/blob/master/docs/manual.txt)。
+若未来另行授权实现全量 restore，才按操作分流：对目标世界完成权限/身份与对象清单校验后，再对每个非空 `celldef` cell 用 `pairs(layers)` 遍历，并仅在 `supportsZ(z)` 为真时解释或生成该层；恢复则每 XY 顺序检查 `z=-32..31`，利用三布尔摘要跳过空段的模板查找，但仍逐层执行安全的 world 清理。该建议不改变当前 Generate 的稀疏预检和“目标须为空”门。定义层内对象按有序数组处理；跨 z 的层顺序允许无序，不创建每次排序的索引。Lua 5.1 规范明确 `next` 的键枚举顺序未指定，`pairs` 基于 `next` 遍历所有键；Kahlua 手册将 `next`、`pairs`、`ipairs` 列为与 Lua 行为相同。当前没有游戏内 benchmark，所以“稀疏建造时 `pairs` 较少做查找”和“三段标志减少空段查表”是基于循环/查表数量的性能推断，不是实测结论；密集层、Kahlua 表迭代成本及 world API 成本都可能改变实际用时。
+
+现有生成代码按模板对象清单顺序创建对象，全部创建后才执行结构重算，再创建 generator（`server/RailroaderRV/Construction/RV_Server_GenerationBuild.lua:218–259`）；当前模板有 `z=0` 与 `z=1` 定义（`shared/RailroaderRV/RoomTemplate/RV_Template.lua:24–25, 341–347`），未发现要求这两个 z 之间固定先后的代码契约。依用户确认，跨 z 顺序可以任意；每个 `celldef[z]` 的对象数组仍保留模板顺序，以免改变同格多对象顺序。依据：[Lua 5.1 `next`/`pairs`](https://www.lua.org/manual/5.1/manual.html#pdf-next)、[Kahlua 手册中与 Lua 相同行为的函数](https://github.com/krka/kahlua/blob/master/docs/manual.txt)。
 
 游戏 API 的坐标可行性有当前源码证据：服务端 schema 将合法 Z 声明为 `-32..31`，布局捕获会遍历这个闭区间，并以 `getGridSquare(x,y,z)` 探测各层；`isValidSquare(x,y,z)` 也用于 world 坐标预检。RV 现支持完整范围，采用 `maxZExclusive=32` 和 `[-32,32)`；所有建造、清理、恢复、映射、越界、屋顶、拆除、电水和通用查询均可覆盖 `z=31`。100×100×64 是游戏及 RV 全层操作的范围。未加载的 square 可能为空，世界变更前仍须完整预检。本设计没有把反编译缓存或静态 API 查询当成运行时验证。
 
-证据：`RV_ServerSchema.lua:15–16, 169–180, 409–425`；`RV_Server_LayoutBuilder.lua:99–133, 463–469`；`RV_ServerWorld.lua:24–29`。这些当前源码支持完整 `z=-32..31` 范围及全层扫描设计；本设计仍未把静态 API 检查当成运行时性能验证。
+证据来自 `server/RailroaderRV/Common/RV_ServerSchema.lua`、`server/RailroaderRV/Construction/RV_Server_GenerationFlow.lua`、`server/RailroaderRV/Construction/RV_Server_GenerationBuild.lua` 与 `server/RailroaderRV/Common/RV_ServerWorld.lua`。这些当前源码支持完整 `z=-32..31` 坐标范围，以及稀疏 square 遍历和按需创建模板 host 的流程；静态 API 检查不代表运行时性能验证。
 
-## 建议目录
+## 当前模块目录
 
 ```text
-media/lua/shared/RailroaderRV/RoomTemplate/
-media/lua/server/RailroaderRV/Core/
-media/lua/server/RailroaderRV/RVMapping/
-media/lua/server/RailroaderRV/BoundaryGuard/
-media/lua/server/RailroaderRV/RoofRefresh/
-media/lua/server/RailroaderRV/DemolitionProtection/
-media/lua/server/RailroaderRV/TemplateRecovery/
-media/lua/server/RailroaderRV/Power/
-media/lua/server/RailroaderRV/Water/
-media/lua/server/RailroaderRV/Construction/
-media/lua/server/RailroaderRV/Common/
+media/lua/shared/RailroaderRV/{Common,RoomTemplate,RVMapping,Water,Power}/
+media/lua/server/RailroaderRV/{Core,Common,Construction,RVMapping,BoundaryGuard,RoofRefresh,DemolitionProtection,TemplateRecovery,Power,Water}/
 media/lua/client/RailroaderRV/GUI/
 ```
 
-模块文件只由自身目录持有；跨模块通过小型返回表或 Core 注册接口协作。Core 是服务端唯一事件入口。不要让挪入新目录的文件继续各自注册同一个 `OnTick` 或同一对象事件。
+模块文件只由自身目录持有；跨模块通过小型返回表或 Core 注册接口协作。Core 是服务端唯一事件入口。迁移过程中保留的顶层 Lua 文件只作为 require 转发入口，不重复持有模块实现。不要让挪入新目录的文件继续各自注册同一个 `OnTick` 或同一对象事件。
 
 ## 模块职责与接口
 
@@ -63,7 +56,7 @@ media/lua/client/RailroaderRV/GUI/
 
 用户要求的 64 位 tick 不应保存为一个 Lua number。建议用精确的 `{hi32, lo32}` 无符号计数对，每 tick 进位一次，由 Core 提供 `tickModulo(interval)`，其他模块不拼接或比较原始大整数。该时钟是进程内调度时钟，不持久化、不由客户端同步；重启后重新计数。若它以后要作为存档身份，需另外定义持久化 schema。
 
-现有 `RV_Server_Commands.lua:43–65, 184–220, 272–300` 注册了通用 `OnTick`、`OnClientCommand` 和对象事件；Railroader adapter 的 `RV_RailroaderServer_Tick.lua:171–258` 又维护 `_ticks` 并注册 tick/移除事件。将事件入口集中到 Core，但保留各服务的处理函数。当前源码没有可复用的 sandbox 写入 API：`readConfig()` 读取经服务端校验的配置；不要在运行时直接改写 `SandboxVars`。若“配置读写”指可持久编辑值，将其定义为当前 schema 下的模组设置记录，并由 Core 原子提交。
+现有 `server/RailroaderRV/Core/RV_Server_Commands.lua:43–65, 184–220, 272–300` 注册了通用 `OnTick`、`OnClientCommand` 和对象事件；Railroader adapter 的 `server/RailroaderRV/Core/RV_RailroaderServer_Tick.lua:171–258` 又维护 `_ticks` 并注册 tick/移除事件。Core 是当前事件入口，功能服务保留自己的处理函数。当前源码没有可复用的 sandbox 写入 API：`readConfig()` 读取经服务端校验的配置；不要在运行时直接改写 `SandboxVars`。若“配置读写”指可持久编辑值，将其定义为当前 schema 下的模组设置记录，并由 Core 原子提交。
 
 ### 1. 房间模板 `RoomTemplate`
 
@@ -73,7 +66,7 @@ media/lua/client/RailroaderRV/GUI/
 
 保留同一格/层多个对象和模板顺序；不能把当前扁平对象表按 XY 合并时丢弃重复对象。`allowDemolition` 建议作为清晰枚举或对象策略而非格层整体 bool，因为一个格层可能既有允许拆除家具，也有受保护墙。屋顶目标应记录模板局部坐标和预期对象身份，实例化后再由映射/锚点变换。
 
-复用 `RV_Template.lua:7–23` 的锚点、显式建造格和对象清单；把并行的 `RV_ProtectionManifest.lua:13–17, 462–475` 策略/身份数据合并到相应对象定义或保留为只读生成来源；复用 `RV_TemplateGeometry.lua:49–143` 坐标转换和索引思路及 exact-key 验证。`RV_Bitmap.lua` 继续只服务边界/建造许可区域，不复用其逐层字节/hex 格式表示模板对象层。需要重组织：`RV_Layout.lua:233–290, 365–404` 当前运行时从捕获对象、构建许可和静态边界重新派生模板/边界位图；将其改成明确的模板解析器，不让每个消费者各自解释捕获数据。三布尔摘要/celldef 一致性、对象数和保护策略检查覆盖 `z=-32..31` 的全部 64 层。
+复用 `shared/RailroaderRV/RoomTemplate/RV_Template.lua:7–23` 的锚点、显式建造格和对象清单；把并行的 `shared/RailroaderRV/RoomTemplate/RV_ProtectionManifest.lua:13–17, 462–475` 策略/身份数据合并到相应对象定义或保留为只读生成来源；复用 `shared/RailroaderRV/RoomTemplate/RV_TemplateGeometry.lua:49–143` 坐标转换和索引思路及 exact-key 验证。`shared/RailroaderRV/Common/RV_Bitmap.lua` 继续只服务边界/建造许可区域，不复用其逐层字节/hex 格式表示模板对象层。需要重组织：`shared/RailroaderRV/RoomTemplate/RV_Layout.lua:233–290, 365–404` 当前运行时从捕获对象、构建许可和静态边界重新派生模板/边界位图；将其改成明确的模板解析器，不让每个消费者各自解释捕获数据。三布尔摘要/celldef 一致性、对象数和保护策略检查覆盖 `z=-32..31` 的全部 64 层。
 
 ### 2. 房车-玩家-车辆映射 `RVMapping`
 
@@ -81,7 +74,7 @@ media/lua/client/RailroaderRV/GUI/
 
 **内部功能：**维护玩家、机车、RV、模板实例、generation 的双向关系和坐标区域索引；从 Core 读写当前 mapping schema；提交或重新生成时检查范围不重叠、模板存在、generation 一致。它不验证 Lua 客户端给的可信位置，也不要求 live train 必须在线才能解析持久化的 RV。
 
-复用 `RV_RailroaderServer_Mapping.lua:40–105, 121–153, 229–280, 566–613`：当前 map 有 strict schema、玩家坐标查 `record.region`，不依赖 room ID 或生成对象；无 live locomotive 时保留已验证映射。将局部 `recordAtPlayerCoordinate` 变成明确公开 API；坐标采样/cache 由 Common 提供，不在多个 mapping 入口重复读。
+复用 `server/RailroaderRV/RVMapping/RV_RailroaderServer_Mapping.lua:40–105, 121–153, 229–280, 566–613`：当前 map 有 strict schema、玩家坐标查 `record.region`，不依赖 room ID 或生成对象；无 live locomotive 时保留已验证映射。将局部 `recordAtPlayerCoordinate` 变成明确公开 API；坐标采样/cache 由 Common 提供，不在多个 mapping 入口重复读。
 
 ### 3. 防越界 `BoundaryGuard`
 
@@ -89,7 +82,7 @@ media/lua/client/RailroaderRV/GUI/
 
 **内部功能：**遍历在线玩家，使用 fresh server position 映射到当前 RV 和模板后，按模板给定顺序逐一检查合法行走 AABB；常见命中区域排在前面，命中任一立即判定合法，全部未命中才判定越界。越界时从已验证 mapping 取出生点/入口，服务端校验 square 世界坐标和加载状态后传送并同步。操作期间存在 generation/roof relocation lease 时暂缓修正。
 
-复用 `RV_BoundaryServer_Sweep.lua:75–145` 的在线玩家遍历、transition lease 和队列调度。重新组织目前分散的 boundary snapshot、epoch 和 interval；AABB 按模板的显式顺序逐个测试，首个命中即合法、全未命中才纠正。安全纠正一律使用 fresh server position，区域判定只读 RoomTemplate 中的合法行走 AABB。
+复用 `server/RailroaderRV/BoundaryGuard/RV_BoundaryServer_Sweep.lua:75–145` 的在线玩家遍历、transition lease 和队列调度。重新组织目前分散的 boundary snapshot、epoch 和 interval；AABB 按模板的显式顺序逐个测试，首个命中即合法、全未命中才纠正。安全纠正一律使用 fresh server position，区域判定只读 RoomTemplate 中的合法行走 AABB。
 
 ### 4. 屋顶刷新 `RoofRefresh`
 
@@ -97,7 +90,7 @@ media/lua/client/RailroaderRV/GUI/
 
 **内部功能：**由 mapping 解析模板实例和 `misc.roofTargets`，去重、检查当前 generation/schema 与相关 square 已加载，执行屋顶/房间刷新；需要临时移玩家时持有 Core 的受限 transition lease，完成后按服务端记录送回。失败不吞事件、不错误报告成功。
 
-复用 `RV_RoofRefresh.lua:318–359` 对既有 captured floor 做 room metadata recalc 和前后对象身份校验的实现；复用 `RV_RailroaderServer_RoofRefresh.lua:276–340, 562–650` 的进入/墙移除触发、重复事件去重、队列和玩家 relocation 流程。当前逻辑刷新的是南窗外既有地板的房间/屋顶邻接元数据，不负责补建或删除屋顶物件；迁移后保留这个边界，通用 roof target 再逐项接入。
+复用 `server/RailroaderRV/RoofRefresh/RV_RoofRefresh.lua:318–359` 对既有 captured floor 做 room metadata recalc 和前后对象身份校验的实现；复用 `server/RailroaderRV/RoofRefresh/RV_RailroaderServer_RoofRefresh.lua:276–340, 562–650` 的进入/墙移除触发、重复事件去重、队列和玩家 relocation 流程。当前逻辑刷新的是南窗外既有地板的房间/屋顶邻接元数据，不负责补建或删除屋顶物件；迁移后保留这个边界，通用 roof target 再逐项接入。
 
 ### 5. 拆除防护 `DemolitionProtection`
 
@@ -105,7 +98,7 @@ media/lua/client/RailroaderRV/GUI/
 
 **内部功能：**把 `celldef` 的拆除策略解释为允许、拆后恢复、禁止/立即恢复或专用策略；核对 object tag 的 owner、templateIndex、RV id、generation、bitmapVersion 和 footprint；处理玩家建造边界。未知归属/旧 generation 对象 fail closed，不靠客户端 tag 判定。
 
-复用 `RV_BoundaryServer_Objects.lua:177–263, 381–435, 547–625` 的壳墙归属、玩家建筑审计与建造/对象事件；复用 `RV_ProtectedDemolition.lua:1–15` 作为客户端预判；复用 `RV_Server_TemplateProtectionRepair.lua:383–435, 1237–1398` 的拆除观察与模板身份检查。必须把 client action hook 降为 UX，不把它视为服务器安全边界。
+复用 `server/RailroaderRV/DemolitionProtection/RV_BoundaryServer_Objects.lua:177–263, 381–435, 547–625` 的壳墙归属、玩家建筑审计与建造/对象事件；复用 `client/RailroaderRV/GUI/RV_ProtectedDemolition.lua:1–15` 作为客户端预判；复用 `server/RailroaderRV/TemplateRecovery/RV_Server_TemplateProtectionRepair.lua:383–435, 1237–1398` 的拆除观察与模板身份检查。必须把 client action hook 降为 UX，不把它视为服务器安全边界。
 
 ### 6. 模板恢复 `TemplateRecovery`
 
@@ -113,7 +106,7 @@ media/lua/client/RailroaderRV/GUI/
 
 **内部功能：**按当前 RV/generation/bitmapVersion 建立有界、去重队列；每个任务再次过 schema、mapping、玩家范围、目标层和 square loaded 检查；仅修复策略明确要求恢复的模板索引。恢复不可判定归属的对象时停止，不清除旧 schema 或外部对象。每个 tick 的处理量和无玩家暂停条件由 Core interval/预算统一配置。
 
-复用 `RV_Server_TemplateProtectionRepair.lua:246–324, 1237–1398, 1629–1742` 的 identity 暂停、3×3 采样、代际队列与逐坐标修复流程。`ensureGeneratorForEntry` 这类入口补建检查可以随政策搬入；事务、对象创建和 tag 写入改由 Construction/Common 共享。
+复用 `server/RailroaderRV/TemplateRecovery/RV_Server_TemplateProtectionRepair.lua:246–324, 1237–1398, 1629–1742` 的 identity 暂停、3×3 采样、代际队列与逐坐标修复流程。`ensureGeneratorForEntry` 这类入口补建检查可以随政策搬入；事务、对象创建和 tag 写入改由 Construction/Common 共享。
 
 ### 7. 电力 `Power`
 
@@ -121,23 +114,23 @@ media/lua/client/RailroaderRV/GUI/
 
 **内部功能：**虚拟燃油/电池/负载结算、原版 generator 代理、设备扫描和状态快照；保存副本，执行世界/物品动作后再显式 commit；任何 API 或后置条件失败返回失败，不提交半份账本。
 
-可直接拆分 `RV_UtilityPower.lua:363–405, 424–628, 639–704`、`RV_UtilityPowerDevices.lua:271–354`、`RV_UtilityServer.lua:235–352, 383–443` 与 `RV_UtilityStore.lua:51–60, 437–542`。保留设备缓存只存坐标/状态、不要持有长寿命 IsoObject 引用；utility identity 必须和 Mapping 的当前 generation/schema 对齐。
+当前实现位于 `server/RailroaderRV/Power/RV_UtilityPower.lua`、`server/RailroaderRV/Power/RV_UtilityPowerDevices.lua`、`server/RailroaderRV/Core/RV_UtilityServer.lua` 与 `server/RailroaderRV/Core/RV_UtilityStore.lua`。保留设备缓存只存坐标/状态、不要持有长寿命 IsoObject 引用；utility identity 必须和 Mapping 的当前 generation/schema 对齐。本次仅调整模块边界，不改现有供电行为。
 
 ### 8. 供水 `Water`
 
-**接口：**预期由服务端提供 `handleIntent(player, operation, itemHint)`、`onObjectAdded/Removed(object)`、`snapshotForPlayer(player)`；操作 identity 从 Mapping 解析，所有物体坐标、pipe 状态和目标范围由服务器重查。
+**当前集成状态：**Water 已由服务端 Utility 服务接入，实现在 `server/RailroaderRV/Water/`，共享目录 `shared/RailroaderRV/Water/` 提供目录与 sink 能力定义。当前 sink 操作、Mapping 身份复核、玩家工具/范围检查、存档提交和失败补偿以 [README](README.md) 的“RV 水管连接”合同为准。这里记录的是已接入模块的归属，不是停放实现；本次模块目录收尾不得重启旧水路方案，也不得改变当前 sink identity 写入时机、交互约束或已声明 schema 门。
 
-**当前可复用边界：**现有 `RV_UtilityWater_Commands.lua`、`_Ledger.lua`、`_Objects.lua`、`_Plumbing.lua` 包含水量结算、连接、流水账和对象操作代码，但中央 `RV_UtilityServer.lua:4–9` 只装配 Store/Power/Devices，没有装配 Water；`RV_UtilityStore.lua:1–4` 与 README 开发期说明也明确当前合同不含水 identity、隐藏水箱或 proxy。故这些文件是待审计/停放实现，不能仅移动目录就重新启用。先确认目标供水行为和当前 schema 中要持久化的字段，再选取无旧身份依赖的纯 API；不得恢复旧记录、隐式创建旧水路对象或做数据迁移。
+目录迁移不新增隐藏水箱、proxy、自动 sink 标记或迁移分支。模块的后续 API 扩展须另有明确授权；本次保持当前 Water 与 Power 行为不变。
 
 ### 9. 建造 `Construction`
 
 **接口：**内部 `build(template,offsetX,offsetY,actor)`、`restore(template,offsetX,offsetY,actor)`、`reconcileCell(currentIdentity,x,y)`。Core 路由的网络请求只携带 `templateId`、`offsetX`、`offsetY` 和 request ID；服务端从 RoomTemplate 注册表解析模板，以服务端 Mapping 中当前 RV 的锚点为基准验证偏移并计算 world anchor。客户端不能提交或指定可信 world anchor、RV identity、权限、generation 或模板对象；actor、mapping 和当前状态均由服务端取得并复核。成功返回 committed identity，失败返回稳定原因和可观测的事务阶段。
 
-**建造步骤：**建造操作的空间范围是 XY 100×100、Z `-32..31`，共 100×100×64 个格层；包括 `z=31` 在内的所有有效层均可查询、清理、建造和回滚。事务顺序固定为：在 mutex 内校验服务端解析的模板、权限、当前 schema、当前 RV mapping、XY 偏移、world 坐标、目标范围不重叠及所有目标 square/API；确认目标范围可安全恢复后，先写入 current-schema 事务意图并完整保存 undo；然后清理有效范围 `z=-32..31` 中经上述策略许可的对象；全清理后，对每个非空 `celldef` cell 用 `pairs(layers)` 遍历其键，仅当 `supportsZ(z)` 为真时才解释该层并按层内对象数组顺序生成，层间顺序不作承诺。schema validator 接受 `z=-32..31` 的整数键并拒绝其他非法层键。最后核对对象身份/数量、重算邻接并同步，全部成功才提交并清除 undo。任一预检或快照不能覆盖本次完整清理目标时，必须在第一次世界修改前拒绝；清理、构建或核对失败则用 undo 回滚，回滚失败时保留事务阶段并封锁后续盲目重试，不得留下未记录的部分清场。要满足“清理范围内所有现有对象”的原始语义，必须先能完整快照并逆向重建该范围内所有受支持对象类型；能力不足时，只允许空白区域或仅含本 RV 当前 generation 所有对象的区域，否则整次拒绝，不得部分清场。只清理可识别的 RV 所有对象而保留任意对象，不等同于全量清除，需按上述限制明确接受。
+**当前建造流程：**现行 Generate 先按当前 Mapping 分配空闲 slot，在 staging 迁移完成后等待目标 IsoCell，并复核合法坐标和 schema。它不要求 10,000 个管理区基面 square 预先存在，也不强制加载全部上层。加载区预检与清理使用稀疏 bounds walker：只读取当前 cell 中已存在的 square，缺失的非模板 square 跳过；对象枚举不完整或任一已存在目标 square 含对象时，在首次世界修改前拒绝，因为当前存档没有对任意既有对象的完整 undo。相同 slot 已有上一代时也拒绝重建，不调用通用旧代清理。通过预检后，Construction 仅在捕获模板对象的 host square 上生成对象；缺少的 host square 按需创建，不创建空白基面。RoomDef 检查和回滚遵循当前 generation 阶段，并要求相应结构及 roof host 已加载。对象身份、generation 标签、同步和失败回滚以当前实现为准；不得把“扫描有效范围”解释成“要求整个 100×100 基面已加载”。
 
-**恢复步骤：**恢复接口同样接收服务端解析的模板、`offsetX/offsetY` 和 actor；服务端从 current mapping 确定锚点、校验偏移并转换坐标。它和建造共用身份、加载、逐 cell 生成和后置检查，但不做跨模板范围全量清除；遍历完整有效范围 `z=-32..31`，包括 `z=31`。由于恢复必须清理模板缺定义的层，且当前没有能列出实例全部存活对象的 ledger，对每个目标 XY 仍须逐层检查 world 并清理由该 RV 当前 generation 明确拥有且策略允许删除的对象。若对应段标志为 false，整段可判定为空并直接清理各 z，无需查询 `celldef[z]`；标志为 true 时逐 z 查层定义，nil 层清理、定义层按层内对象顺序幂等恢复。有效 `z=31` 的 celldef 正常参与摘要、对象数、保护策略、清理和恢复计划。模板没有定义不代表可以删除不明对象或其他玩家对象。重复执行应得到同一对象集合；部分失败保留可识别的 transaction phase，不能再次盲目清场。
+目前没有独立的通用 `restore` 网络操作。未来若另行设计恢复接口，仍须由服务端解析 Mapping 和 actor、限定当前 generation 所有且身份完整的对象，并对未知对象 fail closed；这份建议不是本次实现或改动 schema 的授权。
 
-可以借鉴 `RV_Server_GenerationFlow.lua:214–286, 328–336` 的阶段、预检、清理/建造与失败处理，`RV_Server_GenerationBuild.lua:109–180` 的 manifest identity 和生成构造，`RV_ServerWorld.lua:378–428` 的同步删除和邻接重算。`RV_Server_LayoutBuilder.lua:99–133, 187–192` 的全范围预检可以参考；其注释明确 arbitrary existing objects 没有通用事务式恢复能力，运行时移除失败会留下 partial clear。因此它当前用于布局采集/清场，不可直接当成具备完整 rollback 的通用建造器。若要求清除含任意既有建筑的 100×100×64 RV 有效范围，须先实现并验证完整对象快照与逆向构建能力；否则只接受空白或本 RV 当前代际独占范围。
+旧 `LayoutBuilder` 清场/采集入口已经停用，服务端和客户端文件均已删除。它不能作为当前 Generate 的加载检查、稀疏清理或事务回滚实现参考；当前行为由 `server/RailroaderRV/Construction/` 与 `server/RailroaderRV/Common/` 中的代码持有。
 
 ### 10. 公用模块 `Common`
 
@@ -145,7 +138,7 @@ media/lua/client/RailroaderRV/GUI/
 
 **内部功能：**服务端维护 identity/session/generation 标注的短期坐标缓存；按玩家身份和 tick 时间戳过期，在 teleport、进出 RV、断线重连、mapping epoch/generation 变化时失效。非实时 UI/批处理消费者可取最近快照；边界纠正、建造、拆除、权限和请求范围校验必须 fresh 采样，不接受过期缓存。
 
-复用 `RV_ServerUtil.lua` 的安全调用/数值工具、`RV_ServerWorld.lua:24–27, 422–428` 的 world/square 与邻接操作、`RV_TemplateGeometry.lua:49–93` 纯坐标变换。当前多个位置/验证缓存各自维护 TTL 和 epoch（如 `RV_RailroaderServer_BoundaryValidation.lua:16–28` 与 Mapping），应抽到 Common 或留给对应模块但共用失效事件；缓存不能成为持久化身份。
+复用 `server/RailroaderRV/Common/RV_ServerUtil.lua` 的安全调用/数值工具、`server/RailroaderRV/Common/RV_ServerWorld.lua` 的 world/square 与邻接操作，以及 `shared/RailroaderRV/RoomTemplate/RV_TemplateGeometry.lua` 的纯坐标变换。位置与验证缓存仍由其当前所有模块管理并共用失效事件；缓存不能成为持久化身份。
 
 ### 11. GUI `GUI`
 
@@ -153,7 +146,7 @@ media/lua/client/RailroaderRV/GUI/
 
 **内部功能：**菜单、模板选择、加载/失败状态、服务端 ACK 展示、超时与重复请求处理；仅将服务器确认的 template metadata 用于显示。GUI 不读写 mapping/manifest ModData，不本地建造/传送/改存档。
 
-复用 `RV_ContextMenu.lua` 和 `RV_ContextMenu_Relocation.lua:30–36, 226–260, 376–488` 的意图请求、ACK 与等待状态；复用 `RV_RailroaderContextMenu.lua:171–189` 的 entry/exit 请求、`RV_UtilityClient.lua:90–161` 的请求封装与服务端快照显示、`RV_UtilityContextMenu.lua` 和 Dashboard 的操作面板。`RV_ContextMenu_LayoutBuilder.lua:6–18` 可作为最小菜单意图示例。`RV_ProtectedDemolition.lua` 的本地动作拦截留在 UX 层；是否可拆仍由模块 5 的服务端逻辑决定。
+复用 `client/RailroaderRV/GUI/RV_ContextMenu.lua` 与 `client/RailroaderRV/GUI/RV_ContextMenu_Relocation.lua` 的意图请求、ACK 与等待状态；复用 `client/RailroaderRV/GUI/RV_RailroaderContextMenu.lua` 的 entry/exit 请求、`client/RailroaderRV/GUI/RV_UtilityClient.lua` 的请求封装与服务端快照显示，以及 `client/RailroaderRV/GUI/RV_UtilityContextMenu.lua` 和 Dashboard 的操作面板。旧 LayoutBuilder 菜单已删除，不再作为客户端入口示例。`client/RailroaderRV/GUI/RV_ProtectedDemolition.lua` 的本地动作拦截留在 UX 层；是否可拆仍由模块 5 的服务端逻辑决定。
 
 ## 依赖方向与当前 schema 门
 
@@ -170,9 +163,9 @@ RoomTemplate + Common ───────────────> all server 
 
 ## 需要后续确认的实现边界
 
-- 水模块要保留哪些功能，以及新供水 identity/tank 是否属于当前开发期 schema；旧 Water 文件存在不构成重启旧水路合同的授权。
+- Water 已接入并按当前 README 合同运行；本次不改变 sink identity、工具/范围门、存档提交或失败补偿。新增水箱、proxy、自动标记和 schema 扩展均不在本次目录收尾的授权范围内。
 - “Sandbox 配置写入”若指修改游戏 `SandboxVars`，当前 RV 源码没有展示可复用写接口；设计采用只读沙盒输入，需写入的模组选项落在新声明的当前 schema 中。
-- 100×100×64 的 RV 有效范围是否需要全范围加载、清理和回滚。按现有证据，枚举 Z 坐标可行，但加载成本及任意既有对象可逆恢复能力未得到运行时验证。若不限定空白/独占范围，当前代码不能承诺原子回滚。
+- 当前 Generate 不要求 100×100 基面或全部上层 square 预先加载；它稀疏枚举当前 cell 的已有 square，并在目标对象/枚举不完整时于世界修改前拒绝。具体流式加载成本仍需游戏内联机验证；这个验证边界不改变当前 fail-closed 和回滚门。
 - 建造目标由管理员选点还是玩家近距离选点、多个模板是否允许空间重叠，须在接口实现前确定校验规则；服务端始终重算目标并检查唯一性。
 
 静态核对命令：`rg -n "RV_MANAGED_MIN_Z_OFFSET|RV_MANAGED_MAX_Z_OFFSET|WORLD_MIN_Z|WORLD_MAX_Z|recordAtPlayerCoordinate|function Refresh.run|function M.handleCommand" RailroaderRVTest/contents/mods/RailroaderRVTest/42/media/lua`。本次仅做设计与源码定向检查，不运行游戏联机测试。

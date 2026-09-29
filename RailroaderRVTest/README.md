@@ -12,10 +12,21 @@ RailroaderRV；当前技术版本以 mod.info 和共享常量中的声明为准�
 路线和房屋由服务端按需程序化生成，不内置地图。客户端只提交操作意图；服务端验证玩家、
 权限、请求阶段和当前存档身份，负责世界修改、同步与失败回滚。
 
-固定生成锚点为 (20050,2050,0)。RV 管理 XY 范围是半开区间
-x=[20000,20100)、y=[2000,2100)，各 Z 层的布局、移动和建造判定由当前 bitmap 定义。
-技术验证会清除该管理范围内的既有对象，选址前应确认范围内没有需要保留的内容。
-服务端确认目标管理范围完整加载后才清场和生成；未完整加载时不做部分清场，也不生成路线、房屋或对象。
+生成候选区从默认锚点 (20050,2050,0) 开始，按 5 行（Y）×20 列（X）排列；每格为一个
+半开区间 100×100 管理区域，首格 x=[20000,20100)、y=[2000,2100)。服务端只从当前
+Mapping 未占用的格子中按行优先顺序分配，并在 Mapping/manifest 当前 schema 中保存
+slotIndex 与 anchor。生成先将客户端和服务器移到由所选布局中心派生的 staging 位置，再等待目标
+IsoCell 可用并校验坐标与当前 schema；加载等待期间不做任何世界修改，也不要求预先加载完整
+100×100 基面或上层 square。清理遍历
+管理范围，只处理当前 cell 已有的 square，缺失 square 会跳过。Construction 在首次世界修改前
+检查全部已加载目标 square；由于无法完整快照并恢复既有对象，目标范围内有对象或旧代际没有
+完整 undo 快照时会 fail closed。生成只在固定模板对象的宿主 square 创建对象，缺失的宿主 square
+按需创建；不铺整片金属地板，也不铺满空白格。完成生成后再 FinalRelocate 到该 RV 入口中心；首格的 FinalRelocate 点为
+`(20050.5,2050.5,0)`，其他格按该格 anchor 平移。事务失败时回滚只处理本次 generation 创建的对象；
+回滚失败会保留失败状态并拒绝盲目重试。矩阵空闲只表示 Mapping 未占用，不代表地图区域为空。
+生成时客户端以“正在生成房车”提示等待。临时 staging 点由当前管理区中心计算：
+`managedOriginX+floor(width/2)`、`managedOriginY+floor(height/2)`、`-15`。`-15` 是只存在于进程内存中的无状态 relocation sentinel；
+服务端只用当前 Mapping 与 manifest 重新解析该位置，不把它持久化成玩家坐标，也不恢复原坐标。
 
 房车模板来自 2026-09-25 服务端日志，保留了 357 个原始对象的坐标、对象类、名称、sprite、
 朝向及捕获状态。捕获数据中的 50 处栅栏原有墙体衬层，其中 4 个不在房车边界上的衬层已移除；
@@ -36,6 +47,9 @@ FIFO；每 tick 最多检查一个 XY 列，并核对该坐标的所有受管 Z 
 （RoofRefresh）**由进入房车或特定外墙移除事件触发，服务端验证当前身份和几何，协调在场玩家
 临时离开并权威送回。当前实现重新计算驾驶室南窗外既有捕获地板的房间和屋顶邻接元数据，
 并在操作前后验证同一个地板对象；它不会临时添加或删除地板对象。客户端不提交可信坐标。
+屋顶刷新按当前在场成员分组，先把成员移到由 RV 中心减去 `(18000,0,15)` 得到的远端位置，
+让管理区离开已加载的 chunk 集合，再执行远端 chunk 周期；服务端逐人权威送回并等待组内
+返回阶段完成；必须等组内全部成员的返回确认。断线重连沿用同一事务 token，暂停超时并重发当前阶段，服务端逐人回传。
 
 ## 开发期存档规则
 
@@ -44,6 +58,21 @@ schema。缺失、过期、部分写入或字段结构不符时，立即拒绝�
 不得用旧数据生成 geometry、清理对象、运行 boundary guard 或传送玩家。
 不自动迁移、转换、推断、兼容别名或修改旧存档。只有完全空的新容器可以按当前 schema
 初始化。旧水路对象身份不再由生成、事件、tick 或 UI 流程创建和维护。
+
+## RV 水管连接
+
+本轮只支持玩家对管理区内现有或后来放置的 sink 执行连接/断开，不新增模板 sink，
+也不转移水桶内容或维护自定义水量账本。客户端只提交目标格、对象索引和连接意图；服务端
+从当前 Mapping/RV record 重新验证 `rvId`、generation、bitmapVersion、slotIndex、anchor、
+权限、3 格操作距离、已加载对象、FluidContainer 和原版 water-piped 能力，并要求玩家持有
+Pipe Wrench。只有首次明确操作时，服务端才给合格 sink 写入精确的
+`ModData.RailroaderRVTestWater` 当前身份；没有 object-added 自动标记。
+
+Water 持久化使用 Water schema 6 与 Utility Store schema 6。每个 sink 条目保存当前 RV
+映射身份、格坐标、原版外部水源连接状态和操作序号；实际供水仍由原版 sink/外部水源状态
+承担，不创建隐藏水箱或 proxy。服务端先同步并复核原版连接状态，再提交存档；失败时尝试
+恢复旧连接/可接管状态和对象标签，补偿结果无法确认时标记 `NEEDS_RECONCILE` 并拒绝后续
+水路操作。旧字段、旧 schema 或部分 Water 数据均拒绝并要求删除测试存档后重建，不自动迁移。
 
 ## 房车虚拟供电
 
@@ -68,12 +97,13 @@ ModData，再移除实体，拆除时重新创建物品。低耐久电池的容�
 计费；4000 W 配置值已集中保留，待明确对象标识后再启用。
 
 RV 生成时仍在捕获模板的“发”区创建并标记原版 generator；缺失时沿用现有入口重建检查。
-水槽、台面、隐藏水箱、water proxy 与旧水路对象不属于当前生成模板。
+模板家具不因本轮 Water 重构而改变，sink 的连接只由玩家在当前 RV 管理区内操作。
 
 ## 验证状态
 
-本包包含捕获模板生成、边界与建造审计、roof refresh、水系统和虚拟供电。当前改动只做静态
-核对，不能替代游戏内联机验证。
+本包包含捕获模板生成、边界与建造审计、roof refresh、Water sink 水管连接和虚拟供电。源码
+检查、Lua 语法与配置解析不能替代游戏内联机验证；本轮运行时验收需确认多个 Mapping 槽位无
+重叠生成、Water 连接/断开和原版 sink 供水状态。
 
 2026-09-15 的历史人工测试曾报告拆墙、进出和补墙成功，但东/南墙格可建地板、东墙格可建
 北墙仍待未来实机复核。当前源码包含相应 host 处理，尚无实机证据确认问题已解决。后续
@@ -86,7 +116,16 @@ contents/mods/RailroaderRVTest/42/；media/lua/client/ 放客户端菜单与表�
 media/lua/server/ 放服务端玩法和世界操作，media/lua/shared/ 放共享契约；
 tests/ 放静态检查。
 
+Lua 实现按职责归入模块目录：客户端菜单和表现位于 `client/RailroaderRV/GUI/`；共享的
+`Common/`、`RoomTemplate/`、`RVMapping/`、`Water/` 和 `Power/` 提供对应数据契约；服务端
+`Core/`、`Common/`、`Construction/`、`RVMapping/`、`BoundaryGuard/`、`RoofRefresh/`、
+`DemolitionProtection/`、`TemplateRecovery/`、`Power/` 和 `Water/` 分别持有服务端职责。
+迁移中保留的顶层 Lua 文件只转发到模块入口，不拥有实现。静态检查直接读取这些模块文件，
+并检查模块归属和跨模块契约。
+
 照明灯依赖运行时启用的 BuildingCraft（Workshop ID 3459887404）提供灯具图集和 tile
 definition；本包不复制其资源。workshop.txt 有意留空 Workshop ID，发布前由 Workshop
 流程分配。游戏基线只以根目录
-game-decompiled/42.20.4/metadata.txt 为事实源，本 README 不重复版本数字。
+game-decompiled/42.21.0/metadata.txt 为事实源，本 README 不重复版本数字。
+本包使用其自建房电灯开关1（`BuildingCraft_Light_17`）；服务端生成前会检查 tile 的
+`attachedW` 引擎标记，避免把同图集的普通装饰物当成玩家房屋灯开关。

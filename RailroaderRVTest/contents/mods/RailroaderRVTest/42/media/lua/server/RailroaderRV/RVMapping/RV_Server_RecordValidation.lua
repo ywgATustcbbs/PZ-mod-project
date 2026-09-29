@@ -1,5 +1,6 @@
 -- RV_Server: RecordValidation responsibilities.
 return function(ctx)
+local DevSaveSchemaGate = require("RailroaderRV/Core/RV_DevSaveSchemaGate")
 local Constants = ctx.Constants
 local Boundary = ctx.Boundary
 local Bitmap = ctx.Bitmap
@@ -13,10 +14,10 @@ local function requireCurrentManifest(...) return ctx.requireCurrentManifest(...
 local armTargetedClientRoomOwnershipGuard = ctx.armTargetedClientRoomOwnershipGuard
 local manifestTable = ctx.manifestTable
 local playerIdentity = ctx.playerIdentity
-local currentManifestValid = ctx.currentManifestValid
 local currentRoofRefreshContext = ctx.currentRoofRefreshContext
 local queueGeneration = ctx.queueGeneration
 
+DevSaveSchemaGate.configureRecordGeometry({ ServerSchema = ServerSchema })
 local function currentMappingRecord(rvId, generation, bitmapVersion)
     local adapter = RailroaderRV and RailroaderRV.RailroaderServer
     if type(adapter) ~= "table"
@@ -161,324 +162,52 @@ function RV.Server.currentRVManifestForBoundary(rvId, generation,
     return manifestForIdentity(rvId, generation, bitmapVersion, true)
 end
 
--- Cross-object current-geometry gate shared by boundary/roof/sentinel paths.
--- The map record and manifest are independently persisted snapshots, so an
--- identity tuple alone is insufficient: a stale bitmap, bounds, wall ledger,
--- shell edge set, or region must fail closed even when rvId/generation still
--- match.  This helper is read-only apart from registering the validated
--- current boundary snapshot in Boundary's process-local cache.
-function RV.Server.currentRVRecordGeometryConsistent(record, manifest)
-    local function exactKeys(value, fields)
-        if type(value) ~= "table" then return false end
-        local allowed = {}
-        for i = 1, #fields do allowed[fields[i]] = true end
-        for key in pairs(value) do
-            if not allowed[key] then return false end
-        end
-        for i = 1, #fields do
-            if value[fields[i]] == nil then return false end
-        end
-        return true
-    end
+local function currentRVRecordGeometryConsistent(record, manifest)
 
-    local function integerFieldsEqual(left, right, fields)
-        if not exactKeys(left, fields) or not exactKeys(right, fields) then
-            return false
-        end
-        for i = 1, #fields do
-            if ServerUtil.integer(left[fields[i]]) ~= ServerUtil.integer(right[fields[i]]) then
-                return false
-            end
-        end
-        return true
-    end
-
-    local function integerFieldsMatch(left, right, fields)
-        if type(left) ~= "table" or type(right) ~= "table" then return false end
-        for i = 1, #fields do
-            if ServerUtil.integer(left[fields[i]]) ~= ServerUtil.integer(right[fields[i]]) then
-                return false
-            end
-        end
-        return true
-    end
-
-    local managedFields = { "originX", "originY", "width", "height",
-        "minZ", "maxZ" }
-    local boundaryFields = { "schemaVersion", "rvId", "generation",
-        "bitmapVersion", "managed", "bitmap", "shellEdges" }
-    local shellFields = { "edgeKey", "rvId", "generation", "bitmapVersion",
-        "hostX", "hostY", "z", "axis", "side", "objectX", "objectY",
-        "objectZ", "role", "corner", "replacementAllowed",
-        "templateIndex", "templateIndices", "sprite", "north" }
-    local boundsShellFields = { "edgeKey", "hostX", "hostY", "z", "axis",
-        "side", "objectX", "objectY", "objectZ", "role", "corner",
-        "replacementAllowed", "templateIndex", "templateIndices", "sprite", "north" }
-    local regionFields = { "minX", "minY", "maxX", "maxY", "minZ", "maxZ" }
-
-    if type(record) ~= "table" or type(manifest) ~= "table"
-        or record.generated ~= true
-        or type(record.boundary) ~= "table"
-        or type(manifest.boundary) ~= "table"
-        or type(manifest.bounds) ~= "table"
-        or type(manifest.anchor) ~= "table"
-        or ServerUtil.integer(record.slotIndex) ~= ServerUtil.integer(manifest.slotIndex)
-        or ServerUtil.integer(record.anchor and record.anchor.x)
-            ~= ServerUtil.integer(manifest.anchor.x)
-        or ServerUtil.integer(record.anchor and record.anchor.y)
-            ~= ServerUtil.integer(manifest.anchor.y)
-        or ServerUtil.integer(record.anchor and record.anchor.z)
-            ~= ServerUtil.integer(manifest.anchor.z) then
+    if not DevSaveSchemaGate.isReady() or type(record) ~= "table"
+        or type(manifest) ~= "table" or record.generated ~= true then
         return false
     end
-    local recordGeneration, manifestGeneration = ServerUtil.integer(record.generation),
-        ServerUtil.integer(manifest.generation)
-    local recordBitmapVersion, manifestBitmapVersion = ServerUtil.integer(record.bitmapVersion),
-        ServerUtil.integer(manifest.bitmapVersion)
+    local generation = ServerUtil.integer(record.generation)
+    local bitmapVersion = ServerUtil.integer(record.bitmapVersion)
+    local boundary = record.boundary
+    local manifestBoundary = manifest.boundary
     if type(record.rvId) ~= "string" or record.rvId == ""
         or tostring(record.locoId) ~= record.rvId
         or tostring(manifest.rvId) ~= record.rvId
-        or recordGeneration == nil or recordGeneration < 1
-        or recordGeneration ~= manifestGeneration
-        or recordBitmapVersion ~= Constants.BITMAP_VERSION
-        or manifestBitmapVersion ~= recordBitmapVersion
-        or ServerUtil.integer(record.schemaVersion) ~= Constants.RV_RECORD_SCHEMA_VERSION
-        or ServerUtil.integer(record.boundarySchemaVersion) ~= Constants.BOUNDARY_SCHEMA_VERSION
-        or ServerUtil.integer(manifest.schemaVersion) ~= Constants.MANIFEST_SCHEMA_VERSION
-        or manifest.techVersion ~= Constants.TECH_VERSION
-        or ServerUtil.integer(manifest.templateVersion)
-            ~= Constants.CAPTURED_TEMPLATE_VERSION
-        or ServerUtil.integer(manifest.boundarySchemaVersion)
-            ~= Constants.BOUNDARY_SCHEMA_VERSION
-        or ServerUtil.integer(record.boundary.schemaVersion)
-            ~= Constants.BOUNDARY_SCHEMA_VERSION
-        or ServerUtil.integer(manifest.boundary.schemaVersion)
-            ~= Constants.BOUNDARY_SCHEMA_VERSION
-        or tostring(record.boundary.rvId) ~= record.rvId
-        or tostring(manifest.boundary.rvId) ~= record.rvId
-        or ServerUtil.integer(record.boundary.generation) ~= recordGeneration
-        or ServerUtil.integer(manifest.boundary.generation) ~= recordGeneration
-        or ServerUtil.integer(record.boundary.bitmapVersion) ~= recordBitmapVersion
-        or ServerUtil.integer(manifest.boundary.bitmapVersion) ~= recordBitmapVersion
-        or not exactKeys(record.boundary, boundaryFields)
-        or not exactKeys(manifest.boundary, boundaryFields) then
+        or generation == nil or generation < 1
+        or generation ~= ServerUtil.integer(manifest.generation)
+        or bitmapVersion ~= Constants.BITMAP_VERSION
+        or bitmapVersion ~= ServerUtil.integer(manifest.bitmapVersion)
+        or type(boundary) ~= "table" or type(manifestBoundary) ~= "table"
+        or tostring(boundary.rvId) ~= record.rvId
+        or tostring(manifestBoundary.rvId) ~= record.rvId
+        or ServerUtil.integer(boundary.generation) ~= generation
+        or ServerUtil.integer(manifestBoundary.generation) ~= generation
+        or ServerUtil.integer(boundary.bitmapVersion) ~= bitmapVersion
+        or ServerUtil.integer(manifestBoundary.bitmapVersion) ~= bitmapVersion
+        or type(record.managed) ~= "table"
+        or type(boundary.managed) ~= "table"
+        or type(manifestBoundary.managed) ~= "table" then
         return false
     end
-
-    local decoded = {}
-    local function decodeCurrent(encoded)
-        if not Bitmap or type(Bitmap.decode) ~= "function"
-            or type(Bitmap.validate) ~= "function" then
-            return nil
-        end
-        local decodeOk, bitmap = pcall(Bitmap.decode, encoded)
-        if not decodeOk or type(bitmap) ~= "table" then return nil end
-        local validOk, valid = pcall(Bitmap.validate, bitmap)
-        if not validOk or valid ~= true then return nil end
-        return bitmap
-    end
-    decoded.record = decodeCurrent(record.boundary.bitmap)
-    decoded.manifest = decodeCurrent(manifest.boundary.bitmap)
-    if not decoded.record or not decoded.manifest then return false end
-
-    local function bitmapsEqual(left, right)
-        if not integerFieldsMatch(left, right, managedFields)
-            or ServerUtil.integer(left.bitmapVersion) ~= ServerUtil.integer(right.bitmapVersion) then
-            return false
-        end
-        for z = left.minZ, left.maxZ - 1 do
-            local leftLayer, rightLayer = Bitmap.layer(left, z),
-                Bitmap.layer(right, z)
-            if type(leftLayer) ~= "table" or type(rightLayer) ~= "table"
-                or leftLayer.walkBits ~= rightLayer.walkBits
-                or leftLayer.buildBits ~= rightLayer.buildBits then
-                return false
-            end
-        end
-        return true
-    end
-    local bitmapCompareOk, bitmapSame = pcall(bitmapsEqual, decoded.record,
-        decoded.manifest)
-    if not bitmapCompareOk or bitmapSame ~= true
-        or not integerFieldsEqual(record.boundary.managed,
-            manifest.boundary.managed, managedFields)
-        or not integerFieldsEqual(record.managed, record.boundary.managed,
-            managedFields) then
-        return false
-    end
-    if not integerFieldsMatch(decoded.record, record.boundary.managed,
-            managedFields)
-        or not integerFieldsMatch(decoded.manifest, manifest.boundary.managed,
-            managedFields) then
-        return false
-    end
-
-    local function integerArraysEqual(left, right)
-        if type(left) ~= "table" or type(right) ~= "table"
-            or #left < 1 or #left ~= #right then
-            return false
-        end
-        local leftCount, rightCount = 0, 0
-        for key in pairs(left) do
-            leftCount = leftCount + 1
-            if type(key) ~= "number" or key < 1 or math.floor(key) ~= key
-                or key > #left or ServerUtil.integer(left[key]) == nil then
-                return false
-            end
-        end
-        for key in pairs(right) do
-            rightCount = rightCount + 1
-            if type(key) ~= "number" or key < 1 or math.floor(key) ~= key
-                or key > #right or ServerUtil.integer(right[key]) == nil then
-                return false
-            end
-        end
-        if leftCount ~= #left or rightCount ~= #right then return false end
-        for i = 1, #left do
-            if ServerUtil.integer(left[i]) ~= ServerUtil.integer(right[i]) then
-                return false
-            end
-        end
-        return true
-    end
-
-    local function shellSetEqual(left, right)
-        if type(left) ~= "table" or type(right) ~= "table" then return false end
-        local leftCount, rightCount = 0, 0
-        for key, edge in pairs(left) do
-            leftCount = leftCount + 1
-            local other = right[key]
-            if type(key) ~= "string" or type(edge) ~= "table"
-                or type(other) ~= "table"
-                or not exactKeys(edge, shellFields)
-                or not exactKeys(other, shellFields) then
-                return false
-            end
-            for i = 1, #shellFields do
-                local field = shellFields[i]
-                if field ~= "templateIndices" and edge[field] ~= other[field] then
-                    return false
-                end
-            end
-            if not integerArraysEqual(edge.templateIndices, other.templateIndices) then
-                return false
-            end
-        end
-        for _ in pairs(right) do rightCount = rightCount + 1 end
-        return leftCount == rightCount
-    end
-    if not shellSetEqual(record.boundary.shellEdges,
-            manifest.boundary.shellEdges) then
-        return false
-    end
-
-    -- The manifest wall/shell contract is already validated by the strict
-    -- current-only validator.  Re-run it here so this public cross-object
-    -- hook remains safe when a caller reaches it without first calling the
-    -- manifest helper.
-    local manifestValidOk, manifestValid = pcall(currentManifestValid,
-        manifest, false)
-    if not manifestValidOk or manifestValid ~= true then return false end
-    -- currentManifestValid also gates this snapshot for normal callers, but
-    -- keep the cross-object contract explicit here: bounds.bitmap is a
-    -- decoded current-layout bitmap and must be byte/bit identical to the
-    -- encoded boundary bitmap and the record copy before any consumer uses
-    -- the center, region, or shell geometry.
-    local boundsBitmap = manifest.bounds and manifest.bounds.bitmap
-    local boundsBitmapOk, boundsBitmapValid = false, false
-    if Bitmap and type(Bitmap.validate) == "function" then
-        boundsBitmapOk, boundsBitmapValid = pcall(Bitmap.validate, boundsBitmap)
-    end
-    if not boundsBitmapOk or boundsBitmapValid ~= true
-        or not bitmapsEqual(boundsBitmap, decoded.manifest) then
-        return false
-    end
-    local bounds = manifest.bounds
-    local boundsShell = bounds.shellEdges
-    for key, edge in pairs(record.boundary.shellEdges) do
-        local boundEdge = type(boundsShell) == "table" and boundsShell[key]
-            or nil
-        if type(boundEdge) ~= "table"
-            or not exactKeys(boundEdge, boundsShellFields) then
-            return false
-        end
-        for i = 1, #boundsShellFields do
-            local field = boundsShellFields[i]
-            if field ~= "templateIndices" and edge[field] ~= boundEdge[field] then
-                return false
-            end
-        end
-        if not integerArraysEqual(edge.templateIndices, boundEdge.templateIndices) then
+    local fields = { "originX", "originY", "width", "height", "minZ", "maxZ" }
+    for i = 1, #fields do
+        local field = fields[i]
+        local value = ServerUtil.integer(record.managed[field])
+        if value == nil or value ~= ServerUtil.integer(boundary.managed[field])
+            or value ~= ServerUtil.integer(manifestBoundary.managed[field]) then
             return false
         end
     end
-    local boundaryCount, boundsCount = 0, 0
-    for _ in pairs(record.boundary.shellEdges) do boundaryCount = boundaryCount + 1 end
-    for _ in pairs(boundsShell or {}) do boundsCount = boundsCount + 1 end
-    if boundaryCount ~= boundsCount then return false end
-
-    local anchor = manifest.anchor
-    if not exactKeys(anchor, { "x", "y", "z" })
-        or ServerUtil.integer(anchor.x) == nil or ServerUtil.integer(anchor.y) == nil
-        or ServerUtil.integer(anchor.z) == nil then
-        return false
-    end
-    local anchorX, anchorY, anchorZ = ServerUtil.integer(anchor.x), ServerUtil.integer(anchor.y),
-        ServerUtil.integer(anchor.z)
-    local boundsManaged = {
-        originX = ServerUtil.integer(bounds.managedOriginX),
-        originY = ServerUtil.integer(bounds.managedOriginY),
-        width = ServerUtil.integer(bounds.managedWidth),
-        height = ServerUtil.integer(bounds.managedHeight),
-        minZ = ServerUtil.integer(bounds.managedMinZ),
-        maxZ = ServerUtil.integer(bounds.managedMaxZ),
-    }
-    if not integerFieldsEqual(boundsManaged, record.managed, managedFields)
-        or anchorX ~= boundsManaged.originX + math.floor(boundsManaged.width / 2)
-        or anchorY ~= boundsManaged.originY + math.floor(boundsManaged.height / 2)
-        or anchorZ ~= ServerUtil.integer(bounds.z)
-        or type(record.rvPosition) ~= "table"
-        or not exactKeys(record.rvPosition, { "x", "y", "z" })
-        or ServerUtil.toNumber(record.rvPosition.x) ~= anchorX + 0.5
-        or ServerUtil.toNumber(record.rvPosition.y) ~= anchorY + 0.5
-        or ServerUtil.toNumber(record.rvPosition.z) ~= anchorZ then
-        return false
-    end
-
-    local regionSize = ServerUtil.integer(Constants.RV_REGION_SIZE)
-    local regionMinXOffset = ServerUtil.integer(Constants.RV_REGION_MIN_OFFSET_X)
-    local regionMinYOffset = ServerUtil.integer(Constants.RV_REGION_MIN_OFFSET_Y)
-    local identityMinZ = ServerUtil.integer(Constants.RV_IDENTITY_MIN_Z)
-    local identityMaxZ = ServerUtil.integer(Constants.RV_IDENTITY_MAX_Z)
-    if not regionSize or not regionMinXOffset or not regionMinYOffset
-        or not identityMinZ or not identityMaxZ or identityMaxZ <= identityMinZ then
-        return false
-    end
-    local expectedRegion = {
-        minX = anchorX + regionMinXOffset,
-        minY = anchorY + regionMinYOffset,
-        maxX = anchorX + regionMinXOffset + regionSize,
-        maxY = anchorY + regionMinYOffset + regionSize,
-        minZ = identityMinZ,
-        maxZ = identityMaxZ,
-    }
-    if not integerFieldsEqual(record.region, expectedRegion, regionFields) then
-        return false
-    end
-
-    if not Boundary or type(Boundary.registerGeneration) ~= "function" then
-        return false
-    end
-    local registerOk, registered = pcall(Boundary.registerGeneration,
-        record.rvId, recordGeneration, record.boundary, record)
-    return registerOk and registered == true
+    return true
 end
 
--- Narrow current-only gate for adapter Enter/Exit mutations.  Callers do not
--- supply a manifest snapshot: the service reads the current persisted
--- manifest, requires the READY/COMMITTED contract, and then reuses the full
--- cross-object geometry validator above.  A failed gate has one stable public
--- result so an adapter cannot accidentally continue with a partial snapshot.
+RV.Server.currentRVRecordGeometryConsistent = currentRVRecordGeometryConsistent
+
+-- Narrow current-only gate for adapter Enter/Exit mutations. Callers do not
+-- supply a manifest snapshot: the service resolves current mapping and
+-- manifest identities, then compares their live managed bounds.
 function RV.Server.validateCurrentRVRecord(record)
     if type(record) ~= "table" or type(record.rvId) ~= "string"
         or record.rvId == "" then
@@ -545,14 +274,6 @@ function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
         or type(record.boundary.managed) ~= "table"
         or type(record.boundary.bitmap) ~= "table"
         or type(record.boundary.shellEdges) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local recordSchemaVersion = ServerUtil.toNumber(record.schemaVersion)
-    local recordBoundarySchemaVersion = ServerUtil.toNumber(record.boundarySchemaVersion)
-    local boundarySchemaVersion = ServerUtil.toNumber(record.boundary.schemaVersion)
-    if recordSchemaVersion ~= Constants.RV_RECORD_SCHEMA_VERSION
-        or recordBoundarySchemaVersion ~= Constants.BOUNDARY_SCHEMA_VERSION
-        or boundarySchemaVersion ~= Constants.BOUNDARY_SCHEMA_VERSION then
         return false, Constants.INVALID_RV_DATA
     end
     local recordGeneration = ServerUtil.toNumber(record.generation)

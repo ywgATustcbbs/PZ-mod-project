@@ -402,7 +402,7 @@ local function validCurrentContext(player, expectedBoundary)
         or not sameIdentity(record, boundary)
         or manifest.templateVersion ~= Constants.CAPTURED_TEMPLATE_VERSION
         or type(manifest.bounds) ~= "table"
-        or manifest.bounds.schemaVersion ~= Constants.LAYOUT_SCHEMA_VERSION then
+        then
         return false, Constants.INVALID_RV_DATA
     end
     local region, bitmap = record.region, boundary.bitmap
@@ -1686,5 +1686,44 @@ end
 
 function Boundary.shouldSampleTemplateProtectionRepair(tick)
     return Core.isTick(tick) and Core.tickModulo(sampleInterval) == true
+end
+
+function Boundary.onTemplateProtectionRepairTick(tick, activePlayers,
+    activeBoundaries)
+    local observeOk, observeResult = pcall(
+        Boundary.observeTemplateProtectionRepairTransitions, tick)
+    if not observeOk or observeResult == false then
+        print("[RailroaderRVTest] template-protection-repair transition observation skipped: "
+            .. tostring(observeOk and "transition state unavailable" or observeResult))
+    end
+
+    if Boundary.shouldSampleTemplateProtectionRepair(tick) then
+        for i = 1, #activePlayers do
+            local item = activePlayers[i]
+            local callOk, sampled, reason = pcall(
+                Boundary.sampleTemplateProtectionRepairPlayer,
+                item.boundary, item.player)
+            if not callOk or sampled ~= true then
+                print("[RailroaderRVTest] template-protection-repair player sampling skipped: "
+                    .. tostring(callOk and reason or sampled))
+            end
+        end
+    end
+
+    -- One queued XY tile is checked globally per server tick. Queue state is
+    -- generation-scoped and pauses when no validated RV player is inside.
+    local callOk, processed, reason = pcall(
+        Boundary.processTemplateProtectionRepairQueue, activeBoundaries)
+    if not callOk or processed ~= true and reason ~= nil then
+        print("[RailroaderRVTest] template-protection-repair queue step skipped: "
+            .. tostring(callOk and reason or processed))
+    end
+
+    for key, builder in pairs(Boundary._builders) do
+        local expiredOrder = builder and Core.tickCompare(tick, builder.expires)
+        if not builder or expiredOrder == nil or expiredOrder > 0 then
+            Boundary._builders[key] = nil
+        end
+    end
 end
 end

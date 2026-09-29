@@ -120,8 +120,23 @@ local function boundsFor(layout)
         or clear.halfOpen ~= true then
         error("RailroaderRVTest: managed scope must be half-open 100x100xZ")
     end
-    if not Bitmap or not Bitmap.validate(bitmap) then
-        error("RailroaderRVTest: layout bitmap failed validation")
+    -- This is a runtime requirement for generated layout data: the bitmap
+    -- readers need one packed walk/build byte string for every managed z
+    -- level. Persisted bitmap schema/version validation belongs to the startup
+    -- development save gate, not this geometry helper.
+    local layerByteLength = Bitmap and Bitmap.byteLength(managedWidth, managedHeight)
+    if not layerByteLength or type(bitmap.layers) ~= "table" then
+        error("RailroaderRVTest: layout bitmap has no usable layer data")
+    end
+    for z = managedMinZ, managedMaxZ - 1 do
+        local layer = Bitmap.layer(bitmap, z)
+        if type(layer) ~= "table"
+            or type(layer.walkBits) ~= "string"
+            or #layer.walkBits ~= layerByteLength
+            or type(layer.buildBits) ~= "string"
+            or #layer.buildBits ~= layerByteLength then
+            error("RailroaderRVTest: layout bitmap layer cannot serve current geometry")
+        end
     end
     local scopeMinX, scopeMinY = managedOriginX, managedOriginY
     local scopeMaxX = managedOriginX + managedWidth

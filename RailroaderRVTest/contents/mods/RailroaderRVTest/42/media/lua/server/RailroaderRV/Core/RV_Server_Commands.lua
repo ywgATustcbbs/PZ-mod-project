@@ -1,6 +1,7 @@
 -- RV_Server: Commands responsibilities.
 return function(ctx)
 local Core = ctx.Core
+local DevSaveSchemaGate = require("RailroaderRV/Core/RV_DevSaveSchemaGate")
 local COMMAND_MODULE = ctx.COMMAND_MODULE
 local COMMAND_RELOCATE_ACK = ctx.COMMAND_RELOCATE_ACK
 local COMMAND_FINAL_RELOCATE_ACK = ctx.COMMAND_FINAL_RELOCATE_ACK
@@ -46,6 +47,7 @@ local function isInvalidRVData(reason)
 end
 
 function RV.Server.OnTick(tick)
+    if not DevSaveSchemaGate.isReady() then return end
     ctx.serverTick = tick or Core.getTick()
     -- Extend the token-scoped boundary lease before Boundary.onTick runs.  The
     -- roof transaction may temporarily place the player outside the active
@@ -194,6 +196,7 @@ function RV.Server.OnTick(tick)
 end
 
 function RV.Server.OnClientCommand(module, command, player, args)
+    if not DevSaveSchemaGate.isReady() then return end
     -- OnClientCommand is shared by every mod.  Foreign Railroader/vanilla
     -- commands are not RV requests and must not be reported as malformed RV
     -- traffic.

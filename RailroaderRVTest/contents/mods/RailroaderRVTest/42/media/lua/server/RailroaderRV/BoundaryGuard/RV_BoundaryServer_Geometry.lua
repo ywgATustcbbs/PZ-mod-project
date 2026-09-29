@@ -5,11 +5,14 @@ local Bitmap = ctx.Bitmap
 local Boundary = ctx.Boundary
 local Core = ctx.Core
 local C = ctx.C
+local DevSaveSchemaGate = require("RailroaderRV/Core/RV_DevSaveSchemaGate")
 local Template = require("RailroaderRV/RoomTemplate/RV_Template")
 local exactKeys = ctx.exactKeys
 -- A registered boundary is immutable. Retain its decoded snapshot by source
 -- table so normal tick lookups compare only constant-size metadata.
 local sourceBoundaryCache = setmetatable({}, { __mode = "k" })
+local generatedBoundaryBitmaps = setmetatable({}, { __mode = "k" })
+local sourceCacheHit
 
 local function number(value)
     if type(value) == "number" then return value end
@@ -194,113 +197,6 @@ local function encodeShellEdges(source, rvId, generation, bitmapVersion)
     return result
 end
 
-local function validShellEdges(edges, rvId, generation, bitmapVersion, managed)
-    if type(edges) ~= "table" or rvId == nil or tostring(rvId) == ""
-        or integer(generation) == nil or integer(generation) < 1
-        or integer(bitmapVersion) ~= C.BITMAP_VERSION
-        or type(managed) ~= "table" then
-        return false
-    end
-    local originX, originY = integer(managed.originX), integer(managed.originY)
-    local width, height = integer(managed.width), integer(managed.height)
-    local anchorZ = integer(managed.minZ)
-    if not originX or not originY or not width or not height
-        or not anchorZ or width ~= C.RV_MANAGED_WIDTH
-        or height ~= C.RV_MANAGED_HEIGHT then return false end
-    local anchorX = originX + math.floor(width / 2)
-    local anchorY = originY + math.floor(height / 2)
-    local edgeCount = 0
-    local allowedEdgeKeys = {
-        edgeKey = true, rvId = true, generation = true,
-        bitmapVersion = true, hostX = true, hostY = true, z = true,
-        axis = true, side = true, objectX = true, objectY = true,
-        objectZ = true, role = true, corner = true,
-        replacementAllowed = true, templateIndex = true, templateIndices = true,
-        sprite = true,
-        north = true,
-    }
-    for key, edge in pairs(edges) do
-        edgeCount = edgeCount + 1
-        if type(key) ~= "string" or type(edge) ~= "table"
-            or edge.edgeKey ~= key then
-            return false
-        end
-        for field in pairs(edge) do
-            if not allowedEdgeKeys[field] then return false end
-        end
-        local axis, edgeX, edgeY, edgeZ = string.match(
-            key, "^([NW]):(-?%d+):(-?%d+):(-?%d+)$")
-        edgeX, edgeY, edgeZ = tonumber(edgeX), tonumber(edgeY), tonumber(edgeZ)
-        if not axis or edgeX == nil or edgeY == nil or edgeZ == nil
-            or edge.axis ~= axis
-            or tostring(edge.rvId) ~= tostring(rvId)
-            or integer(edge.generation) ~= integer(generation)
-            or integer(edge.bitmapVersion) ~= integer(bitmapVersion)
-            or integer(edge.hostX) ~= edgeX
-            or integer(edge.hostY) ~= edgeY
-            or integer(edge.z) ~= edgeZ
-            or integer(edge.objectX) == nil
-            or integer(edge.objectY) == nil
-            or integer(edge.objectZ) == nil
-            or (axis == "N" and edge.side ~= "north"
-                and edge.side ~= "south")
-            or (axis == "W" and edge.side ~= "west"
-                and edge.side ~= "east")
-            or integer(edge.objectX) ~= edgeX
-            or integer(edge.objectY) ~= edgeY
-            or integer(edge.objectZ) ~= edgeZ
-            or integer(edge.templateIndex) == nil
-            or type(edge.templateIndices) ~= "table"
-            or #edge.templateIndices < 1
-            or type(edge.sprite) ~= "string"
-            or type(edge.north) ~= "boolean"
-            or type(edge.role) ~= "string"
-            or type(edge.corner) ~= "boolean"
-            or type(edge.replacementAllowed) ~= "boolean" then
-            return false
-        end
-        local captured = Template.objects[integer(edge.templateIndex)]
-        local expectedRole = edge.corner and "corner-nw"
-            or (edge.north and "wall-north" or "wall-west")
-        if not captured
-            or (captured.class ~= "IsoThumpable" and captured.class ~= "IsoWindow")
-            or captured.sprite ~= edge.sprite or captured.north ~= edge.north
-            or captured.x ~= integer(edge.objectX) - anchorX
-            or captured.y ~= integer(edge.objectY) - anchorY
-            or captured.z ~= integer(edge.objectZ) - anchorZ
-            or edge.role ~= expectedRole
-            or edge.corner and edge.north ~= true then
-            return false
-        end
-        local partCount, partSeen = 0, {}
-        for partKey in pairs(edge.templateIndices) do
-            partCount = partCount + 1
-            if type(partKey) ~= "number" or partKey < 1
-                or math.floor(partKey) ~= partKey or partKey > #edge.templateIndices then
-                return false
-            end
-        end
-        if partCount ~= #edge.templateIndices
-            or edge.templateIndices[1] ~= integer(edge.templateIndex) then
-            return false
-        end
-        for partPosition = 1, #edge.templateIndices do
-            local partIndex = integer(edge.templateIndices[partPosition])
-            local part = partIndex and Template.objects[partIndex]
-            if not part or partSeen[partIndex]
-                or (part.class ~= "IsoThumpable" and part.class ~= "IsoWindow")
-                or part.x ~= integer(edge.objectX) - anchorX
-                or part.y ~= integer(edge.objectY) - anchorY
-                or part.z ~= integer(edge.objectZ) - anchorZ
-                or part.north ~= edge.north then
-                return false
-            end
-            partSeen[partIndex] = true
-        end
-    end
-    return edgeCount == 59
-end
-
 -- Build the persistent record from a layout plan.  Only the encoded bitmap is
 -- stored in ModData; no 10,000-entry Lua boolean table is ever persisted.
 function Boundary.makeBoundary(layout, rvId, generation)
@@ -330,11 +226,7 @@ function Boundary.makeBoundary(layout, rvId, generation)
     end
     local shellEdges = encodeShellEdges(layout.shellEdges, rvId, generation,
         bitmapVersion)
-    if not validShellEdges(shellEdges, rvId, generation, bitmapVersion,
-            layout.managed) then
-        return nil, "layout shell edge ledger failed validation"
-    end
-    local boundary = {
+local boundary = {
         schemaVersion = C.BOUNDARY_SCHEMA_VERSION,
         rvId = tostring(rvId), generation = integer(generation),
         bitmapVersion = bitmapVersion,
@@ -352,45 +244,31 @@ function Boundary.makeBoundary(layout, rvId, generation)
         or not boundary.managed.maxZ then
         return nil, "layout managed scope is incomplete"
     end
+    -- New records are built from a current in-memory bitmap. Keep that decoded
+    -- value beside the encoded record so later runtime registration does not
+    -- re-run persisted-schema decoding.
+    generatedBoundaryBitmaps[boundary] = bitmap
     return boundary
 end
 
 local function decodeBoundary(boundary)
     if type(boundary) ~= "table" then return nil end
-    if not exactKeys(boundary, { "schemaVersion", "rvId", "generation",
-        "bitmapVersion", "managed", "bitmap", "shellEdges" }) then
-        return nil
+    local source = sourceCacheHit and sourceCacheHit(boundary) or nil
+    if source then
+        return source.bitmap, source.rvId, source.generation,
+            source.bitmapVersion
     end
-    if integer(boundary.schemaVersion) ~= C.BOUNDARY_SCHEMA_VERSION then return nil end
-    local encoded = boundary.bitmap
-    if type(encoded) ~= "table" then return nil end
-    local bitmap = Bitmap.decode(encoded)
-    if not bitmap or not Bitmap.validate(bitmap) then return nil end
-    local managed = boundary.managed
-    if not exactKeys(managed, { "originX", "originY", "width", "height",
-        "minZ", "maxZ" })
-        or integer(managed.originX) ~= bitmap.originX
-        or integer(managed.originY) ~= bitmap.originY
-        or integer(managed.width) ~= bitmap.width
-        or integer(managed.height) ~= bitmap.height
-        or integer(managed.minZ) ~= bitmap.minZ
-        or integer(managed.maxZ) ~= bitmap.maxZ then
-        return nil
+    local generated = generatedBoundaryBitmaps[boundary]
+    if generated then
+        return generated, tostring(boundary.rvId), integer(boundary.generation),
+            integer(boundary.bitmapVersion)
     end
-    local rvId = boundary.rvId
-    local generation = integer(boundary.generation)
-    local bitmapVersion = integer(boundary.bitmapVersion)
-    local encodedVersion = integer(encoded.bitmapVersion)
-    if rvId == nil or tostring(rvId) == "" or not generation or generation < 1
-        or bitmapVersion ~= C.BITMAP_VERSION
-        or encodedVersion ~= bitmapVersion
-        or not validShellEdges(boundary.shellEdges, rvId, generation,
-            bitmapVersion, boundary.managed) then
-        return nil
-    end
-    return bitmap, tostring(rvId), generation, bitmapVersion
+    if not DevSaveSchemaGate.isValidating() then return nil end
+    local bitmap, rvId, generation, bitmapVersion =
+        DevSaveSchemaGate.validatedBoundary(boundary)
+    if not bitmap then return nil end
+    return bitmap, rvId, generation, bitmapVersion
 end
-
 local function boundaryKey(boundary)
     return tostring(boundary.rvId) .. ":" .. tostring(boundary.generation)
         .. ":" .. tostring(boundary.bitmapVersion)
@@ -476,7 +354,7 @@ local function sameBoundary(left, right)
         and boundaryKey(left) == boundaryKey(right)
 end
 
-local function sourceCacheHit(boundary)
+sourceCacheHit = function(boundary)
     local source = sourceBoundaryCache[boundary]
     if not source then return nil end
     local loaded = source.loaded
@@ -484,15 +362,13 @@ local function sourceCacheHit(boundary)
         return nil
     end
     local bitmap, managed = boundary.bitmap, boundary.managed
-    if boundary.schemaVersion ~= source.schemaVersion
-        or boundary.rvId ~= source.rvId
+    if boundary.rvId ~= source.rvId
         or boundary.generation ~= source.generation
         or boundary.bitmapVersion ~= source.bitmapVersion
         or boundary.bitmap ~= source.bitmap
         or boundary.managed ~= source.managed
         or boundary.shellEdges ~= source.shellEdges
         or type(bitmap) ~= "table"
-        or bitmap.schemaVersion ~= source.bitmapSchemaVersion
         or bitmap.bitmapVersion ~= source.encodedBitmapVersion
         or bitmap.originX ~= source.originX
         or bitmap.originY ~= source.originY
@@ -518,14 +394,12 @@ local function rememberSourceBoundary(boundary, loaded)
     local bitmap = boundary.bitmap
     sourceBoundaryCache[boundary] = {
         loaded = loaded,
-        schemaVersion = boundary.schemaVersion,
         rvId = boundary.rvId,
         generation = boundary.generation,
         bitmapVersion = boundary.bitmapVersion,
         bitmap = bitmap,
         managed = boundary.managed,
         shellEdges = boundary.shellEdges,
-        bitmapSchemaVersion = bitmap.schemaVersion,
         encodedBitmapVersion = bitmap.bitmapVersion,
         originX = bitmap.originX,
         originY = bitmap.originY,
@@ -545,8 +419,23 @@ end
 local function loadedBoundary(boundary)
     local source = sourceCacheHit(boundary)
     if source then return source end
-    local bitmap, rvId, generation, bitmapVersion = decodeBoundary(boundary)
-    if not bitmap then return nil end
+    local bitmap = generatedBoundaryBitmaps[boundary]
+    local rvId, generation, bitmapVersion
+    if bitmap then
+        rvId = type(boundary) == "table" and tostring(boundary.rvId) or nil
+        generation = integer(type(boundary) == "table" and boundary.generation)
+        bitmapVersion = integer(type(boundary) == "table" and boundary.bitmapVersion)
+        if not rvId or rvId == "" or not generation or not bitmapVersion
+            or bitmapVersion ~= C.BITMAP_VERSION then
+            return nil
+        end
+    elseif DevSaveSchemaGate.isValidating() then
+        bitmap, rvId, generation, bitmapVersion = decodeBoundary(boundary)
+        if not bitmap then return nil end
+    else
+        -- A runtime cache miss cannot reopen the persisted schema validator.
+        return nil
+    end
     local key = boundaryKey({ rvId = rvId, generation = generation,
         bitmapVersion = bitmapVersion })
     local cached = Boundary._registered[key]
@@ -748,7 +637,7 @@ local function transitionActive(state)
     return false
 end
 
-local function correction(player, boundary, state, target)
+local function prepareCorrection(player, boundary, state, target)
     if not target or not Bitmap.isActive(boundary.bitmap, target.x, target.y, target.z) then
         return false
     end
@@ -769,15 +658,12 @@ local function correction(player, boundary, state, target)
         bitmapVersion = boundary.bitmapVersion, sequence = state.correctionSequence,
         onlineId = id.onlineId, x = target.x, y = target.y, z = target.z,
     }
-    -- Apply the authoritative server position first.  The client receives an
-    -- opaque correction only after that succeeds; a failed server teleport
-    -- must never leave the client believing a correction that did not happen.
-    if not succeeded(player, "teleportTo", target.x, target.y, target.z) then
-        return false
-    end
+    return payload
+end
+
+local function notifyCorrection(player, payload)
     callGlobal("sendServerCommand", player, C.MOD_ID,
         C.COMMAND_RV_BOUNDARY_CORRECTION, payload)
-    return true
 end
 
 local function currentSquareMatches(player, position)
@@ -797,7 +683,8 @@ local function currentSquareMatches(player, position)
         and integer(z) == math.floor(position.z)
 end
 
-local function updatePlayer(player, position, knownIdentity, deferValidationMiss)
+local function guardContextForPlayer(player, position, knownIdentity,
+    deferValidationMiss)
     local stateIdentity = knownIdentity or identity(player)
     local priorState = stateIdentity and Boundary._states[stateIdentity.key] or nil
     local refreshTicks = integer(C.BOUNDARY_SNAPSHOT_REFRESH_TICKS) or 60
@@ -842,7 +729,7 @@ local function updatePlayer(player, position, knownIdentity, deferValidationMiss
     if state.validationRefreshTick == nil or forceValidationRefresh then
         state.validationRefreshTick = Boundary._tick
     end
-    if transitionActive(state) then return boundary end
+    if transitionActive(state) then return nil end
     if not position then return nil end
     -- A correction must use a fresh position that agrees with the server's
     -- loaded current square. Missing or stale square state leaves the player
@@ -850,14 +737,35 @@ local function updatePlayer(player, position, knownIdentity, deferValidationMiss
     if not currentSquareMatches(player, position) then
         return nil
     end
-    local inManagedScope = Bitmap.containsScope(boundary.bitmap,
-        position.x, position.y, position.z)
-    local bounds = inManagedScope
-        and Bitmap.walkBounds(boundary.bitmap, math.floor(position.z)) or nil
-    if bounds and Bitmap.inAABB(bounds.outer, position.x, position.y) then
-        return boundary
+    local bounds
+    if type(position.z) == "number" and position.z == position.z
+        and position.z > -math.huge and position.z < math.huge then
+        bounds = Bitmap.walkBounds(boundary.bitmap, math.floor(position.z))
     end
-    correction(player, boundary, state, record.rvPosition)
+    return {
+        position = position,
+        bitmap = boundary.bitmap,
+        aabb = bounds and bounds.outer or nil,
+        boundary = boundary,
+        spawnIdentity = { rvId = boundary.rvId,
+            generation = boundary.generation,
+            bitmapVersion = boundary.bitmapVersion },
+        expectedSpawn = record.rvPosition,
+        preparePullback = function()
+            return prepareCorrection(player, boundary, state, record.rvPosition)
+        end,
+        notifyPullback = function(payload)
+            notifyCorrection(player, payload)
+        end,
+    }
+end
+
+function Boundary.cachedBitmap(record)
+    if type(record) ~= "table" or type(record.boundary) ~= "table" then return nil end
+    local key = boundaryKey({ rvId = record.rvId, generation = record.generation,
+        bitmapVersion = record.bitmapVersion })
+    local cached = Boundary._registered[key]
+    if cached and cached.encoded == record.boundary then return cached.bitmap end
     return nil
 end
 
@@ -875,5 +783,5 @@ ctx.boundaryKey = boundaryKey
 ctx.sameBoundary = sameBoundary
 ctx.stateFor = stateFor
 ctx.transitionActive = transitionActive
-ctx.updatePlayer = updatePlayer
+ctx.guardContextForPlayer = guardContextForPlayer
 end

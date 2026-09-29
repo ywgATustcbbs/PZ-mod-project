@@ -5,6 +5,7 @@ local COMMAND_MODULE = ctx.COMMAND_MODULE
 local COMMAND_RELOCATE = ctx.COMMAND_RELOCATE
 local COMMAND_FINAL_RELOCATE = ctx.COMMAND_FINAL_RELOCATE
 local Boundary = ctx.Boundary
+local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
 local RELOCATION_POST_ACK_TICKS = ctx.RELOCATION_POST_ACK_TICKS
 local RELOCATION_TIMEOUT_TICKS = ctx.RELOCATION_TIMEOUT_TICKS
@@ -272,8 +273,7 @@ local function resendGenerationPhase(pending, player, phase)
         -- server-selected half-cell center through the official setters so
         -- the authoritative proof and the client ACK compare the same exact
         -- destination.  Keep the movement history coherent with the move.
-        if not ServerUtil.callSucceeded(player, "teleportTo", target.x, target.y,
-            target.z)
+        if not RV.Server.teleportToPosition(player, target)
             or not ServerUtil.callSucceeded(player, "setX", target.x)
             or not ServerUtil.callSucceeded(player, "setY", target.y)
             or not ServerUtil.callSucceeded(player, "setZ", target.z)
@@ -320,8 +320,9 @@ local function resendGenerationPhase(pending, player, phase)
     local teleportY = phase == "rollback" and target.y or target.y + 0.5
     if not ServerUtil.callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
         COMMAND_RELOCATE, payload)
-        or not ServerUtil.callSucceeded(player, "teleportTo", teleportX, teleportY,
-            target.z) then
+        or not RV.Server.teleportToPosition(player, {
+            x = teleportX, y = teleportY, z = target.z,
+        }) then
         return false
     end
     if phase == "rollback" then

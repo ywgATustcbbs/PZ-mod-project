@@ -301,13 +301,12 @@ local function currentRoofRefreshContext(player, request)
     if not geometryCallOk or geometryConsistent ~= true then
         return false, Constants.INVALID_RV_DATA
     end
-    local bitmap = boundary.bitmap
-    if type(bitmap) ~= "table" or not Bitmap
-        or type(Bitmap.validate) ~= "function" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local bitmapOk, bitmapValid = pcall(Bitmap.validate, bitmap)
-    if not bitmapOk or bitmapValid ~= true then
+    -- The startup schema gate decoded and registered every persisted boundary.
+    -- Runtime consumers use that validated in-memory bitmap instead of
+    -- repeating the persisted bitmap schema walk on each roof request.
+    local bitmap = type(Boundary.cachedBitmap) == "function"
+        and Boundary.cachedBitmap(record) or nil
+    if type(bitmap) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
     return true, {
@@ -413,7 +412,8 @@ local function applyRoofRefreshTeleport(player, target, temporary)
     end
     local x = temporary and target.x + 0.5 or target.x
     local y = temporary and target.y + 0.5 or target.y
-    return ServerUtil.callSucceeded(player, "teleportTo", x, y, target.z)
+    return RV and RV.Server
+        and RV.Server.teleportToPosition(player, { x = x, y = y, z = target.z }) == true
         and ServerUtil.callSucceeded(player, "setX", x)
         and ServerUtil.callSucceeded(player, "setY", y)
         and ServerUtil.callSucceeded(player, "setZ", target.z)

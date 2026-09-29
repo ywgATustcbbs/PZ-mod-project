@@ -1,5 +1,6 @@
 -- RV_RailroaderServer: Mapping responsibilities.
 return function(ctx)
+local DevSaveSchemaGate = require("RailroaderRV/Core/RV_DevSaveSchemaGate")
 local Core = require("RailroaderRV/Core/RV_Server_Core")
 local Boundary = ctx.Boundary
 local Adapter = ctx.Adapter
@@ -14,7 +15,6 @@ local followUpWallRemovalEvents = ctx.followUpWallRemovalEvents
 local suppressedRoomTransitions = ctx.suppressedRoomTransitions
 local seenWallRemovalEvents = ctx.seenWallRemovalEvents
 local ROOF_REFRESH_TRANSITION_SUPPRESSION_TICKS = ctx.ROOF_REFRESH_TRANSITION_SUPPRESSION_TICKS
-local validateMapSchema
 local recordForLoco
 local function serverTransactionMutexStatus(...) return ctx.serverTransactionMutexStatus(...) end
 local number = ctx.number
@@ -22,9 +22,20 @@ local integer = ctx.integer
 local call = ctx.call
 local playerId = ctx.playerId
 local playerName = ctx.playerName
-local copyPosition = ctx.copyPosition
 local findTrain = ctx.findTrain
 local trainPosition = ctx.trainPosition
+local copyPosition = ctx.copyPosition
+
+DevSaveSchemaGate.configureMapping({
+    C = C,
+    RegionSlots = RegionSlots,
+    Boundary = Boundary,
+    number = number,
+    integer = integer,
+    copyPosition = copyPosition,
+    WORLD_MIN_Z = WORLD_MIN_Z,
+    WORLD_MAX_Z = WORLD_MAX_Z,
+})
 
 local MAP_SCHEMA_VALIDATION_TTL_TICKS = 120
 local validatedMapCache
@@ -40,6 +51,7 @@ local function invalidateBoundaryValidationCache()
 end
 
 local function mapData()
+    if not DevSaveSchemaGate.isReady() then error(C.INVALID_RV_DATA) end
     if not ModData then
         error(C.INVALID_RV_DATA)
     end
@@ -82,31 +94,8 @@ local function mapData()
             map.schemaVersion = C.MAP_SCHEMA_VERSION
             map.locomotives = {}
             map.players = {}
-        elseif integer(map.schemaVersion) ~= C.MAP_SCHEMA_VERSION
-            or type(map.locomotives) ~= "table"
-            or type(map.players) ~= "table" then
-            error(C.INVALID_RV_DATA)
         end
     end
-    local mappingEpoch = Adapter._boundaryValidationEpoch or 0
-    local geometryEpoch = Boundary and Boundary._geometryEpoch or 0
-    local now = Adapter._ticks or Core.getTick()
-    local cached = validatedMapCache
-    if type(cached) == "table" and cached.map == map
-        and cached.mappingEpoch == mappingEpoch
-        and cached.geometryEpoch == geometryEpoch
-        and Core.isTick(cached.validatedAtTick)
-        and Core.tickCompare(now, cached.validatedAtTick) >= 0
-        and not Core.tickElapsedAtLeast(now, cached.validatedAtTick,
-            MAP_SCHEMA_VALIDATION_TTL_TICKS) then
-        return map
-    end
-    if validateMapSchema and not validateMapSchema(map) then
-        error(C.INVALID_RV_DATA)
-    end
-    geometryEpoch = Boundary and Boundary._geometryEpoch or 0
-    validatedMapCache = { map = map, mappingEpoch = mappingEpoch,
-        geometryEpoch = geometryEpoch, validatedAtTick = now }
     return map
 end
 
@@ -192,9 +181,6 @@ end
 
 local function validRegion(region)
     if type(region) ~= "table" then return false end
-    local allowed = { minX = true, minY = true, maxX = true, maxY = true,
-        minZ = true, maxZ = true }
-    for key in pairs(region) do if not allowed[key] then return false end end
     local size = integer(C.RV_REGION_SIZE)
     local minX, minY = integer(region.minX), integer(region.minY)
     local minZ, maxZ = integer(region.minZ), integer(region.maxZ)
@@ -205,160 +191,25 @@ local function validRegion(region)
         and minZ >= WORLD_MIN_Z and maxZ <= WORLD_MAX_Z + 1
 end
 
-local function mapOnlyKeys(value, expected)
-    if type(value) ~= "table" then return false end
-    local allowed = {}
-    for i = 1, #expected do allowed[expected[i]] = true end
-    for key in pairs(value) do if not allowed[key] then return false end end
-    return true
-end
-
-local function validMapPosition(value, pose)
-    local keys = pose and { "x", "y", "z", "dirX", "dirY" }
-        or { "x", "y", "z" }
-    local x, y, z = value and number(value.x), value and number(value.y),
-        value and number(value.z)
-    if not mapOnlyKeys(value, keys) or copyPosition(value) == nil
-        or x == nil or y == nil or z == nil
-        or z < WORLD_MIN_Z or z > WORLD_MAX_Z then
-        return false
-    end
-    return not pose or number(value.dirX) ~= nil and number(value.dirY) ~= nil
-end
-
 local function validMapRelation(relation, requireLocoId)
-    if type(relation) ~= "table"
-        or not mapOnlyKeys(relation, { "schemaVersion", "locoId", "onlineId",
-            "inside", "role", "seat", "enterPosition", "exitPosition" })
-        or relation.locomotive ~= nil
-        or relation.locoId ~= nil and type(relation.locoId) ~= "string"
-        or requireLocoId == true and relation.locoId == nil
-        or integer(relation.schemaVersion) ~= C.RV_RELATION_SCHEMA_VERSION
-        or integer(relation.onlineId) == nil or integer(relation.onlineId) < 0
-        or relation.role ~= nil and type(relation.role) ~= "string"
-        or relation.seat ~= nil and integer(relation.seat) == nil
-        or type(relation.inside) ~= "boolean" then
-        return false
-    end
-    if relation.inside then
-        return validMapPosition(relation.enterPosition, false)
-    end
-    return validMapPosition(relation.exitPosition, false)
+    return DevSaveSchemaGate.isReady() and type(relation) == "table"
+        and type(relation.inside) == "boolean"
+        and integer(relation.onlineId) ~= nil and integer(relation.onlineId) >= 0
+        and (requireLocoId ~= true
+            or type(relation.locoId) == "string" and relation.locoId ~= "")
 end
 
 local function validMappingRecord(record)
-    if type(record) ~= "table" or record.generated ~= true
-        or not mapOnlyKeys(record, { "schemaVersion", "generated", "locoId",
-            "rvId", "generation", "slotIndex", "anchor", "region", "rvPosition", "enterPosition",
-            "locoPosition", "boundarySchemaVersion", "bitmapVersion",
-            "boundary", "managed", "players", "updatedAt" })
-        or integer(record.schemaVersion) ~= C.RV_RECORD_SCHEMA_VERSION
-        or type(record.locoId) ~= "string" or record.locoId == ""
-        or type(record.rvId) ~= "string" or record.rvId ~= record.locoId
-        or integer(record.boundarySchemaVersion) ~= C.BOUNDARY_SCHEMA_VERSION
-        or integer(record.bitmapVersion) ~= C.BITMAP_VERSION
-        or integer(record.generation) == nil or integer(record.generation) < 1
-        or integer(record.slotIndex) == nil
-        or integer(record.slotIndex) < 1
-        or integer(record.slotIndex) > RegionSlots.COUNT
-        or type(record.anchor) ~= "table"
-        or RegionSlots.indexForAnchor(record.anchor) ~= integer(record.slotIndex)
-        or integer(record.updatedAt) == nil or integer(record.updatedAt) < 1
-        or not validRegion(record.region)
-        or RegionSlots.indexForRegion({ minX = integer(record.region.minX),
-            minY = integer(record.region.minY), maxX = integer(record.region.maxX),
-            maxY = integer(record.region.maxY) }) ~= integer(record.slotIndex)
-        or integer(record.region.minZ) ~= integer(C.RV_IDENTITY_MIN_Z)
-        or integer(record.region.maxZ) ~= integer(C.RV_IDENTITY_MAX_Z)
-        or not mapOnlyKeys(record.anchor, { "x", "y", "z" })
-        or integer(record.anchor.x) == nil or integer(record.anchor.y) == nil
-        or integer(record.anchor.z) == nil then
-        return false
-    end
-    if type(record.boundary) ~= "table"
-        or type(record.players) ~= "table"
-        or not validMapPosition(record.rvPosition, false)
-        or number(record.rvPosition.x) ~= integer(record.anchor.x) + 0.5
-        or number(record.rvPosition.y) ~= integer(record.anchor.y) + 0.5
-        or number(record.rvPosition.z) ~= integer(record.anchor.z)
-        or not validMapPosition(record.enterPosition, false)
-        or not validMapPosition(record.locoPosition, true)
-        or not mapOnlyKeys(record.managed, { "originX", "originY", "width",
-            "height", "minZ", "maxZ" })
-        or type(record.boundary.managed) ~= "table"
-        or integer(record.managed.originX) ~= integer(record.boundary.managed.originX)
-        or integer(record.managed.originY) ~= integer(record.boundary.managed.originY)
-        or integer(record.managed.width) ~= integer(record.boundary.managed.width)
-        or integer(record.managed.height) ~= integer(record.boundary.managed.height)
-        or integer(record.managed.minZ) ~= integer(record.boundary.managed.minZ)
-        or integer(record.managed.maxZ) ~= integer(record.boundary.managed.maxZ) then
-        return false
-    end
-    if integer(record.managed.originX)
-            ~= integer(record.anchor.x) + integer(C.RV_REGION_MIN_OFFSET_X)
-        or integer(record.managed.originY)
-            ~= integer(record.anchor.y) + integer(C.RV_REGION_MIN_OFFSET_Y)
-        or integer(record.managed.width) ~= integer(C.RV_MANAGED_WIDTH)
-        or integer(record.managed.height) ~= integer(C.RV_MANAGED_HEIGHT)
-        or integer(record.managed.minZ)
-            ~= integer(record.anchor.z) + integer(C.RV_MANAGED_MIN_Z_OFFSET)
-        or integer(record.managed.maxZ)
-            ~= integer(record.anchor.z) + integer(C.RV_MANAGED_MAX_Z_OFFSET) then
-        return false
-    end
-    if Boundary and type(Boundary.registerGeneration) == "function" then
-        local ok, valid = pcall(Boundary.registerGeneration,
-            record.locoId, record.generation, record.boundary, nil)
-        if not ok or valid ~= true then return false end
-    else
-        return false
-    end
-    for name, rider in pairs(record.players) do
-        if type(name) ~= "string" or not validMapRelation(rider, false) then
-            return false
-        end
-    end
-    return true
+    return DevSaveSchemaGate.isReady() and type(record) == "table"
+        and record.generated == true
+        and type(record.rvId) == "string" and record.rvId ~= ""
+        and tostring(record.locoId) == record.rvId
+        and integer(record.generation) ~= nil and integer(record.generation) >= 1
+        and integer(record.bitmapVersion) == integer(C.BITMAP_VERSION)
 end
 
 local function validRecord(record)
     return validMappingRecord(record)
-end
-
-validateMapSchema = function(map)
-    if type(map) ~= "table"
-        or not mapOnlyKeys(map, { "schemaVersion", "locomotives", "players" })
-        or integer(map.schemaVersion) ~= C.MAP_SCHEMA_VERSION
-        or type(map.locomotives) ~= "table"
-        or type(map.players) ~= "table" then
-        return false
-    end
-    local occupiedSlots = {}
-    local recordCount = 0
-    for key, record in pairs(map.locomotives) do
-        recordCount = recordCount + 1
-        if type(key) ~= "string" or not validMappingRecord(record)
-            or tostring(record.locoId) ~= key
-            or occupiedSlots[integer(record.slotIndex)] then
-            return false
-        end
-        occupiedSlots[integer(record.slotIndex)] = true
-    end
-    if recordCount > RegionSlots.COUNT then return false end
-    for name, relation in pairs(map.players) do
-        if type(name) ~= "string" or not validMapRelation(relation, true) then
-            return false
-        end
-        if relation.inside == true then
-            local record = relation.locoId and recordForLoco(map, relation.locoId)
-            if not record or type(record.players) ~= "table"
-                or type(record.players[name]) ~= "table"
-                or record.players[name].inside ~= true then
-                return false
-            end
-        end
-    end
-    return true
 end
 
 recordForLoco = function(map, locoId)
@@ -692,8 +543,7 @@ local function allocateRVRegion(locoId)
                     and manifest.rvId or nil
                 local state = manifest.state
                 local manifestAnchor = manifest.anchor
-                if integer(manifest.schemaVersion) ~= C.MANIFEST_SCHEMA_VERSION
-                    or not manifestSlot or manifestSlot < 1
+                if not manifestSlot or manifestSlot < 1
                     or manifestSlot > RegionSlots.COUNT
                     or not manifestRvId or manifestRvId == ""
                     or type(state) ~= "string"
@@ -767,5 +617,4 @@ ctx.currentMappingRecord = currentMappingRecord
 Adapter.allocateRVRegion = allocateRVRegion
 Adapter.currentMappingRecord = currentMappingRecord
 Adapter.invalidateBoundaryValidationCache = invalidateBoundaryValidationCache
-ctx.validateMapSchema = validateMapSchema
 end

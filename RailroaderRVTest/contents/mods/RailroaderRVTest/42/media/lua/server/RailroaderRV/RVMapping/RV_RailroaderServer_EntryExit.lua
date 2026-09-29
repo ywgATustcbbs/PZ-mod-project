@@ -2,6 +2,7 @@
 return function(ctx)
 local Core = require("RailroaderRV/Core/RV_Server_Core")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
+local ServerTeleport = require("RailroaderRV/Common/RV_ServerTeleport")
 local processIsServer = ctx.processIsServer
 local Boundary = ctx.Boundary
 local Adapter = ctx.Adapter
@@ -238,7 +239,10 @@ local function movePlayer(player, position, action, relation)
     -- RVTeleport hint when the channel exists.  MP/co-op must have the command
     -- path or the transaction fails closed.
     if not sent and processIsServer() then return false end
-    return safeCall(player, "teleportTo", position.x, position.y, position.z)
+    if action == "enter" and type(relation) == "table" then
+        return ServerTeleport.teleportToRVSpawn(player, relation, position)
+    end
+    return ServerTeleport.teleportToPosition(player, position)
 end
 
 local function markPlayerOutside(map, record, key, player, position, seat, role)
@@ -605,20 +609,19 @@ local function commitGeneration(player, data, prepared)
     local relationOk = pcall(markPlayerInside, candidateMap, candidateRecord,
         key, player, data.entryPosition, data.sourceRole, data.sourceSeat)
     if not relationOk then return false, C.INVALID_RV_DATA end
-    local validateWholeMap = ctx.validateMapSchema
-    if type(validateWholeMap) ~= "function" then
-        return false, C.INVALID_RV_DATA
-    end
-    local wholeMapOk, wholeMapValid = pcall(validateWholeMap, candidateMap)
-    if not wholeMapOk or wholeMapValid ~= true then
+    if not Boundary or type(Boundary.registerGeneration) ~= "function"
+        or Boundary.registerGeneration(candidateRecord.rvId,
+            candidateRecord.generation, candidateRecord.boundary,
+            candidateRecord) ~= true then
         return false, C.INVALID_RV_DATA
     end
     local server = RailroaderRV and RailroaderRV.Server
     if not server or type(server.initializeUtilityRecord) ~= "function" then
         return false, C.INVALID_RV_DATA
     end
-    -- Publish a validated candidate in one synchronous table swap. Generation
-    -- finalization performs no fallible work after utility initialization.
+    -- Publish this server-constructed current-schema candidate in one
+    -- synchronous table swap. Generation finalization performs no fallible
+    -- work after utility initialization.
     local oldLocomotives, oldPlayers = map.locomotives, map.players
     map.locomotives, map.players = candidateMap.locomotives,
         candidateMap.players

@@ -216,7 +216,6 @@ function Construction.new(context, operations)
     local function validateCurrentPlan(player, layout, bounds, generation, manifest)
         local identity = currentIdentity(manifest, generation)
         if not identity or manifest.owner ~= Constants.MOD_ID
-            or manifest.schemaVersion ~= Constants.MANIFEST_SCHEMA_VERSION
             or manifest.templateVersion ~= Constants.CAPTURED_TEMPLATE_VERSION
             or manifest.state ~= "RUNNING" then
             error("RailroaderRVTest: current generation identity is invalid")
@@ -300,7 +299,6 @@ function Construction.new(context, operations)
         local height = type(managed) == "table"
             and Constants.finiteInteger(managed.height) or nil
         if type(managed) ~= "table"
-            or boundary.schemaVersion ~= Constants.BOUNDARY_SCHEMA_VERSION
             or type(boundary.rvId) ~= "string" or boundary.rvId == ""
             or generation == nil or generation < 1
             or bitmapVersion ~= Constants.BITMAP_VERSION

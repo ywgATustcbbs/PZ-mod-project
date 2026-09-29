@@ -4,6 +4,7 @@ local C = require("RailroaderRV/Common/RV_Constants")
 local U = require("RailroaderRV/Common/RV_UtilityConstants")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local Store = require("RailroaderRV/Core/RV_UtilityStore")
+local DevSaveSchemaGate = require("RailroaderRV/Core/RV_DevSaveSchemaGate")
 
 local M = {}
 
@@ -23,7 +24,8 @@ local function mappedEntry(entry, identity, mappingRecord, sink)
 end
 
 function M.validateMapping(water, identity, mappingRecord)
-    if type(water) ~= "table" or water.schemaVersion ~= U.WATER_SCHEMA_VERSION
+    if not DevSaveSchemaGate.isReady()
+        or type(water) ~= "table"
         or type(water.sinks) ~= "table"
         or (water.state ~= U.WATER_STATE_ACTIVE
             and water.state ~= U.WATER_STATE_NEEDS_RECONCILE)

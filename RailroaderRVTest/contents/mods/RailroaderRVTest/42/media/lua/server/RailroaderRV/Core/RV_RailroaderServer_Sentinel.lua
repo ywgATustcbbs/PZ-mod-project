@@ -1,6 +1,7 @@
 -- RV_RailroaderServer: Sentinel responsibilities.
 return function(ctx)
 local Core = require("RailroaderRV/Core/RV_Server_Core")
+local DevSaveSchemaGate = require("RailroaderRV/Core/RV_DevSaveSchemaGate")
 local Boundary = ctx.Boundary
 local Bitmap = ctx.Bitmap
 local Adapter = ctx.Adapter
@@ -345,9 +346,9 @@ local function sentinelRelationsConsistent(map, record)
 end
 
 local function sentinelBitmapAndCenter(record)
-    if type(record) ~= "table" or type(record.managed) ~= "table"
-        or type(record.boundary) ~= "table"
-        or type(record.boundary.bitmap) ~= "table" or not Bitmap then
+    if not DevSaveSchemaGate.isReady() or type(record) ~= "table"
+        or type(record.managed) ~= "table"
+        or type(record.boundary) ~= "table" then
         return false, C.INVALID_RV_DATA
     end
     local managed = record.managed
@@ -359,20 +360,9 @@ local function sentinelBitmapAndCenter(record)
         or maxZ <= minZ then
         return false, C.INVALID_RV_DATA
     end
-    local decodeOk, bitmap = pcall(Bitmap.decode, record.boundary.bitmap)
-    local bitmapValidOk, bitmapValid = false, false
-    if decodeOk and type(bitmap) == "table"
-        and type(Bitmap.validate) == "function" then
-        bitmapValidOk, bitmapValid = pcall(Bitmap.validate, bitmap)
-    end
-    if not decodeOk or type(bitmap) ~= "table" or not bitmapValidOk
-        or bitmapValid ~= true
-        or integer(bitmap.bitmapVersion) ~= C.BITMAP_VERSION
-        or integer(bitmap.originX) ~= originX or integer(bitmap.originY) ~= originY
-        or integer(bitmap.width) ~= width or integer(bitmap.height) ~= height
-        or integer(bitmap.minZ) ~= minZ or integer(bitmap.maxZ) ~= maxZ then
-        return false, C.INVALID_RV_DATA
-    end
+    local bitmap = type(Boundary.cachedBitmap) == "function"
+        and Boundary.cachedBitmap(record) or nil
+    if not bitmap then return false, C.INVALID_RV_DATA end
     local centerX = originX + math.floor(width / 2)
     local centerY = originY + math.floor(height / 2)
     local rvPosition = copyPosition(record.rvPosition)
@@ -383,8 +373,7 @@ local function sentinelBitmapAndCenter(record)
     end
     local activeX, activeY, activeZ = math.floor(rvPosition.x),
         math.floor(rvPosition.y), math.floor(rvPosition.z)
-    if not Bitmap.containsScope(bitmap, activeX, activeY, activeZ)
-        or not Bitmap.isActive(bitmap, activeX, activeY, activeZ) then
+    if not Bitmap.isActive(bitmap, activeX, activeY, activeZ) then
         return false, C.INVALID_RV_DATA
     end
     return true, {

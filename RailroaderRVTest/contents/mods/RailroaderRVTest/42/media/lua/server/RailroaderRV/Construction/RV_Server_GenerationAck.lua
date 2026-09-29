@@ -166,8 +166,8 @@ local function acknowledgeFinalRelocation(player, args)
     if not finalPositionOk and stateOk
         and pending.finalRelocationReasserted ~= true then
         pending.finalRelocationReasserted = true
-        local targetReasserted = ServerUtil.callSucceeded(livePlayerOrReason,
-            "teleportTo", target.x, target.y, target.z)
+        local targetReasserted = RV.Server.teleportToPosition(
+            livePlayerOrReason, target)
             and ServerUtil.callSucceeded(livePlayerOrReason, "setX", target.x)
             and ServerUtil.callSucceeded(livePlayerOrReason, "setY", target.y)
             and ServerUtil.callSucceeded(livePlayerOrReason, "setZ", target.z)

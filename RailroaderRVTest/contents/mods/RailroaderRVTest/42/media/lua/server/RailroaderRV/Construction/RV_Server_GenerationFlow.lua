@@ -124,7 +124,7 @@ local function relocatePlayerIntoHouse(player, prepared)
     if not sentOk then
         error("RailroaderRVTest: final server-to-client relocation command failed")
     end
-    if not ServerUtil.callSucceeded(player, "teleportTo", x, y, z)
+    if not RV.Server.teleportToPosition(player, { x = x, y = y, z = z })
         or not ServerUtil.callSucceeded(player, "setX", x)
         or not ServerUtil.callSucceeded(player, "setY", y)
         or not ServerUtil.callSucceeded(player, "setZ", z)
@@ -429,8 +429,7 @@ local function finalizeGenerationAfterRelocate(player, prepared)
             -- tick would release the lease while the engine could still snap
             -- the player back to staging on the following update.
             local target = prepared.finalDestination
-            local reasserted = ServerUtil.callSucceeded(player,
-                "teleportTo", target.x, target.y, target.z)
+            local reasserted = RV.Server.teleportToPosition(player, target)
                 and ServerUtil.callSucceeded(player, "setX", target.x)
                 and ServerUtil.callSucceeded(player, "setY", target.y)
                 and ServerUtil.callSucceeded(player, "setZ", target.z)
@@ -731,8 +730,11 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         ctx.pendingGeneration = nil
         return false, "server-to-client relocation command failed"
     end
-    if not ServerUtil.callSucceeded(player, "teleportTo", stagingDestination.x + 0.5,
-        stagingDestination.y + 0.5, stagingDestination.z) then
+    if not RV.Server.teleportToPosition(player, {
+        x = stagingDestination.x + 0.5,
+        y = stagingDestination.y + 0.5,
+        z = stagingDestination.z,
+    }) then
         if Boundary and type(Boundary.clearPlayer) == "function" then
             pcall(Boundary.clearPlayer, player)
         end

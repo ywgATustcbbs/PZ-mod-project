@@ -89,7 +89,6 @@ local relocationSentinelBusy = {}
 local relocationSentinelCooldown = {}
 local relocationSentinelWarnings = {}
 local transitionSequence = 0
-local validateMapSchema
 local recordForLoco
 local roofRefreshTransactionBlocks
 local currentGeometryGate
@@ -131,7 +130,6 @@ local ctx = {
     relocationSentinelCooldown = relocationSentinelCooldown,
     relocationSentinelWarnings = relocationSentinelWarnings,
     transitionSequence = transitionSequence,
-    validateMapSchema = validateMapSchema,
     recordForLoco = recordForLoco,
     roofRefreshTransactionBlocks = roofRefreshTransactionBlocks,
     currentGeometryGate = currentGeometryGate,

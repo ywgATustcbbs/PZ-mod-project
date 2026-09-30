@@ -216,12 +216,23 @@ local function objectMatchesTemplate(object, expected)
     return objectMatchesStoredState(object, expected)
 end
 
+-- A shell member is only the template object if its tag also carries the shell
+-- edge role and key; the shell ledger reads that role and key to recognise the
+-- wall as protected, so a shell member rebuilt without them is not the entry.
+local function objectHasShellIdentity(object, edge)
+    if not edge then return true end
+    local tag = objectTag(object)
+    if not tag then return false end
+    return tag.role == edge.role and tag.edgeKey == edge.edgeKey
+end
+
 -- True when one of these objects is the tagged template object of the entry.
 local function objectIsTemplateEntry(objects, entry)
     for index = 1, #objects do
         local object = objects[index]
         if objectTemplateIndex(object) == entry.templateIndex
-            and objectMatchesTemplate(object, entry) then
+            and objectMatchesTemplate(object, entry)
+            and objectHasShellIdentity(object, entry.edge) then
             return true
         end
     end
@@ -251,7 +262,8 @@ local function isSpareObject(object, entries, objectIsFloor)
     for index = 1, #entries do
         local entry = entries[index]
         if entry.templateIndex == templateIndex
-            and objectMatchesTemplate(object, entry) then
+            and objectMatchesTemplate(object, entry)
+            and objectHasShellIdentity(object, entry.edge) then
             return false
         end
     end
@@ -353,14 +365,18 @@ local function deleteCapturedObject(square, object, templateIndex)
 end
 
 -- The template decides how many objects share a cell; an object tagged with the
--- expected template index and still carrying the captured identity is that
--- entry. A captured door frame whose pass-through state was lost is rebuilt.
+-- expected template index, still carrying the captured identity and (for a shell
+-- member) the shell edge identity is that entry. The shell edge is passed to the
+-- creator so a restored shell member keeps the role and edge key the shell
+-- ledger recognises. A captured door frame whose pass-through state was lost is
+-- rebuilt.
 local function restoreEntry(cell, square, objects, entry, boundary)
     local tagContext = { rvId = boundary.rvId }
     for index = 1, #objects do
         local object = objects[index]
         if objectTemplateIndex(object) == entry.templateIndex
-            and objectMatchesCaptured(object, entry) then
+            and objectMatchesCaptured(object, entry)
+            and objectHasShellIdentity(object, entry.edge) then
             if entry.name == "Wooden Door Frame" then
                 -- Re-applying the frame state keeps pass-through set on a frame
                 -- that survived, and reactivates a replaced one.
@@ -370,7 +386,7 @@ local function restoreEntry(cell, square, objects, entry, boundary)
         end
     end
     createCapturedTemplateObject(cell, square, entry, boundary.generation,
-        tagContext)
+        tagContext, entry.edge)
 end
 
 local function repairTemplateProtectionCell(player, expectedBoundary, x, y)
@@ -385,7 +401,8 @@ local function repairTemplateProtectionCell(player, expectedBoundary, x, y)
         Template) then
         return false
     end
-    local entries = templateEntriesAt(boundary, anchor, x, y)
+    local entries = templateEntriesAt(boundary, anchor, shellEdgeMap(boundary),
+        x, y)
     if #entries == 0 then return false end
 
     local repairLayers = {}

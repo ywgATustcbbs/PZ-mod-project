@@ -326,18 +326,18 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         or GenerationTransaction.isActive() then
         return false, "generation already queued or in progress"
     end
-    -- Generation and roof refresh both mutate the current managed scope and
-    -- stream the same world region.  The roof group owns the service-wide
-    -- mutex until its active/repair/final-return state has fully retired.
-    local roofServer = type(RV) == "table" and RV.Server or nil
-    if type(roofServer) ~= "table"
-        or type(roofServer.isRoofRefreshTransactionActive) ~= "function" then
-        return false, "roof refresh transaction state is unavailable"
+    -- A generation and a wall reload both mutate the current managed scope and
+    -- stream the same world region.  The wall reload operation holds the
+    -- service-wide mutex until every captured member is back inside the RV.
+    local wallServer = type(RV) == "table" and RV.Server or nil
+    if type(wallServer) ~= "table"
+        or type(wallServer.isWallReloadTransactionActive) ~= "function" then
+        return false, "wall reload transaction state is unavailable"
     end
-    local roofMutexOk, roofActive, roofReason = pcall(
-        roofServer.isRoofRefreshTransactionActive)
-    if not roofMutexOk or roofActive ~= false then
-        return false, roofReason or "roof refresh is in progress"
+    local wallMutexOk, wallActive, wallReason = pcall(
+        wallServer.isWallReloadTransactionActive)
+    if not wallMutexOk or wallActive ~= false then
+        return false, wallReason or "wall reload is in progress"
     end
     local identityOk, identityOrReason = playerIdentity(player)
     if not identityOk then

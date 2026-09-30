@@ -252,34 +252,12 @@ local function isWallReloadTransactionActive(rvId)
 end
 
 Adapter.isWallReloadTransactionActive = isWallReloadTransactionActive
--- One name for the cross-module mutex, shared by BoundaryGuard, RoomOwnership and
--- the utility service so they never disagree about which query to ask.
-Adapter.isRoofRefreshTransactionActive = isWallReloadTransactionActive
 
 local function publishMutexQueries()
     local api = RailroaderRV and RailroaderRV.Server
     if type(api) ~= "table" then return false end
     api.isWallReloadTransactionActive = isWallReloadTransactionActive
-    api.isRoofRefreshTransactionActive = isWallReloadTransactionActive
     return true
-end
-
--- Compatibility entry point for the RelocateAck dispatcher in Construction,
--- which is outside this refactor's ownership.  The body is the wall-reload
--- acknowledgement; the name is the only legacy part.
-function Adapter.acknowledgeRoofRefreshRelocation(player, token)
-    return WallReload.acknowledge(player, token)
-end
-
--- Compatibility entry point for the old adapter tick loop in Core, which is
--- outside this refactor's ownership.  It reports the live operation phase.
-function Adapter.getRoofRefreshRelocationState(rvId, generation, _token)
-    local op = WallReload.activeOperation()
-    if op == nil or tostring(op.rvId) ~= tostring(rvId)
-        or integer(op.generation) ~= integer(generation) then
-        return "idle"
-    end
-    return "active", op.phase
 end
 
 -- PZ loads files in this directory alphabetically, so this adapter is evaluated
@@ -336,5 +314,4 @@ end
 ctx.insidePlayersForRecord = insidePlayersForRecord
 ctx.wallReloadForObject = wallReloadForObject
 ctx.isWallReloadTransactionActive = isWallReloadTransactionActive
-ctx.acknowledgeRoofRefreshRelocation = Adapter.acknowledgeRoofRefreshRelocation
 end

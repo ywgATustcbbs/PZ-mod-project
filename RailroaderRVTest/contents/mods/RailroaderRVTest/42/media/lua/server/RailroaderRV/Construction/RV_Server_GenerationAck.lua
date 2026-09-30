@@ -5,6 +5,7 @@ local Constants = ctx.Constants
 local Boundary = ctx.Boundary
 local ServerWorld = ctx.ServerWorld
 local GenerationTransaction = ctx.GenerationTransaction
+local WallReload = require("RailroaderRV/WallReloadProtection/RV_WallReloadProtection")
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local notifyFailure = ctx.notifyFailure
 local removeGeneration = ctx.removeGeneration
@@ -13,16 +14,17 @@ local playerIdentity = ctx.playerIdentity
 local resolvePendingPlayer = ctx.resolvePendingPlayer
 
 local function acknowledgeRelocation(player, args)
-    -- RoofRefresh relocations share this command name; its own handler runs
-    -- first so a roof acknowledgement is never mistaken for a generation one.
-    local roofAck = ctx.acknowledgeRoofRefreshRelocation
-    if type(roofAck) ~= "function" then
-        return false, "roof refresh acknowledgement owner is unavailable"
+    -- A wall reload relocation shares this command name; its own acknowledgement
+    -- runs first so it is never mistaken for a generation one.
+    if type(WallReload) ~= "table"
+        or type(WallReload.acknowledge) ~= "function" then
+        return false, "wall reload acknowledgement owner is unavailable"
     end
     local token = type(args) == "table" and args.token or nil
-    local roofHandled, roofAccepted, roofReason = roofAck(player, token)
-    if roofHandled then
-        return roofAccepted, roofReason
+    local wallHandled, wallAccepted, wallReason = WallReload.acknowledge(player,
+        token)
+    if wallHandled then
+        return wallAccepted, wallReason
     end
     local record = GenerationTransaction.current()
     if record == nil then

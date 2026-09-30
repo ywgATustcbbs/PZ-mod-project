@@ -184,9 +184,11 @@ end
 Adapter._ticks = Core.getTick()
 
 -- The boundary validation module that Mapping assembles later reads the mutex
--- query through this shared context, so it must resolve at call time.
+-- query through this shared context, and EntryExit asks the same context for the
+-- generation/wall-reload blocking query, so both must resolve at call time.
 ctx.onlinePlayersSnapshot = onlinePlayersSnapshot
 ctx.serverTransactionMutexStatus = Adapter.serverTransactionMutexStatus
+ctx.wallReloadTransactionBlocks = Adapter.wallReloadTransactionBlocks
 
 -- PZ loads files in this directory alphabetically, so this adapter can be
 -- evaluated before RV_Server.lua has created RailroaderRV.Server.  Register the

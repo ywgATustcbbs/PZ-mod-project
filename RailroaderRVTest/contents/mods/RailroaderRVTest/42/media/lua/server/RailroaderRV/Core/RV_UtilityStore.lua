@@ -156,12 +156,8 @@ function M.allRecords()
 end
 
 function M.snapshot(record)
-    local power = copyTable(record.power)
-    for _, battery in ipairs(power.batteries) do battery.modData = nil end
-    if power.charger then power.charger.modData = nil end
-    if power.inverter then power.inverter.modData = nil end
     return { rvId = record.rvId, generation = record.generation,
-        power = power, water = copyTable(record.water) }
+        power = copyTable(record.power), water = copyTable(record.water) }
 end
 
 function M.waterSinkKey(x, y, z)

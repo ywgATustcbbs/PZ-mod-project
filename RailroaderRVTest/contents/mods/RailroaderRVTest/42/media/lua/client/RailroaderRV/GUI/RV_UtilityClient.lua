@@ -2,6 +2,8 @@
 --
 -- This module never writes a FluidContainer, registry, generator, or world
 -- coordinate.  It sends only operation intent plus a server-revalidated hint.
+-- Requests carry a monotonically increasing requestId; the newest one is
+-- correlated with the server acknowledgement for status feedback only.
 
 require("RailroaderRV/Common/RV_Constants")
 -- Register the same isolated sprite used by the server before hidden native
@@ -20,15 +22,14 @@ local Client = RailroaderRV.UtilityClient
 local C = RailroaderRV.Constants
 
 local requestSequence = 0
-local sessionNonce
-local pendingRequests = {}
-local ACK_TIMEOUT_SECONDS = 15
+local sentRequestId = nil
+local sentOperation = nil
 Client.snapshot = nil
 
 function Client.clearConnectionState()
     requestSequence = 0
-    sessionNonce = nil
-    pendingRequests = {}
+    sentRequestId = nil
+    sentOperation = nil
     Client.snapshot = nil
     local rv = rawget(_G, "RailroaderRV")
     local menu = rv and rv.RailroaderContextMenu
@@ -39,15 +40,6 @@ function Client.clearConnectionState()
     if dashboard and type(dashboard.onConnectionReset) == "function" then
         pcall(dashboard.onConnectionReset)
     end
-end
-
-local function finite(value)
-    return type(value) == "number"
-end
-
-local function nowSeconds()
-    local ok, value = pcall(os.time)
-    return ok and finite(value) and value or nil
 end
 
 local function text(key, fallback)
@@ -80,16 +72,6 @@ local function rejectSend(player)
     return false, nil
 end
 
-local function newNonce()
-    local timestamp = os.time()
-    local random = 0
-    if type(ZombRand) == "function" then
-        local ok, value = pcall(ZombRand, 1000000)
-        if ok and finite(value) then random = value end
-    end
-    return tostring(timestamp) .. ":" .. tostring(random)
-end
-
 local function localPlayer(playerNum)
     if type(getSpecificPlayer) ~= "function" then return nil end
     local ok, player = pcall(getSpecificPlayer, playerNum)
@@ -98,7 +80,14 @@ end
 
 local function nextRequestId()
     requestSequence = requestSequence + 1
-    return tostring(sessionNonce) .. ":" .. tostring(requestSequence)
+    return tostring(requestSequence)
+end
+
+local function transmit(player, payload)
+    if not player or type(sendClientCommand) ~= "function" then return false end
+    local ok, result = pcall(sendClientCommand, player, C.MOD_ID,
+        C.COMMAND_RV_UTILITY, payload)
+    return ok and result ~= false
 end
 
 local function hintForObject(object)
@@ -120,41 +109,25 @@ local function hintForItem(item)
     return ok and id ~= nil and { itemId = id } or nil
 end
 
-function Client.ensureSession()
-    if not sessionNonce then sessionNonce = newNonce() end
-    return sessionNonce
-end
-
 function Client.send(player, operation, targetHint, sourceHint)
-    if not player or type(sendClientCommand) ~= "function" then
-        return rejectSend(player)
-    end
-    Client.ensureSession()
     local requestId = nextRequestId()
-    local payload = { requestId = requestId, sessionNonce = sessionNonce,
-        operation = operation }
+    local payload = { requestId = requestId, operation = operation }
     if targetHint ~= nil then payload.targetHint = targetHint end
     if sourceHint ~= nil then payload.sourceHint = sourceHint end
-    local ok, result = pcall(sendClientCommand, player, C.MOD_ID,
-        C.COMMAND_RV_UTILITY, payload)
-    local sent = ok and result ~= false
-    if sent then
-        pendingRequests[requestId] = { player = player, operation = operation,
-            sentAt = nowSeconds() }
-        local dashboard = RailroaderRV.UtilityDashboard
-        local shown = false
-        if dashboard and type(dashboard.onRequestSent) == "function" then
-            local callbackOk, accepted = pcall(dashboard.onRequestSent,
-                player, requestId, operation)
-            shown = callbackOk and accepted == true
-        end
-        if not shown then
-            Client.showFeedback(player, text("UI_RailroaderRVTest_Utility_Submitted",
-                "Utility request sent; waiting for server"))
-        end
-        return true, requestId
+    if not transmit(player, payload) then return rejectSend(player) end
+    sentRequestId, sentOperation = requestId, operation
+    local dashboard = RailroaderRV.UtilityDashboard
+    local shown = false
+    if dashboard and type(dashboard.onRequestSent) == "function" then
+        local callbackOk, accepted = pcall(dashboard.onRequestSent,
+            player, requestId, operation)
+        shown = callbackOk and accepted == true
     end
-    return rejectSend(player)
+    if not shown then
+        Client.showFeedback(player, text("UI_RailroaderRVTest_Utility_Submitted",
+            "Utility request sent; waiting for server"))
+    end
+    return true, requestId
 end
 
 function Client.requestAddFuel(player, item)
@@ -188,8 +161,13 @@ function Client.requestRefreshDevices(player)
     return Client.send(player, U.OP_REFRESH_DEVICES, nil, nil)
 end
 
+-- A snapshot only reads current server state, so it is executed directly and
+-- owns no pending acknowledgement or UI transaction.
 function Client.requestSnapshot(player)
-    return Client.send(player, U.OP_REQUEST_SNAPSHOT, nil, nil)
+    local payload = { requestId = nextRequestId(),
+        operation = U.OP_REQUEST_SNAPSHOT }
+    if not transmit(player, payload) then return rejectSend(player) end
+    return true
 end
 
 function Client.requestGenerator(player, operation, object)
@@ -211,34 +189,7 @@ function Client.requestWaterConnection(player, object, connected)
 end
 
 function Client.isRequestPending(requestId)
-    return type(requestId) == "string" and pendingRequests[requestId] ~= nil
-end
-
-local function notifyRequestTimeout(requestId, request)
-    local dashboard = RailroaderRV.UtilityDashboard
-    local shown = false
-    if dashboard and type(dashboard.onTimeout) == "function" then
-        local ok, accepted = pcall(dashboard.onTimeout, request.player,
-            requestId, request.operation)
-        shown = ok and accepted == true
-    end
-    if not shown then
-        Client.showFeedback(request.player, text(
-            "UI_RailroaderRVTest_Utility_AckTimeout",
-            "No server response. The operation may still have completed."))
-    end
-end
-
-function Client.onTick()
-    local now = nowSeconds()
-    if now == nil then return end
-    for requestId, request in pairs(pendingRequests) do
-        if type(request.sentAt) == "number"
-            and now - request.sentAt >= ACK_TIMEOUT_SECONDS then
-            pendingRequests[requestId] = nil
-            notifyRequestTimeout(requestId, request)
-        end
-    end
+    return type(requestId) == "string" and requestId == sentRequestId
 end
 
 local function showInvalidRVData(player)
@@ -283,20 +234,19 @@ function Client.onServerCommand(module, command, args)
         return
     end
     if command ~= C.COMMAND_RV_UTILITY_ACK then return end
-    local request = type(args.requestId) == "string"
-        and pendingRequests[args.requestId] or nil
+    if type(args.requestId) ~= "string" or args.requestId ~= sentRequestId then return end
+    local operation = sentOperation
+    sentRequestId, sentOperation = nil, nil
     local player = localPlayer(0)
-    if not request or request.player ~= player then return end
-    pendingRequests[args.requestId] = nil
     local dashboard = RailroaderRV.UtilityDashboard
     local displayed = false
     if dashboard and type(dashboard.onAck) == "function" then
-        local ok, accepted = pcall(dashboard.onAck, player, args, request)
+        local ok, accepted = pcall(dashboard.onAck, player, args, operation)
         displayed = ok and accepted == true
     end
     if not displayed then
         local message
-        if args.ok == true and request.operation == U.OP_CONNECT_WATER_DEVICE then
+        if args.ok == true and operation == U.OP_CONNECT_WATER_DEVICE then
             message = args.connected == true
                 and text("UI_RailroaderRVTest_Utility_WaterConnectedAck",
                     "Sink connected to water")
@@ -308,7 +258,7 @@ function Client.onServerCommand(module, command, args)
             message = text("UI_RailroaderRVTest_Utility_Rejected", "Operation rejected")
                 .. ": " .. tostring(args.reason or "unknown")
         end
-        Client.showFeedback(request.player, message)
+        Client.showFeedback(player, message)
     end
     if args.reason == U.REASON_INVALID_RV_DATA then
         Client.showInvalidRVData(localPlayer(0))
@@ -325,8 +275,5 @@ if Events and Events.OnConnected and type(Events.OnConnected.Add) == "function" 
 end
 if Events and Events.OnDisconnect and type(Events.OnDisconnect.Add) == "function" then
     Events.OnDisconnect.Add(Client.clearConnectionState)
-end
-if Events and Events.OnTick and type(Events.OnTick.Add) == "function" then
-    Events.OnTick.Add(Client.onTick)
 end
 return Client

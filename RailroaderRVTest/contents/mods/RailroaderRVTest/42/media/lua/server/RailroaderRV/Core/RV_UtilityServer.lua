@@ -1,5 +1,9 @@
 -- Utility protocol facade. RV_Server owns event registration and calls this
 -- module for server-validated generator intents and mapping sync.
+--
+-- One client command is handled as one straight-line server transaction: the
+-- Lua server executes handlers sequentially, so no per-RV lock, session nonce
+-- or idempotency replay window is required.
 
 local C = require("RailroaderRV/Common/RV_Constants")
 local U = require("RailroaderRV/Common/RV_UtilityConstants")
@@ -11,15 +15,9 @@ local Util = require("RailroaderRV/Common/RV_ServerUtil")
 local Core = require("RailroaderRV/Core/RV_Server_Core")
 
 local M = {}
-local locks = {}
-local sessions = {}
 local mappingSyncState = {}
 local lastTick = nil
 local lastScanTick = nil
-
-local function key(identity)
-    return tostring(identity.rvId) .. ":" .. tostring(identity.generation)
-end
 
 local function playerKey(player)
     local idOk, id = Util.invoke(player, "getOnlineID")
@@ -96,11 +94,10 @@ end
 
 local function validRequest(args)
     if type(args) ~= "table" then return false, U.REASONS.INVALID_REQUEST end
-    local allowed = { requestId = true, sessionNonce = true, operation = true,
+    local allowed = { requestId = true, operation = true,
         targetHint = true, sourceHint = true }
     for field in pairs(args) do if not allowed[field] then return false, U.REASONS.INVALID_REQUEST end end
     if not validText(args.requestId, U.MAX_REQUEST_ID_LENGTH)
-        or not validText(args.sessionNonce, U.MAX_NONCE_LENGTH)
         or not validText(args.operation, 64)
         or not validHint(args.targetHint) or not validHint(args.sourceHint) then
         return false, U.REASONS.INVALID_REQUEST
@@ -118,67 +115,16 @@ local function knownOperation(operation)
         or operation == U.OP_STOP_GENERATOR
 end
 
-local function acquire(identity)
-    local identityKey = key(identity)
-    if locks[identityKey] then return false, U.REASONS.BUSY end
-    locks[identityKey] = true
-    return true, identityKey
-end
-
-local function release(identityKey)
-    if identityKey then locks[identityKey] = nil end
-end
-
-local function withGuard(identity, callback)
-    local acquired, identityKeyOrReason = acquire(identity)
-    if not acquired then return false, identityKeyOrReason end
-    local ok, accepted, result = pcall(callback)
-    release(identityKeyOrReason)
-    if not ok then return false, stableReason(accepted) end
-    return accepted, result
-end
-
 local function acknowledge(player, requestId, accepted, result)
     local payload = { requestId = requestId, ok = accepted == true }
     if accepted then
         payload.reason = U.REASONS.OK
-        if type(result) == "table" then
-            payload.sequence = result.sequence
-            payload.connected = result.connected
-            payload.plannedTransfer = result.plannedTransfer
-            payload.confirmedTransfer = result.confirmedTransfer
-            payload.projectionPending = result.projectionPending
-        end
+        -- Only the water answer carries a client-visible boolean.
+        payload.connected = type(result) == "table" and result.connected or nil
     else
         payload.reason = stableReason(result)
     end
     send(player, C.COMMAND_RV_UTILITY_ACK, payload)
-end
-
-local function remember(session, requestId, response)
-    if type(session) ~= "table" then return end
-    session.processed = session.processed or {}
-    session.processed[requestId] = response
-    local count = 0
-    for _ in pairs(session.processed) do count = count + 1 end
-    if count > 64 then
-        for id in pairs(session.processed) do
-            session.processed[id] = nil
-            break
-        end
-    end
-end
-
-local function sessionFor(nonce, player, previous)
-    local retired = previous and previous.retired or {}
-    if previous and previous.nonce then retired[previous.nonce] = true end
-    return { nonce = nonce, player = player, processed = {}, retired = retired }
-end
-
-local function replaceSession(id, player, nonce, previous)
-    local session = sessionFor(nonce, player, previous)
-    sessions[id] = session
-    return session
 end
 
 local function broadcast(context, record)
@@ -229,37 +175,8 @@ end
 function M.handleCommand(player, args)
     local requestOk, requestReason = validRequest(args)
     if not requestOk then return false, requestReason end
-    if not knownOperation(args.operation) then return false, U.REASONS.INVALID_REQUEST end
-    local id = playerKey(player)
-    if not id then return false, U.REASONS.INVALID_REQUEST end
-    local session = sessions[id]
-    if session then
-        if session.retired and session.retired[args.sessionNonce] then
-            acknowledge(player, args.requestId, false, U.REASONS.INVALID_NONCE)
-            return false, U.REASONS.INVALID_NONCE
-        elseif session.player == player and session.nonce == args.sessionNonce then
-            -- Continue the active session; its idempotency table is scoped to
-            -- this nonce and is never shared with a later reconnect.
-        elseif session.player ~= player and session.nonce == args.sessionNonce then
-            -- A replacement server player object cannot inherit the active
-            -- session nonce.  The client must establish a fresh session.
-            acknowledge(player, args.requestId, false, U.REASONS.INVALID_NONCE)
-            return false, U.REASONS.INVALID_NONCE
-        else
-            -- A new nonce denotes a reconnect/reinitialised client, even when
-            -- the authoritative player object is reused. Retire the old
-            -- nonce so delayed packets cannot create another session with
-            -- the old idempotency namespace.
-            session = replaceSession(id, player, args.sessionNonce, session)
-        end
-    else
-        session = replaceSession(id, player, args.sessionNonce, nil)
-    end
-    if session.processed and session.processed[args.requestId] then
-        local old = session.processed[args.requestId]
-        acknowledge(player, args.requestId, old.ok, old.result or old.reason)
-        return old.ok, old.result or old.reason
-    end
+    local operation = args.operation
+    if not knownOperation(operation) then return false, U.REASONS.INVALID_REQUEST end
     if serviceBusy() then
         acknowledge(player, args.requestId, false, U.REASONS.BUSY)
         return false, U.REASONS.BUSY
@@ -267,84 +184,87 @@ function M.handleCommand(player, args)
     local rvOk, contextOrReason = resolveRV(player)
     if not rvOk then
         acknowledge(player, args.requestId, false, contextOrReason)
-        remember(session, args.requestId, { ok = false, reason = contextOrReason })
         return false, contextOrReason
     end
     local context = contextOrReason
     if context.phase ~= "READY" then
-        local reason = U.REASONS.PERMISSION
-        acknowledge(player, args.requestId, false, reason)
-        remember(session, args.requestId, { ok = false, reason = reason })
-        return false, reason
+        acknowledge(player, args.requestId, false, U.REASONS.PERMISSION)
+        return false, U.REASONS.PERMISSION
     end
     local identity = context.identity
-    local guardOk, guardReason = withGuard(identity, function()
-        local recordOk, recordOrReason = Store.getRecord(identity, false)
-        if not recordOk then return false, recordOrReason end
-        local settledBefore = nil
-        local accepted, detail
-        if args.operation == U.OP_CONNECT_WATER_DEVICE then
-            accepted, detail = Water.setConnection(identity, context,
-                args.targetHint, recordOrReason)
-        elseif args.operation == U.OP_ADD_FUEL then
-            local settled, updated = Power.settleAndRefreshLoad(identity,
-                context.player, recordOrReason)
-            if not settled then return false, updated end
-            settledBefore = updated
-            accepted, detail = Power.addFuel(identity, context, args.sourceHint)
-        elseif args.operation == U.OP_REFRESH_DEVICES then
-            local settled, updated = Power.settleAndRefreshLoad(identity,
-                context.player, recordOrReason)
-            if not settled then return false, updated end
-            local scanned, scanReason = Devices.scanAll(identity, context.record,
-                context.player)
-            if not scanned then return false, scanReason end
-            local settled, settledRecord = Power.settleAndRefreshLoad(identity,
-                context.player)
-            accepted, detail = settled, settled and { record = settledRecord }
-                or settledRecord
-        elseif args.operation == U.OP_ADD_BATTERY
-            or args.operation == U.OP_REMOVE_BATTERY
-            or args.operation == U.OP_INSTALL_CHARGER
-            or args.operation == U.OP_REMOVE_CHARGER
-            or args.operation == U.OP_INSTALL_INVERTER
-            or args.operation == U.OP_REMOVE_INVERTER then
-            local settled, updated = Power.settleAndRefreshLoad(identity,
-                context.player, recordOrReason)
-            if not settled then return false, updated end
-            settledBefore = updated
-            local hint = args.targetHint
-            if args.operation == U.OP_ADD_BATTERY
-                or args.operation == U.OP_INSTALL_CHARGER
-                or args.operation == U.OP_INSTALL_INVERTER then
-                hint = args.sourceHint
-            end
-            accepted, detail = Power.handleIntent(identity, context, args.operation, hint)
-        elseif args.operation == U.OP_REQUEST_SNAPSHOT then
-            accepted, detail = true, { record = recordOrReason }
-        else
-            local hint = args.targetHint
-            if args.operation == U.OP_ADD_BATTERY
-                or args.operation == U.OP_INSTALL_CHARGER
-                or args.operation == U.OP_INSTALL_INVERTER then
-                hint = args.sourceHint
-            end
-            accepted, detail = Power.handleIntent(identity, context, args.operation,
-                hint)
+    local recordOk, recordOrReason = Store.getRecord(identity, false)
+    if not recordOk then
+        acknowledge(player, args.requestId, false, recordOrReason)
+        return false, recordOrReason
+    end
+    if operation == U.OP_REQUEST_SNAPSHOT then
+        -- A snapshot only reads current state: answer it directly.
+        broadcast(context, recordOrReason)
+        return true, { record = recordOrReason }
+    end
+
+    local settledBefore = nil
+    local accepted, detail
+    if operation == U.OP_CONNECT_WATER_DEVICE then
+        accepted, detail = Water.setConnection(identity, context,
+            args.targetHint, recordOrReason)
+    elseif operation == U.OP_ADD_FUEL then
+        local settled, updated = Power.settleAndRefreshLoad(identity,
+            context.player, recordOrReason)
+        if not settled then
+            acknowledge(player, args.requestId, false, updated)
+            return false, updated
         end
-        if accepted ~= true then
-            if settledBefore then broadcastToRV(identity, settledBefore) end
-            return false, detail
+        settledBefore = updated
+        accepted, detail = Power.addFuel(identity, context, args.sourceHint)
+    elseif operation == U.OP_REFRESH_DEVICES then
+        local settled, updated = Power.settleAndRefreshLoad(identity,
+            context.player, recordOrReason)
+        if not settled then
+            acknowledge(player, args.requestId, false, updated)
+            return false, updated
         end
-        local appliedRecord = type(detail) == "table" and detail.record or nil
-        broadcastToRV(identity, appliedRecord or recordOrReason)
-        return true, detail
-    end)
-    local response = { ok = guardOk == true, result = guardOk and guardReason or nil,
-        reason = guardOk and nil or guardReason }
-    remember(session, args.requestId, response)
-    acknowledge(player, args.requestId, guardOk, guardOk and guardReason or guardReason)
-    return guardOk, guardOk and guardReason or guardReason
+        local scanned, scanReason = Devices.scanAll(identity, context.record,
+            context.player)
+        if not scanned then
+            acknowledge(player, args.requestId, false, scanReason)
+            return false, scanReason
+        end
+        local settledAgain, settledRecord = Power.settleAndRefreshLoad(identity,
+            context.player)
+        accepted, detail = settledAgain, settledAgain and { record = settledRecord }
+            or settledRecord
+    elseif operation == U.OP_ADD_BATTERY or operation == U.OP_REMOVE_BATTERY
+        or operation == U.OP_INSTALL_CHARGER or operation == U.OP_REMOVE_CHARGER
+        or operation == U.OP_INSTALL_INVERTER or operation == U.OP_REMOVE_INVERTER then
+        -- Battery, charger and inverter operations settle the load first.
+        local settled, updated = Power.settleAndRefreshLoad(identity,
+            context.player, recordOrReason)
+        if not settled then
+            acknowledge(player, args.requestId, false, updated)
+            return false, updated
+        end
+        settledBefore = updated
+        local hint = args.targetHint
+        if operation == U.OP_ADD_BATTERY or operation == U.OP_INSTALL_CHARGER
+            or operation == U.OP_INSTALL_INVERTER then
+            hint = args.sourceHint
+        end
+        accepted, detail = Power.handleIntent(identity, context, operation, hint)
+    else
+        -- Generator start/stop settles the load inside the intent handler.
+        accepted, detail = Power.handleIntent(identity, context, operation,
+            args.targetHint)
+    end
+    if accepted ~= true then
+        if settledBefore then broadcastToRV(identity, settledBefore) end
+        acknowledge(player, args.requestId, false, detail)
+        return false, detail
+    end
+    local appliedRecord = type(detail) == "table" and detail.record or nil
+    broadcastToRV(identity, appliedRecord or recordOrReason)
+    acknowledge(player, args.requestId, true, detail)
+    return true, detail
 end
 
 local function syncUtilityMappings()
@@ -385,10 +305,6 @@ function M.onTick(tick)
         return
     end
     lastTick = tick
-    local waterOk, waterAccepted = pcall(Water.onTick)
-    if not waterOk or waterAccepted == false then
-        print("[RailroaderRVTest] utility water removal reconciliation failed")
-    end
     if Core.tickModulo(30) then syncUtilityMappings() end
     if not Core.tickModulo(U.POWER.DEVICE_SCAN_INTERVAL_TICKS)
         or lastScanTick == tick then return end
@@ -399,24 +315,9 @@ function M.onTick(tick)
     end)
 end
 
--- Registered by the Core owner for OnObjectAboutToBeRemoved. Water keeps only
--- a short-lived removal witness and commits a ledger deletion after the next
--- tick proves the exact object has left its square.
-function M.onObjectRemoved(object)
-    local ok, accepted, reason = pcall(Water.onObjectRemoved, object)
-    if not ok or accepted ~= true then
-        print("[RailroaderRVTest] utility water sink removal deferred: "
-            .. tostring((not ok and accepted) or reason))
-        return false, (not ok and accepted) or reason
-    end
-    return true
-end
-
 function M.onEveryTenMinutes()
     forCurrentRecords(function(identity, record)
-        local settled, updated = withGuard(identity, function()
-            return Power.settleAndRefreshLoad(identity, nil, record)
-        end)
+        local settled, updated = Power.settleAndRefreshLoad(identity, nil, record)
         if settled and type(updated) == "table" then
             broadcastToRV(identity, updated)
         end
@@ -432,22 +333,11 @@ end
 function M.settleAndRefreshLoad(identity, player)
     local recordOk, record = Store.getRecord(identity, false)
     if not recordOk then return false, record end
-    local settled, updated = withGuard(identity, function()
-        return Power.settleAndRefreshLoad(identity, player, record)
-    end)
+    local settled, updated = Power.settleAndRefreshLoad(identity, player, record)
     if settled and type(updated) == "table" then
         broadcastToRV(identity, updated)
     end
     return settled, updated
-end
-
-function M.snapshotForPlayer(player)
-    local ok, context = resolveRV(player)
-    if not ok then return false, context end
-    local recordOk, record = Store.getRecord(context.identity, false)
-    if not recordOk then return false, record end
-    broadcast(context, record)
-    return true, record
 end
 
 function M.initializeRecord(identity, context)

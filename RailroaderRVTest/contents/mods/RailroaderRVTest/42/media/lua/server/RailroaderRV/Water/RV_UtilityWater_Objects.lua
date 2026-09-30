@@ -122,53 +122,36 @@ function M.resolveSink(identity, context, hint)
     return true, {
         object = object,
         x = x, y = y, z = z,
-        slotIndex = record.slotIndex,
-        anchor = anchor,
         connected = connected,
-        currentConnected = external,
-        hasIdentity = hasIdentity,
     }
 end
 
 function M.ensureSinkIdentity(object, identity, mappingRecord)
     if Catalog.hasSinkIdentity(object) then
         if Catalog.isCurrentWaterSink(object, identity, mappingRecord) then
-            return true, { created = false }
+            return true
         end
-        return false, U.REASONS.DEVICE_NOT_CURRENT, true
+        return false, U.REASONS.DEVICE_NOT_CURRENT
     end
     local dataOk, data = Util.invoke(object, "getModData")
     if not dataOk or type(data) ~= "table" then
-        return false, U.REASONS.API_ERROR, true
+        return false, U.REASONS.API_ERROR
     end
-    if data[Catalog.WATER_TAG_KEY] ~= nil then
-        return false, U.REASONS.DEVICE_NOT_CURRENT, true
-    end
+    -- The tag must carry the complete sink identity contract, including the
+    -- slot allocation the caller's current mapping record proved.
     local tag = {
         owner = C.MOD_ID,
         role = "sink",
         rvId = identity.rvId,
         generation = identity.generation,
+        slotIndex = mappingRecord.slotIndex,
     }
     data[Catalog.WATER_TAG_KEY] = tag
     if Util.callSucceeded(object, "transmitModData")
         and Catalog.isCurrentWaterSink(object, identity, mappingRecord) then
-        return true, { created = true, tag = tag }
+        return true
     end
-    data[Catalog.WATER_TAG_KEY] = nil
-    local restored = Util.callSucceeded(object, "transmitModData")
-        and not Catalog.hasSinkIdentity(object)
-    return false, U.REASONS.POSTCONDITION_FAILED, restored
-end
-
-function M.rollbackSinkIdentity(object, identityToken)
-    if type(identityToken) ~= "table" or identityToken.created ~= true then return true end
-    local dataOk, data = Util.invoke(object, "getModData")
-    if not dataOk or type(data) ~= "table"
-        or data[Catalog.WATER_TAG_KEY] ~= identityToken.tag then return false end
-    data[Catalog.WATER_TAG_KEY] = nil
-    return Util.callSucceeded(object, "transmitModData")
-        and not Catalog.hasSinkIdentity(object)
+    return false, U.REASONS.POSTCONDITION_FAILED
 end
 
 return M

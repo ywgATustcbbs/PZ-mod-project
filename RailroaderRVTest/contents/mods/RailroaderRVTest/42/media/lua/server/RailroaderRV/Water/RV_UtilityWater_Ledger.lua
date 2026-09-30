@@ -13,26 +13,17 @@ function M.sinkKey(sink)
     return Store.waterSinkKey(sink.x, sink.y, sink.z)
 end
 
-function M.getEntry(water, identity, mappingRecord, sink)
+function M.getEntry(water, sink)
     local key = M.sinkKey(sink)
     if not key then return false, C.INVALID_RV_DATA end
     return true, water.sinks[key], key
 end
 
-function M.newEntry(identity, mappingRecord, sink, connected, sequence)
+function M.newEntry(sink, connected, sequence)
     return {
         x = sink.x, y = sink.y, z = sink.z,
         connected = connected == true,
         sequence = sequence or 0,
-    }
-end
-
-function M.copyEntry(entry)
-    if type(entry) ~= "table" then return nil end
-    return {
-        x = entry.x, y = entry.y, z = entry.z,
-        connected = entry.connected,
-        sequence = entry.sequence,
     }
 end
 

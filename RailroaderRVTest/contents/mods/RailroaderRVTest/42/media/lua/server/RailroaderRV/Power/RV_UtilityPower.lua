@@ -9,8 +9,6 @@ local World = require("RailroaderRV/Common/RV_ServerWorld")
 local Util = require("RailroaderRV/Common/RV_ServerUtil")
 
 local M = {}
-local runtimeInitialized = {}
-local runtimeFaults = {}
 
 local function invoke(target, method, ...)
     return Util.invoke(target, method, ...)
@@ -19,21 +17,6 @@ end
 local function finite(value)
     value = Util.toNumber(value)
     return value ~= nil and value == value and value < math.huge and value > -math.huge
-end
-
-local function identityKey(identity)
-    return tostring(identity.rvId) .. ":" .. tostring(identity.generation)
-end
-
-local function failClosed(identity)
-    runtimeFaults[identityKey(identity)] = true
-end
-
-local function ensureHealthy(identity)
-    if runtimeFaults[identityKey(identity)] then
-        return false, U.REASONS.POSTCONDITION_FAILED
-    end
-    return true
 end
 
 local function worldAgeHours()
@@ -62,11 +45,6 @@ end
 
 local function callSucceeded(target, method, ...)
     return Util.callSucceeded(target, method, ...)
-end
-
-local function objectIndex(object)
-    local ok, value = invoke(object, "getObjectIndex")
-    return ok and Util.integer(value) or nil
 end
 
 local function objectFingerprint(object)
@@ -160,39 +138,6 @@ local function bindProxy(identity, power, context)
     return true
 end
 
-local function restoreItemData(item, data)
-    if not item then return false end
-    local ok, target = invoke(item, "getModData")
-    if not ok or type(target) ~= "table" then return false end
-    -- Keep factory-provided defaults and overlay the saved item state.
-    for key, value in pairs(data or {}) do target[key] = value end
-    return true
-end
-
-local function serializableCopy(value, depth, seen)
-    if type(value) ~= "table" then
-        local kind = type(value)
-        if kind == "string" or kind == "number" or kind == "boolean" then return value end
-        return nil
-    end
-    if depth > 6 or seen[value] then return nil end
-    seen[value] = true
-    local result = {}
-    for key, nested in pairs(value) do
-        if type(key) == "string" or type(key) == "number" then
-            local copied = serializableCopy(nested, depth + 1, seen)
-            if copied ~= nil then result[key] = copied end
-        end
-    end
-    seen[value] = nil
-    return result
-end
-
-local function itemModData(item)
-    local ok, data = invoke(item, "getModData")
-    return ok and type(data) == "table" and serializableCopy(data, 1, {}) or {}
-end
-
 local function inventoryItems(inventory, result, seen)
     if not inventory or seen[inventory] then return end
     seen[inventory] = true
@@ -235,59 +180,18 @@ local function itemCondition(item)
     return condition, maxCondition, math.max(0, math.min(1, usedDelta))
 end
 
-local function inventoryContains(inventory, target)
-    if not inventory or not target then return nil end
-    local targetIdOk, targetId = invoke(target, "getID")
-    targetId = targetIdOk and targetId ~= nil and tostring(targetId) or nil
-    local seen = {}
-    local function scan(container)
-        if not container or seen[container] then return false end
-        seen[container] = true
-        local itemsOk, collection = invoke(container, "getItems")
-        if not itemsOk or not collection then return nil end
-        local sizeOk, rawSize = invoke(collection, "size")
-        local size = sizeOk and Util.integer(rawSize) or nil
-        if size == nil or size < 0 then return nil end
-        for index = 0, size - 1 do
-            local itemOk, item = invoke(collection, "get", index)
-            if not itemOk or not item then return nil end
-            if item == target then return true end
-            if targetId then
-                local idOk, itemId = invoke(item, "getID")
-                if idOk and itemId ~= nil and tostring(itemId) == targetId then
-                    return true
-                end
-            end
-            local nestedOk, nested = invoke(item, "getInventory")
-            if nestedOk and nested then
-                local nestedResult = scan(nested)
-                if nestedResult ~= false then return nestedResult end
-            end
-        end
-        return false
-    end
-    return scan(inventory)
-end
-
-local function removeInventoryItem(found, identity)
+local function removeInventoryItem(found)
     if not found or not found.inventory or not found.item then return false end
-    callSucceeded(found.inventory, "Remove", found.item)
-    local present = inventoryContains(found.inventory, found.item)
-    if present == false then return true end
-    if present == nil then failClosed(identity) end
-    return false
+    return callSucceeded(found.inventory, "Remove", found.item)
 end
 
-local function addInventoryItem(inventory, item, identity)
+local function addInventoryItem(inventory, item)
     if not inventory or not item then return false end
-    callSucceeded(inventory, "AddItem", item)
-    local present = inventoryContains(inventory, item)
-    if present == true then return true end
-    if present == nil then failClosed(identity) end
-    return false
+    local ok, added = invoke(inventory, "AddItem", item)
+    return ok and added ~= nil and added ~= false
 end
 
-local function createItem(fullType, condition, modData, usedDelta)
+local function createItem(fullType, condition, usedDelta)
     local factory = rawget(_G, "InventoryItemFactory")
     if not factory or type(factory.CreateItem) ~= "function" then return nil end
     local ok, item = pcall(factory.CreateItem, fullType)
@@ -295,7 +199,6 @@ local function createItem(fullType, condition, modData, usedDelta)
     if condition ~= nil and not callSucceeded(item, "setCondition", condition) then return nil end
     if usedDelta ~= nil and type(item.setUsedDelta) == "function"
         and not callSucceeded(item, "setUsedDelta", usedDelta) then return nil end
-    if not restoreItemData(item, modData) then return nil end
     return item
 end
 
@@ -395,11 +298,10 @@ local function settleGeneration(power, elapsedHours)
     return reportPowerW
 end
 
+-- The persisted lastUpdateTime is the single source of truth for "this record
+-- already has a runtime window"; a fresh record still carries its initial zero.
 local function ensureRuntime(identity, record)
-    local healthy, healthReason = ensureHealthy(identity)
-    if not healthy then return false, healthReason end
-    local key = identityKey(identity)
-    if runtimeInitialized[key] then return true end
+    if record.power.lastUpdateTime > 0 then return true end
     local now = worldAgeHours()
     if now == nil then return false, U.REASONS.API_ERROR end
     record.power.lastUpdateTime = now
@@ -409,10 +311,7 @@ local function ensureRuntime(identity, record)
     local proxyOk, proxyReason = syncCircuitProxy(identity, record.power, nil)
     if not proxyOk then return false, proxyReason end
     bump(record.power)
-    local saved, reason = commit(record, identity)
-    if not saved then return false, reason end
-    runtimeInitialized[key] = true
-    return true
+    return commit(record, identity)
 end
 
 function M.beginRuntime(identity, record)
@@ -476,35 +375,7 @@ local function resolveFuelSource(player, hint)
     return true, found, container, amount, petrol
 end
 
-local function restorePetrolAmount(container, petrol, expectedAmount, identity)
-    local currentOk, currentAmount = invoke(container, "getAmount")
-    currentAmount = currentOk and Util.toNumber(currentAmount) or nil
-    if not finite(currentAmount) or currentAmount > expectedAmount + P.NUMERIC_EPSILON then
-        failClosed(identity)
-        return false
-    end
-    local missing = math.max(0, expectedAmount - currentAmount)
-    local addOk, addResult = true, nil
-    if missing > P.NUMERIC_EPSILON then
-        addOk, addResult = invoke(container, "addFluid", petrol, missing)
-    end
-    local amountOk, restoredAmount = invoke(container, "getAmount")
-    local containsOk, contains = invoke(container, "contains", petrol)
-    local mixtureOk, mixture = invoke(container, "isMixture")
-    restoredAmount = amountOk and Util.toNumber(restoredAmount) or nil
-    local restored = addOk and addResult ~= false and finite(restoredAmount)
-        and math.abs(restoredAmount - expectedAmount) <= P.NUMERIC_EPSILON
-        and containsOk and contains == true and mixtureOk and mixture == false
-    if not restored then
-        failClosed(identity)
-        return false
-    end
-    return true
-end
-
 function M.addFuel(identity, context, hint)
-    local healthy, healthReason = ensureHealthy(identity)
-    if not healthy then return false, healthReason end
     local recordOk, recordOrReason = Store.getRecord(identity, false)
     if not recordOk then return false, recordOrReason end
     local sourceOk, foundOrReason, container, amount, petrol = resolveFuelSource(
@@ -521,11 +392,6 @@ function M.addFuel(identity, context, hint)
     if not removeOk or removeResult == false or not finite(after)
         or confirmed == nil or confirmed <= P.NUMERIC_EPSILON
         or confirmed > transfer + P.NUMERIC_EPSILON then
-        if not finite(after) or after ~= amount then
-            if not restorePetrolAmount(container, petrol, amount, identity) then
-                return false, U.REASONS.POSTCONDITION_FAILED
-            end
-        end
         return false, U.REASONS.API_ERROR
     end
     power.virtualFuelL = math.min(P.VIRTUAL_FUEL_CAPACITY_L,
@@ -533,13 +399,12 @@ function M.addFuel(identity, context, hint)
     bump(power)
     local saved, reason = commit(recordOrReason, identity)
     if not saved then
-        if not restorePetrolAmount(container, petrol, amount, identity) then
-            return false, U.REASONS.POSTCONDITION_FAILED
-        end
+        -- The canonical record did not accept the fuel: return it to the can.
+        local givenBack = invoke(container, "addFluid", petrol, confirmed)
+        if not givenBack then return false, U.REASONS.POSTCONDITION_FAILED end
         return false, reason
     end
-    return true, { record = recordOrReason, plannedTransfer = transfer,
-        confirmedTransfer = confirmed }
+    return true, { record = recordOrReason }
 end
 
 local function isBatteryType(fullType)
@@ -548,8 +413,6 @@ local function isBatteryType(fullType)
 end
 
 function M.addBattery(identity, context, hint)
-    local healthy, healthReason = ensureHealthy(identity)
-    if not healthy then return false, healthReason end
     local recordOk, recordOrReason = Store.getRecord(identity, false)
     if not recordOk then return false, recordOrReason end
     local found = findInventoryItem(context and context.player, itemHintId(hint))
@@ -565,21 +428,19 @@ function M.addBattery(identity, context, hint)
     -- The identifier only labels a slot in this list; it is derived here instead
     -- of being stored, so it can never drift from the battery array.
     local battery = { id = #power.batteries + 1, fullType = fullType,
-        condition = condition, maxCondition = maxCondition, usedDelta = usedDelta,
-        modData = itemModData(found.item) }
+        condition = condition, maxCondition = maxCondition, usedDelta = usedDelta }
     power.batteries[#power.batteries + 1] = battery
     -- Item charge contributes proportionally; condition independently shapes pack capacity.
     power.batteryWh = power.batteryWh + values.capacityWh * usedDelta
     recomputeBatteryPack(power)
-    if not removeInventoryItem(found, identity) then
-        return false, runtimeFaults[identityKey(identity)]
-            and U.REASONS.POSTCONDITION_FAILED or U.REASONS.API_ERROR
+    if not removeInventoryItem(found) then
+        return false, U.REASONS.API_ERROR
     end
     bump(power)
     local saved, reason = commit(recordOrReason, identity)
     if not saved then
-        if not addInventoryItem(found.inventory, found.item, identity) then
-            failClosed(identity)
+        -- Give the battery back when the canonical record did not accept it.
+        if not addInventoryItem(found.inventory, found.item) then
             return false, U.REASONS.POSTCONDITION_FAILED
         end
         return false, reason
@@ -589,8 +450,6 @@ function M.addBattery(identity, context, hint)
 end
 
 function M.removeBattery(identity, context, hint)
-    local healthy, healthReason = ensureHealthy(identity)
-    if not healthy then return false, healthReason end
     local recordOk, recordOrReason = Store.getRecord(identity, false)
     if not recordOk then return false, recordOrReason end
     local batteryId = type(hint) == "table" and Util.integer(hint.batteryId) or nil
@@ -605,10 +464,10 @@ function M.removeBattery(identity, context, hint)
     if not values then return false, U.REASONS.SOURCE_INVALID end
     local stateOfCharge = power.batteryCapacityWh > 0
         and power.batteryWh / power.batteryCapacityWh or 0
-    local item = createItem(battery.fullType, battery.condition, battery.modData, stateOfCharge)
+    local item = createItem(battery.fullType, battery.condition, stateOfCharge)
     if not item then return false, U.REASONS.API_ERROR end
     local inventoryOk, inventory = invoke(context and context.player, "getInventory")
-    if not inventoryOk or not addInventoryItem(inventory, item, identity) then
+    if not inventoryOk or not addInventoryItem(inventory, item) then
         return false, U.REASONS.API_ERROR
     end
     table.remove(power.batteries, index)
@@ -617,8 +476,8 @@ function M.removeBattery(identity, context, hint)
     bump(power)
     local saved, reason = commit(recordOrReason, identity)
     if not saved then
-        if not removeInventoryItem({ inventory = inventory, item = item }, identity) then
-            failClosed(identity)
+        -- Take the created item back when the canonical record did not accept it.
+        if not removeInventoryItem({ inventory = inventory, item = item }) then
             return false, U.REASONS.POSTCONDITION_FAILED
         end
         return false, reason
@@ -635,12 +494,10 @@ local function componentRow(item, expectedType)
         return nil
     end
     return { fullType = expectedType, condition = condition,
-        conditionMax = maxCondition, modData = itemModData(item) }
+        conditionMax = maxCondition }
 end
 
 local function installComponent(identity, context, hint, field, fullType)
-    local healthy, healthReason = ensureHealthy(identity)
-    if not healthy then return false, healthReason end
     local recordOk, recordOrReason = Store.getRecord(identity, false)
     if not recordOk then return false, recordOrReason end
     local power = recordOrReason.power
@@ -648,20 +505,16 @@ local function installComponent(identity, context, hint, field, fullType)
     local found = findInventoryItem(context and context.player, itemHintId(hint))
     local component = found and componentRow(found.item, fullType) or nil
     if not found or not component then return false, U.REASONS.SOURCE_INVALID end
-    if not removeInventoryItem(found, identity) then
-        return false, runtimeFaults[identityKey(identity)]
-            and U.REASONS.POSTCONDITION_FAILED or U.REASONS.API_ERROR
+    if not removeInventoryItem(found) then
+        return false, U.REASONS.API_ERROR
     end
     power[field] = component
     power[field .. "Efficiency"] = component.condition / component.conditionMax
     bump(power)
     local saved, reason = commit(recordOrReason, identity)
     if not saved then
-        power[field] = nil
-        power[field .. "Efficiency"] = field == "charger"
-            and P.DEFAULT_CHARGER_EFFICIENCY or P.DEFAULT_INVERTER_EFFICIENCY
-        if not addInventoryItem(found.inventory, found.item, identity) then
-            failClosed(identity)
+        -- Give the component back when the canonical record did not accept it.
+        if not addInventoryItem(found.inventory, found.item) then
             return false, U.REASONS.POSTCONDITION_FAILED
         end
         return false, reason
@@ -670,17 +523,15 @@ local function installComponent(identity, context, hint, field, fullType)
 end
 
 local function removeComponent(identity, context, field)
-    local healthy, healthReason = ensureHealthy(identity)
-    if not healthy then return false, healthReason end
     local recordOk, recordOrReason = Store.getRecord(identity, false)
     if not recordOk then return false, recordOrReason end
     local power = recordOrReason.power
     local component = power[field]
     if not component then return false, U.REASONS.SOURCE_INVALID end
-    local item = createItem(component.fullType, component.condition, component.modData)
+    local item = createItem(component.fullType, component.condition)
     if not item then return false, U.REASONS.API_ERROR end
     local inventoryOk, inventory = invoke(context and context.player, "getInventory")
-    if not inventoryOk or not addInventoryItem(inventory, item, identity) then
+    if not inventoryOk or not addInventoryItem(inventory, item) then
         return false, U.REASONS.API_ERROR
     end
     power[field] = nil
@@ -689,8 +540,8 @@ local function removeComponent(identity, context, field)
     bump(power)
     local saved, reason = commit(recordOrReason, identity)
     if not saved then
-        if not removeInventoryItem({ inventory = inventory, item = item }, identity) then
-            failClosed(identity)
+        -- Take the created component back when the record did not accept it.
+        if not removeInventoryItem({ inventory = inventory, item = item }) then
             return false, U.REASONS.POSTCONDITION_FAILED
         end
         return false, reason
@@ -800,12 +651,10 @@ function M.initializeRecord(identity, context)
     bump(record.power)
     local maintained, maintenanceReason = M.maintainNativeProxy(identity, record)
     if not maintained then
-        failClosed(identity)
         return false, maintenanceReason or U.REASONS.API_ERROR
     end
     local saved, reason = commit(record, identity)
     if not saved then return false, reason end
-    runtimeInitialized[identityKey(identity)] = true
     return true, record
 end
 

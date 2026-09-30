@@ -8,12 +8,4 @@ function M.setConnection(identity, context, targetHint, record)
     return Commands.setConnection(identity, context, targetHint, record)
 end
 
-function M.onObjectRemoved(object)
-    return Commands.onObjectRemoved(object)
-end
-
-function M.onTick()
-    return Commands.onTick()
-end
-
 return M

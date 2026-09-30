@@ -425,14 +425,9 @@ if ISCollapsableWindow then
             end
         end
         local waterState = water and water.state or nil
-        if waterState == "ACTIVE" then
-            waterState = tr("UI_RailroaderRVTest_Utility_WaterStateActive", "Active")
-        elseif waterState == "NEEDS_RECONCILE" then
-            waterState = tr("UI_RailroaderRVTest_Utility_WaterStateNeedsReconcile",
-                "Needs reconciliation")
-        else
-            waterState = tr("UI_RailroaderRVTest_Utility_WaterStateUnknown", "Unknown")
-        end
+        waterState = waterState == "ACTIVE"
+            and tr("UI_RailroaderRVTest_Utility_WaterStateActive", "Active")
+            or tr("UI_RailroaderRVTest_Utility_WaterStateUnknown", "Unknown")
         self.waterLabel:setNameWithoutMoving(
             tr("UI_RailroaderRVTest_Utility_Water", "Water") .. ": "
             .. tostring(connectedCount) .. "/" .. tostring(sinkCount) .. " "
@@ -559,14 +554,14 @@ function Dashboard.onSendFailure(player)
     return true
 end
 
-function Dashboard.onAck(player, ack, request)
+function Dashboard.onAck(player, ack, operation)
     local instance = Dashboard.instance
     if not instance or not instance:getIsVisible() or instance.player ~= player
-        or type(ack) ~= "table" or type(request) ~= "table"
+        or type(ack) ~= "table"
         or instance.operationRequestId ~= ack.requestId then return false end
     instance.operationRequestId = nil
     if ack.ok == true then
-        if request.operation == U.OP_CONNECT_WATER_DEVICE then
+        if operation == U.OP_CONNECT_WATER_DEVICE then
             instance.operationStatus = ack.connected == true
                 and tr("UI_RailroaderRVTest_Utility_WaterConnectedAck",
                     "Sink connected to water")
@@ -580,17 +575,6 @@ function Dashboard.onAck(player, ack, request)
         instance.operationStatus = tr("UI_RailroaderRVTest_Utility_Rejected",
             "Operation rejected") .. ": " .. tostring(ack.reason or "unknown")
     end
-    instance:setStatus(instance.operationStatus)
-    return true
-end
-
-function Dashboard.onTimeout(player, requestId)
-    local instance = Dashboard.instance
-    if not instance or not instance:getIsVisible() or instance.player ~= player
-        or instance.operationRequestId ~= requestId then return false end
-    instance.operationRequestId = nil
-    instance.operationStatus = tr("UI_RailroaderRVTest_Utility_AckTimeout",
-        "No server response. The operation may still have completed.")
     instance:setStatus(instance.operationStatus)
     return true
 end

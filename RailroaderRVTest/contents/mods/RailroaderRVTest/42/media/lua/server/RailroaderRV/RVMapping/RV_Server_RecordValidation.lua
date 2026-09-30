@@ -91,8 +91,14 @@ local function manifestForIdentity(rvId, generation, bitmapVersion,
         and ServerUtil.integer(persisted.generation) == ServerUtil.integer(generation)
         and ServerUtil.integer(persisted.bitmapVersion) == ServerUtil.integer(bitmapVersion)
     if identityMatches and persisted.state == "RUNNING" then
-        local pending = ctx.pendingGeneration
+        local transaction = ctx.GenerationTransaction
+        local transactionOk, pending = false, nil
+        if type(transaction) == "table"
+            and type(transaction.current) == "function" then
+            transactionOk, pending = pcall(transaction.current)
+        end
         local activeRunning = allowRunning == true
+            and transactionOk == true
             and type(pending) == "table"
             and tostring(pending.rvId) == tostring(rvId)
             and ServerUtil.integer(pending.generation) == ServerUtil.integer(generation)

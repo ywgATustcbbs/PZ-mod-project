@@ -10,13 +10,12 @@ local COMMAND_FINAL_RELOCATE_ACK = ctx.COMMAND_FINAL_RELOCATE_ACK
 local ROOF_REFRESH_HALO_TEXT = ctx.ROOF_REFRESH_HALO_TEXT
 local GENERATION_HALO_RENDER_TEXT = ctx.GENERATION_HALO_RENDER_TEXT
 local COMMAND_REFRESH_ROOM_OWNERSHIP = ctx.COMMAND_REFRESH_ROOM_OWNERSHIP
-local roomOwnershipGuards = ctx.roomOwnershipGuards
 local RELOCATION_TIMEOUT_TICKS = ctx.RELOCATION_TIMEOUT_TICKS
 local GENERATION_HALO_REFRESH_TICKS = ctx.GENERATION_HALO_REFRESH_TICKS
-local roomOwnershipGuardKey = ctx.roomOwnershipGuardKey
 local validRailroaderFinalHint = ctx.validRailroaderFinalHint
 local localPlayerByOnlineId = ctx.localPlayerByOnlineId
-local refreshInvalidRoomOwnership = ctx.refreshInvalidRoomOwnership
+local roomOwnershipGuardStatus = ctx.roomOwnershipGuardStatus
+local refreshRoomOwnershipByIdentity = ctx.refreshRoomOwnershipByIdentity
 local requestRoomOwnershipScan = ctx.requestRoomOwnershipScan
 local beginRoomOwnershipRefresh = ctx.beginRoomOwnershipRefresh
 local finalTargetSquareIsLoaded = ctx.finalTargetSquareIsLoaded
@@ -26,6 +25,36 @@ local finiteNumber = ctx.finiteNumber
 local finiteInteger = ctx.finiteInteger
 local FINAL_RELOCATION_SCAN_RETRY_TICKS = 10
 local FINAL_RELOCATION_SCAN_MAX_ATTEMPTS = 4
+local pendingFinalRelocation = nil
+
+local function reopenFinalRelocationScan(rvId, generation, bitmapVersion)
+    local pending = pendingFinalRelocation
+    local args = type(pending) == "table" and pending.args
+    local exactGeneration = finiteInteger(generation)
+    local exactBitmapVersion = finiteInteger(bitmapVersion)
+    if type(args) ~= "table" or pending.failed ~= true
+        or rvId == nil or tostring(rvId) == ""
+        or exactGeneration == nil or exactBitmapVersion == nil then
+        return false
+    end
+    local phase = pending.teleported and "post" or "pre"
+    local triggerRetryKey = phase .. "TriggerRetryUsed"
+    if pending.failedPhase ~= phase
+        or pending[triggerRetryKey] == true
+        or tostring(args.rvId) ~= tostring(rvId)
+        or finiteInteger(args.generation) ~= exactGeneration
+        or finiteInteger(args.bitmapVersion) ~= exactBitmapVersion then
+        return false
+    end
+    pending.failed = false
+    pending.failedPhase = nil
+    pending[triggerRetryKey] = true
+    pending[phase .. "ScanAttempts"] = 0
+    pending[phase .. "NextScanTick"] = ctx.clientTick
+    print("[RailroaderRVTest] final relocation " .. phase
+        .. " room scan resumed after a matching repair trigger")
+    return true
+end
 
 function Client.requestGenerate(playerObj)
     if not playerObj then return end
@@ -55,7 +84,8 @@ function Client.onFillWorldObjectContextMenu(playerNum, context, worldObjects, t
     context:addOption(getText(MENU_KEY), playerObj, Client.requestGenerate)
 end
 
-local function tryFinalRelocationGuardScan(guard, pending, phase)
+local function tryFinalRelocationGuardScan(
+    rvId, generation, bitmapVersion, pending, phase)
     local completeKey = phase .. "ScanComplete"
     if pending[completeKey] then return true end
     if pending.failed then return false end
@@ -67,7 +97,8 @@ local function tryFinalRelocationGuardScan(guard, pending, phase)
     end
 
     pending[attemptsKey] = (pending[attemptsKey] or 0) + 1
-    local scanCallOk, scanOk = pcall(refreshInvalidRoomOwnership, guard)
+    local scanCallOk, scanOk = pcall(refreshRoomOwnershipByIdentity,
+        rvId, generation, bitmapVersion)
     if scanCallOk and scanOk == true then
         pending[completeKey] = true
         return true
@@ -107,16 +138,17 @@ local function tryApplyFinalRelocation(args, pending)
         or x == nil or y == nil or z == nil or z < -32 or z > 31 then
         return false
     end
-    local guard = roomOwnershipGuards[roomOwnershipGuardKey(
-        rvId, generation, bitmapVersion)]
-    if guard == nil or tostring(guard.rvId) ~= tostring(rvId)
-        or guard.bitmapVersion ~= bitmapVersion then
+    if type(roomOwnershipGuardStatus) ~= "function"
+        or type(refreshRoomOwnershipByIdentity) ~= "function" then
         return false
     end
+    local guardFound, currentCheckReady = roomOwnershipGuardStatus(
+        rvId, generation, bitmapVersion)
+    if guardFound ~= true then return false end
     -- A persistent current-square API failure is latched by the guard monitor.
     -- Do not complete a final relocation transaction until a later local check
     -- succeeds and clears that uncertainty.
-    if guard.currentCheckErrorLatched == true then
+    if currentCheckReady ~= true then
         return false
     end
     local playerObj = localPlayerByOnlineId(onlineId)
@@ -132,7 +164,8 @@ local function tryApplyFinalRelocation(args, pending)
         end
         -- Full pre-scan happens only after the destination is ready. If any
         -- footprint square is still unloaded, retry at a bounded interval.
-        if not tryFinalRelocationGuardScan(guard, pending, "pre") then
+        if not tryFinalRelocationGuardScan(
+                rvId, generation, bitmapVersion, pending, "pre") then
             return false
         end
         if not finalTargetRoomIsValid(x, y, z) then
@@ -182,7 +215,8 @@ local function tryApplyFinalRelocation(args, pending)
     -- final ACK is sent until the full footprint and target room both verify.
     if not pending.postScanComplete then
         if not finalTargetSquareIsLoaded(x, y, z)
-            or not tryFinalRelocationGuardScan(guard, pending, "post") then
+            or not tryFinalRelocationGuardScan(
+                rvId, generation, bitmapVersion, pending, "post") then
             return false
         end
     end
@@ -206,7 +240,7 @@ local function applyFinalRelocation(args)
     -- separate strict token-only ACK, so the initial relocation ACK cannot be
     -- mixed into this move.
     ctx.pendingRelocation = nil
-    ctx.pendingFinalRelocation = {
+    pendingFinalRelocation = {
         args = args,
         ticks = 0,
         applied = false,
@@ -214,11 +248,11 @@ local function applyFinalRelocation(args)
     -- Try in the command callback itself, before the player can enter the
     -- engine update/audio path. If the guard packet has not been installed yet,
     -- OnTick retries while the player remains at staging.
-    if tryApplyFinalRelocation(args, ctx.pendingFinalRelocation) then
-        ctx.pendingFinalRelocation.applied = true
+    if tryApplyFinalRelocation(args, pendingFinalRelocation) then
+        pendingFinalRelocation.applied = true
         if sendFinalRelocationAck(localPlayerByOnlineId(
                 finiteInteger(args.onlineId)), args.token) then
-            ctx.pendingFinalRelocation = nil
+            pendingFinalRelocation = nil
         end
     end
 end
@@ -376,14 +410,14 @@ end
 function Client.onTick()
     ctx.clientTick = ctx.clientTick + 1
     updateRoomOwnershipGuards()
-    local finalPending = ctx.pendingFinalRelocation
+    local finalPending = pendingFinalRelocation
     if finalPending ~= nil then
         finalPending.ticks = finalPending.ticks + 1
         if finalPending.ticks > RELOCATION_TIMEOUT_TICKS then
             -- No failure payload is sent.  The server's current-schema token
             -- deadline owns rollback, so a stale client cannot invent a
             -- failure coordinate or mutate the server-owned transaction.
-            ctx.pendingFinalRelocation = nil
+            pendingFinalRelocation = nil
         else
             if not finalPending.applied then
                 finalPending.applied = tryApplyFinalRelocation(
@@ -393,7 +427,7 @@ function Client.onTick()
                 local args = finalPending.args
                 local playerObj = localPlayerByOnlineId(finiteInteger(args.onlineId))
                 if sendFinalRelocationAck(playerObj, args.token) then
-                    ctx.pendingFinalRelocation = nil
+                    pendingFinalRelocation = nil
                 end
             end
         end
@@ -475,6 +509,8 @@ function Client.onTick()
         ctx.pendingRelocation = nil
     end
 end
+
+ctx.reopenFinalRelocationScan = reopenFinalRelocationScan
 
 Events.OnServerCommand.Add(Client.onServerCommand)
 Events.OnTick.Add(Client.onTick)

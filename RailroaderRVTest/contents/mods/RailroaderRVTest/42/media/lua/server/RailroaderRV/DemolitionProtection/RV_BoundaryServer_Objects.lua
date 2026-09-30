@@ -8,12 +8,12 @@ local OWNER = ctx.OWNER
 local number = ctx.number
 local integer = ctx.integer
 local call = ctx.call
-local callGlobal = ctx.callGlobal
 local identity = ctx.identity
 local square = ctx.square
 local decodeBoundary = ctx.decodeBoundary
 local boundaryKey = ctx.boundaryKey
 local sameBoundary = ctx.sameBoundary
+local Common = require("RailroaderRV/Common/RV_Common")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
@@ -197,10 +197,9 @@ function Boundary.isCurrentShellWall(object, boundary)
     if not object or type(boundary) ~= "table" then return false end
     local bitmap, rvId, generation, bitmapVersion = decodeBoundary(boundary)
     if not bitmap then return false end
-    local thumpableOk, isThumpable = callGlobal("instanceof", object, "IsoThumpable")
-    local windowOk, isWindow = callGlobal("instanceof", object, "IsoWindow")
-    if not (thumpableOk and isThumpable == true)
-        and not (windowOk and isWindow == true) then
+    local isThumpable = Common.classInstance(object, "IsoThumpable")
+    local isWindow = Common.classInstance(object, "IsoWindow")
+    if not isThumpable and not isWindow then
         return false
     end
     local indexOk, index = call(object, "getObjectIndex")
@@ -391,8 +390,7 @@ local function protectedWorldObject(object)
     local classes = { "IsoWorldInventoryObject", "IsoPlayer", "IsoZombie",
         "IsoAnimal", "IsoDeadBody", "BaseVehicle" }
     for i = 1, #classes do
-        local ok, matches = callGlobal("instanceof", object, classes[i])
-        if ok and matches == true then return true end
+        if Common.classInstance(object, classes[i]) then return true end
     end
     return false
 end
@@ -566,7 +564,97 @@ local function commandCoordinate(args, key)
     return integer(commandArgument(args, key))
 end
 
+-- The short-lived async action ledger belongs to DemolitionProtection. The
+-- Boundary facade exposes only the tick-prune and generation-invalidation
+-- operations needed by its sibling components.
+local BuilderActionLedger = { actions = {} }
+
+function BuilderActionLedger.prune(tick)
+    if not Core.isTick(tick) then return false end
+    for key, action in pairs(BuilderActionLedger.actions) do
+        local expires = type(action) == "table" and action.expires or nil
+        if not Core.isTick(expires) or Core.tickCompare(tick, expires) == 1 then
+            BuilderActionLedger.actions[key] = nil
+        end
+    end
+    return true
+end
+
+function BuilderActionLedger.invalidateForGeneration(rvId, generation,
+    bitmapVersion)
+    local expectedRvId = rvId ~= nil and tostring(rvId) or nil
+    local expectedGeneration = integer(generation)
+    local expectedBitmapVersion = integer(bitmapVersion)
+    if not expectedRvId or expectedRvId == "" or not expectedGeneration
+        or not expectedBitmapVersion then
+        return false
+    end
+    for key, action in pairs(BuilderActionLedger.actions) do
+        if type(action) ~= "table"
+            or tostring(action.rvId) == expectedRvId
+                and (integer(action.generation) ~= expectedGeneration
+                    or integer(action.bitmapVersion) ~= expectedBitmapVersion) then
+            BuilderActionLedger.actions[key] = nil
+        end
+    end
+    return true
+end
+
+function BuilderActionLedger.submit(key, action)
+    if type(key) ~= "string" or key == "" or type(action) ~= "table"
+        or not Core.isTick(action.expires) then
+        return false
+    end
+    BuilderActionLedger.actions[key] = action
+    return true
+end
+
+function BuilderActionLedger.uniqueCandidate(object, x, y, z, tick)
+    if not BuilderActionLedger.prune(tick) then return nil end
+    local candidate = nil
+    for _, action in pairs(BuilderActionLedger.actions) do
+        if type(action) == "table" and actionMatchesObject(action, x, y, z) then
+            local boundary = action.boundary
+            local current = Boundary.boundaryForPlayer(action.player)
+            if sameBoundary(current, boundary)
+                and Bitmap.containsScope(boundary.bitmap, x, y, z) then
+                if candidate ~= nil then return nil end
+                candidate = action
+            end
+        end
+    end
+    return candidate
+end
+
+function BuilderActionLedger.objectMatchConsumed(action, object)
+    return type(action) == "table" and type(action.matchedObjects) == "table"
+        and action.matchedObjects[object] == true
+end
+
+function BuilderActionLedger.consumeObjectMatch(action, object)
+    if type(action) ~= "table" or object == nil then return false end
+    local matchedObjects = action.matchedObjects
+    if type(matchedObjects) ~= "table" then
+        matchedObjects = {}
+        action.matchedObjects = matchedObjects
+    end
+    if matchedObjects[object] then return false end
+    matchedObjects[object] = true
+    return true
+end
+
+function Boundary.pruneBuilderActionLedger(tick)
+    return BuilderActionLedger.prune(tick)
+end
+
+function Boundary.invalidateBuilderActionsForGeneration(rvId, generation,
+    bitmapVersion)
+    return BuilderActionLedger.invalidateForGeneration(rvId, generation,
+        bitmapVersion)
+end
+
 function Boundary.onProcessAction(actionName, player, args)
+    BuilderActionLedger.prune(Boundary._tick)
     local actionText = tostring(actionName or ""):lower()
     local placementAction = actionText == "build"
         or string.find(actionText, "build", 1, true)
@@ -606,7 +694,9 @@ function Boundary.onProcessAction(actionName, player, args)
     -- Keep the async attribution key generation-scoped as well as
     -- player-scoped.  A replacement/generation swap must not overwrite a
     -- still-expiring build action from an older bitmap identity.
-    Boundary._builders[id.key .. ":" .. boundaryKey(boundary)] = action
+    BuilderActionLedger.invalidateForGeneration(boundary.rvId,
+        boundary.generation, boundary.bitmapVersion)
+    BuilderActionLedger.submit(id.key .. ":" .. boundaryKey(boundary), action)
 
     -- The standard build callback may run before or after this listener. If
     -- the builder already exposes its Java object, tag it for the bounded
@@ -628,25 +718,9 @@ end
 
 function Boundary.onObjectAdded(object)
     if not object then return end
+    BuilderActionLedger.prune(Boundary._tick)
     local x, y, z = objectCell(object)
     if not x or not y or not z then return end
-    local matches = {}
-    for key, action in pairs(Boundary._builders) do
-        local expires = action and action.expires
-        if action and expires == nil then
-            expires = Core.tickAdd(Boundary._tick, 2)
-        end
-        local active = Core.isTick(expires)
-            and Core.tickCompare(Boundary._tick, expires) <= 0
-        if action and active and actionMatchesObject(action, x, y, z) then
-            local boundary = action.boundary
-            local current = Boundary.boundaryForPlayer(action.player)
-            if sameBoundary(current, boundary)
-                and Bitmap.containsScope(boundary.bitmap, x, y, z) then
-                matches[#matches + 1] = action
-            end
-        end
-    end
     -- Automatic deletion later requires both this unique action correlation
     -- and the resulting current-generation playerBuilt tag. Ambiguous or
     -- untagged additions are intentionally preserved to protect map objects.
@@ -654,9 +728,13 @@ function Boundary.onObjectAdded(object)
     -- server window.  Without a standard owner event, attribution is
     -- ambiguous, so leave the object untagged/fail-open instead of deleting
     -- another player's or another RV's object.
-    if #matches ~= 1 then return end
-    local action = matches[1]
-    markTagPlayerBuilt(object, action.identity, action)
+    local action = BuilderActionLedger.uniqueCandidate(object, x, y, z,
+        Boundary._tick)
+    if not action then return end
+    if BuilderActionLedger.objectMatchConsumed(action, object) then return end
+    if markTagPlayerBuilt(object, action.identity, action) then
+        BuilderActionLedger.consumeObjectMatch(action, object)
+    end
     -- The 3x3 proximity queue classifies this tagged object within its
     -- one-cell-per-tick budget.
 end

@@ -9,6 +9,39 @@ local boundaryKey = ctx.boundaryKey
 local transitionActive = ctx.transitionActive
 local updatePlayer = ctx.updatePlayer
 local playerPosition = ctx.playerPosition
+local postPlayerTickHandlers = {}
+
+function Boundary.addPostPlayerTickHandler(name, callback)
+    if type(name) ~= "string" or name == "" or type(callback) ~= "function" then
+        return false, "invalid post-player tick handler"
+    end
+    local current = postPlayerTickHandlers[name]
+    if current then
+        if current == callback then return true end
+        return false, "post-player tick handler name is already registered"
+    end
+    postPlayerTickHandlers[name] = callback
+    return true
+end
+
+local function dispatchPostPlayerTickHandlers(tick, activePlayers,
+    activeBoundaries)
+    local names = {}
+    for name in pairs(postPlayerTickHandlers) do
+        names[#names + 1] = name
+    end
+    table.sort(names)
+    for i = 1, #names do
+        local callback = postPlayerTickHandlers[names[i]]
+        local callOk, accepted, reason = pcall(callback, tick, activePlayers,
+            activeBoundaries)
+        if not callOk or accepted == false then
+            print("[RailroaderRVTest] post-player tick handler "
+                .. tostring(names[i]) .. " failed: "
+                .. tostring(callOk and reason or accepted))
+        end
+    end
+end
 
 local UNTRACKED_OUTSIDE_PROBE_RETRY_TICKS = 300
 local untrackedOutsideProbeDeadlines = {}
@@ -54,6 +87,9 @@ end
 
 function Boundary.onTick(tick)
     Boundary._tick = Core.isTick(tick) and tick or Core.getTick()
+    if type(Boundary.pruneBuilderActionLedger) == "function" then
+        Boundary.pruneBuilderActionLedger(Boundary._tick)
+    end
     local players = onlinePlayersSnapshot()
     local activePlayers, activeBoundaries = {}, {}
     local coldOutsideCandidates = {}
@@ -112,10 +148,8 @@ function Boundary.onTick(tick)
         end
     end
 
-    if type(Boundary.onTemplateProtectionRepairTick) == "function" then
-        Boundary.onTemplateProtectionRepairTick(Boundary._tick,
-            activePlayers, activeBoundaries)
-    end
+    dispatchPostPlayerTickHandlers(Boundary._tick, activePlayers,
+        activeBoundaries)
 end
 
 end

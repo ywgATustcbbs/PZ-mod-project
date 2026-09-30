@@ -6,6 +6,7 @@ local RoofRefresh = ctx.RoofRefresh
 local RV = ctx.RV
 local Core = ctx.Core
 local ServerUtil = ctx.ServerUtil
+local GenerationTransaction = ctx.GenerationTransaction
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local function requireCurrentManifest(...) return ctx.requireCurrentManifest(...) end
 local ROOF_REFRESH_TEMP_Z = ctx.ROOF_REFRESH_TEMP_Z
@@ -46,7 +47,15 @@ end
 -- through temporary relocation, return, room refresh, and its final-return retry object so the
 -- adapter cannot mutate the same RV while its captured members are returning.
 function RV.Server.isGenerationTransactionActive()
-    return ctx.pendingGeneration ~= nil or ctx.transactionBusy
+    if type(GenerationTransaction) ~= "table"
+        or type(GenerationTransaction.isActive) ~= "function" then
+        return true, "generation transaction state is unavailable"
+    end
+    local activeOk, active = pcall(GenerationTransaction.isActive)
+    if not activeOk or type(active) ~= "boolean" then
+        return true, "generation transaction state is unavailable"
+    end
+    return active
 end
 
 function RV.Server.isRoofRefreshTransactionActive(_rvId)
@@ -108,14 +117,22 @@ function RV.Server.isRelocationIdentityClaimed(identityKey)
         end
         return false
     end
-    if ctx.pendingGeneration ~= nil then
-        if type(ctx.pendingGeneration) ~= "table"
-            or type(ctx.pendingGeneration.identity) ~= "table"
-            or type(ctx.pendingGeneration.identity.key) ~= "string"
-            or ctx.pendingGeneration.identity.key == "" then
+    if type(GenerationTransaction) ~= "table"
+        or type(GenerationTransaction.current) ~= "function" then
+        return nil
+    end
+    local transactionOk, pending = pcall(GenerationTransaction.current)
+    if not transactionOk then
+        return nil
+    end
+    if pending ~= nil then
+        if type(pending) ~= "table"
+            or type(pending.identity) ~= "table"
+            or type(pending.identity.key) ~= "string"
+            or pending.identity.key == "" then
             return nil
         end
-        return ctx.pendingGeneration.identity.key == identityKey
+        return pending.identity.key == identityKey
     end
     local activeClaims = groupClaims(ctx.roofRefreshRelocationGroup)
     if activeClaims ~= false then return activeClaims end

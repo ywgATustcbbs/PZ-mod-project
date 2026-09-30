@@ -49,6 +49,8 @@ end
 -- only for a debugger reload; normal loading must return the actual tables.
 local Constants = loadModule("RailroaderRV/Common/RV_Constants", "RV_Constants")
 local Core = require("RailroaderRV/Core/RV_Server_Core")
+local GenerationTransaction = require(
+    "RailroaderRV/Construction/RV_Server_GenerationTransaction")(Core)
 local boundaryLoaded, Boundary = pcall(require, "RailroaderRV/BoundaryGuard/RV_BoundaryServer")
 if not boundaryLoaded or type(Boundary) ~= "table" then
     Boundary = nil
@@ -81,9 +83,6 @@ local UtilityServer = require("RailroaderRV/Core/RV_UtilityServer")
 local Common = require("RailroaderRV/Common/RV_Common")
 local playerPositionCache = Common.newPlayerPositionCache(Core)
 
-local transactionBusy = false
-local transactionPlayer = nil
-local pendingGeneration = nil
 -- A wall-removal refresh relocates every authoritative player in the current
 -- RV scope as one transaction.  The target is derived from the current
 -- bitmap/layout center and offset by the current contract vector; it is not a
@@ -150,6 +149,7 @@ local ctx = {
     railroaderFailureHook = railroaderFailureHook,
     Constants = Constants,
     Core = Core,
+    GenerationTransaction = GenerationTransaction,
     Boundary = Boundary,
     Bitmap = Bitmap,
     RoofRefresh = RoofRefresh,
@@ -167,9 +167,6 @@ local ctx = {
     invalidatePlayerPosition = function(player)
         return playerPositionCache:invalidatePlayer(player)
     end,
-    transactionBusy = transactionBusy,
-    transactionPlayer = transactionPlayer,
-    pendingGeneration = pendingGeneration,
     roofRefreshRelocationGroup = roofRefreshRelocationGroup,
     roofRefreshGroupFailure = roofRefreshGroupFailure,
     roofRefreshGroupFinalReturn = roofRefreshGroupFinalReturn,
@@ -209,6 +206,7 @@ require("RailroaderRV/Construction/RV_Server_GenerationBuild")(ctx)
 require("RailroaderRV/Construction/RV_Server_PlayerValidation")(ctx)
 require("RailroaderRV/Core/RV_Server_ManifestValidation")(ctx)
 require("RailroaderRV/TemplateRecovery/RV_Server_TemplateProtectionRepair")(ctx)
+require("RailroaderRV/TemplateRecovery/RV_TemplateRecoveryQueue")(ctx)
 require("RailroaderRV/RoofRefresh/RV_Server_RoofDestinations")(ctx)
 require("RailroaderRV/RoofRefresh/RV_Server_RoofRelocation")(ctx)
 require("RailroaderRV/RoofRefresh/RV_Server_RoofApi")(ctx)

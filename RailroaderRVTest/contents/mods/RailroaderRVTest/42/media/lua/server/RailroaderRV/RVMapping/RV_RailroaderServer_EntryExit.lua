@@ -353,11 +353,16 @@ local function enterExisting(player, train, record, key, sourceRole,
         or type(Boundary.completeTransition) ~= "function" then
         return false, "RV boundary entry service is unavailable"
     end
-    if type(Boundary.ensureGeneratorForEntry) ~= "function" then
+    local rv = rawget(_G, "RailroaderRV")
+    local server = type(rv) == "table" and rv.Server or nil
+    local construction = type(server) == "table"
+        and server.Construction or nil
+    if type(construction) ~= "table"
+        or type(construction.ensureGeneratorForEntry) ~= "function" then
         return false, "RV generator entry check is unavailable"
     end
     local generatorCallOk, generatorReady, generatorReason = pcall(
-        Boundary.ensureGeneratorForEntry, player, record)
+        construction.ensureGeneratorForEntry, player, record)
     if not generatorCallOk then generatorReason = generatorReady end
     if generatorReady ~= true then
         return false, generatorReason or C.INVALID_RV_DATA

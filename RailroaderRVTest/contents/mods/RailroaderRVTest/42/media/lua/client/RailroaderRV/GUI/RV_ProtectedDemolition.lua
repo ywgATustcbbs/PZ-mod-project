@@ -31,23 +31,19 @@ local function call(target, method, ...)
     return true, a, b
 end
 
-local function finiteInteger(value)
-    return C.finiteInteger(value)
-end
-
 local objectCoordinates
 local function tagMatchesStaticIdentity(tag, expected, templateIndex,
     protectionClass)
     if type(tag) ~= "table" or type(expected) ~= "table"
-        or finiteInteger(tag.templateIndex) ~= templateIndex
-        or finiteInteger(tag.templateX) ~= expected.x
-        or finiteInteger(tag.templateY) ~= expected.y
-        or finiteInteger(tag.templateZ) ~= expected.z
+        or C.finiteInteger(tag.templateIndex) ~= templateIndex
+        or C.finiteInteger(tag.templateX) ~= expected.x
+        or C.finiteInteger(tag.templateY) ~= expected.y
+        or C.finiteInteger(tag.templateZ) ~= expected.z
         or tag.templateClass ~= expected.class
         or tag.templateName ~= expected.name
         or tag.templateSprite ~= expected.sprite
         or tag.templateDirection ~= expected.direction
-        or finiteInteger(tag.protectionClass) ~= protectionClass then
+        or C.finiteInteger(tag.protectionClass) ~= protectionClass then
         return false
     end
     if expected.north == "none" then
@@ -61,8 +57,8 @@ objectCoordinates = function(object)
     local xOk, x = call(square, "getX")
     local yOk, y = call(square, "getY")
     local zOk, z = call(square, "getZ")
-    x, y, z = xOk and finiteInteger(x), yOk and finiteInteger(y),
-        zOk and finiteInteger(z)
+    x, y, z = xOk and C.finiteInteger(x), yOk and C.finiteInteger(y),
+        zOk and C.finiteInteger(z)
     if not squareOk or not square or not x or not y or not z then
         return nil
     end
@@ -123,17 +119,17 @@ local function templateTagFailureReason(data, tag)
         return fail("template-root-rv-id-invalid")
     end
     if data.rvId ~= tag.rvId then return fail("template-tag-rv-id-mismatch") end
-    local dataGeneration = finiteInteger(data.generation)
+    local dataGeneration = C.finiteInteger(data.generation)
     if dataGeneration == nil or dataGeneration < 1 then
         return fail("template-root-generation-invalid")
     end
-    if dataGeneration ~= finiteInteger(tag.generation) then
+    if dataGeneration ~= C.finiteInteger(tag.generation) then
         return fail("template-tag-generation-mismatch")
     end
-    if finiteInteger(data.bitmapVersion) ~= C.BITMAP_VERSION then
+    if C.finiteInteger(data.bitmapVersion) ~= C.BITMAP_VERSION then
         return fail("template-root-bitmap-version-mismatch")
     end
-    if finiteInteger(tag.bitmapVersion) ~= C.BITMAP_VERSION then
+    if C.finiteInteger(tag.bitmapVersion) ~= C.BITMAP_VERSION then
         return fail("template-tag-bitmap-version-mismatch")
     end
     return nil
@@ -157,8 +153,8 @@ local function objectMatchesStaticIdentity(object, tag, expected,
     end
     local indexOk, objectIndex = call(object, "getObjectIndex")
     local squareOk, square = call(object, "getSquare")
-    if not indexOk or finiteInteger(objectIndex) == nil
-        or finiteInteger(objectIndex) < 0 or not squareOk or not square then
+    if not indexOk or C.finiteInteger(objectIndex) == nil
+        or C.finiteInteger(objectIndex) < 0 or not squareOk or not square then
         return fail("object-index-or-square-invalid", "objectIndex="
             .. tostring(objectIndex) .. " indexOk=" .. tostring(indexOk)
             .. " squareOk=" .. tostring(squareOk) .. " square=" .. tostring(square))
@@ -202,7 +198,7 @@ local function objectMatchesStaticIdentity(object, tag, expected,
 end
 
 local function resolveTemplateObject(object, tag)
-    local index = finiteInteger(tag and tag.templateIndex)
+    local index = C.finiteInteger(tag and tag.templateIndex)
     if index == nil then return nil, "template-index-unavailable" end
     local indexedObject, indexedAt, indexedProtection =
         TemplateGeometry.lookupObjectByIndex(index, Template, ProtectionManifest)
@@ -213,8 +209,8 @@ local function resolveTemplateObject(object, tag)
 
     local x, y, z = objectCoordinates(object)
     if x == nil then return nil, "object-world-coordinate-unavailable" end
-    local anchorX, anchorY, anchorZ = finiteInteger(tag.templateAnchorX),
-        finiteInteger(tag.templateAnchorY), finiteInteger(tag.templateAnchorZ)
+    local anchorX, anchorY, anchorZ = C.finiteInteger(tag.templateAnchorX),
+        C.finiteInteger(tag.templateAnchorY), C.finiteInteger(tag.templateAnchorZ)
     if anchorX == nil or anchorY == nil or anchorZ == nil then
         return nil, "template-anchor-unavailable"
     end

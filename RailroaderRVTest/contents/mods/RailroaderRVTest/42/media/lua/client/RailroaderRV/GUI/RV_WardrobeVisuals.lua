@@ -31,10 +31,6 @@ local function call(target, method, ...)
     return true, a, b
 end
 
-local function integer(value)
-    return C.finiteInteger(value)
-end
-
 local function warnOnce(message)
     if warned then return end
     warned = true
@@ -62,34 +58,34 @@ local function isTaggedWardrobe(object)
         or data.owner ~= C.MOD_ID or tag.owner ~= C.MOD_ID
         or type(data.rvId) ~= "string" or data.rvId == ""
         or data.rvId ~= tag.rvId
-        or integer(data.generation) == nil or integer(data.generation) < 1
-        or integer(data.generation) ~= integer(tag.generation)
-        or integer(data.bitmapVersion) ~= C.BITMAP_VERSION
-        or integer(tag.bitmapVersion) ~= C.BITMAP_VERSION
+        or C.finiteInteger(data.generation) == nil or C.finiteInteger(data.generation) < 1
+        or C.finiteInteger(data.generation) ~= C.finiteInteger(tag.generation)
+        or C.finiteInteger(data.bitmapVersion) ~= C.BITMAP_VERSION
+        or C.finiteInteger(tag.bitmapVersion) ~= C.BITMAP_VERSION
         or data.role ~= "captured-template"
         or tag.role ~= data.role then
         return false
     end
 
-    local templateIndex = integer(tag.templateIndex)
+    local templateIndex = C.finiteInteger(tag.templateIndex)
     if templateIndex == nil or templateIndex < 1 then return false end
     local entry = ProtectionManifest.get(templateIndex)
-    local anchorX, anchorY, anchorZ = integer(tag.templateAnchorX),
-        integer(tag.templateAnchorY), integer(tag.templateAnchorZ)
+    local anchorX, anchorY, anchorZ = C.finiteInteger(tag.templateAnchorX),
+        C.finiteInteger(tag.templateAnchorY), C.finiteInteger(tag.templateAnchorZ)
     if not isWardrobeTemplateEntry(entry)
         or tag.templateClass ~= entry.class
         or tag.templateName ~= entry.name
         or tag.templateSprite ~= entry.sprite
         or tag.templateNorth ~= entry.north
         or tag.templateDirection ~= entry.direction
-        or integer(tag.protectionClass) ~= entry.protectionClass
-        or integer(tag.templateX) ~= entry.x
-        or integer(tag.templateY) ~= entry.y
-        or integer(tag.templateZ) ~= entry.z
+        or C.finiteInteger(tag.protectionClass) ~= entry.protectionClass
+        or C.finiteInteger(tag.templateX) ~= entry.x
+        or C.finiteInteger(tag.templateY) ~= entry.y
+        or C.finiteInteger(tag.templateZ) ~= entry.z
         or anchorX == nil or anchorY == nil or anchorZ == nil
-        or integer(tag.templateWorldX) ~= anchorX + entry.x
-        or integer(tag.templateWorldY) ~= anchorY + entry.y
-        or integer(tag.templateWorldZ) ~= anchorZ + entry.z
+        or C.finiteInteger(tag.templateWorldX) ~= anchorX + entry.x
+        or C.finiteInteger(tag.templateWorldY) ~= anchorY + entry.y
+        or C.finiteInteger(tag.templateWorldZ) ~= anchorZ + entry.z
         or tag.edgeKey ~= nil or tag.axis ~= nil then
         return false
     end
@@ -104,9 +100,9 @@ local function isTaggedWardrobe(object)
     return nameOk and name == entry.name
         and spriteNameOk and tostring(spriteName) == entry.sprite
         and northOk and north == entry.north
-        and xOk and integer(x) == integer(tag.templateWorldX)
-        and yOk and integer(y) == integer(tag.templateWorldY)
-        and zOk and integer(z) == integer(tag.templateWorldZ)
+        and xOk and C.finiteInteger(x) == C.finiteInteger(tag.templateWorldX)
+        and yOk and C.finiteInteger(y) == C.finiteInteger(tag.templateWorldY)
+        and zOk and C.finiteInteger(z) == C.finiteInteger(tag.templateWorldZ)
 end
 
 local function hideWardrobe(object)

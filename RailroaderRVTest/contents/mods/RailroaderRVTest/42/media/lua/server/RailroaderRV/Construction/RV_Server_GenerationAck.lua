@@ -8,13 +8,12 @@ local Boundary = ctx.Boundary
 local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
+local GenerationTransaction = ctx.GenerationTransaction
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local function requireCurrentManifest(...) return ctx.requireCurrentManifest(...) end
 local RELOCATION_MIN_TICKS = ctx.RELOCATION_MIN_TICKS
 local RELOCATION_POST_ACK_TICKS = ctx.RELOCATION_POST_ACK_TICKS
-local ROOF_RELOCATION_RETRY_TICKS = ctx.ROOF_RELOCATION_RETRY_TICKS
 local GENERATION_RELOCATION_RETRY_TICKS = ctx.GENERATION_RELOCATION_RETRY_TICKS
-local ROOF_REFRESH_TEMP_Z = ctx.ROOF_REFRESH_TEMP_Z
 local notifyFailure = ctx.notifyFailure
 local function isInvalidRVData(reason)
     local marker = Constants and Constants.INVALID_RV_DATA
@@ -30,17 +29,10 @@ local pauseGenerationForDisconnect = ctx.pauseGenerationForDisconnect
 local resumeGenerationAfterDisconnect = ctx.resumeGenerationAfterDisconnect
 local rearmGenerationTransition = ctx.rearmGenerationTransition
 local resendGenerationPhase = ctx.resendGenerationPhase
-local resolveRoofRefreshGroupPlayer = ctx.resolveRoofRefreshGroupPlayer
-local validateAuthoritativePlayer = ctx.validateAuthoritativePlayer
 local authoritativePlayerPosition = ctx.authoritativePlayerPosition
 local playerIdentity = ctx.playerIdentity
 local resolvePendingPlayer = ctx.resolvePendingPlayer
 local relocationPositionsEqual = ctx.relocationPositionsEqual
-local currentRoofRefreshContext = ctx.currentRoofRefreshContext
-local applyRoofRefreshTeleport = ctx.applyRoofRefreshTeleport
-local roofRefreshTargetReady = ctx.roofRefreshTargetReady
-local roofRefreshGroupMember = ctx.roofRefreshGroupMember
-local failRoofRefreshRelocationGroup = ctx.failRoofRefreshRelocationGroup
 
 local function ackPayloadToken(args)
     if args == nil then
@@ -71,29 +63,16 @@ local function ackPayloadToken(args)
 end
 
 local function acknowledgeRelocation(player, args)
-    if ctx.roofRefreshRelocationGroup then
-        local token = ackPayloadToken(args)
-        local member = token and roofRefreshGroupMember(
-            ctx.roofRefreshRelocationGroup, player, token) or nil
-        if not member then
-            return false, "unexpected or malformed roof refresh group acknowledgement"
-        end
-        local resolved, playerOrReason = resolvePendingPlayer(member)
-        if not resolved then
-            return false, playerOrReason
-        end
-        local identityOk, identityOrReason = playerIdentity(player)
-        if not identityOk or identityOrReason.key ~= member.identityKey then
-            return false, identityOk
-                and "acknowledgement sender does not own the group request"
-                or identityOrReason
-        end
-        member.acknowledged = true
-        member.acknowledgedAtTick = ctx.serverTick
-        return true
-    end
-    local pending = ctx.pendingGeneration
     local token = ackPayloadToken(args)
+    local roofAck = ctx.acknowledgeRoofRefreshRelocation
+    if type(roofAck) ~= "function" then
+        return false, "roof refresh acknowledgement owner is unavailable"
+    end
+    local roofHandled, roofAccepted, roofReason = roofAck(player, token)
+    if roofHandled then
+        return roofAccepted, roofReason
+    end
+    local pending = GenerationTransaction.current()
     if pending == nil or token == nil or token ~= pending.token then
         return false, "unexpected or malformed relocation acknowledgement"
     end
@@ -106,16 +85,14 @@ local function acknowledgeRelocation(player, args)
         return false, identityOk and "acknowledgement sender does not own the request"
             or identityOrReason
     end
-    pending.acknowledged = true
-    pending.acknowledgedAtTick = ctx.serverTick
-    return true
+    return GenerationTransaction.recordAck("temporary", ctx.serverTick)
 end
 
 -- FinalRelocate has its own ACK namespace.  The payload is deliberately only
 -- the opaque token; all RV identity, destination and room/guard evidence is
 -- re-read from the server-owned pending plan and current manifest.
 local function acknowledgeFinalRelocation(player, args)
-    local pending = ctx.pendingGeneration
+    local pending = GenerationTransaction.current()
     local token = ackPayloadToken(args)
     if not pending or pending.finalRelocationSent ~= true
         or token == nil or token ~= pending.token then
@@ -165,7 +142,7 @@ local function acknowledgeFinalRelocation(player, args)
     -- from the client is used here; a second proof read remains mandatory.
     if not finalPositionOk and stateOk
         and pending.finalRelocationReasserted ~= true then
-        pending.finalRelocationReasserted = true
+        GenerationTransaction.markFinalRelocationReasserted()
         local targetReasserted = RV.Server.teleportToPosition(
             livePlayerOrReason, target)
             and ServerUtil.callSucceeded(livePlayerOrReason, "setX", target.x)
@@ -218,9 +195,7 @@ local function acknowledgeFinalRelocation(player, args)
             .. tostring(math.floor(target.y)) .. ","
             .. tostring(target.z) .. " after B42 half-cell normalization")
     end
-    pending.finalRelocationAcked = true
-    pending.finalRelocationAckAtTick = ctx.serverTick
-    return true
+    return GenerationTransaction.recordAck("final", ctx.serverTick)
 end
 
 local function rollbackPendingGenerationWorld(pending, reason)
@@ -258,8 +233,8 @@ local function rollbackPendingGenerationWorld(pending, reason)
         pending.bitmapVersion)
     if not rollbackOk then
         manifest.rollback = "FAILED"
-        pending.rollbackWorldRetryAtTick = Core.tickAdd(ctx.serverTick,
-            GENERATION_RELOCATION_RETRY_TICKS)
+        GenerationTransaction.rollback("world-retry",
+            Core.tickAdd(ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS))
         print("[RailroaderRVTest] final relocation rollback failed: "
             .. safeErrorText(rollbackReason))
         return false
@@ -268,54 +243,47 @@ local function rollbackPendingGenerationWorld(pending, reason)
     local markedOk, marked, markedReason = pcall(markGenerationFailed, manifest,
         safeErrorText(reason or "final relocation acknowledgement failed"))
     if not markedOk or marked ~= true then
-        pending.rollbackWorldRetryAtTick = Core.tickAdd(ctx.serverTick,
-            GENERATION_RELOCATION_RETRY_TICKS)
+        GenerationTransaction.rollback("world-retry",
+            Core.tickAdd(ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS))
         print("[RailroaderRVTest] final relocation failure marker deferred: "
             .. safeErrorText(markedOk and markedReason or marked))
         return false
     end
-    pending.rollbackApplied = true
-    ctx.transactionBusy = false
-    ctx.transactionPlayer = nil
+    GenerationTransaction.rollback("world-complete")
     return true
 end
 
 local function cancelPending(reason)
-    local pending = ctx.pendingGeneration
+    if not GenerationTransaction.cancel(reason) then return end
+    local pending = GenerationTransaction.current()
     if not pending then return end
-    pending.failureReason = reason
-    pending.cancelled = true
     local resolved, livePlayerOrReason = resolvePendingPlayer(pending)
     if not resolved then
         if generationDisconnected(livePlayerOrReason) then
             pauseGenerationForDisconnect(pending)
         end
-        ctx.transactionBusy = true
-        ctx.transactionPlayer = nil
         print("[RailroaderRVTest] generation cancellation deferred identity="
             .. tostring(pending.identity and pending.identity.key or "unknown")
             .. " reason=" .. safeErrorText(livePlayerOrReason))
         return
     end
     local livePlayer = livePlayerOrReason
-    pending.player = livePlayer
     if isInvalidRVData(reason) and pending.invalidRVDataNoticeSent ~= true then
-        pending.invalidRVDataNoticeSent = notifyFailure(livePlayer, reason) == true
+        if notifyFailure(livePlayer, reason) == true then
+            GenerationTransaction.markInvalidRVDataNoticeSent()
+        end
     end
     resumeGenerationAfterDisconnect(pending)
+    pending = GenerationTransaction.current() or pending
     if pending.boundaryCleared ~= true
         and not rearmGenerationTransition(pending, livePlayer, "generation") then
-        pending.rollbackRetryAtTick = Core.tickAdd(ctx.serverTick,
-            GENERATION_RELOCATION_RETRY_TICKS)
-        ctx.transactionBusy = true
-        ctx.transactionPlayer = livePlayer
+        GenerationTransaction.rollback("return-retry", Core.tickAdd(
+            ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS))
         return
     end
     if pending.finalRelocationSent == true and pending.rollbackApplied ~= true then
         local rollbackOk = rollbackPendingGenerationWorld(pending, reason)
         if not rollbackOk then
-            ctx.transactionBusy = true
-            ctx.transactionPlayer = livePlayer
             return
         end
     end
@@ -326,30 +294,22 @@ local function cancelPending(reason)
         and relocationPositionsEqual(position, original)
     if not atOriginal then
         if type(original) ~= "table" then
-            ctx.transactionBusy = true
-            ctx.transactionPlayer = livePlayer
             return
         end
         if not Core.tickReached(ctx.serverTick,
             pending.rollbackRetryAtTick or { hi32 = 0, lo32 = 0 }) then
-            ctx.transactionBusy = true
-            ctx.transactionPlayer = livePlayer
             return
         end
         local returned = resendGenerationPhase(pending, livePlayer, "rollback")
-        pending.rollbackRetryAtTick = Core.tickAdd(ctx.serverTick,
-            GENERATION_RELOCATION_RETRY_TICKS)
+        GenerationTransaction.rollback("return-retry", Core.tickAdd(
+            ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS))
         if not returned then
-            ctx.transactionBusy = true
-            ctx.transactionPlayer = livePlayer
             return
         end
         local afterOk, after = authoritativePlayerPosition(livePlayer)
         if not afterOk or not relocationPositionsEqual(after, original) then
-            pending.rollbackRetryAtTick = Core.tickAdd(ctx.serverTick,
-                GENERATION_RELOCATION_RETRY_TICKS)
-            ctx.transactionBusy = true
-            ctx.transactionPlayer = livePlayer
+            GenerationTransaction.rollback("return-retry", Core.tickAdd(
+                ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS))
             return
         end
     end
@@ -359,10 +319,8 @@ local function cancelPending(reason)
         local completeOk, complete = pcall(Boundary.completeTransition,
             livePlayer, pending.token)
         if not completeOk or complete ~= true then
-            pending.rollbackRetryAtTick = Core.tickAdd(ctx.serverTick,
-                GENERATION_RELOCATION_RETRY_TICKS)
-            ctx.transactionBusy = true
-            ctx.transactionPlayer = livePlayer
+            GenerationTransaction.rollback("return-retry", Core.tickAdd(
+                ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS))
             return
         end
     end
@@ -373,200 +331,13 @@ local function cancelPending(reason)
     if pending.invalidRVDataNoticeSent ~= true then
         notifyFailure(livePlayer, reason)
     end
-    ctx.pendingGeneration = nil
-    ctx.transactionBusy = false
-    ctx.transactionPlayer = nil
+    GenerationTransaction.release(pending.token)
     print("[RailroaderRVTest] queued generation cancelled player="
         .. tostring(pending.identity and pending.identity.key or "unknown") .. ": "
         .. safeErrorText(reason))
 end
 
-local function roofRefreshRelocationPositionStillSyncing(reason)
-    return reason == "server player has not reached the roof refresh destination"
-        or reason == "server player has no current square after roof refresh relocation"
-        or reason == "server player current square does not match roof refresh destination"
-        or reason == "roof refresh temporary destination cell is not loaded"
-        or reason == "roof refresh temporary destination square is not loaded"
-        or reason == "roof refresh temporary destination is still room geometry"
-end
-
-local function processRoofRefreshRelocationGroup()
-    local group = ctx.roofRefreshRelocationGroup
-    if not group then return end
-    -- A live process owns the exact-tick group across a player disconnect.
-    -- Defer all phase work until every stable identity has a live IsoPlayer;
-    -- this avoids converting a reconnect into a failed/cancelled transaction.
-    for i = 1, #(group.members or {}) do
-        local resolved = resolveRoofRefreshGroupPlayer(group,
-            group.members[i])
-        if not resolved then return end
-    end
-    if Core.tickCompare(ctx.serverTick,
-        group.deadlineTick or ctx.serverTick) == 1 then
-        failRoofRefreshRelocationGroup("roof refresh group relocation transaction timed out")
-        return
-    end
-    for i = 1, #(group.members or {}) do
-        local member = group.members[i]
-        if not member.arrived then
-            local resolved, playerOrReason = resolveRoofRefreshGroupPlayer(
-                group, member)
-            if not resolved then
-                return
-            end
-            local stateCallOk, stateOk, stateOrReason = pcall(
-                validateAuthoritativePlayer, playerOrReason)
-            if not stateCallOk then
-                failRoofRefreshRelocationGroup(safeErrorText(stateOk))
-                return
-            end
-            if not stateOk then
-                failRoofRefreshRelocationGroup(stateOrReason)
-                return
-            end
-            local contextCallOk, contextOk, contextOrReason = pcall(
-                currentRoofRefreshContext, playerOrReason, {
-                    rvId = member.rvId, generation = member.generation,
-                    bitmapVersion = member.bitmapVersion,
-                    identityKey = member.identityKey,
-                })
-            if not contextCallOk then
-                contextOrReason = safeErrorText(contextOk)
-                contextOk = false
-            end
-            if not contextOk then
-                failRoofRefreshRelocationGroup(contextOrReason)
-                return
-            end
-            local target = group.phase == "temporary"
-                and group.target or member.target
-            if group.phase == "return" then
-                local exactCallOk, exactPosition =
-                    tryAuthoritativePlayerPosition(playerOrReason)
-                -- The client ACK plus floor/z proof is enough to stop a
-                -- duplicate return packet.  If the engine normalized a
-                -- fractional x/y, completeRoofRefreshRelocation reasserts the
-                -- captured float before it releases the lease.
-                local atTarget = exactCallOk and type(exactPosition) == "table"
-                    and math.floor(exactPosition.x) == math.floor(target.x)
-                    and math.floor(exactPosition.y) == math.floor(target.y)
-                    and math.floor(exactPosition.z) == math.floor(target.z)
-                    and exactPosition.z ~= ROOF_REFRESH_TEMP_Z
-                if not atTarget then
-                    local waitLogTick = member.returnTargetLogTick
-                    if not Core.isTick(waitLogTick)
-                        or Core.tickElapsedAtLeast(ctx.serverTick, waitLogTick, 30) then
-                        local positionText = exactCallOk
-                            and type(exactPosition) == "table"
-                            and (tostring(exactPosition.x) .. ","
-                                .. tostring(exactPosition.y) .. ","
-                                .. tostring(exactPosition.z))
-                            or safeErrorText(exactPosition)
-                        print("[RailroaderRVTest] roof refresh group return target wait room="
-                            .. tostring(group.roomKey or "unknown") .. " player="
-                            .. tostring(member.identityKey) .. " position="
-                            .. positionText .. " target=" .. tostring(target.x) .. ","
-                            .. tostring(target.y) .. "," .. tostring(target.z))
-                        member.returnTargetLogTick = Core.getTick()
-                    end
-                    if member.acknowledged == true then
-                        -- The client has already proved that it applied this
-                        -- token.  Do not clear that ACK and send an endless
-                        -- stream of return commands just because a stale
-                        -- PlayerPacket briefly put the server object back at
-                        -- the remote point.  Reassert server coordinates only;
-                        -- the normal target/current-square proof below still
-                        -- gates arrival and lease release.
-                        local moved = applyRoofRefreshTeleport(playerOrReason,
-                            target, false)
-                        member.relocationNeedsResend = not moved
-                        if moved then
-                            exactCallOk, exactPosition =
-                                tryAuthoritativePlayerPosition(playerOrReason)
-                            atTarget = exactCallOk
-                                and type(exactPosition) == "table"
-                                and math.floor(exactPosition.x) == math.floor(target.x)
-                                and math.floor(exactPosition.y) == math.floor(target.y)
-                                and math.floor(exactPosition.z) == math.floor(target.z)
-                                and exactPosition.z ~= ROOF_REFRESH_TEMP_Z
-                        end
-                    else
-                        -- A stale/fallen member without an ACK needs the same
-                        -- return command again, but never once per tick.
-                        member.arrivalConsumed = false
-                        member.completed = false
-                        member.arrived = false
-                        member.relocationNeedsResend = true
-                        if not Core.tickReached(ctx.serverTick,
-                            member.relocationRetryAtTick or { hi32 = 0, lo32 = 0 }) then
-                            -- Wait for the bounded retry cadence below.
-                        elseif type(member.returnPayload) ~= "table" then
-                            failRoofRefreshRelocationGroup(
-                                "roof refresh group return payload is unavailable")
-                            return
-                        else
-                            local sentOk = ServerUtil.callGlobalSucceeded("sendServerCommand",
-                                playerOrReason, COMMAND_MODULE, COMMAND_RELOCATE,
-                                member.returnPayload)
-                            local moved = applyRoofRefreshTeleport(playerOrReason,
-                                target, false)
-                            member.relocationLastSentTick = ctx.serverTick
-                            member.relocationRetryAtTick = Core.tickAdd(
-                                ctx.serverTick, ROOF_RELOCATION_RETRY_TICKS)
-                            if not sentOk or not moved then
-                                -- A transient send/teleport failure is retried
-                                -- with this token; the transaction timeout is
-                                -- still the final bounded failure path.
-                                member.relocationNeedsResend = true
-                            else
-                                member.relocationNeedsResend = false
-                            end
-                        end
-                    end
-                end
-            end
-            if not member.acknowledged
-                or not Core.tickElapsedAtLeast(ctx.serverTick,
-                    group.queuedAtTick, RELOCATION_MIN_TICKS)
-                or not Core.tickElapsedAtLeast(ctx.serverTick,
-                    member.acknowledgedAtTick or ctx.serverTick,
-                    RELOCATION_POST_ACK_TICKS) then
-                -- The player may still be synchronizing its current square;
-                -- do not treat an absent ACK as a permanent failure yet.
-            else
-                    local readyCallOk, ready, readyReason = pcall(
-                        roofRefreshTargetReady, playerOrReason, target,
-                        group.phase, group.allowedPlayers)
-                    if not readyCallOk then
-                        readyReason = safeErrorText(ready)
-                        ready = false
-                    end
-                if not ready then
-                    if roofRefreshRelocationPositionStillSyncing(readyReason) then
-                        -- Wait for the authoritative square/current cell to
-                        -- settle on the next server tick.
-                    else
-                        failRoofRefreshRelocationGroup(readyReason)
-                        return
-                    end
-                else
-                    member.arrived = true
-                    member.arrivedAtTick = ctx.serverTick
-                    print("[RailroaderRVTest] roof refresh group member arrived room="
-                        .. tostring(group.roomKey or "unknown") .. " player="
-                        .. tostring(member.identityKey) .. " phase="
-                        .. tostring(group.phase) .. " target="
-                        .. tostring(target.x) .. "," .. tostring(target.y)
-                        .. "," .. tostring(target.z))
-                end
-            end
-        end
-    end
-end
-
-
 ctx.acknowledgeRelocation = acknowledgeRelocation
 ctx.acknowledgeFinalRelocation = acknowledgeFinalRelocation
 ctx.cancelPending = cancelPending
-ctx.processRoofRefreshRelocationGroup = processRoofRefreshRelocationGroup
 end

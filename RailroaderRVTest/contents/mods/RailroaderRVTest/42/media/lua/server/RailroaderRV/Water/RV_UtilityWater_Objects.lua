@@ -6,6 +6,7 @@ local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local Catalog = require("RailroaderRV/Water/RV_UtilityCatalog")
 local Util = require("RailroaderRV/Common/RV_ServerUtil")
 local World = require("RailroaderRV/Common/RV_ServerWorld")
+local StrictSchema = require("RailroaderRV/Common/RV_StrictSchema")
 
 local M = {}
 
@@ -21,20 +22,7 @@ local function exactKeys(value, expected)
     return count == #expected
 end
 
-local function integer(value)
-    return type(value) == "number" and value == value
-        and value < math.huge and value > -math.huge
-        and math.floor(value) == value and value or nil
-end
-
-local function finite(value)
-    return type(value) == "number" and value == value
-        and value < math.huge and value > -math.huge
-end
-
-local function invoke(target, method, ...)
-    return Util.invoke(target, method, ...)
-end
+local integer = StrictSchema.integer
 
 local function validContext(context, identity)
     local record = context and context.record
@@ -59,11 +47,12 @@ local function validContext(context, identity)
 end
 
 local function withinReach(player, x, y, z)
-    local xOk, playerX = invoke(player, "getX")
-    local yOk, playerY = invoke(player, "getY")
-    local zOk, playerZ = invoke(player, "getZ")
+    local xOk, playerX = Util.invoke(player, "getX")
+    local yOk, playerY = Util.invoke(player, "getY")
+    local zOk, playerZ = Util.invoke(player, "getZ")
     if not xOk or not yOk or not zOk
-        or not finite(playerX) or not finite(playerY) or not finite(playerZ) then
+        or not Util.isFiniteNumber(playerX) or not Util.isFiniteNumber(playerY)
+        or not Util.isFiniteNumber(playerZ) then
         return false
     end
     local dx, dy, dz = playerX - x, playerY - y, playerZ - z
@@ -86,7 +75,7 @@ local function findHintedObject(square, index)
     local matches = {}
     for i = 1, #objects do
         local object = objects[i]
-        local indexOk, objectIndex = invoke(object, "getObjectIndex")
+        local indexOk, objectIndex = Util.invoke(object, "getObjectIndex")
         if indexOk and integer(objectIndex) == index then
             matches[#matches + 1] = object
         end
@@ -117,12 +106,12 @@ function M.resolveSink(identity, context, hint)
     if not square then return false, U.REASONS.TARGET_NOT_LOADED end
     local object = findHintedObject(square, objectIndex)
     if not object then return false, U.REASONS.DEVICE_INVALID end
-    local squareOk, actualSquare = invoke(object, "getSquare")
+    local squareOk, actualSquare = Util.invoke(object, "getSquare")
     if not squareOk or actualSquare ~= square
         or not Catalog.hasFluidContainer(object) then
         return false, U.REASONS.DEVICE_NOT_CURRENT
     end
-    local externalOk, external = invoke(object, "getUsesExternalWaterSource")
+    local externalOk, external = Util.invoke(object, "getUsesExternalWaterSource")
     if not externalOk or type(external) ~= "boolean" then
         return false, U.REASONS.API_ERROR
     end
@@ -151,7 +140,7 @@ function M.ensureSinkIdentity(object, identity, mappingRecord)
         end
         return false, U.REASONS.DEVICE_NOT_CURRENT, true
     end
-    local dataOk, data = invoke(object, "getModData")
+    local dataOk, data = Util.invoke(object, "getModData")
     if not dataOk or type(data) ~= "table" then
         return false, U.REASONS.API_ERROR, true
     end
@@ -181,7 +170,7 @@ end
 
 function M.rollbackSinkIdentity(object, identityToken)
     if type(identityToken) ~= "table" or identityToken.created ~= true then return true end
-    local dataOk, data = invoke(object, "getModData")
+    local dataOk, data = Util.invoke(object, "getModData")
     if not dataOk or type(data) ~= "table"
         or data[Catalog.WATER_TAG_KEY] ~= identityToken.tag then return false end
     data[Catalog.WATER_TAG_KEY] = nil

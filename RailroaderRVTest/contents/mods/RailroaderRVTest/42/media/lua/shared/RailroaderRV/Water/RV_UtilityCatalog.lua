@@ -4,37 +4,19 @@
 -- identity. Native plumbing capability is checked separately.
 
 require "RailroaderRV/Common/RV_Constants"
+local StrictSchema = require "RailroaderRV/Common/RV_StrictSchema"
 local RegionSlots = require "RailroaderRV/RVMapping/RV_RegionSlots"
 
 RailroaderRV = RailroaderRV or {}
 local C = RailroaderRV.Constants
 local M = {}
+local integer = StrictSchema.integer
+local exactKeys = StrictSchema.exactKeys
 
 M.SINK_IDENTITY_FIELDS = {
     "owner", "role", "rvId", "generation", "bitmapVersion", "slotIndex", "anchor",
 }
 M.WATER_TAG_KEY = "RailroaderRVTestWater"
-
-local function integer(value)
-    if type(value) ~= "number" or value ~= value
-        or value >= math.huge or value <= -math.huge
-        or math.floor(value) ~= value then
-        return nil
-    end
-    return value
-end
-
-local function exactKeys(value, keys)
-    if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
-    local allowed = {}
-    for i = 1, #keys do allowed[keys[i]] = true end
-    local count = 0
-    for key in pairs(value) do
-        if not allowed[key] then return false end
-        count = count + 1
-    end
-    return count == #keys
-end
 
 local function validAnchor(anchor)
     if not exactKeys(anchor, { "x", "y", "z" })

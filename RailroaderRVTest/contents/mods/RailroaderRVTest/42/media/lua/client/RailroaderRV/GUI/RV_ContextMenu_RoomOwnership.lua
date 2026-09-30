@@ -2,7 +2,7 @@
 return function(ctx)
 local C = ctx.C
 local Layout = ctx.Layout
-local roomOwnershipGuards = ctx.roomOwnershipGuards
+local roomOwnershipGuards = {}
 local ROOM_OWNERSHIP_MIN_TICKS = ctx.ROOM_OWNERSHIP_MIN_TICKS
 local ROOM_OWNERSHIP_REACTIVE_SCAN_INTERVAL_TICKS = 5
 local ROOM_OWNERSHIP_EVENT_RESCAN_COUNT = 3
@@ -17,6 +17,31 @@ end
 
 local finiteNumber = C.finiteNumber
 local finiteInteger = C.finiteInteger
+
+local function findRoomOwnershipGuard(rvId, generation, bitmapVersion)
+    local exactGeneration = finiteInteger(generation)
+    local exactBitmapVersion = finiteInteger(bitmapVersion)
+    if rvId == nil or tostring(rvId) == "" or exactGeneration == nil
+        or exactBitmapVersion ~= C.BITMAP_VERSION then
+        return nil
+    end
+    local guard = roomOwnershipGuards[roomOwnershipGuardKey(
+        rvId, exactGeneration, exactBitmapVersion)]
+    if type(guard) ~= "table" or tostring(guard.rvId) ~= tostring(rvId)
+        or guard.generation ~= exactGeneration
+        or guard.bitmapVersion ~= exactBitmapVersion then
+        return nil
+    end
+    return guard
+end
+
+local function roomOwnershipGuardStatus(rvId, generation, bitmapVersion)
+    local guard = findRoomOwnershipGuard(rvId, generation, bitmapVersion)
+    if guard == nil then
+        return false, false
+    end
+    return true, guard.currentCheckErrorLatched ~= true
+end
 
 local function validRailroaderFinalHint(args)
     local generation = type(args) == "table" and finiteInteger(args.generation)
@@ -193,6 +218,14 @@ local function refreshCurrentPlayerRoomOwnership(guard)
     return scanOk, cleared
 end
 
+local function refreshRoomOwnershipByIdentity(rvId, generation, bitmapVersion)
+    local guard = findRoomOwnershipGuard(rvId, generation, bitmapVersion)
+    if guard == nil then
+        return false, 0
+    end
+    return refreshInvalidRoomOwnership(guard)
+end
+
 local function objectCoordinates(object)
     if not object then return nil end
     local target = object
@@ -243,25 +276,10 @@ local function scheduleRoomOwnershipScan(guard, delayedRetries)
     -- If the bounded transaction scan window was exhausted while client
     -- chunks were still arriving, a later matching world/local trigger opens
     -- one fresh bounded window. Unloaded data alone never counts as success.
-    local pendingFinal = ctx.pendingFinalRelocation
-    local args = type(pendingFinal) == "table" and pendingFinal.args
-    local pendingPhase = pendingFinal
-        and (pendingFinal.teleported and "post" or "pre")
-    local triggerRetryKey = pendingPhase
-        and (pendingPhase .. "TriggerRetryUsed")
-    if type(args) == "table" and pendingFinal.failed == true
-        and pendingFinal.failedPhase == pendingPhase
-        and pendingFinal[triggerRetryKey] ~= true
-        and tostring(args.rvId) == tostring(guard.rvId)
-        and finiteInteger(args.generation) == guard.generation
-        and finiteInteger(args.bitmapVersion) == guard.bitmapVersion then
-        pendingFinal.failed = false
-        pendingFinal.failedPhase = nil
-        pendingFinal[triggerRetryKey] = true
-        pendingFinal[pendingPhase .. "ScanAttempts"] = 0
-        pendingFinal[pendingPhase .. "NextScanTick"] = ctx.clientTick
-        print("[RailroaderRVTest] final relocation " .. pendingPhase
-            .. " room scan resumed after a matching repair trigger")
+    local reopenFinalRelocationScan = ctx.reopenFinalRelocationScan
+    if type(reopenFinalRelocationScan) == "function" then
+        reopenFinalRelocationScan(
+            guard.rvId, guard.generation, guard.bitmapVersion)
     end
 end
 
@@ -443,10 +461,10 @@ local function updateRoomOwnershipGuards()
 end
 
 
-ctx.roomOwnershipGuardKey = roomOwnershipGuardKey
 ctx.validRailroaderFinalHint = validRailroaderFinalHint
 ctx.localPlayerByOnlineId = localPlayerByOnlineId
-ctx.refreshInvalidRoomOwnership = refreshInvalidRoomOwnership
+ctx.roomOwnershipGuardStatus = roomOwnershipGuardStatus
+ctx.refreshRoomOwnershipByIdentity = refreshRoomOwnershipByIdentity
 ctx.requestRoomOwnershipScan = requestRoomOwnershipScan
 ctx.beginRoomOwnershipRefresh = beginRoomOwnershipRefresh
 ctx.finalTargetSquareIsLoaded = finalTargetSquareIsLoaded

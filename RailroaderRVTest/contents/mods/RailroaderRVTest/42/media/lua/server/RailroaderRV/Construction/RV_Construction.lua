@@ -116,6 +116,9 @@ end
 
 function Construction.new(context, operations)
     if type(context) ~= "table" or type(operations) ~= "table"
+        or type(context.GenerationTransaction) ~= "table"
+        or type(context.GenerationTransaction.owns) ~= "function"
+        or type(context.GenerationTransaction.current) ~= "function"
         or type(operations.clear) ~= "function"
         or type(operations.build) ~= "function"
         or type(operations.setGenerationPhase) ~= "function" then
@@ -123,11 +126,12 @@ function Construction.new(context, operations)
     end
 
     local service = {}
+    local generationTransaction = context.GenerationTransaction
 
     local function validatePlannedGeometry(player, layout, bounds, generation,
         identitySource)
-        if context.transactionBusy ~= true or context.transactionPlayer ~= player
-            or player == nil then
+        if player == nil or generationTransaction.owns(player, nil,
+            "building") ~= true then
             error("RailroaderRVTest: Construction requires the active server transaction")
         end
         local template, templateError = currentTemplate()
@@ -249,9 +253,9 @@ function Construction.new(context, operations)
     end
 
     function service.clearCurrentGeneration(cell, bounds, generation, manifest)
-        local player = context.transactionPlayer
-        local layout = context.pendingGeneration
-            and context.pendingGeneration.layout or nil
+        local pending = generationTransaction.current()
+        local player = type(pending) == "table" and pending.player or nil
+        local layout = type(pending) == "table" and pending.layout or nil
         local identity = validateCurrentPlan(player, layout, bounds,
             generation, manifest)
         validateManifestGate(manifest, generation, "CLEARING")

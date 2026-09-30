@@ -566,6 +566,23 @@ local function refreshServerRoomOwnershipGuard(guard, phase, requireFullNewRoof)
     return cleared
 end
 
+local function refreshGenerationRoomOwnershipGuard(rvId, generation,
+    bitmapVersion, phase)
+    generation = ServerUtil.integer(generation)
+    bitmapVersion = ServerUtil.integer(bitmapVersion)
+    if type(rvId) ~= "string" or rvId == ""
+        or generation == nil or generation < 1
+        or bitmapVersion == nil then
+        error("RailroaderRVTest: generation room ownership identity is invalid")
+    end
+    local guard = roomOwnershipGuards[roomOwnershipGuardKey(rvId, generation,
+        bitmapVersion)]
+    if type(guard) ~= "table" then
+        error("RailroaderRVTest: generation room ownership guard is unavailable")
+    end
+    return refreshServerRoomOwnershipGuard(guard, phase)
+end
+
 local function processServerRoomOwnershipGuards()
     local hasGuards = false
     for _ in pairs(roomOwnershipGuards) do
@@ -580,7 +597,13 @@ local function processServerRoomOwnershipGuards()
     -- the same tick that must advance the relocation.  The roof service
     -- already owns the boundary lease and keeps the player out of the room;
     -- pause only this non-transactional cleanup until the member returns.
-    if ctx.roofRefreshRelocationGroup ~= nil or ctx.roofRefreshGroupFinalReturn ~= nil then
+    local server = type(RV) == "table" and RV.Server or nil
+    if type(server) ~= "table"
+        or type(server.isRoofRefreshTransactionActive) ~= "function" then
+        return
+    end
+    local roofStateOk, roofActive = pcall(server.isRoofRefreshTransactionActive)
+    if not roofStateOk or type(roofActive) ~= "boolean" or roofActive then
         return
     end
     -- Positions are read once per tick. Share each local square probe across
@@ -805,6 +828,7 @@ ctx.requestRoomOwnershipScan = requestRoomOwnershipScan
 ctx.requestRoomOwnershipRemovalScan = requestRoomOwnershipRemovalScan
 ctx.registerServerRoomOwnershipGuard = registerServerRoomOwnershipGuard
 ctx.refreshServerRoomOwnershipGuard = refreshServerRoomOwnershipGuard
+ctx.refreshGenerationRoomOwnershipGuard = refreshGenerationRoomOwnershipGuard
 ctx.processServerRoomOwnershipGuards = processServerRoomOwnershipGuards
 ctx.armClientRoomOwnershipGuard = armClientRoomOwnershipGuard
 ctx.removeGeneration = removeGeneration

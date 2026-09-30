@@ -36,7 +36,6 @@ local exactKeys = Bitmap.hasExactKeys
 
 Boundary._states = Boundary._states or {}
 Boundary._registered = Boundary._registered or {}
-Boundary._builders = Boundary._builders or {}
 Boundary._tick = Core.getTick()
 
 

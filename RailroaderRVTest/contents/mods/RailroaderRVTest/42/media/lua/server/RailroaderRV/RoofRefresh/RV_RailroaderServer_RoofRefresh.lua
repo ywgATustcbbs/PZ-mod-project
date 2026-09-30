@@ -501,8 +501,12 @@ end
 local function queueWallRoofRefreshForObject(object, source)
     local server = RV and RV.Server
     if object ~= nil and type(server) == "table"
-        and server._templateProtectionRepairRemovalObject == object then
-        return false
+        and type(server.isTemplateProtectionRepairRemoval) == "function" then
+        local markerOk, isOwnRepairRemoval = pcall(
+            server.isTemplateProtectionRepairRemoval, object)
+        if markerOk and isOwnRepairRemoval == true then
+            return false
+        end
     end
     if not processIsServer() or not Boundary
         or type(Boundary.isCurrentShellWall) ~= "function" then

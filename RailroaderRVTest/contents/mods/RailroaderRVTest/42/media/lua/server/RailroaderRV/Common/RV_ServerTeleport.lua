@@ -1,16 +1,12 @@
 -- Shared server-authoritative teleport operations.
 local M = {}
 local DevSaveSchemaGate = require("RailroaderRV/Core/RV_DevSaveSchemaGate")
-
-local function finite(value)
-    return type(value) == "number" and value == value
-        and value > -math.huge and value < math.huge
-end
+local Common = require("RailroaderRV/Common/RV_Common")
 
 function M.teleportToPosition(player, position)
     if not DevSaveSchemaGate.isReady() or not player or type(position) ~= "table"
-        or not finite(position.x) or not finite(position.y)
-        or not finite(position.z) or type(player.teleportTo) ~= "function" then
+        or not Common.isFiniteNumber(position.x) or not Common.isFiniteNumber(position.y)
+        or not Common.isFiniteNumber(position.z) or type(player.teleportTo) ~= "function" then
         return false
     end
     local ok, result = pcall(player.teleportTo, player,
@@ -34,7 +30,8 @@ function M.teleportToRVSpawn(player, source, expectedPosition)
         return false
     end
     local target = record.rvPosition
-    if not finite(target.x) or not finite(target.y) or not finite(target.z) then
+    if not Common.isFiniteNumber(target.x) or not Common.isFiniteNumber(target.y)
+        or not Common.isFiniteNumber(target.z) then
         return false
     end
     if expectedPosition and (target.x ~= expectedPosition.x

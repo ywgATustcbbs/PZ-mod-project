@@ -13,7 +13,6 @@ local ROOF_REFRESH_REMOTE_OFFSET_X = ctx.ROOF_REFRESH_REMOTE_OFFSET_X
 local ROOF_REFRESH_REMOTE_OFFSET_Y = ctx.ROOF_REFRESH_REMOTE_OFFSET_Y
 local ROOF_REFRESH_REMOTE_OFFSET_Z = ctx.ROOF_REFRESH_REMOTE_OFFSET_Z
 local ROOF_REFRESH_TEMP_Z = ctx.ROOF_REFRESH_TEMP_Z
-local GENERATION_STAGING_Z = ctx.GENERATION_STAGING_Z
 local WORLD_MIN_Z = ctx.WORLD_MIN_Z
 local WORLD_MAX_Z = ctx.WORLD_MAX_Z
 local tryAuthoritativePlayerPosition = ctx.tryAuthoritativePlayerPosition
@@ -116,75 +115,6 @@ local function roofRefreshTemporarySquareSafe(square, allowedPlayers)
         if not playerRoomOk or playerRoom == true then return false end
     end
     return true
-end
-
--- First-generation staging deliberately lands at the current managed-scope
--- center on z=-15.  The point is computed only from the validated
--- layout/bitmap contract; unlike roof refresh, it is not the remote
--- center-minus-(18000,0,15) experiment and it is allowed to have no ordinary
--- GridSquare while the destination chunk streams.
-local function selectGenerationStagingDestination(layout, bounds)
-    if type(layout) ~= "table" or type(bounds) ~= "table"
-        or type(layout.bitmap) ~= "table" then
-        error("RailroaderRVTest: generation staging contract is incomplete")
-    end
-    local originX = ServerUtil.requiredInteger(bounds.managedOriginX,
-        "generation managed origin x")
-    local originY = ServerUtil.requiredInteger(bounds.managedOriginY,
-        "generation managed origin y")
-    local width = ServerUtil.requiredInteger(bounds.managedWidth,
-        "generation managed width")
-    local height = ServerUtil.requiredInteger(bounds.managedHeight,
-        "generation managed height")
-    if width ~= ServerUtil.requiredInteger(layout.bitmap.width, "generation bitmap width")
-        or height ~= ServerUtil.requiredInteger(layout.bitmap.height,
-            "generation bitmap height")
-        or originX ~= ServerUtil.requiredInteger(layout.bitmap.originX,
-            "generation bitmap origin x")
-        or originY ~= ServerUtil.requiredInteger(layout.bitmap.originY,
-            "generation bitmap origin y")
-        or width <= 0 or height <= 0 then
-        error("RailroaderRVTest: generation staging bitmap identity is stale")
-    end
-    local destination = {
-        x = originX + math.floor(width / 2),
-        y = originY + math.floor(height / 2),
-        z = GENERATION_STAGING_Z,
-        purpose = "generation-center",
-    }
-    local worldOk, world = ServerUtil.callGlobal("getWorld")
-    if not worldOk or world == nil then
-        error("RailroaderRVTest: getWorld is unavailable for generation staging")
-    end
-    local validOk, valid = ServerUtil.invoke(world, "isValidSquare", destination.x,
-        destination.y, destination.z)
-    if not validOk or valid ~= true then
-        error("RailroaderRVTest: generation center staging coordinate is illegal")
-    end
-    return destination
-end
-
-local function playerIsAtStagingDestination(player, destination, bounds)
-    local playerOk, positionOrReason = validateAuthoritativePlayer(player)
-    if not playerOk then
-        return false, positionOrReason
-    end
-    if positionOrReason.x ~= destination.x or positionOrReason.y ~= destination.y
-        or positionOrReason.z ~= destination.z then
-        return false, "server player has not reached the relocation destination"
-    end
-    if destination.purpose == "generation-center" then
-        local expectedX = bounds.managedOriginX
-            + math.floor(bounds.managedWidth / 2)
-        local expectedY = bounds.managedOriginY
-            + math.floor(bounds.managedHeight / 2)
-        if destination.z ~= GENERATION_STAGING_Z
-            or destination.x ~= expectedX or destination.y ~= expectedY then
-            return false, "generation staging destination identity is stale"
-        end
-        return true
-    end
-    return false, "generation staging destination identity is stale"
 end
 
 local function relocationPositionStillSyncing(reason)
@@ -616,8 +546,6 @@ local function rollbackRoofRefreshRelocation(pending)
 end
 
 
-ctx.selectGenerationStagingDestination = selectGenerationStagingDestination
-ctx.playerIsAtStagingDestination = playerIsAtStagingDestination
 ctx.relocationPositionStillSyncing = relocationPositionStillSyncing
 ctx.roofRefreshPosition = roofRefreshPosition
 ctx.roofRefreshWorldCoordinateValid = roofRefreshWorldCoordinateValid

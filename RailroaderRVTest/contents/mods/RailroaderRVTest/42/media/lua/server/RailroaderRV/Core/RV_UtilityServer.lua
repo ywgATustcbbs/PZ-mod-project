@@ -366,7 +366,9 @@ local function syncUtilityMappings()
     end
     local listOk, list = pcall(adapter.onlinePlayersSnapshot)
     if not listOk or type(list) ~= "table" then return end
-    local epoch = adapter._mappingEpoch or 0
+    if type(adapter.currentMappingEpoch) ~= "function" then return end
+    local epoch = adapter.currentMappingEpoch()
+    if type(epoch) ~= "number" then return end
     local present = {}
     for i = 1, #list do
         local player = list[i]

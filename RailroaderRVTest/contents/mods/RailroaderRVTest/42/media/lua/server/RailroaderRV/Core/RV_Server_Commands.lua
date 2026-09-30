@@ -12,6 +12,7 @@ local Boundary = ctx.Boundary
 local RV = ctx.RV
 local ServerSchema = ctx.ServerSchema
 local UtilityServer = ctx.UtilityServer
+local GenerationTransaction = ctx.GenerationTransaction
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local RELOCATION_MIN_TICKS = ctx.RELOCATION_MIN_TICKS
 local RELOCATION_POST_ACK_TICKS = ctx.RELOCATION_POST_ACK_TICKS
@@ -67,7 +68,8 @@ function RV.Server.OnTick(tick)
             print("[RailroaderRVTest] utility tick error: " .. safeErrorText(utilityError))
         end
     end
-    local pending = ctx.pendingGeneration
+    local pendingOk, pending = pcall(GenerationTransaction.current)
+    if not pendingOk then return end
     if pending == nil then
         return
     end
@@ -88,6 +90,7 @@ function RV.Server.OnTick(tick)
         return
     end
     resumeGenerationAfterDisconnect(pending)
+    pending = GenerationTransaction.current() or pending
     if not Core.isTick(pending.queuedAtTick) then
         cancelPending("generation transaction has an invalid queued tick")
         return
@@ -134,7 +137,7 @@ function RV.Server.OnTick(tick)
         local finalOk, finalReason = finalizeGenerationAfterRelocate(
             playerOrReason, pending)
         if finalOk then
-            ctx.pendingGeneration = nil
+            GenerationTransaction.release(pending.token)
             print("[RailroaderRVTest] generation committed READY")
         elseif finalReason == "final relocation authoritative target is still synchronizing" then
             -- The server object may still carry the previous staging packet;
@@ -142,8 +145,7 @@ function RV.Server.OnTick(tick)
             -- and will require a fresh post-update proof on the next tick.
             return
         else
-            pending.failureReason = finalReason
-            pending.cancelled = true
+            GenerationTransaction.cancel(finalReason)
             cancelPending(finalReason)
             print("[RailroaderRVTest] generation finalization failed: "
                 .. safeErrorText(finalReason))
@@ -183,14 +185,13 @@ function RV.Server.OnTick(tick)
     local completedPending = pending
     local ok, reason = generateForPlayer(playerOrReason, completedPending)
     if not ok then
-        completedPending.failureReason = reason
-        completedPending.cancelled = true
+        GenerationTransaction.cancel(reason)
         cancelPending(reason)
         print("[RailroaderRVTest] generation failed: " .. tostring(reason))
     elseif reason == "await-final-relocate" then
         print("[RailroaderRVTest] generation awaiting FinalRelocateAck")
     else
-        ctx.pendingGeneration = nil
+        GenerationTransaction.release(completedPending.token)
         print("[RailroaderRVTest] generation committed READY")
     end
 end

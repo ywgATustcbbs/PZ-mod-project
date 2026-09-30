@@ -10,6 +10,7 @@ local ServerUtil = ctx.ServerUtil
 local RELOCATION_POST_ACK_TICKS = ctx.RELOCATION_POST_ACK_TICKS
 local RELOCATION_TIMEOUT_TICKS = ctx.RELOCATION_TIMEOUT_TICKS
 local GENERATION_RELOCATION_RETRY_TICKS = ctx.GENERATION_RELOCATION_RETRY_TICKS
+local GenerationTransaction = ctx.GenerationTransaction
 local WORLD_MIN_Z = ctx.WORLD_MIN_Z
 local WORLD_MAX_Z = ctx.WORLD_MAX_Z
 local function cancelPending(...) return ctx.cancelPending(...) end
@@ -126,21 +127,25 @@ local function resolvePendingPlayer(pending)
         return false, identityOk and "requesting player identity changed" or identityOrReason
     end
     -- The online ID is the stable server identity across a transient
-    -- IsoPlayer object replacement.  Keep the live object on the transaction
-    -- so every later tick/phase uses the authoritative instance.  A changed
-    -- userdata is also a protocol event: the client-side pending command is
-    -- gone after a reconnect, so the owner must re-arm/re-send the same phase
-    -- token before it can continue.
+    -- IsoPlayer object replacement. Generation state is rebound through its
+    -- owner; RoofRelocation applies the same result to its member record.
     local previous = pending.player
-    pending.player = current
+    if type(GenerationTransaction) == "table"
+        and type(GenerationTransaction.owns) == "function"
+        and GenerationTransaction.owns(nil, pending.token) then
+        local reboundOk, ownerPrevious = GenerationTransaction.setPlayer(
+            current, ctx.serverTick)
+        if not reboundOk then
+            return false, "generation player could not be rebound"
+        end
+        previous = ownerPrevious
+    end
     if previous ~= nil and previous ~= current then
         if type(ctx.invalidatePlayerPosition) == "function" then
             pcall(ctx.invalidatePlayerPosition, previous)
         end
-        pending.playerReboundAtTick = ctx.serverTick
-        pending.relocationNeedsResend = true
     end
-    return true, current
+    return true, current, previous
 end
 
 local function relocationPositionsEqual(left, right)
@@ -185,8 +190,9 @@ end
 
 local function pauseGenerationForDisconnect(pending)
     if type(pending) ~= "table" then return end
-    if pending.disconnectStartedTick == nil then
-        pending.disconnectStartedTick = ctx.serverTick
+    if type(GenerationTransaction) == "table"
+        and type(GenerationTransaction.pauseForDisconnect) == "function" then
+        GenerationTransaction.pauseForDisconnect(ctx.serverTick)
     end
 end
 
@@ -197,20 +203,15 @@ local function resumeGenerationAfterDisconnect(pending)
     end
     local paused = Core.tickElapsed(ctx.serverTick,
         pending.disconnectStartedTick)
-    if Core.isTick(paused) and (paused.hi32 > 0 or paused.lo32 > 0) then
-        -- Do not let a missing IsoPlayer consume the normal transaction
-        -- timeout.  The in-memory owner remains live until this identity
-        -- reconnects; no value here is persisted.
-        pending.queuedAtTick = Core.tickAdd(
-            pending.queuedAtTick or ctx.serverTick, paused)
-        if pending.finalRelocationDeadlineTick ~= nil then
-            pending.finalRelocationDeadlineTick =
-                Core.tickAdd(pending.finalRelocationDeadlineTick, paused)
-        end
+    if not Core.isTick(paused) then
+        return
     end
-    pending.disconnectStartedTick = nil
-    pending.relocationNeedsResend = true
-    pending.relocationRetryAtTick = ctx.serverTick
+    -- Do not let a missing IsoPlayer consume the normal transaction timeout.
+    -- The in-memory owner remains live until this identity reconnects.
+    if type(GenerationTransaction) == "table"
+        and type(GenerationTransaction.resumeAfterDisconnect) == "function" then
+        GenerationTransaction.resumeAfterDisconnect(ctx.serverTick, paused)
+    end
 end
 
 local function rearmGenerationTransition(pending, player, kind)
@@ -281,13 +282,10 @@ local function resendGenerationPhase(pending, player, phase)
             or not ServerUtil.callSucceeded(player, "setLastY", target.y) then
             return false
         end
-        if pending.finalRelocationDeadlineTick == nil then
-            pending.finalRelocationDeadlineTick = Core.tickAdd(ctx.serverTick,
-                RELOCATION_TIMEOUT_TICKS)
-        end
-        pending.relocationLastSentTick = ctx.serverTick
-        pending.relocationRetryAtTick = ctx.serverTick
-        pending.relocationNeedsResend = false
+        local finalDeadline = pending.finalRelocationDeadlineTick
+            or Core.tickAdd(ctx.serverTick, RELOCATION_TIMEOUT_TICKS)
+        GenerationTransaction.markRelocationSent("final", ctx.serverTick,
+            ctx.serverTick, finalDeadline)
         return true
     end
 
@@ -338,20 +336,14 @@ local function resendGenerationPhase(pending, player, phase)
             return false
         end
     end
-    pending.relocationLastSentTick = ctx.serverTick
-    pending.relocationRetryAtTick = ctx.serverTick
-    pending.relocationNeedsResend = false
-    if phase == "rollback" then
-        pending.rollbackLastSentTick = ctx.serverTick
-    else
-        pending.acknowledged = false
-        pending.acknowledgedAtTick = nil
-    end
+    GenerationTransaction.markRelocationSent(phase == "rollback"
+        and "rollback" or "temporary", ctx.serverTick, ctx.serverTick)
     return true
 end
 
 local function keepGenerationTransitionAlive()
-    local pending = ctx.pendingGeneration
+    local transactionOk, pending = pcall(GenerationTransaction.current)
+    if not transactionOk then return false end
     if type(pending) ~= "table" then return true end
     local resolved, playerOrReason = resolvePendingPlayer(pending)
     if not resolved then
@@ -363,8 +355,8 @@ local function keepGenerationTransitionAlive()
         return true
     end
     resumeGenerationAfterDisconnect(pending)
+    pending = GenerationTransaction.current() or pending
     local player = playerOrReason
-    ctx.transactionPlayer = player
     local phase = pending.cancelled and "rollback"
         or pending.finalRelocationSent and "final" or "temporary"
     local rearmed = rearmGenerationTransition(pending, player,
@@ -372,34 +364,17 @@ local function keepGenerationTransitionAlive()
     if not rearmed then
         -- Keep trying the same token; do not clear the pending transaction or
         -- invent a new one merely because a lease API briefly failed.
-        pending.relocationNeedsResend = true
+        GenerationTransaction.requestRelocationResend()
     end
     if pending.relocationNeedsResend and not pending.cancelled
         and Core.tickReached(ctx.serverTick,
             pending.relocationRetryAtTick or { hi32 = 0, lo32 = 0 }) then
-        resendGenerationPhase(pending, player, phase)
-        pending.relocationRetryAtTick = Core.tickAdd(ctx.serverTick,
-            GENERATION_RELOCATION_RETRY_TICKS)
+        local resent = resendGenerationPhase(pending, player, phase)
+        GenerationTransaction.scheduleRelocationRetry(Core.tickAdd(
+            ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS), not resent)
     end
     return true
 end
-
--- A reconnect can replace the IsoPlayer userdata while the stable identity
--- remains the same.  Keep the temporary occupancy allow-list in sync with the
--- rebound object so a valid member is not mistaken for a foreign occupant.
-local function resolveRoofRefreshGroupPlayer(group, member)
-    local previous = type(member) == "table" and member.player or nil
-    local resolved, current = resolvePendingPlayer(member)
-    if resolved and type(group) == "table"
-        and type(group.allowedPlayers) == "table" then
-        if previous ~= nil and previous ~= current then
-            group.allowedPlayers[previous] = nil
-        end
-        group.allowedPlayers[current] = true
-    end
-    return resolved, current
-end
-
 
 ctx.tryAuthoritativePlayerPosition = tryAuthoritativePlayerPosition
 ctx.generationDisconnected = generationDisconnected
@@ -408,7 +383,6 @@ ctx.resumeGenerationAfterDisconnect = resumeGenerationAfterDisconnect
 ctx.rearmGenerationTransition = rearmGenerationTransition
 ctx.resendGenerationPhase = resendGenerationPhase
 ctx.keepGenerationTransitionAlive = keepGenerationTransitionAlive
-ctx.resolveRoofRefreshGroupPlayer = resolveRoofRefreshGroupPlayer
 ctx.validateAuthoritativePlayer = validateAuthoritativePlayer
 ctx.authoritativePlayerPosition = authoritativePlayerPosition
 ctx.validateGenerationPermission = validateGenerationPermission

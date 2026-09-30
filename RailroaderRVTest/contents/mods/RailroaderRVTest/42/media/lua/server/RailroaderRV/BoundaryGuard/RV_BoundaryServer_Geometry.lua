@@ -475,6 +475,10 @@ function Boundary.registerGeneration(rvId, generation, boundary, record)
         end
     end
     Boundary._registered[boundaryKey(loaded)] = loaded
+    if type(Boundary.invalidateBuilderActionsForGeneration) == "function" then
+        Boundary.invalidateBuilderActionsForGeneration(loaded.rvId,
+            loaded.generation, loaded.bitmapVersion)
+    end
     return true
 end
 
@@ -530,6 +534,58 @@ local function stateFor(player, knownIdentity)
     return state
 end
 
+local function transitionIdentityKey(rvId, generation, bitmapVersion)
+    local normalizedGeneration = integer(generation)
+    local normalizedBitmapVersion = integer(bitmapVersion)
+    if rvId == nil or tostring(rvId) == "" or normalizedGeneration == nil
+        or normalizedBitmapVersion == nil then
+        return nil
+    end
+    return tostring(rvId) .. ":" .. tostring(normalizedGeneration)
+        .. ":" .. tostring(normalizedBitmapVersion)
+end
+
+-- Return only the activity facts needed by TemplateRecovery. Callers do not
+-- receive Boundary's mutable player-state tables or lease field layout.
+function Boundary.transitionActivitySnapshot(tick)
+    if not Core.isTick(tick) or type(Boundary._states) ~= "table" then
+        return false, "boundary transition state unavailable"
+    end
+    local activity = {}
+    for _, state in pairs(Boundary._states) do
+        if type(state) == "table" then
+            local key = transitionIdentityKey(state.rvId, state.generation,
+                state.bitmapVersion)
+            local transitionUntil = state.transitionUntil
+            local inWindow = Core.isTick(transitionUntil)
+                and Core.tickReached(transitionUntil, tick)
+            if key and inWindow then
+                local snapshot = activity[key]
+                if not snapshot then
+                    snapshot = { active = false, recentlyCompleted = false }
+                    activity[key] = snapshot
+                end
+                if state.transitionToken ~= nil or state.transitionKind ~= nil then
+                    snapshot.active = true
+                else
+                    snapshot.recentlyCompleted = true
+                end
+            end
+        end
+    end
+    return true, activity
+end
+
+function Boundary.hasActiveTransitionForIdentity(rvId, generation,
+    bitmapVersion, tick)
+    local key = transitionIdentityKey(rvId, generation, bitmapVersion)
+    if not key or not Core.isTick(tick) then return false end
+    local snapshotOk, activity = Boundary.transitionActivitySnapshot(tick)
+    if not snapshotOk then return false end
+    local state = activity[key]
+    return state ~= nil and state.active == true
+end
+
 -- Small lifecycle interface for independent services that must yield while
 -- an authoritative player relocation is in flight. Listeners do not own or
 -- alter transition state; failures are contained so they cannot block travel.
@@ -550,9 +606,15 @@ function Boundary.addTransitionLifecycleListener(name, listener)
 end
 
 local function notifyTransitionLifecycle(eventName, player, state)
+    local transitionIdentity = type(state) == "table" and {
+        rvId = state.rvId,
+        generation = state.generation,
+        bitmapVersion = state.bitmapVersion,
+    } or nil
     for name, listener in pairs(transitionLifecycleListeners) do
         if type(listener) == "function" then
-            local ok, reason = pcall(listener, eventName, player, state,
+            local ok, reason = pcall(listener, eventName, player,
+                transitionIdentity,
                 Boundary._tick)
             if not ok then
                 print("[RailroaderRVTest] boundary transition listener failed name="

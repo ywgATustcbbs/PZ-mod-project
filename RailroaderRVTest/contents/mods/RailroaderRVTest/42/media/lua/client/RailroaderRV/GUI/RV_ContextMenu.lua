@@ -37,8 +37,6 @@ local GENERATION_HALO_RENDER_TEXT = "Generating RV"
 local COMMAND_REFRESH_ROOM_OWNERSHIP = C.COMMAND_REFRESH_ROOM_OWNERSHIP
     or "RefreshRoomOwnership"
 local pendingRelocation = nil
-local pendingFinalRelocation = nil
-local roomOwnershipGuards = {}
 local RELOCATION_TIMEOUT_TICKS = 600
 local GENERATION_HALO_REFRESH_TICKS = 10
 -- IsoRegions has no public Lua completion event.  The initial generation
@@ -65,8 +63,6 @@ local ctx = {
     GENERATION_HALO_RENDER_TEXT = GENERATION_HALO_RENDER_TEXT,
     COMMAND_REFRESH_ROOM_OWNERSHIP = COMMAND_REFRESH_ROOM_OWNERSHIP,
     pendingRelocation = pendingRelocation,
-    pendingFinalRelocation = pendingFinalRelocation,
-    roomOwnershipGuards = roomOwnershipGuards,
     RELOCATION_TIMEOUT_TICKS = RELOCATION_TIMEOUT_TICKS,
     GENERATION_HALO_REFRESH_TICKS = GENERATION_HALO_REFRESH_TICKS,
     ROOM_OWNERSHIP_MIN_TICKS = ROOM_OWNERSHIP_MIN_TICKS,

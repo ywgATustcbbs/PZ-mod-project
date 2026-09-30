@@ -45,6 +45,15 @@ local WORLD_MAX_Z = 31
 local roofRefreshRooms = {}
 local ROOF_REFRESH_CACHE_TTL_TICKS = 1800
 Adapter._mappingEpoch = Adapter._mappingEpoch or 0
+local mappingEpoch = Adapter._mappingEpoch
+function Adapter.currentMappingEpoch()
+    return mappingEpoch
+end
+function Adapter.advanceMappingEpoch()
+    mappingEpoch = mappingEpoch + 1
+    Adapter._mappingEpoch = mappingEpoch
+    return mappingEpoch
+end
 local roofRefreshPlayers = {}
 local roomMonitorPlayers = {}
 local pendingWallRoofRefreshes = {}

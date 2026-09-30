@@ -4,6 +4,7 @@
 -- state or ModData.
 
 require "RailroaderRV/Common/RV_Constants"
+local StrictSchema = require "RailroaderRV/Common/RV_StrictSchema"
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.RegionSlots = RailroaderRV.RegionSlots or {}
@@ -17,35 +18,14 @@ Slots.COUNT = C.RV_REGION_SLOT_COUNT
 Slots.REGION_SIZE = C.RV_REGION_SIZE
 
 local SIZE = Slots.REGION_SIZE
+local integer = StrictSchema.integer
+local exactKeys = StrictSchema.exactKeys
 local FIRST_MIN_X = C.TELEPORT_X + C.RV_REGION_MIN_OFFSET_X
 local FIRST_MIN_Y = C.TELEPORT_Y + C.RV_REGION_MIN_OFFSET_Y
 local FIRST_Z = C.TELEPORT_Z
 
 if type(SIZE) ~= "number" or SIZE ~= 100 then
     error("RailroaderRVTest: RV region slot size must be 100")
-end
-
-local function integer(value)
-    if type(value) ~= "number" or value ~= value
-        or value >= math.huge or value <= -math.huge then
-        return nil
-    end
-    if math.floor(value) ~= value then return nil end
-    return value
-end
-
-local function exactKeys(value, expected)
-    if type(value) ~= "table" or getmetatable(value) ~= nil then
-        return false
-    end
-    local allowed = {}
-    for i = 1, #expected do allowed[expected[i]] = true end
-    local count = 0
-    for key in pairs(value) do
-        if not allowed[key] then return false end
-        count = count + 1
-    end
-    return count == #expected
 end
 
 local function slotForIndex(index)

@@ -13,6 +13,8 @@ local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local ServerSchema = ctx.ServerSchema
 local UtilityServer = ctx.UtilityServer
+local GenerationTransaction = ctx.GenerationTransaction
+local GENERATION_STAGING_Z = ctx.GENERATION_STAGING_Z
 local function allocateRVRegion(...)
     local rv = rawget(_G, "RailroaderRV")
     local adapter = type(rv) == "table" and rv.RailroaderServer or nil
@@ -39,6 +41,7 @@ end
 local RELOCATION_TIMEOUT_TICKS = ctx.RELOCATION_TIMEOUT_TICKS
 local registerServerRoomOwnershipGuard = ctx.registerServerRoomOwnershipGuard
 local refreshServerRoomOwnershipGuard = ctx.refreshServerRoomOwnershipGuard
+local refreshGenerationRoomOwnershipGuard = ctx.refreshGenerationRoomOwnershipGuard
 local armClientRoomOwnershipGuard = ctx.armClientRoomOwnershipGuard
 local removeGeneration = ctx.removeGeneration
 local setManifestState = ctx.setManifestState
@@ -52,8 +55,72 @@ local authoritativePlayerPosition = ctx.authoritativePlayerPosition
 local validateGenerationPermission = ctx.validateGenerationPermission
 local playerIdentity = ctx.playerIdentity
 local relocationPositionsEqual = ctx.relocationPositionsEqual
-local selectGenerationStagingDestination = ctx.selectGenerationStagingDestination
-local playerIsAtStagingDestination = ctx.playerIsAtStagingDestination
+
+-- Generation staging belongs to this flow: roof refresh has a separate
+-- remote relocation contract and must not publish these generation helpers.
+local function selectGenerationStagingDestination(layout, bounds)
+    if type(layout) ~= "table" or type(bounds) ~= "table"
+        or type(layout.bitmap) ~= "table" then
+        error("RailroaderRVTest: generation staging contract is incomplete")
+    end
+    local originX = ServerUtil.requiredInteger(bounds.managedOriginX,
+        "generation managed origin x")
+    local originY = ServerUtil.requiredInteger(bounds.managedOriginY,
+        "generation managed origin y")
+    local width = ServerUtil.requiredInteger(bounds.managedWidth,
+        "generation managed width")
+    local height = ServerUtil.requiredInteger(bounds.managedHeight,
+        "generation managed height")
+    if width ~= ServerUtil.requiredInteger(layout.bitmap.width, "generation bitmap width")
+        or height ~= ServerUtil.requiredInteger(layout.bitmap.height,
+            "generation bitmap height")
+        or originX ~= ServerUtil.requiredInteger(layout.bitmap.originX,
+            "generation bitmap origin x")
+        or originY ~= ServerUtil.requiredInteger(layout.bitmap.originY,
+            "generation bitmap origin y")
+        or width <= 0 or height <= 0 then
+        error("RailroaderRVTest: generation staging bitmap identity is stale")
+    end
+    local destination = {
+        x = originX + math.floor(width / 2),
+        y = originY + math.floor(height / 2),
+        z = GENERATION_STAGING_Z,
+        purpose = "generation-center",
+    }
+    local worldOk, world = ServerUtil.callGlobal("getWorld")
+    if not worldOk or world == nil then
+        error("RailroaderRVTest: getWorld is unavailable for generation staging")
+    end
+    local validOk, valid = ServerUtil.invoke(world, "isValidSquare", destination.x,
+        destination.y, destination.z)
+    if not validOk or valid ~= true then
+        error("RailroaderRVTest: generation center staging coordinate is illegal")
+    end
+    return destination
+end
+
+local function playerIsAtStagingDestination(player, destination, bounds)
+    local playerOk, positionOrReason = validateAuthoritativePlayer(player)
+    if not playerOk then
+        return false, positionOrReason
+    end
+    if positionOrReason.x ~= destination.x or positionOrReason.y ~= destination.y
+        or positionOrReason.z ~= destination.z then
+        return false, "server player has not reached the relocation destination"
+    end
+    if destination.purpose == "generation-center" then
+        local expectedX = bounds.managedOriginX
+            + math.floor(bounds.managedWidth / 2)
+        local expectedY = bounds.managedOriginY
+            + math.floor(bounds.managedHeight / 2)
+        if destination.z ~= GENERATION_STAGING_Z
+            or destination.x ~= expectedX or destination.y ~= expectedY then
+            return false, "generation staging destination identity is stale"
+        end
+        return true
+    end
+    return false, "generation staging destination identity is stale"
+end
 
 local function validateRequest(module, command, player, args)
     if module ~= COMMAND_MODULE then
@@ -135,20 +202,33 @@ local function relocatePlayerIntoHouse(player, prepared)
     -- Do not advance the manifest here. The client must complete its guard/
     -- room scan and prove the exact target with the token-only final ACK; the
     -- in-memory transaction owns the deadline and rollback.
+    local deadlineTick = Core.tickAdd(ctx.serverTick, RELOCATION_TIMEOUT_TICKS)
+    local stageAdvanced = GenerationTransaction.advanceStage("final-relocation", {
+        boundary = prepared.boundary,
+        finalRelocationSent = true,
+        finalRelocationAcked = false,
+        finalRelocationDeadlineTick = deadlineTick,
+    })
+    if not stageAdvanced then
+        error("RailroaderRVTest: generation transaction stage could not advance")
+    end
     prepared.finalRelocationSent = true
     prepared.finalRelocationAcked = false
     prepared.finalRelocationAckAtTick = nil
-    prepared.finalRelocationDeadlineTick = Core.tickAdd(ctx.serverTick,
-        RELOCATION_TIMEOUT_TICKS)
+    prepared.finalRelocationDeadlineTick = deadlineTick
     prepared.finalDestination = {
         x = x, y = y, z = z,
     }
 end
 
 local function generateForPlayer(player, prepared)
-    if ctx.transactionBusy then
+    if type(GenerationTransaction) ~= "table"
+        or type(GenerationTransaction.advanceStage) ~= "function"
+        or GenerationTransaction.owns(player) ~= true
+        or GenerationTransaction.advanceStage("building") ~= true then
         return false, "generation already in progress"
     end
+    prepared = GenerationTransaction.current()
     if type(prepared) ~= "table" or type(prepared.layout) ~= "table"
         or type(prepared.bounds) ~= "table" or type(prepared.anchor) ~= "table"
         or type(prepared.destination) ~= "table"
@@ -160,16 +240,12 @@ local function generateForPlayer(player, prepared)
         return false, "RailroaderRVTest: same-slot rebuild is refused because "
             .. "the previous generation has no complete undo snapshot"
     end
-    ctx.transactionBusy = true
-    ctx.transactionPlayer = player
     local manifest
     local manifestOk, manifestOrError = pcall(manifestTable)
     if not manifestOk or type(manifestOrError) ~= "table" then
         if Boundary and type(Boundary.clearPlayer) == "function" then
             Boundary.clearPlayer(player)
         end
-        ctx.transactionBusy = false
-        ctx.transactionPlayer = nil
         return false, safeErrorText(manifestOrError)
     end
     manifest = manifestOrError
@@ -178,16 +254,12 @@ local function generateForPlayer(player, prepared)
         if Boundary and type(Boundary.clearPlayer) == "function" then
             Boundary.clearPlayer(player)
         end
-        ctx.transactionBusy = false
-        ctx.transactionPlayer = nil
         return false, Constants.INVALID_RV_DATA
     end
     if manifest.state == "RUNNING" then
         if Boundary and type(Boundary.clearPlayer) == "function" then
             Boundary.clearPlayer(player)
         end
-        ctx.transactionBusy = false
-        ctx.transactionPlayer = nil
         return false, "generation already in progress"
     end
     -- Until the managed clear scope passes its read-only occupancy proof or
@@ -341,14 +413,20 @@ local function generateForPlayer(player, prepared)
                     buildOk = false
                     buildError = finalRelocationError
                 else
-                    prepared.manifest = manifest
-                    prepared.generationCell = cell
-                    prepared.generationRoomOwnershipGuard = roomOwnershipGuard
-                    prepared.generationNumber = generation
-                    -- Keep the process-local transaction alive across the
-                    -- asynchronous client readiness proof. The continuation
-                    -- below is the only path that can commit READY.
-                    return "await-final-relocate"
+                    local stageSaved = GenerationTransaction.advanceStage(
+                        "final-relocation", {
+                            boundary = boundaryOrReason,
+                            generationCell = cell,
+                        })
+                    if not stageSaved then
+                        buildOk = false
+                        buildError = "generation transaction state could not be saved"
+                    else
+                        -- Keep the process-local transaction alive across the
+                        -- asynchronous client readiness proof. The continuation
+                        -- below is the only path that can commit READY.
+                        return "await-final-relocate"
+                    end
                 end
             end
         end
@@ -390,6 +468,9 @@ local function finalizeGenerationAfterRelocate(player, prepared)
         or prepared.finalRelocationSent ~= true
         or prepared.finalRelocationAcked ~= true then
         return false, "final relocation acknowledgement is still pending"
+    end
+    if GenerationTransaction.advanceStage("committing") ~= true then
+        return false, "generation transaction could not enter commit"
     end
     local ok, result = pcall(function()
         local positionOk, position = authoritativePlayerPosition(player)
@@ -444,8 +525,7 @@ local function finalizeGenerationAfterRelocate(player, prepared)
                 .. " reasserted=" .. tostring(reasserted))
             error("final relocation authoritative target is still synchronizing")
         end
-        local manifest = prepared.manifest
-        if type(manifest) ~= "table" then manifest = manifestTable() end
+        local manifest = manifestTable()
         local schemaOk = pcall(requireCurrentManifest, manifest, false)
         if not schemaOk or manifest.state ~= "RUNNING"
             or manifest.phase ~= "FINAL_RELOCATE"
@@ -463,10 +543,11 @@ local function finalizeGenerationAfterRelocate(player, prepared)
             or prepared.finalDestination.z ~= anchorZ then
             error(Constants.INVALID_RV_DATA)
         end
-        local guard = prepared.generationRoomOwnershipGuard
-        if guard then
-            refreshServerRoomOwnershipGuard(guard, "before-commit")
+        if type(refreshGenerationRoomOwnershipGuard) ~= "function" then
+            error("generation room ownership guard service is unavailable")
         end
+        refreshGenerationRoomOwnershipGuard(prepared.rvId,
+            prepared.generation, prepared.bitmapVersion, "before-commit")
         if prepared.railroader ~= nil and not ctx.railroaderCommitHook then
             error("Railroader RV commit hook is unavailable")
         end
@@ -477,7 +558,8 @@ local function finalizeGenerationAfterRelocate(player, prepared)
         setGenerationPhase(manifest, prepared.generation, "COMMITTED")
         manifest.completedAt = math.floor(os.time())
         setManifestState(manifest, "READY")
-        if guard then refreshServerRoomOwnershipGuard(guard, "pre-mapping-commit") end
+        refreshGenerationRoomOwnershipGuard(prepared.rvId,
+            prepared.generation, prepared.bitmapVersion, "pre-mapping-commit")
         local readySchemaOk = pcall(requireCurrentManifest, manifest, false)
         if not readySchemaOk or manifest.state ~= "READY"
             or manifest.phase ~= "COMMITTED" then
@@ -494,28 +576,36 @@ local function finalizeGenerationAfterRelocate(player, prepared)
             if commitResult ~= true then
                 error(commitReason or "Railroader RV mapping commit failed")
             end
-            prepared.commitApplied = true
+            GenerationTransaction.markCommitApplied()
         end
-        prepared.finalizationReady = true
     end)
     if not ok then
         return false, safeErrorText(result)
     end
-    ctx.transactionBusy = false
-    ctx.transactionPlayer = nil
+    if GenerationTransaction.advanceStage("ready") ~= true then
+        return false, "generation transaction could not enter ready"
+    end
     return true
 end
 
 local function queueGeneration(player, authoritativePosition, railroaderData)
-    if ctx.pendingGeneration ~= nil or ctx.transactionBusy then
+    if type(GenerationTransaction) ~= "table"
+        or type(GenerationTransaction.isActive) ~= "function"
+        or GenerationTransaction.isActive() then
         return false, "generation already queued or in progress"
     end
     -- Generation and roof refresh both mutate the current managed scope and
     -- stream the same world region.  The roof group owns the service-wide
     -- mutex until its active/repair/final-return state has fully retired.
-    if ctx.roofRefreshRelocationGroup ~= nil
-        or ctx.roofRefreshGroupFinalReturn ~= nil then
-        return false, "roof refresh refresh is in progress"
+    local roofServer = type(RV) == "table" and RV.Server or nil
+    if type(roofServer) ~= "table"
+        or type(roofServer.isRoofRefreshTransactionActive) ~= "function" then
+        return false, "roof refresh transaction state is unavailable"
+    end
+    local roofMutexOk, roofActive, roofReason = pcall(
+        roofServer.isRoofRefreshTransactionActive)
+    if not roofMutexOk or roofActive ~= false then
+        return false, roofReason or "roof refresh is in progress"
     end
     local identityOk, identityOrReason = playerIdentity(player)
     if not identityOk then
@@ -625,7 +715,14 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         bitmapVersion = transitionBitmapVersion,
     })
     if not utilityReady then return false, utilityReason end
-    ctx.pendingGeneration = {
+    if type(railroaderData) == "table" then
+        -- Keep the complete generation identity on the adapter's asynchronous
+        -- failure/commit payload as well as on the owned transaction record.
+        railroaderData.rvId = tostring(transitionRvId)
+        railroaderData.generation = transitionGeneration
+        railroaderData.bitmapVersion = transitionBitmapVersion
+    end
+    local pending = {
         player = player,
         identity = identityOrReason,
         originalPosition = {
@@ -667,23 +764,20 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         },
         railroader = railroaderData,
     }
-    if type(railroaderData) == "table" then
-        -- Keep the complete generation identity on the adapter's asynchronous
-        -- failure/commit payload as well as on pendingGeneration itself.
-        railroaderData.rvId = tostring(transitionRvId)
-        railroaderData.generation = transitionGeneration
-        railroaderData.bitmapVersion = transitionBitmapVersion
+    local beginOk = GenerationTransaction.begin(player, pending)
+    if not beginOk then
+        return false, "generation transaction could not be acquired"
     end
 
     if not Boundary or type(Boundary.beginTransition) ~= "function" then
-        ctx.pendingGeneration = nil
+        GenerationTransaction.release(token)
         return false, "RV boundary transition service is unavailable"
     end
     local transitionOk, transitionResult = pcall(Boundary.beginTransition,
         player, transitionRvId, transitionGeneration, token, "generation",
         transitionBitmapVersion)
     if not transitionOk or transitionResult ~= true then
-        ctx.pendingGeneration = nil
+        GenerationTransaction.release(token)
         return false, "RV boundary transition could not be armed"
     end
 
@@ -727,7 +821,7 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         if Boundary and type(Boundary.clearPlayer) == "function" then
             pcall(Boundary.clearPlayer, player)
         end
-        ctx.pendingGeneration = nil
+        GenerationTransaction.release(token)
         return false, "server-to-client relocation command failed"
     end
     if not RV.Server.teleportToPosition(player, {
@@ -738,11 +832,11 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         if Boundary and type(Boundary.clearPlayer) == "function" then
             pcall(Boundary.clearPlayer, player)
         end
-        ctx.pendingGeneration = nil
+        GenerationTransaction.release(token)
         return false, "authoritative server relocation failed"
     end
-    ctx.pendingGeneration.relocationLastSentTick = ctx.serverTick
-    ctx.pendingGeneration.relocationRetryAtTick = ctx.serverTick
+    GenerationTransaction.markRelocationSent("temporary", ctx.serverTick,
+        ctx.serverTick)
     print("[RailroaderRVTest] generation queued after relocation player="
         .. identityOrReason.key .. " staging=" .. tostring(stagingDestination.x)
         .. "," .. tostring(stagingDestination.y) .. ","
@@ -756,4 +850,6 @@ ctx.validateRequest = validateRequest
 ctx.generateForPlayer = generateForPlayer
 ctx.finalizeGenerationAfterRelocate = finalizeGenerationAfterRelocate
 ctx.queueGeneration = queueGeneration
+ctx.selectGenerationStagingDestination = selectGenerationStagingDestination
+ctx.playerIsAtStagingDestination = playerIsAtStagingDestination
 end

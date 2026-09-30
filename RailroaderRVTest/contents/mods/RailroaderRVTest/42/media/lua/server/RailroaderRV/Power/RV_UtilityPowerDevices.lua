@@ -14,17 +14,7 @@ local function invoke(target, method, ...)
     return Util.invoke(target, method, ...)
 end
 
-local function identityKey(identity)
-    return tostring(identity.rvId) .. ":" .. tostring(identity.generation)
-        .. ":" .. tostring(identity.bitmapVersion)
-end
-
-local function instanceOf(object, className)
-    local fn = rawget(_G, "instanceof")
-    if type(fn) ~= "function" then return false end
-    local ok, result = pcall(fn, object, className)
-    return ok and result == true
-end
+local instanceOf = Util.classInstance
 
 local function spriteName(object)
     local spriteOk, sprite = invoke(object, "getSprite")
@@ -195,7 +185,8 @@ local function scanSquare(identity, player, x, y, z)
     if sx == nil then return false end
     local objectsOk, objects = pcall(World.squareSnapshot, square)
     if not objectsOk or type(objects) ~= "table" then return false end
-    local key = identityKey(identity)
+    local key = Util.identityKey(identity.rvId,
+        identity.generation, identity.bitmapVersion)
     local cache = caches[key] or {}
     caches[key] = cache
     local prefix = tostring(sx) .. ":" .. tostring(sy) .. ":" .. tostring(sz) .. ":"
@@ -263,7 +254,8 @@ function M.scanAll(identity, record, player)
         local square = squares[i]
         scanSquare(identity, player, square.x, square.y, square.z)
     end
-    local key = identityKey(identity)
+    local key = Util.identityKey(identity.rvId,
+        identity.generation, identity.bitmapVersion)
     scans[key] = { cursor = 1 }
     return true
 end
@@ -271,7 +263,8 @@ end
 function M.scanTick(identity, record, player)
     local squares = interior(record)
     if not squares then return false end
-    local key = identityKey(identity)
+    local key = Util.identityKey(identity.rvId,
+        identity.generation, identity.bitmapVersion)
     local state = scans[key] or { cursor = 1 }
     scans[key] = state
     for _ = 1, P.DEVICE_SCAN_SQUARES_PER_TICK do
@@ -310,7 +303,8 @@ local function resolveDevice(identity, device, player)
 end
 
 function M.refreshStates(identity, player, circuitOn)
-    local cache = caches[identityKey(identity)] or {}
+    local cache = caches[Util.identityKey(identity.rvId,
+        identity.generation, identity.bitmapVersion)] or {}
     for _, device in pairs(cache) do
         local object = resolveDevice(identity, device, player)
         device.resolved = object ~= nil
@@ -327,7 +321,8 @@ function M.refreshStates(identity, player, circuitOn)
 end
 
 function M.resolveCached(identity, player)
-    local cache = caches[identityKey(identity)] or {}
+    local cache = caches[Util.identityKey(identity.rvId,
+        identity.generation, identity.bitmapVersion)] or {}
     for _, device in pairs(cache) do
         device.resolved = resolveDevice(identity, device, player) ~= nil
     end
@@ -335,7 +330,8 @@ end
 
 function M.currentLoadW(identity)
     local total, count = 0, 0
-    local cache = caches[identityKey(identity)] or {}
+    local cache = caches[Util.identityKey(identity.rvId,
+        identity.generation, identity.bitmapVersion)] or {}
     for _, device in pairs(cache) do
         if device.resolved and device.stateKnown and device.lastKnownActive == true then
             total = total + (device.lastKnownPowerW or device.ratedPowerW)
@@ -347,12 +343,16 @@ end
 
 function M.count(identity)
     local count = 0
-    for _ in pairs(caches[identityKey(identity)] or {}) do count = count + 1 end
+    for _ in pairs(caches[Util.identityKey(identity.rvId,
+        identity.generation, identity.bitmapVersion)] or {}) do
+        count = count + 1
+    end
     return count
 end
 
 function M.clear(identity)
-    local key = identityKey(identity)
+    local key = Util.identityKey(identity.rvId,
+        identity.generation, identity.bitmapVersion)
     caches[key] = nil
     scans[key] = nil
 end

@@ -36,10 +36,6 @@ local function call(target, method, ...)
     return true, a, b
 end
 
-local function integer(value)
-    return C.finiteInteger(value)
-end
-
 local function warnOnce(message)
     if warned then return end
     warned = true
@@ -51,29 +47,29 @@ local function isTaggedBoundarySupportWall(object)
     local dataOk, data = call(object, "getModData")
     if not dataOk or type(data) ~= "table" then return false end
     local tag = data.RailroaderRVTest
-    local templateIndex = type(tag) == "table" and integer(tag.templateIndex) or nil
+    local templateIndex = type(tag) == "table" and C.finiteInteger(tag.templateIndex) or nil
     local expected = templateIndex and ProtectionManifest.get(templateIndex) or nil
-    local anchorX = type(tag) == "table" and integer(tag.templateAnchorX) or nil
-    local anchorY = type(tag) == "table" and integer(tag.templateAnchorY) or nil
-    local anchorZ = type(tag) == "table" and integer(tag.templateAnchorZ) or nil
+    local anchorX = type(tag) == "table" and C.finiteInteger(tag.templateAnchorX) or nil
+    local anchorY = type(tag) == "table" and C.finiteInteger(tag.templateAnchorY) or nil
+    local anchorZ = type(tag) == "table" and C.finiteInteger(tag.templateAnchorZ) or nil
     if type(tag) ~= "table" or tag.templateBoundarySupportWall ~= true
         or data.owner ~= C.MOD_ID or tag.owner ~= C.MOD_ID
         or type(data.rvId) ~= "string" or data.rvId == ""
         or data.rvId ~= tag.rvId
-        or integer(data.generation) == nil or integer(data.generation) < 1
-        or integer(data.generation) ~= integer(tag.generation)
-        or integer(data.bitmapVersion) ~= C.BITMAP_VERSION
-        or integer(tag.bitmapVersion) ~= C.BITMAP_VERSION
+        or C.finiteInteger(data.generation) == nil or C.finiteInteger(data.generation) < 1
+        or C.finiteInteger(data.generation) ~= C.finiteInteger(tag.generation)
+        or C.finiteInteger(data.bitmapVersion) ~= C.BITMAP_VERSION
+        or C.finiteInteger(tag.bitmapVersion) ~= C.BITMAP_VERSION
         or data.role ~= tag.role or not boundaryRoles[tag.role]
         or not expected or expected.protectionClass ~= ProtectionManifest.PROHIBITED
-        or integer(tag.protectionClass) ~= expected.protectionClass
-        or integer(tag.templateX) ~= expected.x
-        or integer(tag.templateY) ~= expected.y
-        or integer(tag.templateZ) ~= expected.z
+        or C.finiteInteger(tag.protectionClass) ~= expected.protectionClass
+        or C.finiteInteger(tag.templateX) ~= expected.x
+        or C.finiteInteger(tag.templateY) ~= expected.y
+        or C.finiteInteger(tag.templateZ) ~= expected.z
         or anchorX == nil or anchorY == nil or anchorZ == nil
-        or integer(tag.templateWorldX) ~= anchorX + expected.x
-        or integer(tag.templateWorldY) ~= anchorY + expected.y
-        or integer(tag.templateWorldZ) ~= anchorZ + expected.z
+        or C.finiteInteger(tag.templateWorldX) ~= anchorX + expected.x
+        or C.finiteInteger(tag.templateWorldY) ~= anchorY + expected.y
+        or C.finiteInteger(tag.templateWorldZ) ~= anchorZ + expected.z
         or tag.templateClass ~= "IsoThumpable"
         or expected.class ~= "IsoThumpable"
         or expected.name ~= "Wooden Wall"

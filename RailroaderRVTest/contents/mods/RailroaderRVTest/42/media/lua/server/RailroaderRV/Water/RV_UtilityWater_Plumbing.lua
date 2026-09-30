@@ -5,16 +5,12 @@ local U = require("RailroaderRV/Common/RV_UtilityConstants")
 
 local M = {}
 
-local function invoke(target, method, ...)
-    return Util.invoke(target, method, ...)
-end
-
 local function readState(object)
-    local ok, connected = invoke(object, "getUsesExternalWaterSource")
+    local ok, connected = Util.invoke(object, "getUsesExternalWaterSource")
     if not ok or type(connected) ~= "boolean" then
         return false, U.REASONS.API_ERROR
     end
-    local dataOk, data = invoke(object, "getModData")
+    local dataOk, data = Util.invoke(object, "getModData")
     if not dataOk or type(data) ~= "table" then
         return false, U.REASONS.API_ERROR
     end
@@ -28,7 +24,7 @@ end
 
 local function applyState(object, connected, pipableFlag)
     local accepted = Util.callSucceeded(object, "setUsesExternalWaterSource", connected)
-    local dataOk, data = invoke(object, "getModData")
+    local dataOk, data = Util.invoke(object, "getModData")
     if dataOk and type(data) == "table" then
         data.canBeWaterPiped = pipableFlag
     else

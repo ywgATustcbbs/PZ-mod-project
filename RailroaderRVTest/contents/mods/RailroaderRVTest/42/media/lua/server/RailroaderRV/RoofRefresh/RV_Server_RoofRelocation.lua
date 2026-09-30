@@ -16,10 +16,12 @@ local RELOCATION_TIMEOUT_TICKS = ctx.RELOCATION_TIMEOUT_TICKS
 local ROOF_REFRESH_RETURN_RETRY_TICKS = ctx.ROOF_REFRESH_RETURN_RETRY_TICKS
 local ROOF_RELOCATION_RETRY_TICKS = ctx.ROOF_RELOCATION_RETRY_TICKS
 local ROOF_REFRESH_TEMP_Z = ctx.ROOF_REFRESH_TEMP_Z
+local RELOCATION_MIN_TICKS = ctx.RELOCATION_MIN_TICKS
+local RELOCATION_POST_ACK_TICKS = ctx.RELOCATION_POST_ACK_TICKS
 local notifyFailure = ctx.notifyFailure
 local tryAuthoritativePlayerPosition = ctx.tryAuthoritativePlayerPosition
-local resolveRoofRefreshGroupPlayer = ctx.resolveRoofRefreshGroupPlayer
 local authoritativePlayerPosition = ctx.authoritativePlayerPosition
+local validateAuthoritativePlayer = ctx.validateAuthoritativePlayer
 local playerIdentity = ctx.playerIdentity
 local resolvePendingPlayer = ctx.resolvePendingPlayer
 local roofRefreshPosition = ctx.roofRefreshPosition
@@ -29,7 +31,7 @@ local roofRefreshDestination = ctx.roofRefreshDestination
 local applyRoofRefreshTeleport = ctx.applyRoofRefreshTeleport
 local copyRoofRefreshPosition = ctx.copyRoofRefreshPosition
 local rollbackRoofRefreshRelocation = ctx.rollbackRoofRefreshRelocation
-local function processRoofRefreshRelocationGroup(...) return ctx.processRoofRefreshRelocationGroup(...) end
+local roofRefreshTargetReady = ctx.roofRefreshTargetReady
 
 local function earlierTick(left, right)
     local order = Core.tickCompare(left, right)
@@ -63,6 +65,22 @@ local function roofRefreshGroupMember(group, player, token)
         end
     end
     return nil
+end
+
+local function resolveRoofRefreshGroupPlayer(group, member)
+    local resolved, current, previous = resolvePendingPlayer(member)
+    if not resolved then return false, current end
+    previous = previous or member.player
+    member.player = current
+    if previous ~= nil and previous ~= current then
+        if type(group) == "table" and type(group.allowedPlayers) == "table" then
+            group.allowedPlayers[previous] = nil
+            group.allowedPlayers[current] = true
+        end
+        member.playerReboundAtTick = ctx.serverTick
+        member.relocationNeedsResend = true
+    end
+    return true, current
 end
 
 local function roofRefreshGroupAll(group, field, value)
@@ -192,11 +210,20 @@ end
 -- the complete RV scope can unload and stream back in as one operation.
 function RV.Server.beginRoofRefreshRelocationGroup(request)
     local callOk, result, reason = pcall(function()
+        local server = type(RV) == "table" and RV.Server or nil
+        if type(server) ~= "table"
+            or type(server.isGenerationTransactionActive) ~= "function" then
+            return false, "generation transaction state is unavailable"
+        end
+        local generationStateOk, generationActive = pcall(
+            server.isGenerationTransactionActive)
+        if not generationStateOk or type(generationActive) ~= "boolean" then
+            return false, "generation transaction state is unavailable"
+        end
         if (type(request) ~= "table" or request.phase == "temporary")
             and (ctx.roofRefreshRelocationGroup ~= nil
                 or ctx.roofRefreshGroupFinalReturn ~= nil)
-            or ctx.transactionBusy
-            or ctx.pendingGeneration ~= nil then
+            or generationActive then
             return false, "another RV relocation or generation is in progress"
         end
         if type(request) ~= "table"
@@ -646,11 +673,211 @@ local function keepRoofRefreshTransitionAlive()
     return true
 end
 
+local function roofRefreshRelocationPositionStillSyncing(reason)
+    return reason == "server player has not reached the roof refresh destination"
+        or reason == "server player has no current square after roof refresh relocation"
+        or reason == "server player current square does not match roof refresh destination"
+        or reason == "roof refresh temporary destination cell is not loaded"
+        or reason == "roof refresh temporary destination square is not loaded"
+        or reason == "roof refresh temporary destination is still room geometry"
+end
+
+local function acknowledgeRoofRefreshRelocation(player, token)
+    local group = ctx.roofRefreshRelocationGroup
+    if not group then return false end
+    if type(token) ~= "string" or token == "" then
+        return true, false,
+            "unexpected or malformed roof refresh group acknowledgement"
+    end
+    local member = roofRefreshGroupMember(group, player, token)
+    if not member then
+        return true, false,
+            "unexpected or malformed roof refresh group acknowledgement"
+    end
+    local resolved, playerOrReason = resolveRoofRefreshGroupPlayer(group, member)
+    if not resolved then return true, false, playerOrReason end
+    local identityOk, identityOrReason = playerIdentity(player)
+    if not identityOk or identityOrReason.key ~= member.identityKey then
+        return true, false, identityOk
+            and "acknowledgement sender does not own the group request"
+            or identityOrReason
+    end
+    member.acknowledged = true
+    member.acknowledgedAtTick = ctx.serverTick
+    return true, true
+end
+
+local function processRoofRefreshRelocationGroup()
+    local group = ctx.roofRefreshRelocationGroup
+    if not group then return end
+    -- A live process owns the exact-tick group across a player disconnect.
+    -- Defer all phase work until every stable identity has a live IsoPlayer;
+    -- this avoids converting a reconnect into a failed/cancelled transaction.
+    for i = 1, #(group.members or {}) do
+        local resolved = resolveRoofRefreshGroupPlayer(group,
+            group.members[i])
+        if not resolved then return end
+    end
+    if Core.tickCompare(ctx.serverTick,
+        group.deadlineTick or ctx.serverTick) == 1 then
+        failRoofRefreshRelocationGroup("roof refresh group relocation transaction timed out")
+        return
+    end
+    for i = 1, #(group.members or {}) do
+        local member = group.members[i]
+        if not member.arrived then
+            local resolved, playerOrReason = resolveRoofRefreshGroupPlayer(
+                group, member)
+            if not resolved then
+                return
+            end
+            local stateCallOk, stateOk, stateOrReason = pcall(
+                validateAuthoritativePlayer, playerOrReason)
+            if not stateCallOk then
+                failRoofRefreshRelocationGroup(safeErrorText(stateOk))
+                return
+            end
+            if not stateOk then
+                failRoofRefreshRelocationGroup(stateOrReason)
+                return
+            end
+            local contextCallOk, contextOk, contextOrReason = pcall(
+                currentRoofRefreshContext, playerOrReason, {
+                    rvId = member.rvId, generation = member.generation,
+                    bitmapVersion = member.bitmapVersion,
+                    identityKey = member.identityKey,
+                })
+            if not contextCallOk then
+                contextOrReason = safeErrorText(contextOk)
+                contextOk = false
+            end
+            if not contextOk then
+                failRoofRefreshRelocationGroup(contextOrReason)
+                return
+            end
+            local target = group.phase == "temporary"
+                and group.target or member.target
+            if group.phase == "return" then
+                local exactCallOk, exactPosition =
+                    tryAuthoritativePlayerPosition(playerOrReason)
+                -- The client ACK plus floor/z proof is enough to stop a
+                -- duplicate return packet. If the engine normalized a
+                -- fractional x/y, completeRoofRefreshRelocation reasserts the
+                -- captured float before it releases the lease.
+                local atTarget = exactCallOk and type(exactPosition) == "table"
+                    and math.floor(exactPosition.x) == math.floor(target.x)
+                    and math.floor(exactPosition.y) == math.floor(target.y)
+                    and math.floor(exactPosition.z) == math.floor(target.z)
+                    and exactPosition.z ~= ROOF_REFRESH_TEMP_Z
+                if not atTarget then
+                    local waitLogTick = member.returnTargetLogTick
+                    if not Core.isTick(waitLogTick)
+                        or Core.tickElapsedAtLeast(ctx.serverTick, waitLogTick, 30) then
+                        local positionText = exactCallOk
+                            and type(exactPosition) == "table"
+                            and (tostring(exactPosition.x) .. ","
+                                .. tostring(exactPosition.y) .. ","
+                                .. tostring(exactPosition.z))
+                            or safeErrorText(exactPosition)
+                        print("[RailroaderRVTest] roof refresh group return target wait room="
+                            .. tostring(group.roomKey or "unknown") .. " player="
+                            .. tostring(member.identityKey) .. " position="
+                            .. positionText .. " target=" .. tostring(target.x) .. ","
+                            .. tostring(target.y) .. "," .. tostring(target.z))
+                        member.returnTargetLogTick = Core.getTick()
+                    end
+                    if member.acknowledged == true then
+                        -- A consumed ACK does not authorize a duplicate packet
+                        -- just because a stale PlayerPacket briefly moved the
+                        -- server object back to the remote point.
+                        local moved = applyRoofRefreshTeleport(playerOrReason,
+                            target, false)
+                        member.relocationNeedsResend = not moved
+                        if moved then
+                            exactCallOk, exactPosition =
+                                tryAuthoritativePlayerPosition(playerOrReason)
+                            atTarget = exactCallOk
+                                and type(exactPosition) == "table"
+                                and math.floor(exactPosition.x) == math.floor(target.x)
+                                and math.floor(exactPosition.y) == math.floor(target.y)
+                                and math.floor(exactPosition.z) == math.floor(target.z)
+                                and exactPosition.z ~= ROOF_REFRESH_TEMP_Z
+                        end
+                    else
+                        -- A stale/fallen member without an ACK needs the same
+                        -- return command again, but never once per tick.
+                        member.arrivalConsumed = false
+                        member.completed = false
+                        member.arrived = false
+                        member.relocationNeedsResend = true
+                        if not Core.tickReached(ctx.serverTick,
+                            member.relocationRetryAtTick or { hi32 = 0, lo32 = 0 }) then
+                            -- Wait for the bounded retry cadence below.
+                        elseif type(member.returnPayload) ~= "table" then
+                            failRoofRefreshRelocationGroup(
+                                "roof refresh group return payload is unavailable")
+                            return
+                        else
+                            local sentOk = ServerUtil.callGlobalSucceeded("sendServerCommand",
+                                playerOrReason, COMMAND_MODULE, COMMAND_RELOCATE,
+                                member.returnPayload)
+                            local moved = applyRoofRefreshTeleport(playerOrReason,
+                                target, false)
+                            member.relocationLastSentTick = ctx.serverTick
+                            member.relocationRetryAtTick = Core.tickAdd(
+                                ctx.serverTick, ROOF_RELOCATION_RETRY_TICKS)
+                            if not sentOk or not moved then
+                                member.relocationNeedsResend = true
+                            else
+                                member.relocationNeedsResend = false
+                            end
+                        end
+                    end
+                end
+            end
+            if not member.acknowledged
+                or not Core.tickElapsedAtLeast(ctx.serverTick,
+                    group.queuedAtTick, RELOCATION_MIN_TICKS)
+                or not Core.tickElapsedAtLeast(ctx.serverTick,
+                    member.acknowledgedAtTick or ctx.serverTick,
+                    RELOCATION_POST_ACK_TICKS) then
+                -- Keep waiting for the server's authoritative position proof.
+            else
+                local readyCallOk, ready, readyReason = pcall(
+                    roofRefreshTargetReady, playerOrReason, target,
+                    group.phase, group.allowedPlayers)
+                if not readyCallOk then
+                    readyReason = safeErrorText(ready)
+                    ready = false
+                end
+                if not ready then
+                    if not roofRefreshRelocationPositionStillSyncing(readyReason) then
+                        failRoofRefreshRelocationGroup(readyReason)
+                        return
+                    end
+                else
+                    member.arrived = true
+                    member.arrivedAtTick = ctx.serverTick
+                    print("[RailroaderRVTest] roof refresh group member arrived room="
+                        .. tostring(group.roomKey or "unknown") .. " player="
+                        .. tostring(member.identityKey) .. " phase="
+                        .. tostring(group.phase) .. " target="
+                        .. tostring(target.x) .. "," .. tostring(target.y)
+                        .. "," .. tostring(target.z))
+                end
+            end
+        end
+    end
+end
+
 
 ctx.roofRefreshGroupMatches = roofRefreshGroupMatches
 ctx.roofRefreshGroupMember = roofRefreshGroupMember
+ctx.resolveRoofRefreshGroupPlayer = resolveRoofRefreshGroupPlayer
 ctx.roofRefreshGroupAll = roofRefreshGroupAll
 ctx.failRoofRefreshRelocationGroup = failRoofRefreshRelocationGroup
+ctx.acknowledgeRoofRefreshRelocation = acknowledgeRoofRefreshRelocation
+ctx.processRoofRefreshRelocationGroup = processRoofRefreshRelocationGroup
 ctx.processRoofRefreshGroupFinalReturn = processRoofRefreshGroupFinalReturn
 ctx.keepRoofRefreshTransitionAlive = keepRoofRefreshTransitionAlive
 end

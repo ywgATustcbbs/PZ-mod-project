@@ -100,7 +100,7 @@ local function mapData()
 end
 
 local function markMappingChanged(boundaryChanged)
-    Adapter._mappingEpoch = (Adapter._mappingEpoch or 0) + 1
+    Adapter.advanceMappingEpoch()
     if boundaryChanged ~= false then
         Adapter._boundaryValidationEpoch =
             (Adapter._boundaryValidationEpoch or 0) + 1

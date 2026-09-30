@@ -6,6 +6,24 @@ local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local ProtectionManifest = require("RailroaderRV/RoomTemplate/RV_ProtectionManifest")
 local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
+local Bitmap = require("RailroaderRV/Common/RV_Bitmap")
+
+local function integer(value)
+    local number = ServerUtil.toNumber(value)
+    if type(number) ~= "number" or number ~= number
+        or number <= -math.huge or number >= math.huge
+        or math.floor(number) ~= number then
+        return nil
+    end
+    return number
+end
+
+local function sameIdentity(left, right)
+    return type(left) == "table" and type(right) == "table"
+        and tostring(left.rvId) == tostring(right.rvId)
+        and integer(left.generation) == integer(right.generation)
+        and integer(left.bitmapVersion) == integer(right.bitmapVersion)
+end
 
 local function applyIntegerState(object, state, key, setter, getter)
     local expected = state[key]
@@ -878,6 +896,180 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
     return object
 end
 
+local function generatorObjectTag(object)
+    local data = ServerWorld.objectModData(object)
+    if type(data) ~= "table" then return nil end
+    local nested = data.RailroaderRVTest
+    if type(nested) ~= "table"
+        or data.owner ~= Constants.MOD_ID
+        or nested.owner ~= Constants.MOD_ID
+        or tostring(data.rvId) ~= tostring(nested.rvId)
+        or integer(data.generation) ~= integer(nested.generation)
+        or integer(data.bitmapVersion) ~= integer(nested.bitmapVersion)
+        or data.role ~= nested.role then
+        return nil
+    end
+    return nested
+end
+
+local function isWhitelistedGenerator(object, boundary, manifest)
+    local tag = generatorObjectTag(object)
+    if not tag or not sameIdentity(tag, boundary) or tag.role ~= "generator"
+        or not ServerUtil.classInstance(object, "IsoGenerator") then
+        return false
+    end
+    local anchor = manifest.anchor
+    local xOk, x = ServerUtil.invoke(object, "getX")
+    local yOk, y = ServerUtil.invoke(object, "getY")
+    local zOk, z = ServerUtil.invoke(object, "getZ")
+    return type(anchor) == "table" and xOk and yOk and zOk
+        and integer(x) == integer(anchor.x) + Constants.GENERATOR_OFFSET.x
+        and integer(y) == integer(anchor.y) + Constants.GENERATOR_OFFSET.y
+        and integer(z) == integer(anchor.z) + Constants.GENERATOR_OFFSET.z
+end
+
+local function rollbackEntryGenerator(square, before, boundary, created)
+    local snapshotOk, objects = pcall(ServerWorld.squareSnapshot, square)
+    if not snapshotOk or type(objects) ~= "table" then
+        return false, "generator rollback snapshot failed"
+    end
+    for i = 1, #objects do
+        local object = objects[i]
+        local candidate = object == created
+        if not candidate and not before[object] then
+            local tagOk, tag = pcall(generatorObjectTag, object)
+            local classOk, isGenerator = pcall(ServerUtil.classInstance,
+                object, "IsoGenerator")
+            candidate = tagOk and classOk and tag
+                and sameIdentity(tag, boundary) and tag.role == "generator"
+                and isGenerator == true
+        end
+        if not before[object] and candidate then
+            local removeOk, removeError = pcall(ServerWorld.removeGenericObject,
+                square, object, false)
+            if not removeOk then
+                return false, "generator rollback removal failed: "
+                    .. tostring(removeError)
+            end
+            local containsOk, remains = pcall(ServerWorld.squareContainsObject,
+                square, object)
+            if not containsOk or remains ~= false then
+                return false, "generator rollback removal was not observable"
+            end
+        end
+    end
+    return true
+end
+
+local function ensureGeneratorForEntry(player, record)
+    if not player or type(record) ~= "table" then
+        return false, Constants.INVALID_RV_DATA
+    end
+    local rv = rawget(_G, "RailroaderRV")
+    local server = rv and rv.Server
+    if not server or type(server.validateCurrentRVRecord) ~= "function" then
+        return false, Constants.INVALID_RV_DATA
+    end
+    local gateOk, accepted, manifest = pcall(
+        server.validateCurrentRVRecord, record)
+    if not gateOk or accepted ~= true or type(manifest) ~= "table"
+        or manifest.state ~= "READY" or manifest.phase ~= "COMMITTED"
+        or not sameIdentity(record, manifest)
+        or not sameIdentity(record, record.boundary)
+        or not sameIdentity(record, manifest.boundary)
+        or manifest.templateVersion ~= Constants.CAPTURED_TEMPLATE_VERSION
+        or type(manifest.anchor) ~= "table" then
+        return false, Constants.INVALID_RV_DATA
+    end
+
+    local anchorX, anchorY, anchorZ = integer(manifest.anchor.x),
+        integer(manifest.anchor.y), integer(manifest.anchor.z)
+    if not anchorX or not anchorY or not anchorZ then
+        return false, Constants.INVALID_RV_DATA
+    end
+    local x = anchorX + Constants.GENERATOR_OFFSET.x
+    local y = anchorY + Constants.GENERATOR_OFFSET.y
+    local z = anchorZ + Constants.GENERATOR_OFFSET.z
+    if not Bitmap.containsScope(record.boundary.bitmap, x, y, z) then
+        return false, Constants.INVALID_RV_DATA
+    end
+
+    local cellOk, cell = pcall(ServerWorld.getCellForPlayer, player)
+    if not cellOk or not cell then
+        return false, "current player cell is unavailable for generator entry check"
+    end
+    local chunkOk, chunk = ServerUtil.invoke(cell, "getChunkForGridSquare",
+        x, y, z)
+    if not chunkOk then
+        return false, Constants.INVALID_RV_DATA
+    end
+    if not chunk then
+        -- A nil server chunk is the normal unloaded state after everyone leaves
+        -- the RV. Entry itself causes the RV area to stream back in; do not
+        -- manufacture or inspect squares outside a loaded chunk.
+        return true
+    end
+    local loadedOk, chunkLoaded = pcall(function() return chunk.loaded end)
+    if not loadedOk or type(chunkLoaded) ~= "boolean" then
+        return false, Constants.INVALID_RV_DATA
+    end
+    if not chunkLoaded then return true end
+
+    local squareOk, square = pcall(ServerWorld.getSquare, cell, x, y, z)
+    if not squareOk or not square then
+        return false, "current RV generator square is unavailable"
+    end
+    local snapshotOk, objects = pcall(ServerWorld.squareSnapshot, square)
+    if not snapshotOk or type(objects) ~= "table" then
+        return false, "current RV generator square could not be inspected"
+    end
+
+    local before, present, ambiguous = {}, false, false
+    for i = 1, #objects do
+        local object = objects[i]
+        before[object] = true
+        if isWhitelistedGenerator(object, record.boundary, manifest) then
+            present = true
+        elseif ServerUtil.classInstance(object, "IsoGenerator") then
+            ambiguous = true
+        end
+    end
+    if ambiguous then return false, Constants.INVALID_RV_DATA end
+    if present then return true end
+
+    local createOk, created = pcall(createGenerator, cell, square,
+        Constants.SPRITES.generator.sprite, record.generation,
+        { rvId = record.rvId, bitmapVersion = record.bitmapVersion })
+    if not createOk or not created then
+        local rollbackCallOk, rollbackOk, rollbackReason = pcall(
+            rollbackEntryGenerator, square, before, record.boundary)
+        local failure = "entry generator creation failed: " .. tostring(created)
+        if not rollbackCallOk or not rollbackOk then
+            failure = failure .. "; " .. tostring(rollbackCallOk
+                and rollbackReason or rollbackOk)
+        end
+        return false, failure
+    end
+
+    local verifyOk, attachedAndCurrent = pcall(function()
+        local containsOk, attached = ServerWorld.squareContainsObject(square,
+            created)
+        return containsOk and attached == true
+            and isWhitelistedGenerator(created, record.boundary, manifest)
+    end)
+    if not verifyOk or attachedAndCurrent ~= true then
+        local rollbackCallOk, rollbackOk, rollbackReason = pcall(
+            rollbackEntryGenerator, square, before, record.boundary, created)
+        local failure = "entry generator creation did not persist"
+        if not rollbackCallOk or not rollbackOk then
+            failure = failure .. "; " .. tostring(rollbackCallOk
+                and rollbackReason or rollbackOk)
+        end
+        return false, failure
+    end
+    return true
+end
+
 -- Error objects are not required to be strings in Lua.  Keep diagnostics
 -- useful without allowing a hostile __tostring/debug implementation to
 -- escape the transaction's protected/finalize path.
@@ -888,4 +1080,5 @@ ctx.createWall = createWall
 ctx.createGenerator = createGenerator
 ctx.createCapturedTemplateObject = createCapturedTemplateObject
 ctx.configureCapturedDoorFrame = configureCapturedDoorFrame
+ctx.ensureGeneratorForEntry = ensureGeneratorForEntry
 end

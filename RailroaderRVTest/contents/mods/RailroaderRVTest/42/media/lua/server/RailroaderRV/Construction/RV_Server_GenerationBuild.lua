@@ -16,6 +16,8 @@ local safeErrorText
 local ensureRoofSquare = ctx.ensureRoofSquare
 local createCapturedTemplateObject = ctx.createCapturedTemplateObject
 local createGenerator = ctx.createGenerator
+local ensureGeneratorForEntry = ctx.ensureGeneratorForEntry
+local GenerationTransaction = ctx.GenerationTransaction
 
 safeErrorText = function(err)
     local textOk, text = pcall(tostring, err)
@@ -327,17 +329,16 @@ local function finalizeGeneration(manifest, ok, resultOrError,
                     .. safeErrorText(finalizationFailure) .. ")"
             end
             if Boundary and type(Boundary.clearPlayer) == "function" then
-                if ctx.pendingGeneration then ctx.pendingGeneration.boundaryCleared = true end
-                pcall(Boundary.clearPlayer, ctx.transactionPlayer)
+                local pending = GenerationTransaction.current()
+                if pending then
+                    GenerationTransaction.markBoundaryCleared()
+                    pcall(Boundary.clearPlayer, pending.player)
+                end
             end
             return false, message
         end
         return true, resultOrError
     end)
-    -- This remains the single lock-release point for the synchronous build
-    -- body.  An asynchronous final relocation keeps its own pending record.
-    ctx.transactionBusy = false
-    ctx.transactionPlayer = nil
     if not finalized then
         return false, safeErrorText(finalResult)
     end
@@ -351,6 +352,12 @@ local construction = ConstructionModule.new(ctx, {
     build = rawBuildGeneration,
     setGenerationPhase = setGenerationPhase,
 })
+function construction.ensureGeneratorForEntry(player, record)
+    if type(ensureGeneratorForEntry) ~= "function" then
+        return false, Constants.INVALID_RV_DATA
+    end
+    return ensureGeneratorForEntry(player, record)
+end
 clearGenerationArea = construction.clearCurrentGeneration
 buildGeneration = construction.buildCurrentGeneration
 

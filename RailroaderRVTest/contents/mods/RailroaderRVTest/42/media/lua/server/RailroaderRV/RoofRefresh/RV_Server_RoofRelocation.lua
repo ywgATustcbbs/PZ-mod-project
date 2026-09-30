@@ -34,10 +34,7 @@ local rollbackRoofRefreshRelocation = ctx.rollbackRoofRefreshRelocation
 local roofRefreshTargetReady = ctx.roofRefreshTargetReady
 
 local function earlierTick(left, right)
-    local order = Core.tickCompare(left, right)
-    if order == nil then return nil end
-    local selected = order <= 0 and left or right
-    return { hi32 = selected.hi32, lo32 = selected.lo32 }
+    return left <= right and left or right
 end
 
 local function roofRefreshGroupMatches(group, rvId, generation)
@@ -131,7 +128,7 @@ local function failRoofRefreshRelocationGroup(reason)
         ctx.roofRefreshGroupFinalReturn = {
             group = group,
             attempts = 0,
-            nextTick = Core.tickAdd(ctx.serverTick, 1),
+            nextTick = ctx.serverTick + 1,
         }
     else
     end
@@ -143,8 +140,9 @@ end
 
 local function processRoofRefreshGroupFinalReturn()
     local retry = ctx.roofRefreshGroupFinalReturn
-    if not retry or not Core.tickReached(ctx.serverTick,
-        retry.nextTick or ctx.serverTick) then return end
+    if not retry or ctx.serverTick < (retry.nextTick or ctx.serverTick) then
+        return
+    end
     local group = retry.group
     retry.attempts = (retry.attempts or 0) + 1
     local allReturned = true
@@ -193,8 +191,7 @@ local function processRoofRefreshGroupFinalReturn()
     -- Keep the current-schema identity/context alive and continue bounded-rate
     -- retries until the authoritative object is actually back.  In particular,
     -- do not clear the Boundary lease or drop the group after a finite count.
-    retry.nextTick = Core.tickAdd(ctx.serverTick,
-        ROOF_REFRESH_RETURN_RETRY_TICKS)
+    retry.nextTick = ctx.serverTick + ROOF_REFRESH_RETURN_RETRY_TICKS
     print("[RailroaderRVTest] roof refresh group final return pending room="
         .. tostring(group.roomKey or "unknown") .. " attempt="
         .. tostring(retry.attempts + 1) .. " reason=authoritative-return-required")
@@ -320,8 +317,8 @@ function RV.Server.beginRoofRefreshRelocationGroup(request)
                     return false, failure
                 end
                 member.relocationLastSentTick = ctx.serverTick
-                member.relocationRetryAtTick = Core.tickAdd(ctx.serverTick,
-                    ROOF_RELOCATION_RETRY_TICKS)
+                member.relocationRetryAtTick = ctx.serverTick
+                    + ROOF_RELOCATION_RETRY_TICKS
                 member.relocationNeedsResend = false
             end
             print("[RailroaderRVTest] roof refresh group return queued room="
@@ -401,7 +398,7 @@ function RV.Server.beginRoofRefreshRelocationGroup(request)
 
         ctx.roofRefreshGroupSerial = ctx.roofRefreshGroupSerial + 1
         local token = "roof-refresh-group:" .. rvId .. ":"
-            .. tostring(generation) .. ":" .. Core.formatTick(ctx.serverTick) .. ":"
+            .. tostring(generation) .. ":" .. tostring(ctx.serverTick) .. ":"
             .. tostring(ctx.roofRefreshGroupSerial)
         local group = {
             roomKey = roomKey, rvId = rvId, generation = generation,
@@ -410,7 +407,7 @@ function RV.Server.beginRoofRefreshRelocationGroup(request)
             allowedPlayers = {},
             startedAt = math.floor(os.time()),
             queuedAtTick = ctx.serverTick,
-            deadlineTick = Core.tickAdd(ctx.serverTick, RELOCATION_TIMEOUT_TICKS),
+            deadlineTick = ctx.serverTick + RELOCATION_TIMEOUT_TICKS,
             disconnectStartedTick = nil,
         }
         ctx.roofRefreshRelocationGroup = group
@@ -450,8 +447,8 @@ function RV.Server.beginRoofRefreshRelocationGroup(request)
                 return false, failure
             end
             member.relocationLastSentTick = ctx.serverTick
-            member.relocationRetryAtTick = Core.tickAdd(ctx.serverTick,
-                ROOF_RELOCATION_RETRY_TICKS)
+            member.relocationRetryAtTick = ctx.serverTick
+                + ROOF_RELOCATION_RETRY_TICKS
             member.relocationNeedsResend = false
         end
         print("[RailroaderRVTest] roof refresh group relocation queued room="
@@ -472,8 +469,7 @@ local function keepRoofRefreshFinalReturnAlive(member)
     if not resolved then return end
     member.player = playerOrReason
     local livePlayer = playerOrReason
-    local keepUntil = Core.tickAdd(ctx.serverTick,
-        RELOCATION_POST_ACK_TICKS + 2)
+    local keepUntil = ctx.serverTick + RELOCATION_POST_ACK_TICKS + 2
     if type(Boundary.extendTransition) == "function" then
         local extendCallOk, extended = pcall(Boundary.extendTransition,
             livePlayer, member.token, keepUntil)
@@ -582,13 +578,12 @@ local function keepRoofRefreshTransitionAlive()
             return true
         end
         if group.disconnectStartedTick ~= nil then
-            local paused = Core.tickElapsed(ctx.serverTick,
-                group.disconnectStartedTick)
-            if Core.isTick(paused) and (paused.hi32 > 0 or paused.lo32 > 0) then
-                group.queuedAtTick = Core.tickAdd(
-                    group.queuedAtTick or ctx.serverTick, paused)
-                group.deadlineTick = Core.tickAdd(
-                    group.deadlineTick or ctx.serverTick, paused)
+            local paused = ctx.serverTick - group.disconnectStartedTick
+            if paused > 0 then
+                group.queuedAtTick = (group.queuedAtTick or ctx.serverTick)
+                    + paused
+                group.deadlineTick = (group.deadlineTick or ctx.serverTick)
+                    + paused
             end
             group.disconnectStartedTick = nil
             for i = 1, #(group.members or {}) do
@@ -599,8 +594,7 @@ local function keepRoofRefreshTransitionAlive()
                 end
             end
         end
-        if Core.tickCompare(ctx.serverTick,
-            group.deadlineTick or ctx.serverTick) == 1 then
+        if ctx.serverTick > (group.deadlineTick or ctx.serverTick) then
             failRoofRefreshRelocationGroup("roof refresh group relocation transaction timed out")
             return false
         end
@@ -615,8 +609,8 @@ local function keepRoofRefreshTransitionAlive()
                     group, member)
                 if not resolved then return true end
                 member.player = livePlayer
-                local leaseUntil = Core.tickAdd(ctx.serverTick,
-                    RELOCATION_POST_ACK_TICKS + 2)
+                local leaseUntil = ctx.serverTick
+                    + RELOCATION_POST_ACK_TICKS + 2
                 local boundedUntil = earlierTick(group.deadlineTick, leaseUntil)
                 local extendCallOk, extended = pcall(
                     Boundary.extendTransition, member.player, member.token,
@@ -641,11 +635,11 @@ local function keepRoofRefreshTransitionAlive()
             if member.arrived or member.completed then
                 member.relocationNeedsResend = false
             elseif member.relocationNeedsResend
-                and Core.tickReached(ctx.serverTick,
-                    member.relocationRetryAtTick or { hi32 = 0, lo32 = 0 }) then
+                and ctx.serverTick
+                    >= (member.relocationRetryAtTick or 0) then
                 local resent = resendRoofRefreshMemberPhase(group, member)
-                member.relocationRetryAtTick = Core.tickAdd(ctx.serverTick,
-                    ROOF_RELOCATION_RETRY_TICKS)
+                member.relocationRetryAtTick = ctx.serverTick
+                    + ROOF_RELOCATION_RETRY_TICKS
                 if not resent then
                     -- Keep the same transaction alive and retry at the bounded
                     -- cadence; processRoofRefreshRelocationGroup remains the
@@ -703,8 +697,7 @@ local function processRoofRefreshRelocationGroup()
             group.members[i])
         if not resolved then return end
     end
-    if Core.tickCompare(ctx.serverTick,
-        group.deadlineTick or ctx.serverTick) == 1 then
+    if ctx.serverTick > (group.deadlineTick or ctx.serverTick) then
         failRoofRefreshRelocationGroup("roof refresh group relocation transaction timed out")
         return
     end
@@ -755,8 +748,8 @@ local function processRoofRefreshRelocationGroup()
                     and exactPosition.z ~= ROOF_REFRESH_TEMP_Z
                 if not atTarget then
                     local waitLogTick = member.returnTargetLogTick
-                    if not Core.isTick(waitLogTick)
-                        or Core.tickElapsedAtLeast(ctx.serverTick, waitLogTick, 30) then
+                    if type(waitLogTick) ~= "number"
+                        or (ctx.serverTick - waitLogTick) >= 30 then
                         local positionText = exactCallOk
                             and type(exactPosition) == "table"
                             and (tostring(exactPosition.x) .. ","
@@ -794,8 +787,8 @@ local function processRoofRefreshRelocationGroup()
                         member.completed = false
                         member.arrived = false
                         member.relocationNeedsResend = true
-                        if not Core.tickReached(ctx.serverTick,
-                            member.relocationRetryAtTick or { hi32 = 0, lo32 = 0 }) then
+                        if ctx.serverTick
+                            < (member.relocationRetryAtTick or 0) then
                             -- Wait for the bounded retry cadence below.
                         elseif type(member.returnPayload) ~= "table" then
                             failRoofRefreshRelocationGroup(
@@ -808,8 +801,8 @@ local function processRoofRefreshRelocationGroup()
                             local moved = applyRoofRefreshTeleport(playerOrReason,
                                 target, false)
                             member.relocationLastSentTick = ctx.serverTick
-                            member.relocationRetryAtTick = Core.tickAdd(
-                                ctx.serverTick, ROOF_RELOCATION_RETRY_TICKS)
+                            member.relocationRetryAtTick = ctx.serverTick
+                                + ROOF_RELOCATION_RETRY_TICKS
                             if not sentOk or not moved then
                                 member.relocationNeedsResend = true
                             else
@@ -820,11 +813,11 @@ local function processRoofRefreshRelocationGroup()
                 end
             end
             if not member.acknowledged
-                or not Core.tickElapsedAtLeast(ctx.serverTick,
-                    group.queuedAtTick, RELOCATION_MIN_TICKS)
-                or not Core.tickElapsedAtLeast(ctx.serverTick,
-                    member.acknowledgedAtTick or ctx.serverTick,
-                    RELOCATION_POST_ACK_TICKS) then
+                or (ctx.serverTick - group.queuedAtTick)
+                    < RELOCATION_MIN_TICKS
+                or (ctx.serverTick
+                    - (member.acknowledgedAtTick or ctx.serverTick))
+                    < RELOCATION_POST_ACK_TICKS then
                 -- Keep waiting for the server's authoritative position proof.
             else
                 local readyCallOk, ready, readyReason = pcall(

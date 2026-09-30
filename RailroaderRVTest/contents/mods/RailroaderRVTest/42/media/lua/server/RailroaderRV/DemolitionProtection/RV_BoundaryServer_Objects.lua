@@ -383,10 +383,10 @@ end
 local BuilderActionLedger = { actions = {} }
 
 function BuilderActionLedger.prune(tick)
-    if not Core.isTick(tick) then return false end
+    if type(tick) ~= "number" then return false end
     for key, action in pairs(BuilderActionLedger.actions) do
         local expires = type(action) == "table" and action.expires or nil
-        if not Core.isTick(expires) or Core.tickCompare(tick, expires) == 1 then
+        if type(expires) ~= "number" or tick > expires then
             BuilderActionLedger.actions[key] = nil
         end
     end
@@ -412,7 +412,7 @@ end
 
 function BuilderActionLedger.submit(key, action)
     if type(key) ~= "string" or key == "" or type(action) ~= "table"
-        or not Core.isTick(action.expires) then
+        or type(action.expires) ~= "number" then
         return false
     end
     BuilderActionLedger.actions[key] = action
@@ -485,7 +485,7 @@ function Boundary.onProcessAction(actionName, player, args)
         generation = boundary.generation,
         x = x, y = y, z = z,
         boundary = boundary, footprint = commandArgument(args, "footprint"),
-        expires = Core.tickAdd(Boundary._tick, 2) }
+        expires = Boundary._tick + 2 }
     local axis = commandArgument(args, "axis")
         or commandArgument(args, "edgeAxis")
     if axis ~= "N" and axis ~= "W" and axis ~= "E" and axis ~= "S"

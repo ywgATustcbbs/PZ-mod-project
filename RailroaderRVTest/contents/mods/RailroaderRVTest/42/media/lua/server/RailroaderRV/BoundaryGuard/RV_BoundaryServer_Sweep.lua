@@ -50,16 +50,13 @@ local untrackedOutsideProbeCursor = 0
 
 local function untrackedOutsideProbeDue(identityKey)
     local retryAt = untrackedOutsideProbeDeadlines[identityKey]
-    return not Core.isTick(retryAt)
-        or Core.tickReached(Boundary._tick, retryAt)
+    return type(retryAt) ~= "number"
+        or Boundary._tick >= retryAt
 end
 
 local function deferUntrackedOutsideProbe(identityKey)
-    local retryAt = Core.tickAdd(Boundary._tick,
-        UNTRACKED_OUTSIDE_PROBE_RETRY_TICKS)
-    if Core.isTick(retryAt) then
-        untrackedOutsideProbeDeadlines[identityKey] = retryAt
-    end
+    untrackedOutsideProbeDeadlines[identityKey] = Boundary._tick
+        + UNTRACKED_OUTSIDE_PROBE_RETRY_TICKS
 end
 
 local function onlinePlayersSnapshot()
@@ -87,7 +84,7 @@ local function onlinePlayersSnapshot()
 end
 
 function Boundary.onTick(tick)
-    Boundary._tick = Core.isTick(tick) and tick or Core.getTick()
+    Boundary._tick = tick or Core.getTick()
     if type(Boundary.pruneBuilderActionLedger) == "function" then
         Boundary.pruneBuilderActionLedger(Boundary._tick)
     end

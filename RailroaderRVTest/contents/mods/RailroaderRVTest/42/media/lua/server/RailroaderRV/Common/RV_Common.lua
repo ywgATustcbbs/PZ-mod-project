@@ -133,17 +133,6 @@ local function playerIdentity(player)
     return Common.identityKey(name, onlineId)
 end
 
-local function copyTick(tick)
-    if type(tick) ~= "table" or Common.exactKeys(tick,
-        { hi32 = true, lo32 = true }) ~= true
-        or Common.integer(tick.hi32) == nil or Common.integer(tick.lo32) == nil
-        or tick.hi32 < 0 or tick.hi32 > 4294967295
-        or tick.lo32 < 0 or tick.lo32 > 4294967295 then
-        return nil
-    end
-    return { hi32 = tick.hi32, lo32 = tick.lo32 }
-end
-
 local function playerScopeKey(identity)
     if identity == nil then return "<session>" end
     if type(identity) ~= "table"
@@ -166,12 +155,14 @@ local function playerScopeKey(identity)
     return Common.identityKey(identity.rvId, generation, slotIndex, x, y, z)
 end
 
-function Common.newPlayerPositionCache(clock)
-    if type(clock) ~= "table" or type(clock.getTick) ~= "function"
-        or type(clock.tickAdd) ~= "function"
-        or type(clock.tickReached) ~= "function" then
-        error("RailroaderRV: current Core tick arithmetic is unavailable")
-    end
+-- The logical server tick is only needed by getPlayerPosition when a caller
+-- omits options.now, so resolve the Core owner lazily in that one branch.
+local function currentTick()
+    local Core = require("RailroaderRV/Core/RV_Server_Core")
+    return Core.getTick()
+end
+
+function Common.newPlayerPositionCache()
     local entries = {}
     local cache = {}
 
@@ -196,10 +187,9 @@ function Common.newPlayerPositionCache(clock)
 
     function cache:samplePlayerPosition(player, tick, interval, identity)
         local key = playerIdentity(player)
-        local currentTick = copyTick(tick)
         local sampleInterval = Common.integer(interval)
         local scopeKey = playerScopeKey(identity)
-        if key == nil or currentTick == nil or sampleInterval == nil
+        if key == nil or type(tick) ~= "number" or sampleInterval == nil
             or sampleInterval < 1 or scopeKey == nil then
             return false, "player sample identity or interval is invalid"
         end
@@ -208,17 +198,14 @@ function Common.newPlayerPositionCache(clock)
             entries[key] = nil
             previous = nil
         end
-        if previous ~= nil then
-            local nextSample = clock.tickAdd(previous.tick, sampleInterval)
-            if not clock.tickReached(currentTick, nextSample) then
-                return false, "player sample is not due"
-            end
+        if previous ~= nil and tick - previous.tick < sampleInterval then
+            return false, "player sample is not due"
         end
         local positionOk, position = Common.getPlayerPosition(player)
         if not positionOk then return false, position end
         entries[key] = {
             position = position,
-            tick = currentTick,
+            tick = tick,
             scopeKey = scopeKey,
         }
         return true, { x = position.x, y = position.y, z = position.z }
@@ -228,16 +215,15 @@ function Common.newPlayerPositionCache(clock)
         options = type(options) == "table" and options or {}
         if options.fresh == true then return Common.getPlayerPosition(player) end
         local key = playerIdentity(player)
-        local now = copyTick(options.now or clock.getTick())
+        local now = options.now or currentTick()
         local maxAge = Common.integer(options.maxAge)
         local scopeKey = playerScopeKey(options.identity)
         local entry = key and entries[key] or nil
-        if entry == nil or now == nil or maxAge == nil or maxAge < 0
+        if entry == nil or type(now) ~= "number" or maxAge == nil or maxAge < 0
             or scopeKey == nil or entry.scopeKey ~= scopeKey then
             return false, "fresh player position is required"
         end
-        local expiry = clock.tickAdd(entry.tick, maxAge)
-        if not clock.tickReached(expiry, now) then
+        if now > entry.tick + maxAge then
             return false, "cached player position is stale"
         end
         return true, {

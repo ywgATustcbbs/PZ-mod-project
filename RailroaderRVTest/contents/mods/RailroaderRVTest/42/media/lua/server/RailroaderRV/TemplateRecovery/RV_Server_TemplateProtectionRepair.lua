@@ -38,13 +38,6 @@ end
 
 local configuredDoorFrames = setmetatable({}, { __mode = "k" })
 local repairReportStateByIndex = setmetatable({}, { __mode = "k" })
-local function tickAfter(tick, delta)
-    local result, reason = Core.tickAdd(tick, delta)
-    if result == nil then
-        error("invalid template-repair tick deadline: " .. tostring(reason), 0)
-    end
-    return result
-end
 local function repairReportState(index)
     local state = repairReportStateByIndex[index]
     if not state then
@@ -76,7 +69,7 @@ local function removeTemplateProtectionRepairObject(square, object)
     currentlyRemovingTemplateProtectionObject = object
     local removalRecord = {
         position = position,
-        expiresAt = tickAfter(Core.getTick(), 2),
+        expiresAt = Core.getTick() + 2,
     }
     recentTemplateProtectionRemovals[object] = removalRecord
     recentTemplateProtectionRemovalsByPosition[position] = removalRecord
@@ -144,24 +137,19 @@ end
 
 local function registerTemplateProtectionRemovalTrace()
     if templateProtectionRemovalTraceRegistered then return end
-    local registered, reason = Core.registerEvent(
-        "OnObjectAboutToBeRemoved",
-        "RV.Server.TemplateProtectionRepairRemovalTrace",
+    Core.on("OnObjectAboutToBeRemoved",
         onTemplateProtectionObjectAboutToBeRemoved)
-    if not registered then
-        error("RV Core registration failed: " .. tostring(reason), 0)
-    end
     templateProtectionRemovalTraceRegistered = true
 end
 
 registerTemplateProtectionRemovalTrace()
 
 local function pruneTemplateProtectionRemovalTrace(tick)
-    if not Core.isTick(tick) then return false end
+    if type(tick) ~= "number" then return false end
     for position, removalTrace in pairs(
         recentTemplateProtectionRemovalsByPosition) do
-        if not Core.isTick(removalTrace.expiresAt)
-            or Core.tickCompare(tick, removalTrace.expiresAt) == 1 then
+        if type(removalTrace.expiresAt) ~= "number"
+            or tick > removalTrace.expiresAt then
             recentTemplateProtectionRemovalsByPosition[position] = nil
         end
     end

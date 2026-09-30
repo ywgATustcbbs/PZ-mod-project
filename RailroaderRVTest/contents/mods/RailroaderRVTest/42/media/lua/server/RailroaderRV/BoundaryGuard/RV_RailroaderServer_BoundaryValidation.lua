@@ -19,12 +19,12 @@ local pending = {}
 local CACHE_TTL_TICKS = 60
 local REFRESH_TICKS = 30
 local PREWARM_RETRY_TICKS = 30
-local prewarmAfterTick = { hi32 = 0, lo32 = 0 }
+local prewarmAfterTick = 0
 
 local function invalidate()
     cache = {}
     pending = {}
-    prewarmAfterTick = { hi32 = 0, lo32 = 0 }
+    prewarmAfterTick = 0
 end
 
 local function roofRefreshBoundaryReadAllowed(server, record, identityKey)
@@ -80,9 +80,9 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
     local state = Boundary and Boundary._states
         and Boundary._states[identityKey]
     local transitionActive = state and state.transitionToken ~= nil
-        and Core.isTick(Boundary._tick)
-        and Core.isTick(state.transitionUntil)
-        and Core.tickReached(state.transitionUntil, Boundary._tick)
+        and type(Boundary._tick) == "number"
+        and type(state.transitionUntil) == "number"
+        and state.transitionUntil >= Boundary._tick
     local mappingEpoch = Adapter._boundaryValidationEpoch or 0
     local geometryEpoch = Boundary and Boundary._geometryEpoch or 0
     local now = Adapter._ticks or Core.getTick()
@@ -93,10 +93,9 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
         and type(cached) == "table"
         and cached.mappingEpoch == mappingEpoch
         and cached.geometryEpoch == geometryEpoch
-        and Core.isTick(cached.validatedAtTick)
-        and Core.tickCompare(now, cached.validatedAtTick) >= 0
-        and not Core.tickElapsedAtLeast(now, cached.validatedAtTick,
-            CACHE_TTL_TICKS)
+        and type(cached.validatedAtTick) == "number"
+        and now >= cached.validatedAtTick
+        and (now - cached.validatedAtTick) < CACHE_TTL_TICKS
         and (roofBusy == false
             or roofRefreshGuardRead
                 and roofRefreshBoundaryReadAllowed(server, cached.record,
@@ -215,10 +214,9 @@ local function needsRefresh(identityKey, forceRefresh)
     return type(cached) ~= "table"
         or cached.mappingEpoch ~= (Adapter._boundaryValidationEpoch or 0)
         or cached.geometryEpoch ~= (Boundary and Boundary._geometryEpoch or 0)
-        or not Core.isTick(cached.validatedAtTick)
-        or Core.tickCompare(now, cached.validatedAtTick) < 0
-        or Core.tickElapsedAtLeast(now, cached.validatedAtTick,
-            REFRESH_TICKS)
+        or type(cached.validatedAtTick) ~= "number"
+        or now < cached.validatedAtTick
+        or (now - cached.validatedAtTick) >= REFRESH_TICKS
 end
 
 function Adapter.prewarmCurrentBoundaryPlayer(player, knownMap, forceRefresh)
@@ -234,8 +232,8 @@ function Adapter.prewarmCurrentBoundaryPlayers(knownMap, knownPlayers)
     local generationBusy, roofBusy = serverTransactionMutexStatus()
     if generationBusy ~= false or type(roofBusy) ~= "boolean" then return false end
     local now = Adapter._ticks or Core.getTick()
-    if Core.tickCompare(now, prewarmAfterTick) < 0 then return false end
-    prewarmAfterTick = Core.tickAdd(now, PREWARM_RETRY_TICKS)
+    if now < prewarmAfterTick then return false end
+    prewarmAfterTick = now + PREWARM_RETRY_TICKS
     local candidates = knownPlayers
     if type(candidates) ~= "table" then
         candidates = {}

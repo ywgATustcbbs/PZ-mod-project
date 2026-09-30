@@ -360,7 +360,7 @@ end
 -- Return only the activity facts needed by TemplateRecovery. Callers do not
 -- receive Boundary's mutable player-state tables or lease field layout.
 function Boundary.transitionActivitySnapshot(tick)
-    if not Core.isTick(tick) or type(Boundary._states) ~= "table" then
+    if type(tick) ~= "number" or type(Boundary._states) ~= "table" then
         return false, "boundary transition state unavailable"
     end
     local activity = {}
@@ -368,8 +368,8 @@ function Boundary.transitionActivitySnapshot(tick)
         if type(state) == "table" then
             local key = transitionIdentityKey(state.rvId, state.generation)
             local transitionUntil = state.transitionUntil
-            local inWindow = Core.isTick(transitionUntil)
-                and Core.tickReached(transitionUntil, tick)
+            local inWindow = type(transitionUntil) == "number"
+                and transitionUntil >= tick
             if key and inWindow then
                 local snapshot = activity[key]
                 if not snapshot then
@@ -436,8 +436,8 @@ function Boundary.beginTransition(player, rvId, generation, token, kind)
     state.generation = integer(generation)
     state.transitionToken = type(token) == "string" and token or nil
     state.transitionKind = kind or "relocation"
-    state.transitionUntil = Core.tickAdd(Boundary._tick,
-        integer(C.BOUNDARY_TRANSITION_TIMEOUT_TICKS) or 120)
+    state.transitionUntil = Boundary._tick
+        + (integer(C.BOUNDARY_TRANSITION_TIMEOUT_TICKS) or 120)
     state.validationRefreshTick = nil
     notifyTransitionLifecycle("begin", player, state)
     return true
@@ -449,7 +449,7 @@ function Boundary.completeTransition(player, token)
     if token ~= nil and state.transitionToken ~= token then return false end
     state.transitionToken = nil
     state.transitionKind = nil
-    state.transitionUntil = Core.tickAdd(Boundary._tick, 2)
+    state.transitionUntil = Boundary._tick + 2
     notifyTransitionLifecycle("complete", player, state)
     return true
 end
@@ -466,11 +466,10 @@ function Boundary.extendTransition(player, token, untilTick)
         or state.transitionToken ~= token then
         return false
     end
-    if not Core.isTick(untilTick) then return false end
-    local order = Core.isTick(state.transitionUntil)
-        and Core.tickCompare(untilTick, state.transitionUntil) or 1
-    if order == nil or order > 0 then
-        state.transitionUntil = { hi32 = untilTick.hi32, lo32 = untilTick.lo32 }
+    if type(untilTick) ~= "number" then return false end
+    if type(state.transitionUntil) ~= "number"
+        or untilTick > state.transitionUntil then
+        state.transitionUntil = untilTick
     end
     return true
 end
@@ -487,8 +486,8 @@ end
 
 local function transitionActive(state)
     if not state or not state.transitionToken then return false end
-    if Core.isTick(state.transitionUntil)
-        and Core.tickReached(state.transitionUntil, Boundary._tick) then
+    if type(state.transitionUntil) == "number"
+        and state.transitionUntil >= Boundary._tick then
         return true
     end
     state.transitionToken, state.transitionKind, state.transitionUntil = nil, nil, nil
@@ -551,9 +550,8 @@ local function guardContextForPlayer(player, position, knownIdentity,
     local refreshTicks = integer(C.BOUNDARY_SNAPSHOT_REFRESH_TICKS) or 60
     local previousRefreshTick = priorState and priorState.validationRefreshTick
     local forceValidationRefresh = priorState ~= nil
-        and (not Core.isTick(previousRefreshTick)
-            or Core.tickElapsedAtLeast(Boundary._tick, previousRefreshTick,
-                refreshTicks))
+        and (type(previousRefreshTick) ~= "number"
+            or (Boundary._tick - previousRefreshTick) >= refreshTicks)
     local boundary, record, relation, id = Boundary.boundaryForPlayer(player,
         knownIdentity, deferValidationMiss, forceValidationRefresh, false, true)
     if not boundary then

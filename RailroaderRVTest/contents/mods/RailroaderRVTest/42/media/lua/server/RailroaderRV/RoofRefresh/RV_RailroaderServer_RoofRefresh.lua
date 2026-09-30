@@ -160,9 +160,8 @@ local function processStatelessRelocationSentinel()
         if identityKey then
             present[identityKey] = true
             if candidate and not relocationSentinelBusy[identityKey] then
-                local untilTick = relocationSentinelCooldown[identityKey]
-                    or { hi32 = 0, lo32 = 0 }
-                if Core.tickReached(now, untilTick) then
+                local untilTick = relocationSentinelCooldown[identityKey] or 0
+                if now >= untilTick then
                     local claimed = sentinelClaimState(server, identityKey)
                     if claimed == nil then
                         sentinelWarn(identityKey, C.INVALID_RV_DATA)
@@ -181,8 +180,8 @@ local function processStatelessRelocationSentinel()
                             local claimedAfter = sentinelClaimState(server,
                                 identityKey)
                             relocationSentinelBusy[identityKey] = nil
-                            relocationSentinelCooldown[identityKey] = Core.tickAdd(now,
-                                RELOCATION_SENTINEL_RETRY_COOLDOWN_TICKS or 10)
+                            relocationSentinelCooldown[identityKey] = now
+                                + (RELOCATION_SENTINEL_RETRY_COOLDOWN_TICKS or 10)
                             if claimedAfter == nil then
                                 sentinelWarn(identityKey, C.INVALID_RV_DATA)
                             elseif claimedAfter ~= false then
@@ -366,9 +365,9 @@ scheduleRoofRefresh = function(map, record, source, eventKey, coordinateKey)
         generation = integer(record.generation),
         identityKey = players[1].identityKey,
         returnPosition = players[1].originalPosition,
-        startTick = Core.tickAdd(now, 1),
-        queuedDeadlineTick = Core.tickAdd(now,
-            ROOF_REFRESH_QUEUED_DEADLINE_TICKS),
+        startTick = now + 1,
+        queuedDeadlineTick = now
+            + ROOF_REFRESH_QUEUED_DEADLINE_TICKS,
         dueTicks = nil,
         nextAttempt = 1,
         relocationStarted = false,
@@ -389,7 +388,7 @@ scheduleRoofRefresh = function(map, record, source, eventKey, coordinateKey)
     end
     print("[RailroaderRVTest] roof refresh scheduled room=" .. roomKey
         .. " source=" .. tostring(source or "room-transition")
-        .. " relocationStartTick=" .. Core.formatTick(Core.tickAdd(now, 1))
+        .. " relocationStartTick=" .. tostring(now + 1)
         .. " attempts=" .. tostring(ROOF_REFRESH_ATTEMPTS)
         .. " delayTicks=" .. tostring(ROOF_REFRESH_DELAY_TICKS))
     return true
@@ -420,8 +419,8 @@ local function rememberFollowUpWallRemoval(record, roomKey, eventKey,
         eventKey = eventKey,
         coordinateKey = coordinateKey,
         waitingForGeneration = waitingForGeneration == true,
-        expiresAtTick = Core.tickAdd(now or Adapter._ticks or Core.getTick(),
-            WALL_REMOVAL_FOLLOWUP_TICKS),
+        expiresAtTick = (now or Adapter._ticks or Core.getTick())
+            + WALL_REMOVAL_FOLLOWUP_TICKS,
     }
     print("[RailroaderRVTest] wall removal follow-up queued room=" .. roomKey
         .. " event=" .. eventKey)
@@ -435,14 +434,13 @@ local function pauseFollowUpWallRemovalDeadlines(now)
         break
     end
     if not hasFollowUpEvents then return end
-    now = Core.isTick(now) and now or Adapter._ticks or Core.getTick()
+    now = now or Adapter._ticks or Core.getTick()
     for _, events in pairs(followUpWallRemovalEvents) do
         if type(events) == "table" then
             for _, event in pairs(events) do
                 local expiresAt = type(event) == "table"
                     and event.expiresAtTick or nil
-                if Core.isTick(expiresAt)
-                    and Core.tickReached(expiresAt, now) then
+                if type(expiresAt) == "number" and expiresAt >= now then
                     event.waitingForGeneration = true
                 end
             end
@@ -548,8 +546,8 @@ local function queueWallRoofRefreshForObject(object, source)
         seen = seenWallRemovalEvents[coordinateKey]
     end
     if type(seen) == "table" and seen.roomKey == roomKey
-        and Core.isTick(seen.expiresAtTick)
-        and Core.tickReached(seen.expiresAtTick, now) then
+        and type(seen.expiresAtTick) == "number"
+        and seen.expiresAtTick >= now then
         print("[RailroaderRVTest] wall removal event suppressed room="
             .. roomKey .. " source=" .. tostring(source))
         return false
@@ -557,7 +555,7 @@ local function queueWallRoofRefreshForObject(object, source)
     if eventKey ~= nil then
         local seenEvent = {
             roomKey = roomKey,
-            expiresAtTick = Core.tickAdd(now, WALL_REMOVAL_EVENT_DEDUPE_TICKS),
+            expiresAtTick = now + WALL_REMOVAL_EVENT_DEDUPE_TICKS,
         }
         seenWallRemovalEvents[eventKey] = seenEvent
         if coordinateKey then seenWallRemovalEvents[coordinateKey] = seenEvent end

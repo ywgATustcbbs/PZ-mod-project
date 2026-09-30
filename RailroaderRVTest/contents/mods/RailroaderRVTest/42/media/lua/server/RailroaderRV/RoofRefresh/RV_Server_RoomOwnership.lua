@@ -1,6 +1,5 @@
 -- RV_Server: RoomOwnership responsibilities.
 return function(ctx)
-local Core = ctx.Core
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
@@ -28,14 +27,6 @@ local ROOM_OWNERSHIP_RECHECK_DELAYS = { 1, 5, 15, 30 }
 -- The server checks authoritative players' current squares each tick and
 -- supplements that with a lower-frequency 3x3 neighborhood probe.
 local ROOM_OWNERSHIP_3X3_INTERVAL_TICKS = 120
-
-local function tickAfter(tick, delta)
-    local result, reason = Core.tickAdd(tick, delta)
-    if result == nil then
-        error("invalid room-ownership tick deadline: " .. tostring(reason), 0)
-    end
-    return result
-end
 
 local function notifyFailure(player, reason)
     if not player then return end
@@ -206,8 +197,7 @@ local function scheduleRoomOwnershipScan(guard, cell)
     if guard.scanSeriesActive then return end
     guard.scanSeriesActive = true
     guard.scanSeriesStep = 1
-    guard.scanDueTick = tickAfter(ctx.serverTick,
-        ROOM_OWNERSHIP_RECHECK_DELAYS[1])
+    guard.scanDueTick = ctx.serverTick + ROOM_OWNERSHIP_RECHECK_DELAYS[1]
 end
 
 local function requestRoomOwnershipScan(object, includeOutcome)
@@ -265,7 +255,7 @@ local function onlinePlayersSnapshot()
 end
 
 local function authoritativePlayerCoordinates(player)
-    if Core.isTick(ctx.serverTick)
+    if type(ctx.serverTick) == "number"
         and type(ctx.samplePlayerPosition) == "function"
         and type(ctx.getPlayerPosition) == "function" then
         local sampled, positionOrReason = ctx.samplePlayerPosition(player,
@@ -476,8 +466,8 @@ local function registerServerRoomOwnershipGuard(generation, player, oldBounds,
         scanSeriesActive = false,
         scanSeriesStep = 0,
         scanDueTick = nil,
-        nextNeighborhoodProbeTick = tickAfter(ctx.serverTick,
-            ROOM_OWNERSHIP_3X3_INTERVAL_TICKS),
+        nextNeighborhoodProbeTick = ctx.serverTick
+            + ROOM_OWNERSHIP_3X3_INTERVAL_TICKS,
     }
     guard.key = roomOwnershipGuardKey(guard.rvId, guard.generation)
     roomOwnershipGuards[guard.key] = guard
@@ -558,12 +548,12 @@ local function processServerRoomOwnershipGuards()
     for generation, guard in pairs(roomOwnershipGuards) do
         guard.ticks = guard.ticks + 1
         local nextNeighborhoodProbeTick = guard.nextNeighborhoodProbeTick
-        local due = not Core.isTick(nextNeighborhoodProbeTick)
-            or Core.tickReached(ctx.serverTick, nextNeighborhoodProbeTick)
+        local due = type(nextNeighborhoodProbeTick) ~= "number"
+            or ctx.serverTick >= nextNeighborhoodProbeTick
         neighborhoodDue[guard] = due
         if due then
-            guard.nextNeighborhoodProbeTick = tickAfter(ctx.serverTick,
-                ROOM_OWNERSHIP_3X3_INTERVAL_TICKS)
+            guard.nextNeighborhoodProbeTick = ctx.serverTick
+                + ROOM_OWNERSHIP_3X3_INTERVAL_TICKS
         end
     end
     if not snapshotOk then
@@ -586,8 +576,8 @@ local function processServerRoomOwnershipGuards()
     local finished = {}
     for generation, guard in pairs(roomOwnershipGuards) do
         if guard.scanSeriesActive
-            and (not Core.isTick(guard.scanDueTick)
-                or Core.tickReached(ctx.serverTick, guard.scanDueTick)) then
+            and (type(guard.scanDueTick) ~= "number"
+                or ctx.serverTick >= guard.scanDueTick) then
             local ok, clearedOrError = pcall(refreshServerRoomOwnershipGuard, guard, nil)
             if not ok then
                 guard.stableSinceTick = nil
@@ -600,7 +590,7 @@ local function processServerRoomOwnershipGuards()
             guard.scanSeriesStep = guard.scanSeriesStep + 1
             local nextDelay = ROOM_OWNERSHIP_RECHECK_DELAYS[guard.scanSeriesStep]
             if nextDelay ~= nil then
-                guard.scanDueTick = tickAfter(ctx.serverTick, nextDelay)
+                guard.scanDueTick = ctx.serverTick + nextDelay
             else
                 guard.scanSeriesActive = false
                 guard.scanSeriesStep = 0
@@ -615,8 +605,8 @@ local function processServerRoomOwnershipGuards()
             finished[#finished + 1] = generation
         elseif guard.ticks >= ROOM_OWNERSHIP_MIN_TICKS
             and not guard.scanSeriesActive and guard.stableSinceTick ~= nil
-            and Core.tickElapsedAtLeast(ctx.serverTick,
-                guard.stableSinceTick, ROOM_OWNERSHIP_STABLE_TICKS) then
+            and (ctx.serverTick - guard.stableSinceTick)
+                >= ROOM_OWNERSHIP_STABLE_TICKS then
             print("[RailroaderRVTest] room ownership guard complete generation="
                 .. tostring(generation) .. " cleared=" .. tostring(guard.totalCleared))
             finished[#finished + 1] = generation

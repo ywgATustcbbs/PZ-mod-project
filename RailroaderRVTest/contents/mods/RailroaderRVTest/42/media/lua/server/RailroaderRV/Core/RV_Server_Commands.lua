@@ -214,13 +214,9 @@ function RV.Server.OnTick(tick)
     end
     resumeGenerationAfterDisconnect(pending)
     pending = GenerationTransaction.current() or pending
-    if not Core.isTick(pending.queuedAtTick) then
-        cancelPending("generation transaction has an invalid queued tick")
-        return
-    end
     if pending.finalRelocationSent ~= true
-        and Core.tickElapsedAtLeast(ctx.serverTick, pending.queuedAtTick,
-            RELOCATION_TIMEOUT_TICKS + 1) then
+        and (ctx.serverTick - pending.queuedAtTick)
+            >= RELOCATION_TIMEOUT_TICKS + 1 then
         cancelPending("relocation acknowledgement timed out before world mutation")
         return
     end
@@ -246,14 +242,14 @@ function RV.Server.OnTick(tick)
     end
     if pending.finalRelocationSent == true then
         if not pending.finalRelocationAcked then
-            if Core.tickCompare(ctx.serverTick,
-                pending.finalRelocationDeadlineTick or ctx.serverTick) == 1 then
+            if ctx.serverTick
+                > (pending.finalRelocationDeadlineTick or ctx.serverTick) then
                 cancelPending("final relocation acknowledgement timed out")
             end
             return
         end
-        if Core.tickCompare(ctx.serverTick,
-            pending.finalRelocationDeadlineTick or ctx.serverTick) == 1 then
+        if ctx.serverTick
+            > (pending.finalRelocationDeadlineTick or ctx.serverTick) then
             cancelPending("final relocation target synchronization timed out")
             return
         end
@@ -276,10 +272,9 @@ function RV.Server.OnTick(tick)
         return
     end
     if not pending.acknowledged
-        or not Core.tickElapsedAtLeast(ctx.serverTick, pending.queuedAtTick,
-            RELOCATION_MIN_TICKS)
-        or not Core.tickElapsedAtLeast(ctx.serverTick,
-            pending.acknowledgedAtTick, RELOCATION_POST_ACK_TICKS) then
+        or (ctx.serverTick - pending.queuedAtTick) < RELOCATION_MIN_TICKS
+        or (ctx.serverTick - pending.acknowledgedAtTick)
+            < RELOCATION_POST_ACK_TICKS then
         return
     end
     local atStaging, stagingReason = playerIsAtStagingDestination(playerOrReason,
@@ -407,24 +402,14 @@ function RV.Server.OnClientCommand(module, command, player, args)
     end
 end
 
-local function requireCoreRegistration(ok, reason)
-    if not ok then
-        error("RV Core registration failed: " .. tostring(reason), 0)
-    end
-end
-
-requireCoreRegistration(Core.registerCommand("*", RV.Server.OnClientCommand))
-requireCoreRegistration(Core.registerTick("RV.Server", 1, RV.Server.OnTick))
+Core.onCommand("*", RV.Server.OnClientCommand)
+Core.onTick(RV.Server.OnTick)
 if Boundary then
-    requireCoreRegistration(Core.registerEvent("OnProcessAction",
-        "RV.Server.BoundaryOnProcessAction", Boundary.onProcessAction))
-    requireCoreRegistration(Core.registerEvent("OnObjectAdded",
-        "RV.Server.BoundaryOnObjectAdded", Boundary.onObjectAdded))
+    Core.on("OnProcessAction", Boundary.onProcessAction)
+    Core.on("OnObjectAdded", Boundary.onObjectAdded)
 end
-requireCoreRegistration(Core.registerEvent("OnObjectAboutToBeRemoved",
-    "RV.Server.RoomOwnershipRemovalScan", requestRoomOwnershipRemovalScan))
-requireCoreRegistration(Core.registerEvent("OnObjectAdded",
-    "RV.Server.RoomOwnershipScan", requestRoomOwnershipScan))
+Core.on("OnObjectAboutToBeRemoved", requestRoomOwnershipRemovalScan)
+Core.on("OnObjectAdded", requestRoomOwnershipScan)
 
 -- Load after RV.Server has been fully constructed.  The adapter is intentionally
 -- a separate file so the generic generation transaction remains readable and

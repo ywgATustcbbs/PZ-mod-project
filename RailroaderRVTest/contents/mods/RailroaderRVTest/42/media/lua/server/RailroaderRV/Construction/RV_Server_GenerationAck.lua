@@ -194,8 +194,7 @@ local function rollbackPendingGenerationWorld(pending, reason)
         or pending.rollbackApplied == true then
         return true
     end
-    if not Core.tickReached(ctx.serverTick,
-        pending.rollbackWorldRetryAtTick or { hi32 = 0, lo32 = 0 }) then
+    if ctx.serverTick < (pending.rollbackWorldRetryAtTick or 0) then
         return false
     end
     local cell = pending.generationCell
@@ -217,7 +216,7 @@ local function rollbackPendingGenerationWorld(pending, reason)
         pending.bounds, pending.generation, pending.rvId)
     if not rollbackOk then
         GenerationTransaction.rollback("world-retry",
-            Core.tickAdd(ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS))
+            ctx.serverTick + GENERATION_RELOCATION_RETRY_TICKS)
         print("[RailroaderRVTest] final relocation rollback failed: "
             .. safeErrorText(rollbackReason))
         return false
@@ -250,8 +249,8 @@ local function cancelPending(reason)
     pending = GenerationTransaction.current() or pending
     if pending.boundaryCleared ~= true
         and not rearmGenerationTransition(pending, livePlayer, "generation") then
-        GenerationTransaction.rollback("return-retry", Core.tickAdd(
-            ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS))
+        GenerationTransaction.rollback("return-retry",
+            ctx.serverTick + GENERATION_RELOCATION_RETRY_TICKS)
         return
     end
     if pending.finalRelocationSent == true and pending.rollbackApplied ~= true then
@@ -269,20 +268,19 @@ local function cancelPending(reason)
         if type(original) ~= "table" then
             return
         end
-        if not Core.tickReached(ctx.serverTick,
-            pending.rollbackRetryAtTick or { hi32 = 0, lo32 = 0 }) then
+        if ctx.serverTick < (pending.rollbackRetryAtTick or 0) then
             return
         end
         local returned = resendGenerationPhase(pending, livePlayer, "rollback")
-        GenerationTransaction.rollback("return-retry", Core.tickAdd(
-            ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS))
+        GenerationTransaction.rollback("return-retry",
+            ctx.serverTick + GENERATION_RELOCATION_RETRY_TICKS)
         if not returned then
             return
         end
         local afterOk, after = authoritativePlayerPosition(livePlayer)
         if not afterOk or not relocationPositionsEqual(after, original) then
-            GenerationTransaction.rollback("return-retry", Core.tickAdd(
-                ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS))
+            GenerationTransaction.rollback("return-retry",
+                ctx.serverTick + GENERATION_RELOCATION_RETRY_TICKS)
             return
         end
     end
@@ -292,8 +290,8 @@ local function cancelPending(reason)
         local completeOk, complete = pcall(Boundary.completeTransition,
             livePlayer, pending.token)
         if not completeOk or complete ~= true then
-            GenerationTransaction.rollback("return-retry", Core.tickAdd(
-                ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS))
+            GenerationTransaction.rollback("return-retry",
+                ctx.serverTick + GENERATION_RELOCATION_RETRY_TICKS)
             return
         end
     end

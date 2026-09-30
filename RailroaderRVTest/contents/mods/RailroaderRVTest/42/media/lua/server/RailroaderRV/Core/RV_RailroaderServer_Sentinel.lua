@@ -266,8 +266,8 @@ roofRefreshTransactionBlocks = function(rvId)
                 return true, C.INVALID_RV_DATA
             end
             local expiresAt = event.expiresAtTick
-            if not Core.isTick(expiresAt) then return true, C.INVALID_RV_DATA end
-            if Core.tickCompare(Adapter._ticks or Core.getTick(), expiresAt) <= 0 then
+            if type(expiresAt) ~= "number" then return true, C.INVALID_RV_DATA end
+            if (Adapter._ticks or Core.getTick()) <= expiresAt then
                 return true, "roof refresh refresh is in progress (rvId="
                     .. tostring(event.rvId or "unknown") .. ")"
             end

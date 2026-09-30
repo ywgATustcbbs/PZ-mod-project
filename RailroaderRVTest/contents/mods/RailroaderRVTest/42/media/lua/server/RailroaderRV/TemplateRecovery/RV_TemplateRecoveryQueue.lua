@@ -30,14 +30,6 @@ if type(Boundary) ~= "table"
     error("RailroaderRVTest: template-recovery queue dependencies are incomplete")
 end
 
-local function tickAfter(tick, delta)
-    local result, reason = Core.tickAdd(tick, delta)
-    if result == nil then
-        error("invalid template-repair tick deadline: " .. tostring(reason), 0)
-    end
-    return result
-end
-
 local function clearQueuedIdentity(identityKey)
     if type(identityKey) ~= "string" then return end
     queues[identityKey] = nil
@@ -47,10 +39,10 @@ end
 local function isIdentityPaused(identityKey, tick)
     if type(identityKey) ~= "string" then return false end
     if previousActiveTransitions[identityKey] == true then return true end
-    if not Core.isTick(tick) then return false end
+    if type(tick) ~= "number" then return false end
     local untilTick = transitionPauseUntil[identityKey]
-    if not Core.isTick(untilTick) then return false end
-    if Core.tickReached(untilTick, tick) then return true end
+    if type(untilTick) ~= "number" then return false end
+    if untilTick >= tick then return true end
     transitionPauseUntil[identityKey] = nil
     return false
 end
@@ -102,18 +94,17 @@ local function observeBoundaryTransitions(tick)
     for key in pairs(previousActiveTransitions) do
         if not activeIdentities[key] then
             previousActiveTransitions[key] = nil
-            transitionPauseUntil[key] = tickAfter(tick,
-                transitionReturnGraceTicks)
+            transitionPauseUntil[key] = tick + transitionReturnGraceTicks
             clearQueuedIdentity(key)
         end
     end
 
     for key in pairs(recentlyCompleted) do
         if not activeIdentities[key] then
-            local requestedUntil = tickAfter(tick, transitionReturnGraceTicks)
+            local requestedUntil = tick + transitionReturnGraceTicks
             local previousUntil = transitionPauseUntil[key]
-            if not Core.isTick(previousUntil)
-                or Core.tickCompare(requestedUntil, previousUntil) == 1 then
+            if type(previousUntil) ~= "number"
+                or requestedUntil > previousUntil then
                 transitionPauseUntil[key] = requestedUntil
             end
             clearQueuedIdentity(key)
@@ -124,8 +115,7 @@ local function observeBoundaryTransitions(tick)
         previousActiveTransitions[key] = true
     end
     for key, untilTick in pairs(transitionPauseUntil) do
-        if not Core.isTick(untilTick)
-            or Core.tickCompare(tick, untilTick) == 1 then
+        if type(untilTick) ~= "number" or tick > untilTick then
             transitionPauseUntil[key] = nil
         end
     end
@@ -147,13 +137,7 @@ local function onBoundaryTransitionLifecycle(eventName, _, identity, tick)
     if type(identity) ~= "table" then return end
     local key = Index.identityKey(identity.rvId, identity.generation)
     if not key then return end
-    if not Core.isTick(tick) then tick = Core.getTick() end
-    if not Core.isTick(tick) then
-        previousActiveTransitions[key] = true
-        transitionPauseUntil[key] = nil
-        clearQueuedIdentity(key)
-        return
-    end
+    if type(tick) ~= "number" then tick = Core.getTick() end
     if eventName == "begin" then
         previousActiveTransitions[key] = true
         transitionPauseUntil[key] = nil
@@ -170,8 +154,7 @@ local function onBoundaryTransitionLifecycle(eventName, _, identity, tick)
         transitionPauseUntil[key] = nil
     else
         previousActiveTransitions[key] = nil
-        transitionPauseUntil[key] = tickAfter(tick,
-            transitionReturnGraceTicks)
+        transitionPauseUntil[key] = tick + transitionReturnGraceTicks
     end
     clearQueuedIdentity(key)
 end
@@ -320,7 +303,9 @@ local function processQueue(activeBoundaries, tick)
 end
 
 local function onPostPlayerTick(tick, activePlayers, activeBoundaries)
-    if not Core.isTick(tick) then return false, "invalid boundary tick" end
+    if type(tick) ~= "number" then
+        return false, "invalid boundary tick"
+    end
     local observeOk, observeReason = observeBoundaryTransitions(tick)
     if not observeOk then
         print("[RailroaderRVTest] template-protection-repair transition observation skipped: "
@@ -328,7 +313,7 @@ local function onPostPlayerTick(tick, activePlayers, activeBoundaries)
         return false, observeReason
     end
 
-    if Core.tickModulo(sampleInterval) == true
+    if Core.tickModulo(sampleInterval)
         and type(activePlayers) == "table" then
         for i = 1, #activePlayers do
             local item = activePlayers[i]

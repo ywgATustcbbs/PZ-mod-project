@@ -49,7 +49,7 @@ end
 local Constants = loadModule("RailroaderRV/Common/RV_Constants", "RV_Constants")
 local Core = require("RailroaderRV/Core/RV_Server_Core")
 local GenerationTransaction = require(
-    "RailroaderRV/Construction/RV_Server_GenerationTransaction")(Core)
+    "RailroaderRV/Construction/RV_Server_GenerationTransaction")()
 local boundaryLoaded, Boundary = pcall(require, "RailroaderRV/BoundaryGuard/RV_BoundaryServer")
 if not boundaryLoaded or type(Boundary) ~= "table" then
     Boundary = nil
@@ -75,7 +75,7 @@ local ServerWorld = require("RailroaderRV/Common/RV_ServerWorld")
 local ServerSchema = require("RailroaderRV/Common/RV_ServerSchema")
 local UtilityServer = require("RailroaderRV/Core/RV_UtilityServer")
 local Common = require("RailroaderRV/Common/RV_Common")
-local playerPositionCache = Common.newPlayerPositionCache(Core)
+local playerPositionCache = Common.newPlayerPositionCache()
 
 -- A wall-removal refresh relocates every authoritative player in the current
 -- RV scope as one transaction.  The target is derived from the current

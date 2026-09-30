@@ -201,11 +201,7 @@ local function resumeGenerationAfterDisconnect(pending)
         or pending.disconnectStartedTick == nil then
         return
     end
-    local paused = Core.tickElapsed(ctx.serverTick,
-        pending.disconnectStartedTick)
-    if not Core.isTick(paused) then
-        return
-    end
+    local paused = ctx.serverTick - pending.disconnectStartedTick
     -- Do not let a missing IsoPlayer consume the normal transaction timeout.
     -- The in-memory owner remains live until this identity reconnects.
     if type(GenerationTransaction) == "table"
@@ -223,8 +219,7 @@ local function rearmGenerationTransition(pending, player, kind)
     if type(token) ~= "string" or token == "" then return false end
     if type(Boundary.extendTransition) == "function" then
         local extendOk, extended = pcall(Boundary.extendTransition, player,
-            token, Core.tickAdd(ctx.serverTick,
-                RELOCATION_POST_ACK_TICKS + 2))
+            token, ctx.serverTick + RELOCATION_POST_ACK_TICKS + 2)
         if extendOk and extended == true then return true end
     end
     if type(Boundary.beginTransition) ~= "function" then return false end
@@ -233,7 +228,7 @@ local function rearmGenerationTransition(pending, player, kind)
     if not beginOk or armed ~= true then return false end
     if type(Boundary.extendTransition) == "function" then
         pcall(Boundary.extendTransition, player, token,
-            Core.tickAdd(ctx.serverTick, RELOCATION_POST_ACK_TICKS + 2))
+            ctx.serverTick + RELOCATION_POST_ACK_TICKS + 2)
     end
     return true
 end
@@ -281,7 +276,7 @@ local function resendGenerationPhase(pending, player, phase)
             return false
         end
         local finalDeadline = pending.finalRelocationDeadlineTick
-            or Core.tickAdd(ctx.serverTick, RELOCATION_TIMEOUT_TICKS)
+            or (ctx.serverTick + RELOCATION_TIMEOUT_TICKS)
         GenerationTransaction.markRelocationSent("final", ctx.serverTick,
             ctx.serverTick, finalDeadline)
         return true
@@ -364,11 +359,10 @@ local function keepGenerationTransitionAlive()
         GenerationTransaction.requestRelocationResend()
     end
     if pending.relocationNeedsResend and not pending.cancelled
-        and Core.tickReached(ctx.serverTick,
-            pending.relocationRetryAtTick or { hi32 = 0, lo32 = 0 }) then
+        and ctx.serverTick >= (pending.relocationRetryAtTick or 0) then
         local resent = resendGenerationPhase(pending, player, phase)
-        GenerationTransaction.scheduleRelocationRetry(Core.tickAdd(
-            ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS), not resent)
+        GenerationTransaction.scheduleRelocationRetry(ctx.serverTick
+            + GENERATION_RELOCATION_RETRY_TICKS, not resent)
     end
     return true
 end

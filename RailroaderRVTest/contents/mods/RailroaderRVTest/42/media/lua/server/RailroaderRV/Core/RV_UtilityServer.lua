@@ -380,20 +380,19 @@ local function syncUtilityMappings()
 end
 
 function M.onTick(tick)
-    if not Core.isTick(tick) then return end
-    if Core.isTick(lastTick) and Core.tickCompare(lastTick, tick) == 0 then
+    if type(tick) ~= "number" then return end
+    if lastTick == tick then
         return
     end
-    lastTick = { hi32 = tick.hi32, lo32 = tick.lo32 }
+    lastTick = tick
     local waterOk, waterAccepted = pcall(Water.onTick)
     if not waterOk or waterAccepted == false then
         print("[RailroaderRVTest] utility water removal reconciliation failed")
     end
-    if Core.tickModulo(30) == true then syncUtilityMappings() end
-    if Core.tickModulo(U.POWER.DEVICE_SCAN_INTERVAL_TICKS) ~= true
-        or (Core.isTick(lastScanTick)
-            and Core.tickCompare(lastScanTick, tick) == 0) then return end
-    lastScanTick = { hi32 = tick.hi32, lo32 = tick.lo32 }
+    if Core.tickModulo(30) then syncUtilityMappings() end
+    if not Core.tickModulo(U.POWER.DEVICE_SCAN_INTERVAL_TICKS)
+        or lastScanTick == tick then return end
+    lastScanTick = tick
     forCurrentRecords(function(identity, record, mappingRecord)
         local started = Power.beginRuntime(identity, record)
         if started then Devices.scanTick(identity, mappingRecord, nil) end

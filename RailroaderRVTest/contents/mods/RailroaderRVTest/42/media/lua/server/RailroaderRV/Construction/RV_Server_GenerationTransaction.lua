@@ -1,6 +1,6 @@
 -- RV_Server: GenerationTransaction owns the process-local generation record.
 -- Callers receive detached snapshots and use semantic operations to advance it.
-return function(Core)
+return function()
     local state
 
     local function copySnapshot(value, seen)
@@ -132,7 +132,7 @@ return function(Core)
 
     function api.recordAck(phase, tick)
         local record = currentRecord()
-        if not record or type(Core) ~= "table" or phase == nil then return false end
+        if not record or phase == nil then return false end
         if phase == "temporary" then
             record.acknowledged = true
             record.acknowledgedAtTick = copySnapshot(tick)
@@ -208,19 +208,16 @@ return function(Core)
         return true
     end
 
-    function api.resumeAfterDisconnect(now, elapsed)
+    function api.resumeAfterDisconnect(now, elapsedTicks)
         local record = currentRecord()
-        if not record or record.disconnectStartedTick == nil
-            or type(Core) ~= "table" or type(Core.tickAdd) ~= "function" then
+        if not record or record.disconnectStartedTick == nil then
             return false
         end
-        if type(elapsed) == "table"
-            and (elapsed.hi32 > 0 or elapsed.lo32 > 0) then
-            record.queuedAtTick = Core.tickAdd(
-                record.queuedAtTick or now, elapsed)
+        if type(elapsedTicks) == "number" and elapsedTicks > 0 then
+            record.queuedAtTick = (record.queuedAtTick or now) + elapsedTicks
             if record.finalRelocationDeadlineTick ~= nil then
-                record.finalRelocationDeadlineTick = Core.tickAdd(
-                    record.finalRelocationDeadlineTick, elapsed)
+                record.finalRelocationDeadlineTick =
+                    record.finalRelocationDeadlineTick + elapsedTicks
             end
         end
         record.disconnectStartedTick = nil

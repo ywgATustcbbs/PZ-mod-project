@@ -151,7 +151,7 @@ local function relocatePlayerIntoHouse(player, prepared)
     -- Do not advance the manifest here. The client must complete its guard/
     -- room scan and prove the exact target with the token-only final ACK; the
     -- in-memory transaction owns the deadline and rollback.
-    local deadlineTick = Core.tickAdd(ctx.serverTick, RELOCATION_TIMEOUT_TICKS)
+    local deadlineTick = ctx.serverTick + RELOCATION_TIMEOUT_TICKS
     local stageAdvanced = GenerationTransaction.advanceStage("final-relocation", {
         boundary = prepared.boundary,
         finalRelocationSent = true,
@@ -493,7 +493,7 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     ServerSchema.validateTargetCoordinates(bounds, destination)
     local stagingDestination = selectGenerationStagingDestination(layout, bounds)
     ctx.pendingSerial = ctx.pendingSerial + 1
-    local token = identityOrReason.key .. ":" .. Core.formatTick(ctx.serverTick)
+    local token = identityOrReason.key .. ":" .. tostring(ctx.serverTick)
         .. ":" .. tostring(ctx.pendingSerial)
     local transitionRvId = rvId
     local transitionGeneration = generation

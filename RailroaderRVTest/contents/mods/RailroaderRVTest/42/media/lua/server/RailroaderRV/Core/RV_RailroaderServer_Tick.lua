@@ -75,10 +75,7 @@ local function processPendingWallRoofRefreshes()
                 -- wait.  Once marked waiting, this old deadline is paused.
                 if pending.waitingForGeneration ~= true then
                     local queuedDeadline = pending.queuedDeadlineTick
-                    if not Core.isTick(queuedDeadline) then
-                        cancelPendingWallRoofRefresh(roomKey, pending,
-                            "malformed queued roof refresh deadline")
-                    elseif Core.tickReached(now, queuedDeadline) then
+                    if now >= queuedDeadline then
                         cancelPendingWallRoofRefresh(roomKey, pending,
                             "queued roof refresh member rebind deadline expired")
                     else
@@ -92,8 +89,8 @@ local function processPendingWallRoofRefreshes()
                     -- the absolute timestamp makes a long generation
                     -- disconnect incapable of consuming an accepted roof
                     -- event's budget.
-                    pending.revalidateUntilTick = Core.tickAdd(now,
-                        WALL_REMOVAL_FOLLOWUP_TICKS)
+                    pending.revalidateUntilTick = now
+                        + WALL_REMOVAL_FOLLOWUP_TICKS
                 end
             end
         end
@@ -156,7 +153,7 @@ local function processPendingWallRoofRefreshes()
 end
 
 function Adapter.OnTick(tick)
-    Adapter._ticks = Core.isTick(tick) and tick or Core.getTick()
+    Adapter._ticks = tick
     if Core.tickModulo(30) then
         pruneRoofRefreshDedupeState(Adapter._ticks)
         pruneRoofRefreshRooms(Adapter._ticks)
@@ -214,27 +211,15 @@ end
 
 Adapter._installed = true
 Adapter.installTransactionHooks()
-local function requireCoreRegistration(ok, reason)
-    if not ok then
-        error("RV Core registration failed: " .. tostring(reason), 0)
-    end
-end
 
-requireCoreRegistration(Core.registerCommand(C.COMMAND_RV_ENTER,
-    Adapter.OnClientCommand))
-requireCoreRegistration(Core.registerCommand(C.COMMAND_RV_EXIT,
-    Adapter.OnClientCommand))
-requireCoreRegistration(Core.registerTick("RailroaderRV.Adapter", 1,
-    Adapter.OnTick))
+Core.onCommand(C.COMMAND_RV_ENTER, Adapter.OnClientCommand)
+Core.onCommand(C.COMMAND_RV_EXIT, Adapter.OnClientCommand)
+Core.onTick(Adapter.OnTick)
 if type(Adapter.onObjectAboutToBeRemoved) == "function" then
-    requireCoreRegistration(Core.registerEvent("OnObjectAboutToBeRemoved",
-        "RailroaderRV.Adapter.ObjectAboutToBeRemoved",
-        Adapter.onObjectAboutToBeRemoved))
+    Core.on("OnObjectAboutToBeRemoved", Adapter.onObjectAboutToBeRemoved)
 end
 if type(Adapter.onDestroyIsoThumpable) == "function" then
-    requireCoreRegistration(Core.registerEvent("OnDestroyIsoThumpable",
-        "RailroaderRV.Adapter.DestroyIsoThumpable",
-        Adapter.onDestroyIsoThumpable))
+    Core.on("OnDestroyIsoThumpable", Adapter.onDestroyIsoThumpable)
 end
 
 

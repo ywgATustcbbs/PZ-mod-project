@@ -145,19 +145,6 @@ local function finishCompletedRoofRefresh(map, pending, record)
     return true
 end
 
-local function tickText(tick)
-    if not Core.isTick(tick) then return "unknown" end
-    return Core.formatTick(tick)
-end
-
-local function tickAfter(tick, delta)
-    local result, reason = Core.tickAdd(tick, delta)
-    if result == nil then
-        error("invalid roof refresh tick deadline: " .. tostring(reason), 0)
-    end
-    return result
-end
-
 -- Expire unstarted queued ownership before reading map data.  This keeps the
 -- finite pre-relocation lease effective even during a transient ModData read
 -- failure; no Boundary lease, Relocate or return action exists to unwind.
@@ -169,11 +156,7 @@ local function expireQueuedWallRoofRefreshes(now)
             and pending.relocationStarted ~= true
             and pending.relocationToken == nil
             and pending.returnToken == nil then
-            local deadline = pending.queuedDeadlineTick
-            if not Core.isTick(deadline) then
-                cancelPendingWallRoofRefresh(roomKey, pending,
-                    "malformed queued roof refresh deadline")
-            elseif Core.tickReached(now, deadline) then
+            if now >= pending.queuedDeadlineTick then
                 cancelPendingWallRoofRefresh(roomKey, pending,
                     "queued roof refresh member rebind deadline expired")
             end
@@ -200,13 +183,7 @@ local function processPendingWallRoofRefreshGroup(map, pending, record, server,
         and pending.relocationStarted ~= true
         and pending.relocationToken == nil
         and pending.returnToken == nil then
-        local queuedDeadline = pending.queuedDeadlineTick
-        if not Core.isTick(queuedDeadline) then
-            cancelPendingWallRoofRefresh(pending.roomKey, pending,
-                "malformed queued roof refresh deadline")
-            return
-        end
-        if Core.tickReached(now, queuedDeadline) then
+        if now >= pending.queuedDeadlineTick then
             cancelPendingWallRoofRefresh(pending.roomKey, pending,
                 "queued roof refresh member rebind deadline expired")
             return
@@ -220,11 +197,8 @@ local function processPendingWallRoofRefreshGroup(map, pending, record, server,
         end
     end
     if pending.relocationPhase == "queued" then
-        local startTick = pending.startTick
-        if not Core.isTick(startTick) then
-            startTick = Core.tickAdd(now, 1)
-        end
-        if startTick and Core.tickReached(now, startTick) then
+        local startTick = pending.startTick or (now + 1)
+        if now >= startTick then
             local started, detail = beginRoofRefreshPhase(nil, pending,
                 "temporary")
             if not started then
@@ -236,7 +210,7 @@ local function processPendingWallRoofRefreshGroup(map, pending, record, server,
                 -- cancellations below.
                 if detail == "another RV relocation or generation is in progress"
                     or detail == "requesting player disconnected or was replaced" then
-                    pending.startTick = tickAfter(now, 1)
+                    pending.startTick = now + 1
                 else
                     cancelPendingWallRoofRefresh(pending.roomKey, pending, detail)
                 end
@@ -270,12 +244,12 @@ local function processPendingWallRoofRefreshGroup(map, pending, record, server,
         pending.dueTicks = {}
         pending.nextAttempt = 1
         for attempt = 1, ROOF_REFRESH_ATTEMPTS do
-            pending.dueTicks[attempt] = tickAfter(now,
-                attempt * ROOF_REFRESH_DELAY_TICKS)
+            pending.dueTicks[attempt] = now
+                + attempt * ROOF_REFRESH_DELAY_TICKS
         end
         local dueTickText = {}
         for attempt = 1, #pending.dueTicks do
-            dueTickText[attempt] = tickText(pending.dueTicks[attempt])
+            dueTickText[attempt] = tostring(pending.dueTicks[attempt])
         end
         print("[RailroaderRVTest] roof refresh group remote relocation ready room="
             .. pending.roomKey .. " members=" .. tostring(#pending.players)
@@ -288,12 +262,12 @@ local function processPendingWallRoofRefreshGroup(map, pending, record, server,
         local dueTick = attempt and pending.dueTicks
             and pending.dueTicks[attempt] or nil
         if not attempt or attempt < 1 or attempt > ROOF_REFRESH_ATTEMPTS
-            or not Core.isTick(dueTick) then
+            or type(dueTick) ~= "number" then
             cancelPendingWallRoofRefresh(pending.roomKey, pending,
                 "malformed roof refresh group remote wait schedule")
             return
         end
-        if not Core.tickReached(now, dueTick) then return end
+        if now < dueTick then return end
         -- Keep the complete group remote for the requested cross-tick cycle;
         -- room refresh is intentionally invoked only after every member returns.
         print("[RailroaderRVTest] roof refresh group remote wait room="
@@ -393,12 +367,9 @@ local function processPendingWallRoofRefreshGroup(map, pending, record, server,
             representative = pending.players[1]
             pending.refreshContextIndex = 1
         end
-        local refreshRetryAtTick = pending.refreshRetryAtTick
-        if not Core.isTick(refreshRetryAtTick) then
-            refreshRetryAtTick = now
-        end
+        local refreshRetryAtTick = pending.refreshRetryAtTick or now
         if pending.refreshWorldApplied ~= true
-            and Core.tickReached(now, refreshRetryAtTick) then
+            and now >= refreshRetryAtTick then
             local loaded, loadedDetail = false,
                 "roof refresh squares are not loaded after return"
             local loadedCallOk, loadedResult, loadedReason = pcall(
@@ -424,14 +395,12 @@ local function processPendingWallRoofRefreshGroup(map, pending, record, server,
                     pending.refreshWorldApplied = true
                     pending.refreshRetryAtTick = nil
                 else
-                    pending.refreshRetryAtTick = tickAfter(now,
-                        ROOF_REFRESH_DELAY_TICKS)
+                    pending.refreshRetryAtTick = now + ROOF_REFRESH_DELAY_TICKS
                     sendResult(representative.player, false,
                         detail or "roof refresh after remote reload was deferred")
                 end
             else
-                pending.refreshRetryAtTick = tickAfter(now,
-                    ROOF_REFRESH_DELAY_TICKS)
+                pending.refreshRetryAtTick = now + ROOF_REFRESH_DELAY_TICKS
                 print("[RailroaderRVTest] roof refresh after return deferred room="
                     .. tostring(pending.roomKey) .. " detail=" .. tostring(loadedDetail
                         or "roof refresh squares are not loaded after return"))
@@ -499,14 +468,12 @@ promoteFollowUpWallRemoval = function(map, roomKey)
     if pendingWallRoofRefreshes[roomKey] ~= nil then return false end
     local events = followUpWallRemovalEvents[roomKey]
     if type(events) ~= "table" then return false end
-    local now = Adapter._ticks
-    if not Core.isTick(now) then now = Core.getTick() end
+    local now = Adapter._ticks or Core.getTick()
     for eventKey, event in pairs(events) do
         if type(event) ~= "table" then
             events[eventKey] = nil
         elseif event.waitingForGeneration ~= true
-            and (not Core.isTick(event.expiresAtTick)
-                or Core.tickCompare(now, event.expiresAtTick) == 1) then
+            and now > event.expiresAtTick then
             events[eventKey] = nil
         else
             local waitingForGeneration = event.waitingForGeneration == true
@@ -548,8 +515,8 @@ promoteFollowUpWallRemoval = function(map, roomKey)
                                 -- The current record/rvId/generation is now
                                 -- proven complete. Give
                                 -- this accepted event a fresh full lease.
-                                event.expiresAtTick = tickAfter(now,
-                                    ROOF_REFRESH_QUEUED_DEADLINE_TICKS)
+                                event.expiresAtTick = now
+                                    + ROOF_REFRESH_QUEUED_DEADLINE_TICKS
                                 event.waitingForGeneration = nil
                             end
                             currentEvents[eventKey] = event
@@ -575,8 +542,8 @@ promoteFollowUpWallRemoval = function(map, roomKey)
                         -- Revalidation succeeded against the complete current
                         -- record.  Only now does the follow-up re-enter its
                         -- bounded offline/rebind wait.
-                        event.expiresAtTick = tickAfter(now,
-                            ROOF_REFRESH_QUEUED_DEADLINE_TICKS)
+                        event.expiresAtTick = now
+                            + ROOF_REFRESH_QUEUED_DEADLINE_TICKS
                         event.waitingForGeneration = nil
                     end
                     local scheduled = scheduleRoofRefresh(map, record,
@@ -612,9 +579,7 @@ local function revalidateQueuedRoofRefreshAfterGeneration(map, roomKey,
     end
     local waitingForGeneration = pending.waitingForGeneration == true
     local deadline = pending.revalidateUntilTick
-    if not Core.isTick(deadline) then
-        deadline = tickAfter(now, WALL_REMOVAL_FOLLOWUP_TICKS)
-    end
+        or (now + WALL_REMOVAL_FOLLOWUP_TICKS)
     pending.revalidateUntilTick = deadline
     local record = recordForLoco(map, pending.rvId)
     local currentRoomKey = record and validRecord(record)
@@ -634,11 +599,11 @@ local function revalidateQueuedRoofRefreshAfterGeneration(map, roomKey,
         waitingForGeneration = true
     end
     if not record or not validRecord(record) then
-        if Core.tickCompare(now, deadline) ~= 1 then return "wait" end
+        if now <= deadline then return "wait" end
         return "expired"
     end
     if not currentRoomKey then
-        if Core.tickCompare(now, deadline) ~= 1 then return "wait" end
+        if now <= deadline then return "wait" end
         return "expired"
     end
     if currentRoomKey == roomKey
@@ -648,8 +613,8 @@ local function revalidateQueuedRoofRefreshAfterGeneration(map, roomKey,
         -- a fresh bounded rebind window; never carry the pre-generation
         -- deadline into the new generation.
         if waitingForGeneration then
-            pending.queuedDeadlineTick = tickAfter(now,
-                ROOF_REFRESH_QUEUED_DEADLINE_TICKS)
+            pending.queuedDeadlineTick = now
+                + ROOF_REFRESH_QUEUED_DEADLINE_TICKS
         end
         pending.waitingForGeneration = nil
         pending.revalidateUntilTick = nil
@@ -661,7 +626,7 @@ local function revalidateQueuedRoofRefreshAfterGeneration(map, roomKey,
     -- pre-generation return coordinate from being used after a swap.
     local players = insidePlayersForRecord(map, record)
     if #players == 0 then
-        if Core.tickCompare(now, deadline) ~= 1 then return "wait" end
+        if now <= deadline then return "wait" end
         return "expired"
     end
     local existing = pendingWallRoofRefreshes[currentRoomKey]
@@ -686,9 +651,9 @@ local function revalidateQueuedRoofRefreshAfterGeneration(map, roomKey,
     pending.generation = integer(record.generation)
     pending.identityKey = players[1].identityKey
     pending.returnPosition = players[1].originalPosition
-    pending.startTick = tickAfter(now, 1)
-    pending.queuedDeadlineTick = tickAfter(now,
-        ROOF_REFRESH_QUEUED_DEADLINE_TICKS)
+    pending.startTick = now + 1
+    pending.queuedDeadlineTick = now
+        + ROOF_REFRESH_QUEUED_DEADLINE_TICKS
     pending.dueTicks = nil
     pending.nextAttempt = 1
     pending.relocationStarted = false

@@ -206,17 +206,16 @@ local function markSuppressedRoomTransition(pending)
     suppressedRoomTransitions[pending.roomKey] = {
         roomKey = pending.roomKey,
         token = pending.relocationToken or pending.returnToken,
-        expiresAtTick = Core.tickAdd(Adapter._ticks or Core.getTick(),
-            ROOF_REFRESH_TRANSITION_SUPPRESSION_TICKS),
+        expiresAtTick = (Adapter._ticks or Core.getTick())
+            + ROOF_REFRESH_TRANSITION_SUPPRESSION_TICKS,
     }
 end
 
 local function consumeSuppressedRoomTransition(roomKey)
     local suppression = suppressedRoomTransitions[roomKey]
     if type(suppression) ~= "table" then return false end
-    if not Core.isTick(suppression.expiresAtTick)
-        or Core.tickCompare(Adapter._ticks or Core.getTick(),
-            suppression.expiresAtTick) == 1 then
+    if type(suppression.expiresAtTick) ~= "number"
+        or (Adapter._ticks or Core.getTick()) > suppression.expiresAtTick then
         suppressedRoomTransitions[roomKey] = nil
         return false
     end
@@ -231,7 +230,7 @@ end
 -- for the short duplicate-callback window.  Never retain userdata; the current
 -- RV identity/room key owns the actual transaction below.
 local function pruneRoofRefreshDedupeState(now)
-    now = Core.isTick(now) and now or Adapter._ticks or Core.getTick()
+    now = now or Adapter._ticks or Core.getTick()
     -- Follow-up expiry is paused while generation owns the shared scope.  If
     -- the mutex query is temporarily unavailable, fail closed by preserving
     -- the bounded queue until a later tick can classify it.
@@ -246,15 +245,15 @@ local function pruneRoofRefreshDedupeState(now)
     end
     for eventKey, seen in pairs(seenWallRemovalEvents) do
         if type(seen) ~= "table"
-            or not Core.isTick(seen.expiresAtTick)
-            or Core.tickCompare(now, seen.expiresAtTick) == 1 then
+            or type(seen.expiresAtTick) ~= "number"
+            or now > seen.expiresAtTick then
             seenWallRemovalEvents[eventKey] = nil
         end
     end
     for roomKey, suppression in pairs(suppressedRoomTransitions) do
         if type(suppression) ~= "table"
-            or not Core.isTick(suppression.expiresAtTick)
-            or Core.tickCompare(now, suppression.expiresAtTick) == 1 then
+            or type(suppression.expiresAtTick) ~= "number"
+            or now > suppression.expiresAtTick then
             suppressedRoomTransitions[roomKey] = nil
         end
     end
@@ -265,7 +264,8 @@ local function pruneRoofRefreshDedupeState(now)
             for eventKey, event in pairs(events) do
                 local expiresAt = type(event) == "table"
                     and event.expiresAtTick or nil
-                if type(event) ~= "table" or not Core.isTick(expiresAt) then
+                if type(event) ~= "table"
+                    or type(expiresAt) ~= "number" then
                     print("[RailroaderRVTest] wall removal follow-up cancelled room="
                         .. tostring(roomKey) .. " event=" .. tostring(eventKey)
                         .. " reason=malformed-follow-up")
@@ -274,7 +274,7 @@ local function pruneRoofRefreshDedupeState(now)
                     -- This event already entered the generation wait.  Its
                     -- old absolute expiry is deliberately inert until the
                     -- post-generation current-identity revalidation.
-                elseif Core.tickCompare(now, expiresAt) == 1 then
+                elseif now > expiresAt then
                     -- Do not resurrect an event whose ordinary lease expired
                     -- before generation became active on this tick.
                     events[eventKey] = nil
@@ -371,16 +371,15 @@ local function refreshRoofForPlayer(player, record, force, reason)
 end
 
 local function pruneRoofRefreshRooms(now)
-    now = Core.isTick(now) and now or Adapter._ticks or Core.getTick()
+    now = now or Adapter._ticks or Core.getTick()
     for roomKey, cached in pairs(roofRefreshRooms) do
         local updatedAt = cached and cached.updatedAtTick
         if type(cached) ~= "table"
             or type(cached.roomKey) ~= "string"
             or cached.roomKey ~= roomKey
-            or not Core.isTick(updatedAt)
-            or Core.tickCompare(now, updatedAt) < 0
-            or Core.tickElapsedAtLeast(now, updatedAt,
-                ROOF_REFRESH_CACHE_TTL_TICKS + 1) then
+            or type(updatedAt) ~= "number"
+            or now < updatedAt
+            or (now - updatedAt) >= ROOF_REFRESH_CACHE_TTL_TICKS + 1 then
             roofRefreshRooms[roomKey] = nil
         end
     end

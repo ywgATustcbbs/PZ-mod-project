@@ -120,7 +120,11 @@ local function refreshInvalidRoomOwnership(guard)
         seen[key] = true
         local inspected, reset = inspectRoomOwnershipSquare(square)
         if not inspected then
-            error("RailroaderRVTest: client room ownership inspection failed")
+            -- The repair helper reports that it could not inspect or reset this
+            -- square instead of raising: the caller must stay able to schedule
+            -- the one-tick follow-up scan that retries a stale room which could
+            -- not be reset on this attempt.
+            return
         end
         cleared = cleared + reset
     end

@@ -59,6 +59,27 @@ function Client.onFillWorldObjectContextMenu(playerNum, context, worldObjects, t
         Client.requestTemplateCapture)
 end
 
+-- The server verifies the authoritative position but cannot see this client's
+-- chunk state. This single local readiness proof keeps a client that is still
+-- streaming from teleporting to and acknowledging a destination square it has
+-- not loaded yet; the server's relocation timeout bounds the wait.
+local function destinationSquareIsLoaded(x, y, z)
+    local targetX = finiteInteger(x)
+    local targetY = finiteInteger(y)
+    local targetZ = finiteInteger(z)
+    if targetX == nil or targetY == nil or targetZ == nil then
+        return false
+    end
+    local cellCallOk, cell = pcall(getCell)
+    if not cellCallOk or not cell then
+        return false
+    end
+    local squareCallOk, square = pcall(function()
+        return cell:getGridSquare(targetX, targetY, targetZ)
+    end)
+    return squareCallOk and square ~= nil
+end
+
 local function tryApplyFinalRelocation(args, pending)
     if type(args) ~= "table" then return false end
     if type(pending) ~= "table" or pending.failed then return false end
@@ -77,6 +98,13 @@ local function tryApplyFinalRelocation(args, pending)
     end
 
     if not pending.teleported then
+        if not destinationSquareIsLoaded(x, y, z) then
+            -- Do not teleport and do not acknowledge while the destination is
+            -- still streaming. The request stays pending so the next client
+            -- tick re-checks it; no attempt counter or deadline is needed here
+            -- because the server owns the relocation timeout.
+            return false
+        end
         local teleported, teleportResult = pcall(function()
             return playerObj:teleportTo(x, y, z)
         end)

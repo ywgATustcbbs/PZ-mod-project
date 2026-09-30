@@ -443,15 +443,34 @@ local function processServerRoomOwnershipGuards()
                 + ROOM_OWNERSHIP_3X3_INTERVAL_TICKS
         end
     end
+    -- This runs inside the shared generic tick, which has no pcall of its own, so
+    -- a raise from a scan precondition (no authoritative cell, a player square
+    -- inside the bounds with no IsoCell) must be logged instead of killing the
+    -- boundary sweep, the utility tick and the generation tick that follow it.
     if snapshotOk and #playerStates > 0 then
-        clearInvalidRoomOwnershipNearPlayers(roomOwnershipGuards, playerStates,
-            true, neighborhoodDue)
+        local sweepOk, sweepError = pcall(clearInvalidRoomOwnershipNearPlayers,
+            roomOwnershipGuards, playerStates, true, neighborhoodDue)
+        if not sweepOk then
+            print("[RailroaderRVTest] room ownership neighborhood sweep failed: "
+                .. tostring(sweepError))
+        end
     end
     -- Event-triggered structure scans, merged per tick by scheduleRoomOwnershipScan.
-    for _, guard in pairs(roomOwnershipGuards) do
-        if guard.scanDueTick ~= nil and ctx.serverTick >= guard.scanDueTick then
-            refreshServerRoomOwnershipGuard(guard, nil)
+    -- The due marker is cleared before the scan: a scan that raises is reported
+    -- once and stays unarmed, so it cannot repeat on every later tick. The next
+    -- object event or neighborhood probe re-schedules it through the normal path.
+    local scansOk, scansError = pcall(function()
+        for _, guard in pairs(roomOwnershipGuards) do
+            if guard.scanDueTick ~= nil and ctx.serverTick >= guard.scanDueTick then
+                guard.pendingCells = {}
+                guard.scanDueTick = nil
+                refreshServerRoomOwnershipGuard(guard, nil)
+            end
         end
+    end)
+    if not scansOk then
+        print("[RailroaderRVTest] room ownership scan failed: "
+            .. tostring(scansError))
     end
 end
 

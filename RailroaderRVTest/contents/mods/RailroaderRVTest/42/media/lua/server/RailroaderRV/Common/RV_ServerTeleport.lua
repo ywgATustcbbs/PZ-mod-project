@@ -23,7 +23,7 @@ function M.teleportToRVSpawn(player, source, expectedPosition)
         return false
     end
     local ok, record = adapter.currentMappingRecord(source.rvId,
-        source.generation, source.bitmapVersion)
+        source.generation)
     if ok ~= true or type(record) ~= "table"
         or type(record.rvPosition) ~= "table" then
         return false

@@ -17,9 +17,13 @@ return {
     templateVersion = 11,
     sourceTarget = { x = 51, y = 44, z = 0 },
     objectCount = 412,
-    -- Cab z0 build/demolish permission is the full 6x4 rectangle. The
-    -- proximity queue exempts only these captured template cells.
+    -- Build/demolish permission is the authored cell set. The proximity
+    -- queue exempts only these captured template cells.
     buildCells = buildCells,
+    walkAabbs = {
+        { minX = -4, maxX = 2, minY = -6, maxY = 17,
+            minZ = 0, maxZExclusive = 1 },
+    },
     objects = {
     {x=-4, y=-6, z=0, class="IsoObject", name="IsoObject", sprite="industry_01_13", direction="N", state={hoppable=false}},
     {x=-4, y=-6, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_02_33", north=true, direction="N", state={health=250,hoppable=false,locked=false,maxHealth=250,doRender=false}},

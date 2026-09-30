@@ -24,7 +24,7 @@ end
 
 require "RailroaderRV/Common/RV_Constants"
 local Core = require "RailroaderRV/Core/RV_Server_Core"
-local Bitmap = require "RailroaderRV/Common/RV_Bitmap"
+local StrictSchema = require "RailroaderRV/Common/RV_StrictSchema"
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.BoundaryServer = RailroaderRV.BoundaryServer or {}
@@ -32,16 +32,14 @@ RailroaderRV.BoundaryServer = RailroaderRV.BoundaryServer or {}
 local Boundary = RailroaderRV.BoundaryServer
 local C = RailroaderRV.Constants
 local OWNER = C.MOD_ID
-local exactKeys = Bitmap.hasExactKeys
+local exactKeys = StrictSchema.exactKeys
 
 Boundary._states = Boundary._states or {}
-Boundary._registered = Boundary._registered or {}
 Boundary._tick = Core.getTick()
 
 
 local ctx = {
     processIsServer = processIsServer,
-    Bitmap = Bitmap,
     Boundary = Boundary,
     C = C,
     Core = Core,

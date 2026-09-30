@@ -33,10 +33,9 @@ function RV.Server.consumeRoofRefreshRelocationArrival(player)
     return member
 end
 
-function RV.Server.roofRefreshRelocationGroupReady(rvId, generation,
-    bitmapVersion)
+function RV.Server.roofRefreshRelocationGroupReady(rvId, generation)
     local group = ctx.roofRefreshRelocationGroup
-    return roofRefreshGroupMatches(group, rvId, generation, bitmapVersion)
+    return roofRefreshGroupMatches(group, rvId, generation)
         and group.phase == "temporary"
         and roofRefreshGroupAll(group, "arrived", true)
 end
@@ -147,15 +146,12 @@ function RV.Server.isRelocationIdentityClaimed(identityKey)
     return false
 end
 
-function RV.Server.getRoofRefreshRelocationState(rvId, generation,
-    bitmapVersion, token)
-    if roofRefreshGroupMatches(ctx.roofRefreshRelocationGroup, rvId, generation,
-        bitmapVersion) then
+function RV.Server.getRoofRefreshRelocationState(rvId, generation, token)
+    if roofRefreshGroupMatches(ctx.roofRefreshRelocationGroup, rvId, generation) then
         return "active", ctx.roofRefreshRelocationGroup.phase
     end
     if ctx.roofRefreshGroupFailure
-        and roofRefreshGroupMatches(ctx.roofRefreshGroupFailure, rvId, generation,
-            bitmapVersion)
+        and roofRefreshGroupMatches(ctx.roofRefreshGroupFailure, rvId, generation)
         and type(token) == "string"
         and token ~= ""
         and ctx.roofRefreshGroupFailure.token == token then
@@ -164,10 +160,9 @@ function RV.Server.getRoofRefreshRelocationState(rvId, generation,
     return "idle"
 end
 
-function RV.Server.isRoofRefreshBoundaryReadAllowed(rvId, generation,
-    bitmapVersion, identityKey)
+function RV.Server.isRoofRefreshBoundaryReadAllowed(rvId, generation, identityKey)
     local group = ctx.roofRefreshRelocationGroup
-    if not roofRefreshGroupMatches(group, rvId, generation, bitmapVersion)
+    if not roofRefreshGroupMatches(group, rvId, generation)
         or group.phase ~= "return"
         or type(identityKey) ~= "string" or identityKey == ""
         or type(group.members) ~= "table" then
@@ -187,7 +182,6 @@ function RV.Server.isRoofRefreshBoundaryReadAllowed(rvId, generation,
                 and proof.identityKey == identityKey
                 and proof.rvId == member.rvId
                 and proof.generation == member.generation
-                and proof.bitmapVersion == member.bitmapVersion
                 and proof.token == member.token
                 and type(target) == "table"
                 and proof.x == target.x and proof.y == target.y
@@ -198,9 +192,9 @@ function RV.Server.isRoofRefreshBoundaryReadAllowed(rvId, generation,
 end
 
 function RV.Server.isRoofRefreshBoundaryContextReadAllowed(rvId, generation,
-    bitmapVersion, identityKey)
+    identityKey)
     local group = ctx.roofRefreshRelocationGroup
-    if not roofRefreshGroupMatches(group, rvId, generation, bitmapVersion)
+    if not roofRefreshGroupMatches(group, rvId, generation)
         or (group.phase ~= "temporary" and group.phase ~= "return")
         or type(identityKey) ~= "string" or identityKey == ""
         or type(group.members) ~= "table" then
@@ -211,19 +205,16 @@ function RV.Server.isRoofRefreshBoundaryContextReadAllowed(rvId, generation,
         if type(member) == "table"
             and member.identityKey == identityKey
             and member.rvId == group.rvId
-            and member.generation == group.generation
-            and member.bitmapVersion == group.bitmapVersion then
+            and member.generation == group.generation then
             return true
         end
     end
     return false
 end
 
-function RV.Server.consumeRoofRefreshRelocationFailure(rvId, generation,
-    bitmapVersion, token)
+function RV.Server.consumeRoofRefreshRelocationFailure(rvId, generation, token)
     if ctx.roofRefreshGroupFailure
-        and roofRefreshGroupMatches(ctx.roofRefreshGroupFailure, rvId, generation,
-            bitmapVersion)
+        and roofRefreshGroupMatches(ctx.roofRefreshGroupFailure, rvId, generation)
         and type(token) == "string"
         and token ~= ""
         and ctx.roofRefreshGroupFailure.token == token then
@@ -254,7 +245,6 @@ function RV.Server.completeRoofRefreshRelocation(player, token)
         end
         local contextOk, contextOrReason = currentRoofRefreshContext(livePlayer,
             { rvId = member.rvId, generation = member.generation,
-                bitmapVersion = member.bitmapVersion,
                 identityKey = member.identityKey })
         if not contextOk then return false, contextOrReason end
         -- The client ACK is deliberately coordinate-free.  B42.20 may have
@@ -305,7 +295,6 @@ function RV.Server.completeRoofRefreshRelocation(player, token)
                 identityKey = member.identityKey,
                 rvId = member.rvId,
                 generation = member.generation,
-                bitmapVersion = member.bitmapVersion,
                 token = token,
                 x = authoritativePosition.x,
                 y = authoritativePosition.y,
@@ -352,7 +341,6 @@ function RV.Server.completeRoofRefresh(player, token)
         if not memberResolved then return false, livePlayer end
         local contextOk, contextOrReason = currentRoofRefreshContext(livePlayer, {
             rvId = groupMember.rvId, generation = groupMember.generation,
-            bitmapVersion = groupMember.bitmapVersion,
             identityKey = groupMember.identityKey,
         })
         if not contextOk then return false, contextOrReason end
@@ -363,7 +351,6 @@ function RV.Server.completeRoofRefresh(player, token)
             and proof.identityKey == groupMember.identityKey
             and proof.rvId == groupMember.rvId
             and proof.generation == groupMember.generation
-            and proof.bitmapVersion == groupMember.bitmapVersion
             and proof.token == groupMember.token
             and type(target) == "table"
             and proof.x == target.x and proof.y == target.y
@@ -403,7 +390,7 @@ function RV.Server.roofRefreshSquaresLoaded(player, record)
     if type(record) ~= "table" then return false, Constants.INVALID_RV_DATA end
     local manifestCallOk, manifestAccepted, manifest = pcall(
         RV.Server.currentRVManifestForRelocation, record.rvId,
-        record.generation, record.bitmapVersion)
+        record.generation)
     if not manifestCallOk or manifestAccepted ~= true
         or type(manifest) ~= "table" then
         return false, Constants.INVALID_RV_DATA
@@ -412,14 +399,11 @@ function RV.Server.roofRefreshSquaresLoaded(player, record)
     if not identityOk then return false, identityOrReason end
     local contextOk, contextOrReason = currentRoofRefreshContext(player,
         { rvId = record.rvId, generation = record.generation,
-            bitmapVersion = record.bitmapVersion,
             identityKey = identityOrReason.key })
     if not contextOk then return false, contextOrReason end
     if type(record) == "table"
         and (tostring(record.rvId) ~= tostring(contextOrReason.boundary.rvId)
-            or ServerUtil.integer(record.generation) ~= contextOrReason.boundary.generation
-            or ServerUtil.integer(record.bitmapVersion)
-                ~= contextOrReason.boundary.bitmapVersion) then
+            or ServerUtil.integer(record.generation) ~= contextOrReason.boundary.generation) then
         return false, Constants.INVALID_RV_DATA
     end
     local loadedOk, loaded, reason = pcall(RoofRefresh.isLoaded, player,

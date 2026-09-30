@@ -4,7 +4,6 @@
 -- exposes deterministic helpers for snapshots, tagging, cleanup and engine
 -- calls; it never registers an event or accepts client coordinates.
 
-local Constants = require("RailroaderRV/Common/RV_Constants")
 local ServerUtil = require("RailroaderRV/Common/RV_ServerUtil")
 local OWNER = "RailroaderRVTest"
 local M = {}
@@ -185,15 +184,12 @@ local function tagObject(object, generation, role, extraData)
     end
     generation = generationNumber
     local rvId = extraData and extraData.rvId
-    local bitmapVersion = extraData and ServerUtil.toNumber(extraData.bitmapVersion)
-    if rvId == nil or tostring(rvId) == ""
-        or bitmapVersion ~= Constants.BITMAP_VERSION then
+    if rvId == nil or tostring(rvId) == "" then
         error("RailroaderRVTest: generated object boundary identity is incomplete")
     end
     data.owner = OWNER
     data.rvId = tostring(rvId)
     data.generation = generation
-    data.bitmapVersion = bitmapVersion
     data.role = role
     if data.RailroaderRVTest ~= nil and type(data.RailroaderRVTest) ~= "table" then
         error("RailroaderRVTest: generated object tag namespace is not a table")
@@ -202,7 +198,6 @@ local function tagObject(object, generation, role, extraData)
     data.RailroaderRVTest.owner = OWNER
     data.RailroaderRVTest.rvId = tostring(rvId)
     data.RailroaderRVTest.generation = generation
-    data.RailroaderRVTest.bitmapVersion = bitmapVersion
     data.RailroaderRVTest.role = role
     if type(extraData) == "table" then
         for key, value in pairs(extraData) do
@@ -214,7 +209,6 @@ local function tagObject(object, generation, role, extraData)
     data.RailroaderRVTest.owner = OWNER
     data.RailroaderRVTest.rvId = tostring(rvId)
     data.RailroaderRVTest.generation = generation
-    data.RailroaderRVTest.bitmapVersion = bitmapVersion
     data.RailroaderRVTest.role = role
     -- New objects are not on the client yet.  Do not transmit an object-index
     -- modData delta here: the creator sends one complete object packet after
@@ -224,18 +218,14 @@ local function tagObject(object, generation, role, extraData)
     if not verify or verify.owner ~= OWNER
         or tostring(verify.rvId) ~= tostring(rvId)
         or verify.role ~= role
-        or ServerUtil.toNumber(verify.generation) ~= ServerUtil.toNumber(generation)
-        or ServerUtil.toNumber(verify.bitmapVersion) ~= bitmapVersion then
+        or ServerUtil.toNumber(verify.generation) ~= generation then
         error("RailroaderRVTest: generated object tag verification failed for role " .. tostring(role))
     end
 end
 
 local function withTagIdentity(extraData, tagContext)
-    local bitmapVersion = type(tagContext) == "table"
-        and ServerUtil.toNumber(tagContext.bitmapVersion) or nil
     if type(tagContext) ~= "table" or tagContext.rvId == nil
-        or tostring(tagContext.rvId) == ""
-        or bitmapVersion ~= Constants.BITMAP_VERSION then
+        or tostring(tagContext.rvId) == "" then
         error("RailroaderRVTest: boundary tag identity is incomplete")
     end
     local result = {}
@@ -245,12 +235,11 @@ local function withTagIdentity(extraData, tagContext)
     -- Context identity is authoritative; per-object metadata must not be
     -- able to overwrite the RV/generation snapshot tokens.
     result.rvId = tostring(tagContext.rvId)
-    result.bitmapVersion = bitmapVersion
     return result
 end
 
-local function isTaggedForGeneration(object, generation, rvId, bitmapVersion)
-    if generation == nil or rvId == nil or bitmapVersion == nil then
+local function isTaggedForGeneration(object, generation, rvId)
+    if generation == nil or rvId == nil then
         return false
     end
     local data = objectModData(object)
@@ -263,7 +252,6 @@ local function isTaggedForGeneration(object, generation, rvId, bitmapVersion)
             return false
         end
         return tostring(tag.rvId) == tostring(rvId)
-            and ServerUtil.toNumber(tag.bitmapVersion) == ServerUtil.toNumber(bitmapVersion)
     end
     if matches(data) then
         return true
@@ -373,7 +361,6 @@ local function clearGenerationTag(object)
         data.owner = nil
         data.rvId = nil
         data.generation = nil
-        data.bitmapVersion = nil
         data.role = nil
     end
     local nested = data.RailroaderRVTest
@@ -381,7 +368,6 @@ local function clearGenerationTag(object)
         nested.owner = nil
         nested.rvId = nil
         nested.generation = nil
-        nested.bitmapVersion = nil
         nested.role = nil
         nested.previousSprite = nil
         nested.createdByGeneration = nil
@@ -495,21 +481,20 @@ local function recalcSquare(square)
     ServerUtil.invoke(square, "RecalcAllWithNeighbours", true)
 end
 
-local function clearSquare(square, onlyGeneration, rvId, bitmapVersion)
+local function clearSquare(square, onlyGeneration, rvId)
     local objects = squareSnapshot(square)
     -- Validate all vehicles before removing any object on this square.  This
     -- makes an unknown vehicle API a clean transaction failure, not data loss.
     for i = 1, #objects do
         if isVehicleObject(objects[i]) and (not onlyGeneration
-            or isTaggedForGeneration(objects[i], onlyGeneration, rvId,
-                bitmapVersion)) then
+            or isTaggedForGeneration(objects[i], onlyGeneration, rvId)) then
             validateVehiclePath(objects[i])
         end
     end
     for i = 1, #objects do
         local object = objects[i]
         if not onlyGeneration or isTaggedForGeneration(object, onlyGeneration,
-            rvId, bitmapVersion) then
+            rvId) then
             -- Generation rollback restores a tagged pre-existing floor, while
             -- the cleanup-only pass must remove every floor, including one
             -- left tagged by an earlier generation.

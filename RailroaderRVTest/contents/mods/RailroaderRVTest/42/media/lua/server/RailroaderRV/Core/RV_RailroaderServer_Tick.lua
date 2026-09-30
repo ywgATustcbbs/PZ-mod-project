@@ -111,7 +111,6 @@ local function processPendingWallRoofRefreshes()
     for roomKey, pending in pairs(pendingWallRoofRefreshes) do
         if type(pending) ~= "table"
             or integer(pending.generation) == nil
-            or integer(pending.bitmapVersion) ~= C.BITMAP_VERSION
             or type(pending.returnPosition) ~= "table" then
             cancelPendingWallRoofRefresh(roomKey, pending, "malformed roof refresh schedule")
         elseif pendingWallRoofRefreshes[roomKey] == pending then
@@ -126,11 +125,11 @@ local function processPendingWallRoofRefreshes()
                     "roof refresh generation revalidation expired")
             else
                 local state, stateDetail = server.getRoofRefreshRelocationState(
-                    pending.rvId, pending.generation, pending.bitmapVersion,
+                    pending.rvId, pending.generation,
                     pending.relocationToken or pending.returnToken)
                 if state == "failed" then
                     server.consumeRoofRefreshRelocationFailure(pending.rvId,
-                        pending.generation, pending.bitmapVersion,
+                        pending.generation,
                         pending.relocationToken or pending.returnToken)
                     cancelPendingWallRoofRefresh(roomKey, pending,
                         stateDetail or "roof refresh relocation failed")
@@ -138,7 +137,6 @@ local function processPendingWallRoofRefreshes()
                     local record = recordForLoco(map, pending.rvId)
                     if not record or tostring(record.rvId) ~= pending.rvId
                         or integer(record.generation) ~= pending.generation
-                        or integer(record.bitmapVersion) ~= pending.bitmapVersion
                         or not validRecord(record) then
                         cancelPendingWallRoofRefresh(roomKey, pending,
                             "identity-mismatch")

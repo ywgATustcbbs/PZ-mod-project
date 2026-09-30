@@ -4,6 +4,9 @@ local C = require("RailroaderRV/Common/RV_Constants")
 local P = require("RailroaderRV/Power/RV_UtilityPowerConfig")
 local World = require("RailroaderRV/Common/RV_ServerWorld")
 local Util = require("RailroaderRV/Common/RV_ServerUtil")
+local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
+local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
+local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 
 local M = {}
 local caches = {}
@@ -185,8 +188,7 @@ local function scanSquare(identity, player, x, y, z)
     if sx == nil then return false end
     local objectsOk, objects = pcall(World.squareSnapshot, square)
     if not objectsOk or type(objects) ~= "table" then return false end
-    local key = Util.identityKey(identity.rvId,
-        identity.generation, identity.bitmapVersion)
+    local key = Util.identityKey(identity.rvId, identity.generation)
     local cache = caches[key] or {}
     caches[key] = cache
     local prefix = tostring(sx) .. ":" .. tostring(sy) .. ":" .. tostring(sz) .. ":"
@@ -230,18 +232,28 @@ local function scanSquare(identity, player, x, y, z)
 end
 
 local function interior(record)
-    local position = type(record) == "table" and record.rvPosition or nil
-    if type(position) ~= "table" then return nil end
-    local x, y = Util.toNumber(position.x), Util.toNumber(position.y)
-    local z = Util.integer(position.z)
-    if type(x) ~= "number" or type(y) ~= "number"
-        or x ~= x or y ~= y or x >= math.huge or y >= math.huge
-        or x <= -math.huge or y <= -math.huge or z == nil then return nil end
-    x, y = math.floor(x), math.floor(y)
-    local coords = {}
-    for dy = C.INTERIOR_MIN_OFFSET_Y, C.INTERIOR_MAX_OFFSET_Y do
-        for dx = C.INTERIOR_MIN_OFFSET_X, C.INTERIOR_MAX_OFFSET_X do
-            coords[#coords + 1] = { x = x + dx, y = y + dy, z = z }
+    local anchor = type(record) == "table" and record.anchor or nil
+    if type(anchor) ~= "table" or Util.integer(anchor.x) == nil
+        or Util.integer(anchor.y) == nil or Util.integer(anchor.z) == nil then
+        return nil
+    end
+    local coords, seen = {}, {}
+    for _, box in ipairs(Template.misc.walkAabbs) do
+        for z = box.minZ, box.maxZExclusive - 1 do
+            for y = box.minY, box.maxY - 1 do
+                for x = box.minX, box.maxX - 1 do
+                    local world = { x = anchor.x + x, y = anchor.y + y,
+                        z = anchor.z + z }
+                    if TemplateGeometry.isWalkable(world, anchor, Template) then
+                        local coordinate = tostring(world.x) .. ":"
+                            .. tostring(world.y) .. ":" .. tostring(world.z)
+                        if not seen[coordinate] then
+                            seen[coordinate] = true
+                            coords[#coords + 1] = world
+                        end
+                    end
+                end
+            end
         end
     end
     return coords
@@ -254,8 +266,7 @@ function M.scanAll(identity, record, player)
         local square = squares[i]
         scanSquare(identity, player, square.x, square.y, square.z)
     end
-    local key = Util.identityKey(identity.rvId,
-        identity.generation, identity.bitmapVersion)
+    local key = Util.identityKey(identity.rvId, identity.generation)
     scans[key] = { cursor = 1 }
     return true
 end
@@ -263,8 +274,7 @@ end
 function M.scanTick(identity, record, player)
     local squares = interior(record)
     if not squares then return false end
-    local key = Util.identityKey(identity.rvId,
-        identity.generation, identity.bitmapVersion)
+    local key = Util.identityKey(identity.rvId, identity.generation)
     local state = scans[key] or { cursor = 1 }
     scans[key] = state
     for _ = 1, P.DEVICE_SCAN_SQUARES_PER_TICK do
@@ -303,8 +313,7 @@ local function resolveDevice(identity, device, player)
 end
 
 function M.refreshStates(identity, player, circuitOn)
-    local cache = caches[Util.identityKey(identity.rvId,
-        identity.generation, identity.bitmapVersion)] or {}
+    local cache = caches[Util.identityKey(identity.rvId, identity.generation)] or {}
     for _, device in pairs(cache) do
         local object = resolveDevice(identity, device, player)
         device.resolved = object ~= nil
@@ -321,8 +330,7 @@ function M.refreshStates(identity, player, circuitOn)
 end
 
 function M.resolveCached(identity, player)
-    local cache = caches[Util.identityKey(identity.rvId,
-        identity.generation, identity.bitmapVersion)] or {}
+    local cache = caches[Util.identityKey(identity.rvId, identity.generation)] or {}
     for _, device in pairs(cache) do
         device.resolved = resolveDevice(identity, device, player) ~= nil
     end
@@ -330,8 +338,7 @@ end
 
 function M.currentLoadW(identity)
     local total, count = 0, 0
-    local cache = caches[Util.identityKey(identity.rvId,
-        identity.generation, identity.bitmapVersion)] or {}
+    local cache = caches[Util.identityKey(identity.rvId, identity.generation)] or {}
     for _, device in pairs(cache) do
         if device.resolved and device.stateKnown and device.lastKnownActive == true then
             total = total + (device.lastKnownPowerW or device.ratedPowerW)
@@ -343,16 +350,14 @@ end
 
 function M.count(identity)
     local count = 0
-    for _ in pairs(caches[Util.identityKey(identity.rvId,
-        identity.generation, identity.bitmapVersion)] or {}) do
+    for _ in pairs(caches[Util.identityKey(identity.rvId, identity.generation)] or {}) do
         count = count + 1
     end
     return count
 end
 
 function M.clear(identity)
-    local key = Util.identityKey(identity.rvId,
-        identity.generation, identity.bitmapVersion)
+    local key = Util.identityKey(identity.rvId, identity.generation)
     caches[key] = nil
     scans[key] = nil
 end

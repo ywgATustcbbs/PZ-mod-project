@@ -7,7 +7,7 @@ local COMMAND_MODULE = ctx.COMMAND_MODULE
 local COMMAND_RELOCATE = ctx.COMMAND_RELOCATE
 local Constants = ctx.Constants
 local Boundary = ctx.Boundary
-local Bitmap = ctx.Bitmap
+local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
 local function safeErrorText(...) return ctx.safeErrorText(...) end
@@ -40,11 +40,10 @@ local function earlierTick(left, right)
     return { hi32 = selected.hi32, lo32 = selected.lo32 }
 end
 
-local function roofRefreshGroupMatches(group, rvId, generation, bitmapVersion)
+local function roofRefreshGroupMatches(group, rvId, generation)
     return type(group) == "table"
         and tostring(group.rvId) == tostring(rvId)
         and ServerUtil.integer(group.generation) == ServerUtil.integer(generation)
-        and ServerUtil.integer(group.bitmapVersion) == ServerUtil.integer(bitmapVersion)
 end
 
 local function roofRefreshGroupMember(group, player, token)
@@ -110,7 +109,6 @@ local function failRoofRefreshRelocationGroup(reason)
         roomKey = group.roomKey,
         rvId = group.rvId,
         generation = group.generation,
-        bitmapVersion = group.bitmapVersion,
         token = group.token,
         reason = safeErrorText(reason),
     }
@@ -232,19 +230,16 @@ function RV.Server.beginRoofRefreshRelocationGroup(request)
         end
         local rvId = tostring(request.rvId or "")
         local generation = ServerUtil.integer(request.generation)
-        local bitmapVersion = ServerUtil.integer(request.bitmapVersion)
         local roomKey = tostring(request.roomKey or "")
         if rvId == "" or generation == nil or generation < 1
-            or bitmapVersion ~= Constants.BITMAP_VERSION
-            or roomKey ~= rvId .. ":" .. tostring(generation) .. ":"
-                .. tostring(bitmapVersion) then
+            or roomKey ~= rvId .. ":" .. tostring(generation) then
             return false, Constants.INVALID_RV_DATA
         end
 
         if request.phase == "return" then
             local group = ctx.roofRefreshRelocationGroup
-            if not roofRefreshGroupMatches(group, rvId, generation,
-                bitmapVersion) or group.roomKey ~= roomKey
+            if not roofRefreshGroupMatches(group, rvId, generation)
+                or group.roomKey ~= roomKey
                 or group.phase ~= "temporary"
                 or not roofRefreshGroupAll(group, "arrived", true) then
                 return false, "roof refresh group temporary phase is not complete"
@@ -267,7 +262,6 @@ function RV.Server.beginRoofRefreshRelocationGroup(request)
                 local contextOk, contextOrReason = currentRoofRefreshContext(
                     livePlayer, {
                         rvId = rvId, generation = generation,
-                        bitmapVersion = bitmapVersion,
                         identityKey = member.identity.key,
                     })
                 if not contextOk then
@@ -277,10 +271,9 @@ function RV.Server.beginRoofRefreshRelocationGroup(request)
                 local returnPosition = member.returnPosition
                 local returnX, returnY, returnZ = math.floor(returnPosition.x),
                     math.floor(returnPosition.y), math.floor(returnPosition.z)
-                if not Bitmap.containsScope(contextOrReason.bitmap, returnX,
-                    returnY, returnZ)
-                    or not Bitmap.isActive(contextOrReason.bitmap, returnX,
-                        returnY, returnZ) then
+                if not TemplateGeometry.isWalkableInManagedRegion(
+                    { x = returnX, y = returnY, z = returnZ },
+                    contextOrReason.boundary.managed) then
                     local failure = "roof refresh group return position is not current active RV geometry"
                     failRoofRefreshRelocationGroup(failure)
                     return false, failure
@@ -300,7 +293,6 @@ function RV.Server.beginRoofRefreshRelocationGroup(request)
                     token = returnToken,
                     onlineId = member.identity.onlineId,
                     rvId = rvId, generation = generation,
-                    bitmapVersion = bitmapVersion,
                     x = member.target.x, y = member.target.y, z = member.target.z,
                     roofRepairTransition = true,
                     roofRepairPhase = "return",
@@ -359,7 +351,6 @@ function RV.Server.beginRoofRefreshRelocationGroup(request)
             seen[identityOrReason.key] = true
             local contextOk, contextOrReason = currentRoofRefreshContext(player,
                 { rvId = rvId, generation = generation,
-                    bitmapVersion = bitmapVersion,
                     identityKey = identityOrReason.key })
             if not contextOk then return false, contextOrReason end
             sharedContext = sharedContext or contextOrReason
@@ -368,10 +359,8 @@ function RV.Server.beginRoofRefreshRelocationGroup(request)
             local returnOk, returnPosition = pcall(roofRefreshPosition,
                 exactOrReason, "group return")
             if not returnOk then return false, Constants.INVALID_RV_DATA end
-            if not Bitmap.containsScope(contextOrReason.bitmap,
-                returnPosition.x, returnPosition.y, returnPosition.z)
-                or not Bitmap.isActive(contextOrReason.bitmap,
-                    returnPosition.x, returnPosition.y, returnPosition.z) then
+            if not TemplateGeometry.isWalkableInManagedRegion(returnPosition,
+                contextOrReason.boundary.managed) then
                 return false, "roof refresh group return position is not current active RV geometry"
             end
             members[#members + 1] = {
@@ -381,7 +370,6 @@ function RV.Server.beginRoofRefreshRelocationGroup(request)
                 roomKey = roomKey,
                 rvId = rvId,
                 generation = generation,
-                bitmapVersion = bitmapVersion,
                 originalPosition = exactOrReason,
                 returnPosition = returnPosition,
                 acknowledged = false,
@@ -417,7 +405,7 @@ function RV.Server.beginRoofRefreshRelocationGroup(request)
             .. tostring(ctx.roofRefreshGroupSerial)
         local group = {
             roomKey = roomKey, rvId = rvId, generation = generation,
-            bitmapVersion = bitmapVersion, phase = "temporary", token = token,
+            phase = "temporary", token = token,
             target = copyRoofRefreshPosition(destination), members = members,
             allowedPlayers = {},
             startedAt = math.floor(os.time()),
@@ -435,7 +423,7 @@ function RV.Server.beginRoofRefreshRelocationGroup(request)
             if Boundary and type(Boundary.beginTransition) == "function" then
                 beginCallOk, armed = pcall(Boundary.beginTransition,
                     member.player, rvId, generation, token,
-                    "roof-refresh-group", bitmapVersion)
+                    "roof-refresh-group")
             end
             if not beginCallOk or armed ~= true then
                 local failure = "roof refresh group boundary transition could not be armed"
@@ -448,7 +436,6 @@ function RV.Server.beginRoofRefreshRelocationGroup(request)
             local payload = {
                 token = token, onlineId = member.identity.onlineId,
                 rvId = rvId, generation = generation,
-                bitmapVersion = bitmapVersion,
                 x = group.target.x, y = group.target.y, z = group.target.z,
                 roofRepairTransition = true, roofRepairPhase = "temporary",
             }
@@ -496,8 +483,7 @@ local function keepRoofRefreshFinalReturnAlive(member)
     -- this exact in-memory token and stable identity; no guessed player is used.
     if type(Boundary.beginTransition) == "function" then
         local beginCallOk, armed = pcall(Boundary.beginTransition, livePlayer,
-            member.rvId, member.generation, member.token, "roof-refresh-return",
-            member.bitmapVersion)
+            member.rvId, member.generation, member.token, "roof-refresh-return")
         if armed == true and type(Boundary.extendTransition) == "function" then
             pcall(Boundary.extendTransition, livePlayer, member.token, keepUntil)
             print("[RailroaderRVTest] roof refresh return lease re-armed identity="
@@ -531,7 +517,6 @@ local function resendRoofRefreshMemberPhase(group, member)
             token = member.token,
             onlineId = member.identity and member.identity.onlineId,
             rvId = member.rvId, generation = member.generation,
-            bitmapVersion = member.bitmapVersion,
             x = target and target.x, y = target and target.y,
             z = target and target.z,
             roofRepairTransition = true, roofRepairPhase = "temporary",
@@ -744,7 +729,6 @@ local function processRoofRefreshRelocationGroup()
             local contextCallOk, contextOk, contextOrReason = pcall(
                 currentRoofRefreshContext, playerOrReason, {
                     rvId = member.rvId, generation = member.generation,
-                    bitmapVersion = member.bitmapVersion,
                     identityKey = member.identityKey,
                 })
             if not contextCallOk then

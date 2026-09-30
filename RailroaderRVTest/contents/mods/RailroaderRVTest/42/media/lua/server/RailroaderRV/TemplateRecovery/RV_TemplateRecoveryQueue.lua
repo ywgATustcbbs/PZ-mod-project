@@ -138,16 +138,14 @@ end
 local function identityHasActiveTransition(identity, tick)
     local snapshotOk, activity = Boundary.transitionActivitySnapshot(tick)
     if not snapshotOk or type(activity) ~= "table" then return nil end
-    local key = Index.identityKey(identity.rvId, identity.generation,
-        identity.bitmapVersion)
+    local key = Index.identityKey(identity.rvId, identity.generation)
     if not key then return nil end
     return activeForIdentity(activity, key)
 end
 
 local function onBoundaryTransitionLifecycle(eventName, _, identity, tick)
     if type(identity) ~= "table" then return end
-    local key = Index.identityKey(identity.rvId, identity.generation,
-        identity.bitmapVersion)
+    local key = Index.identityKey(identity.rvId, identity.generation)
     if not key then return end
     if not Core.isTick(tick) then tick = Core.getTick() end
     if not Core.isTick(tick) then
@@ -205,7 +203,7 @@ local function samplePlayer(expectedBoundary, player)
     pcall(function()
         if player == nil or type(expectedBoundary) ~= "table" then return end
         local key = Index.identityKey(expectedBoundary.rvId,
-            expectedBoundary.generation, expectedBoundary.bitmapVersion)
+            expectedBoundary.generation)
         if not key then return end
         local xOk, playerX = ServerUtil.invoke(player, "getX")
         local yOk, playerY = ServerUtil.invoke(player, "getY")
@@ -276,8 +274,7 @@ local function processQueue(activeBoundaries, tick)
                 local staleBoundary = item.boundary
                 local staleKey = type(staleBoundary) == "table"
                     and Index.identityKey(staleBoundary.rvId,
-                        staleBoundary.generation,
-                        staleBoundary.bitmapVersion) or nil
+                        staleBoundary.generation) or nil
                 if staleKey then
                     clearQueuedIdentity(staleKey)
                     Index.clear(staleKey)

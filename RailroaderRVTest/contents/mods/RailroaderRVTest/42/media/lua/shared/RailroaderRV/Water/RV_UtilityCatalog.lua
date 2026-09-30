@@ -14,7 +14,7 @@ local integer = StrictSchema.integer
 local exactKeys = StrictSchema.exactKeys
 
 M.SINK_IDENTITY_FIELDS = {
-    "owner", "role", "rvId", "generation", "bitmapVersion", "slotIndex", "anchor",
+    "owner", "role", "rvId", "generation", "slotIndex", "anchor",
 }
 M.WATER_TAG_KEY = "RailroaderRVTestWater"
 
@@ -41,7 +41,6 @@ local function tagForObject(object)
         or tag.owner ~= C.MOD_ID or tag.role ~= "sink"
         or type(tag.rvId) ~= "string" or tag.rvId == ""
         or integer(tag.generation) == nil or tag.generation < 1
-        or integer(tag.bitmapVersion) ~= C.BITMAP_VERSION
         or integer(tag.slotIndex) == nil then
         return nil
     end
@@ -56,7 +55,6 @@ function M.readSinkIdentity(object)
     return {
         rvId = tag.rvId,
         generation = tag.generation,
-        bitmapVersion = tag.bitmapVersion,
         slotIndex = tag.slotIndex,
         anchor = { x = tag.anchor.x, y = tag.anchor.y, z = tag.anchor.z },
     }
@@ -77,14 +75,12 @@ function M.isCurrentWaterSink(object, identity, mappingRecord)
     if type(identity) ~= "table" or type(mappingRecord) ~= "table"
         or type(identity.rvId) ~= "string" or identity.rvId == ""
         or integer(identity.generation) == nil
-        or integer(identity.bitmapVersion) ~= C.BITMAP_VERSION
         or integer(mappingRecord.slotIndex) ~= tag.slotIndex
         or not sameAnchor(mappingRecord.anchor, tag.anchor) then
         return false
     end
     return tag.rvId == identity.rvId
         and tag.generation == integer(identity.generation)
-        and tag.bitmapVersion == integer(identity.bitmapVersion)
 end
 
 local function invoke(target, method, ...)

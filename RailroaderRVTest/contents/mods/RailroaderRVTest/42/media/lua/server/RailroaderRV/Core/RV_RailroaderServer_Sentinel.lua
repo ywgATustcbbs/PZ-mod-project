@@ -2,7 +2,7 @@
 return function(ctx)
 local Core = require("RailroaderRV/Core/RV_Server_Core")
 local Boundary = ctx.Boundary
-local Bitmap = ctx.Bitmap
+local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local Adapter = ctx.Adapter
 local C = ctx.C
 local pendingWallRoofRefreshes = ctx.pendingWallRoofRefreshes
@@ -119,7 +119,6 @@ function Adapter.syncUtilityMapping(player)
     local record = context.record
     if onlineId == nil or type(identity.rvId) ~= "string"
         or identity.rvId == "" or integer(identity.generation) == nil
-        or integer(identity.bitmapVersion) ~= C.BITMAP_VERSION
         or record.locoId == nil then
         return false
     end
@@ -129,7 +128,6 @@ function Adapter.syncUtilityMapping(player)
         rvId = tostring(identity.rvId),
         locoId = tostring(record.locoId),
         generation = integer(identity.generation),
-        bitmapVersion = integer(identity.bitmapVersion),
     }
     local sentOk, sent = callGlobal("sendServerCommand", player, C.MOD_ID,
         C.COMMAND_RV_UTILITY_MAPPING, payload)
@@ -330,49 +328,40 @@ local function sentinelRelationsConsistent(map, record)
     return true
 end
 
-local function sentinelBitmapAndCenter(record)
+local function sentinelGeometryAndCenter(record)
     if type(record) ~= "table"
-        or type(record.managed) ~= "table"
         or type(record.boundary) ~= "table" then
         return false, C.INVALID_RV_DATA
     end
-    local managed = record.managed
+    local managed = record.boundary.managed
     local originX, originY = integer(managed.originX), integer(managed.originY)
     local width, height = integer(managed.width), integer(managed.height)
     local minZ, maxZ = integer(managed.minZ), integer(managed.maxZ)
-    if originX == nil or originY == nil or width ~= integer(C.RV_MANAGED_WIDTH)
-        or height ~= integer(C.RV_MANAGED_HEIGHT) or minZ == nil or maxZ == nil
+    if originX == nil or originY == nil or width == nil
+        or height == nil or minZ == nil or maxZ == nil
         or maxZ <= minZ then
         return false, C.INVALID_RV_DATA
     end
-    local bitmap = type(Boundary.cachedBitmap) == "function"
-        and Boundary.cachedBitmap(record) or nil
-    if not bitmap and Boundary
-        and type(Boundary.registerGeneration) == "function" then
-        local registerOk, registered = pcall(Boundary.registerGeneration,
-            record.rvId, record.generation, record.boundary, record)
-        if registerOk and registered == true then
-            bitmap = type(Boundary.cachedBitmap) == "function"
-                and Boundary.cachedBitmap(record) or nil
-        end
+    local anchor = TemplateGeometry.anchorFromManaged(managed)
+    if not anchor or anchor.z ~= integer(record.anchor and record.anchor.z) then
+        return false, C.INVALID_RV_DATA
     end
-    if not bitmap then return false, C.INVALID_RV_DATA end
     local centerX = originX + math.floor(width / 2)
     local centerY = originY + math.floor(height / 2)
     local rvPosition = copyPosition(record.rvPosition)
     if not rvPosition or math.floor(rvPosition.x) ~= centerX
         or math.floor(rvPosition.y) ~= centerY
-        or math.floor(rvPosition.z) ~= integer(record.anchor and record.anchor.z) then
+        or math.floor(rvPosition.z) ~= anchor.z then
         return false, C.INVALID_RV_DATA
     end
     local activeX, activeY, activeZ = math.floor(rvPosition.x),
         math.floor(rvPosition.y), math.floor(rvPosition.z)
-    if not Bitmap.isActive(bitmap, activeX, activeY, activeZ) then
+    if not TemplateGeometry.isWalkable(rvPosition, anchor) then
         return false, C.INVALID_RV_DATA
     end
     return true, {
-        bitmap = bitmap, centerX = centerX, centerY = centerY,
-        centerZ = integer(record.anchor and record.anchor.z),
+        anchor = anchor, centerX = centerX, centerY = centerY,
+        centerZ = anchor.z,
     }
 end
 
@@ -387,7 +376,7 @@ local function sentinelRecordCandidate(map, player, server)
     local invalidReason = nil
     for _, record in pairs(map.locomotives or {}) do
         if type(record) == "table" then
-            local centerOk, centerOrReason = sentinelBitmapAndCenter(record)
+            local centerOk, centerOrReason = sentinelGeometryAndCenter(record)
             local center = centerOk and centerOrReason or nil
             local generationMatch = center ~= nil
                 and math.floor(position.x) == center.centerX
@@ -410,7 +399,7 @@ local function sentinelRecordCandidate(map, player, server)
                         == "function" then
                         local callOk, current, detail = pcall(
                             server.currentRVManifestForRelocation,
-                            record.rvId, record.generation, record.bitmapVersion)
+                            record.rvId, record.generation)
                         if callOk and current == true and type(detail) == "table" then
                             manifestOk, manifestOrReason = true, detail
                         else
@@ -493,7 +482,7 @@ local function sentinelReturnToRV(candidate, player, map)
     if type(server.currentRVManifestForRelocation) == "function" then
         local callOk, current, detail = pcall(
             server.currentRVManifestForRelocation,
-            record.rvId, record.generation, record.bitmapVersion)
+            record.rvId, record.generation)
         if callOk and current == true and type(detail) == "table" then
             manifestOk, manifestOrReason = true, detail
         else
@@ -507,19 +496,14 @@ local function sentinelReturnToRV(candidate, player, map)
         or not sentinelRelationsConsistent(map, record) then
         return false, C.INVALID_RV_DATA
     end
-    local centerOk, centerOrReason = sentinelBitmapAndCenter(record)
+    local centerOk, centerOrReason = sentinelGeometryAndCenter(record)
     if not centerOk then return false, centerOrReason end
     local target = copyPosition(record.rvPosition)
-    local activeOk, active = false, false
-    if target and type(Bitmap.isActive) == "function" then
-        activeOk, active = pcall(Bitmap.isActive, centerOrReason.bitmap,
-            math.floor(target.x), math.floor(target.y), math.floor(target.z))
-    end
     if not target
         or target.x ~= centerOrReason.centerX + 0.5
         or target.y ~= centerOrReason.centerY + 0.5
         or target.z ~= centerOrReason.centerZ
-        or not activeOk or active ~= true
+        or not TemplateGeometry.isWalkable(target, centerOrReason.anchor)
         or not usableCoordinate(target) then
         return false, C.INVALID_RV_DATA
     end
@@ -531,7 +515,7 @@ local function sentinelReturnToRV(candidate, player, map)
     if Boundary and type(Boundary.beginTransition) == "function"
         and type(Boundary.completeTransition) == "function" then
         beginOk, armed = pcall(Boundary.beginTransition, player, record.rvId,
-            record.generation, token, "sentinel", record.bitmapVersion)
+            record.generation, token, "sentinel")
     end
     if not beginOk or armed ~= true then
         if Boundary and type(Boundary.clearPlayer) == "function" then
@@ -559,7 +543,6 @@ local function sentinelReturnToRV(candidate, player, map)
     local moved = movePlayer(player, target, "enter", {
         locoId = record.locoId, role = relation.role, seat = relation.seat,
         rvId = record.rvId, generation = record.generation,
-        bitmapVersion = record.bitmapVersion,
     })
     if not moved then
         if type(Boundary.clearPlayer) == "function" then

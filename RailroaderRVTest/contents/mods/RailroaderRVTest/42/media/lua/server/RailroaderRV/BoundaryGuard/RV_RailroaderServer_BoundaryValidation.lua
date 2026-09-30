@@ -35,7 +35,7 @@ local function roofRefreshBoundaryReadAllowed(server, record, identityKey)
         return false
     end
     local callOk, allowed = pcall(server.isRoofRefreshBoundaryReadAllowed,
-        record.rvId, record.generation, record.bitmapVersion, identityKey)
+        record.rvId, record.generation, identityKey)
     return callOk and allowed == true
 end
 
@@ -48,7 +48,7 @@ local function roofRefreshBoundaryContextReadAllowed(server, record,
     end
     local callOk, allowed = pcall(
         server.isRoofRefreshBoundaryContextReadAllowed, record.rvId,
-        record.generation, record.bitmapVersion, identityKey)
+        record.generation, identityKey)
     return callOk and allowed == true
 end
 
@@ -160,8 +160,7 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
         return nil
     end
     local manifestCallOk, manifestAccepted, manifest = pcall(
-        server.currentRVManifestForBoundary, record.rvId, record.generation,
-        record.bitmapVersion)
+        server.currentRVManifestForBoundary, record.rvId, record.generation)
     if not manifestCallOk or manifestAccepted ~= true
         or type(manifest) ~= "table" then
         diagnose("manifest-rejected")

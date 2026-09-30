@@ -10,33 +10,29 @@ local ROOM_OWNERSHIP_EVENT_SCAN_COOLDOWN_TICKS =
     (ROOM_OWNERSHIP_EVENT_RESCAN_COUNT + 1)
         * ROOM_OWNERSHIP_REACTIVE_SCAN_INTERVAL_TICKS
 
-local function roomOwnershipGuardKey(rvId, generation, bitmapVersion)
-    return tostring(rvId) .. ":" .. tostring(generation) .. ":"
-        .. tostring(bitmapVersion)
+local function roomOwnershipGuardKey(rvId, generation)
+    return tostring(rvId) .. ":" .. tostring(generation)
 end
 
 local finiteNumber = C.finiteNumber
 local finiteInteger = C.finiteInteger
 
-local function findRoomOwnershipGuard(rvId, generation, bitmapVersion)
+local function findRoomOwnershipGuard(rvId, generation)
     local exactGeneration = finiteInteger(generation)
-    local exactBitmapVersion = finiteInteger(bitmapVersion)
-    if rvId == nil or tostring(rvId) == "" or exactGeneration == nil
-        or exactBitmapVersion ~= C.BITMAP_VERSION then
+    if rvId == nil or tostring(rvId) == "" or exactGeneration == nil then
         return nil
     end
     local guard = roomOwnershipGuards[roomOwnershipGuardKey(
-        rvId, exactGeneration, exactBitmapVersion)]
+        rvId, exactGeneration)]
     if type(guard) ~= "table" or tostring(guard.rvId) ~= tostring(rvId)
-        or guard.generation ~= exactGeneration
-        or guard.bitmapVersion ~= exactBitmapVersion then
+        or guard.generation ~= exactGeneration then
         return nil
     end
     return guard
 end
 
-local function roomOwnershipGuardStatus(rvId, generation, bitmapVersion)
-    local guard = findRoomOwnershipGuard(rvId, generation, bitmapVersion)
+local function roomOwnershipGuardStatus(rvId, generation)
+    local guard = findRoomOwnershipGuard(rvId, generation)
     if guard == nil then
         return false, false
     end
@@ -45,14 +41,11 @@ end
 
 local function validRailroaderFinalHint(args)
     local generation = type(args) == "table" and finiteInteger(args.generation)
-    local bitmapVersion = type(args) == "table"
-        and finiteInteger(args.bitmapVersion)
     return type(args) == "table" and args.railroaderTransition == true
         and type(args.token) == "string" and args.token ~= ""
         and args.locoId ~= nil and tostring(args.locoId) ~= ""
         and args.rvId ~= nil and tostring(args.rvId) ~= ""
         and generation ~= nil and generation >= 1
-        and bitmapVersion == C.BITMAP_VERSION
 end
 
 local function localPlayerByOnlineId(onlineId)
@@ -84,19 +77,10 @@ local function readRoomRefreshBounds(args, prefix)
     if bounds.wallMinX > bounds.wallMaxX or bounds.wallMinY > bounds.wallMaxY
         or bounds.roomMinX > bounds.roomMaxX or bounds.roomMinY > bounds.roomMaxY
         or bounds.roofMinX > bounds.roofMaxX or bounds.roofMinY > bounds.roofMaxY
-        or bounds.wallMaxX - bounds.wallMinX + 1 ~= 7
-        or bounds.wallMaxY - bounds.wallMinY + 1 ~= 24
-        or bounds.roomMaxX - bounds.roomMinX + 1 ~= 6
-        or bounds.roomMaxY - bounds.roomMinY + 1 ~= 23
         or bounds.roomMinX < bounds.wallMinX
         or bounds.roomMaxX > bounds.wallMaxX
         or bounds.roomMinY < bounds.wallMinY
-        or bounds.roomMaxY > bounds.wallMaxY
-        or bounds.roofMaxX - bounds.roofMinX + 1 ~= 6
-        or bounds.roofMaxY - bounds.roofMinY + 1 ~= 23
-        or bounds.z < -32 or bounds.z > 31
-        or bounds.roofZ < -32 or bounds.roofZ > 31
-        or bounds.roofZ ~= bounds.z + 1 then
+        or bounds.roomMaxY > bounds.wallMaxY then
         return nil
     end
     return bounds
@@ -218,8 +202,8 @@ local function refreshCurrentPlayerRoomOwnership(guard)
     return scanOk, cleared
 end
 
-local function refreshRoomOwnershipByIdentity(rvId, generation, bitmapVersion)
-    local guard = findRoomOwnershipGuard(rvId, generation, bitmapVersion)
+local function refreshRoomOwnershipByIdentity(rvId, generation)
+    local guard = findRoomOwnershipGuard(rvId, generation)
     if guard == nil then
         return false, 0
     end
@@ -279,7 +263,7 @@ local function scheduleRoomOwnershipScan(guard, delayedRetries)
     local reopenFinalRelocationScan = ctx.reopenFinalRelocationScan
     if type(reopenFinalRelocationScan) == "function" then
         reopenFinalRelocationScan(
-            guard.rvId, guard.generation, guard.bitmapVersion)
+            guard.rvId, guard.generation)
     end
 end
 
@@ -297,11 +281,9 @@ end
 local function beginRoomOwnershipRefresh(args)
     local rvId = args.rvId
     local generation = finiteInteger(args.generation)
-    local bitmapVersion = finiteInteger(args.bitmapVersion)
     local newBounds = readRoomRefreshBounds(args, "new")
     if rvId == nil or tostring(rvId) == "" or generation == nil
-        or generation < 1 or bitmapVersion ~= C.BITMAP_VERSION
-        or newBounds == nil
+        or generation < 1 or newBounds == nil
         or args.hasOld ~= true and args.hasOld ~= false then
         return
     end
@@ -310,7 +292,7 @@ local function beginRoomOwnershipRefresh(args)
         oldBounds = readRoomRefreshBounds(args, "old")
         if oldBounds == nil then return end
     end
-    local key = roomOwnershipGuardKey(rvId, generation, bitmapVersion)
+    local key = roomOwnershipGuardKey(rvId, generation)
     -- A current generation packet contains the authoritative previous/current
     -- footprints needed for this swap.  Retain monitors for other RV IDs, but
     -- do not keep a prior generation's geometry alive after this identity has
@@ -325,7 +307,6 @@ local function beginRoomOwnershipRefresh(args)
         key = key,
         rvId = tostring(rvId),
         generation = generation,
-        bitmapVersion = bitmapVersion,
         oldBounds = oldBounds,
         newBounds = newBounds,
         ticks = 0,

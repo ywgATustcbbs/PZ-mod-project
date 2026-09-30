@@ -48,9 +48,8 @@ local function markMappingChanged(boundaryChanged)
             (Adapter._boundaryValidationEpoch or 0) + 1
         invalidateBoundaryValidationCache()
     end
-    -- The train map is server-persistent authority. ModData.transmit sends its
-    -- entire table, including the static boundary bitmap; no client code reads
-    -- this key, so keep the epoch/cache updates local and send no map snapshot.
+    -- The train map is server-persistent authority. No client code reads this
+    -- key, so keep the epoch/cache updates local and send no map snapshot.
 end
 
 local function rvRegion(anchor)
@@ -147,7 +146,6 @@ local function validMappingRecord(record)
         and type(record.rvId) == "string" and record.rvId ~= ""
         and tostring(record.locoId) == record.rvId
         and integer(record.generation) ~= nil and integer(record.generation) >= 1
-        and integer(record.bitmapVersion) == integer(C.BITMAP_VERSION)
 end
 
 local function validRecord(record)
@@ -188,12 +186,10 @@ local function roofRefreshRoomKey(record)
     if type(record) ~= "table" or record.locoId == nil
         or record.rvId == nil or tostring(record.rvId) == ""
         or tostring(record.rvId) ~= tostring(record.locoId)
-        or integer(record.generation) == nil or integer(record.generation) < 1
-        or integer(record.bitmapVersion) ~= C.BITMAP_VERSION then
+        or integer(record.generation) == nil or integer(record.generation) < 1 then
         return nil
     end
     return tostring(record.rvId) .. ":" .. tostring(record.generation)
-        .. ":" .. tostring(record.bitmapVersion)
 end
 
 local function isWallRemovalSource(source)
@@ -346,7 +342,6 @@ local function refreshRoofForPlayer(player, record, force, reason)
     local cacheMatches = type(cached) == "table"
         and tostring(cached.rvId) == tostring(record.rvId)
         and integer(cached.generation) == integer(record.generation)
-        and integer(cached.bitmapVersion) == integer(record.bitmapVersion)
     if not force and cacheMatches then return true, "already refreshed" end
     local ok, refreshed, detail = pcall(server.refreshRoofVisuals, player, record)
     if not ok then
@@ -358,7 +353,6 @@ local function refreshRoofForPlayer(player, record, force, reason)
             roomKey = roomKey,
             rvId = tostring(record.rvId),
             generation = integer(record.generation),
-            bitmapVersion = integer(record.bitmapVersion),
             updatedAtTick = Adapter._ticks or Core.getTick(),
         }
         local name = playerName(player)
@@ -517,12 +511,11 @@ local function allocateRVRegion(locoId)
     return true, slotIndex, anchor, regionForAnchor(anchor)
 end
 
-local function currentMappingRecord(rvId, generation, bitmapVersion)
+local function currentMappingRecord(rvId, generation)
     local map = mapData()
     local record = recordForLoco(map, rvId)
     if not record or not validMappingRecord(record)
-        or integer(record.generation) ~= integer(generation)
-        or integer(record.bitmapVersion) ~= integer(bitmapVersion) then
+        or integer(record.generation) ~= integer(generation) then
         return false, C.INVALID_RV_DATA
     end
     return true, record

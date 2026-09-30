@@ -229,8 +229,7 @@ local function rearmGenerationTransition(pending, player, kind)
     end
     if type(Boundary.beginTransition) ~= "function" then return false end
     local beginOk, armed = pcall(Boundary.beginTransition, player,
-        pending.rvId, pending.generation, token, kind or "generation",
-        pending.bitmapVersion)
+        pending.rvId, pending.generation, token, kind or "generation")
     if not beginOk or armed ~= true then return false end
     if type(Boundary.extendTransition) == "function" then
         pcall(Boundary.extendTransition, player, token,
@@ -256,7 +255,6 @@ local function resendGenerationPhase(pending, player, phase)
             onlineId = identity.onlineId,
             rvId = tostring(pending.rvId),
             generation = pending.generation,
-            bitmapVersion = pending.bitmapVersion,
             x = target.x, y = target.y, z = target.z,
         }
         if type(pending.railroader) == "table" then
@@ -301,7 +299,6 @@ local function resendGenerationPhase(pending, player, phase)
         onlineId = identity.onlineId,
         rvId = tostring(pending.rvId),
         generation = pending.generation,
-        bitmapVersion = pending.bitmapVersion,
         x = target.x, y = target.y, z = target.z,
         generationTransition = true,
         generationPhase = phase == "rollback" and "return" or "temporary",

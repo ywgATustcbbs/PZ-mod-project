@@ -30,7 +30,6 @@ local function validContext(context, identity)
         or context.authorized ~= true or context.phase ~= "READY"
         or record.rvId ~= identity.rvId
         or integer(record.generation) ~= integer(identity.generation)
-        or integer(record.bitmapVersion) ~= integer(identity.bitmapVersion)
         or integer(record.slotIndex) == nil then
         return false
     end
@@ -152,7 +151,6 @@ function M.ensureSinkIdentity(object, identity, mappingRecord)
         role = "sink",
         rvId = identity.rvId,
         generation = identity.generation,
-        bitmapVersion = identity.bitmapVersion,
         slotIndex = mappingRecord.slotIndex,
         anchor = { x = mappingRecord.anchor.x, y = mappingRecord.anchor.y,
             z = mappingRecord.anchor.z },

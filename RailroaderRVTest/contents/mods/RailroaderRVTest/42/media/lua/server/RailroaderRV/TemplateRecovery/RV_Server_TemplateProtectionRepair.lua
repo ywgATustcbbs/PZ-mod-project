@@ -6,7 +6,7 @@ local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local ensureRoofSquare = ctx.ensureRoofSquare
-local Bitmap = require("RailroaderRV/Common/RV_Bitmap")
+local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local createCapturedTemplateObject = ctx.createCapturedTemplateObject
 local configureCapturedDoorFrame = ctx.configureCapturedDoorFrame
 local ProtectionManifest = require("RailroaderRV/RoomTemplate/RV_ProtectionManifest")
@@ -121,7 +121,6 @@ local function objectTag(object)
         or nested.owner ~= Constants.MOD_ID
         or tostring(data.rvId) ~= tostring(nested.rvId)
         or integer(data.generation) ~= integer(nested.generation)
-        or integer(data.bitmapVersion) ~= integer(nested.bitmapVersion)
         or data.role ~= nested.role then
         return nil
     end
@@ -291,12 +290,14 @@ local function objectAtCoordinate(object, x, y, z)
 end
 
 local function isCabEditableCoordinate(x, y, z, index)
-    return z == integer(index.anchorZ)
-        and index.cabEditableCoordinates[coordinateKey(x, y, z)] == true
+    return Index.isCabCoordinate(x, y, z, {
+        x = index.anchorX, y = index.anchorY, z = index.anchorZ,
+    })
 end
 
 local function isRemovalScopeCoordinate(boundary, index, x, y, z)
-    return Bitmap.containsScope(boundary.bitmap, x, y, z)
+    return TemplateGeometry.inManagedRegion({ x = x, y = y, z = z },
+        boundary.managed)
         and not isCabEditableCoordinate(x, y, z, index)
 end
 
@@ -493,7 +494,7 @@ local function isWhitelistedTemplateObject(object, boundary, manifest, edges,
         or tag.role ~= "captured-template" then
         return false
     end
-    return Bitmap.containsScope(boundary.bitmap, x, y, z) == true
+    return TemplateGeometry.contains({ x = x, y = y, z = z }, anchor) == true
 end
 
 local function isWhitelistedGenerator(object, boundary, manifest)
@@ -780,7 +781,6 @@ local function repairTemplateProtectionCoordinate(cell, x, y, z, squareInfo,
     local anchor = manifest.anchor
     local tagContext = {
         rvId = boundary.rvId,
-        bitmapVersion = boundary.bitmapVersion,
         anchorX = anchor.x,
         anchorY = anchor.y,
         anchorZ = anchor.z,
@@ -792,8 +792,8 @@ local function repairTemplateProtectionCoordinate(cell, x, y, z, squareInfo,
             return false, Constants.INVALID_RV_DATA
         end
         if not squareInfo then
-            if not Bitmap.containsScope(boundary.bitmap, expected.x,
-                expected.y, expected.z) then
+            if not TemplateGeometry.contains({ x = expected.x, y = expected.y,
+                z = expected.z }, manifest.anchor) then
                 return false, Constants.INVALID_RV_DATA
             end
             if not loadedLayerForCell(cell, expected.x, expected.y,
@@ -902,7 +902,8 @@ end
 
 local function repairTemplateProtectionLayer(cell, x, y, z, boundary, manifest,
     repairIndex)
-    if not Bitmap.containsScope(boundary.bitmap, x, y, z)
+    if not TemplateGeometry.inManagedRegion({ x = x, y = y, z = z },
+        boundary.managed)
         or isCabEditableCoordinate(x, y, z, repairIndex) then
         return true
     end
@@ -948,7 +949,7 @@ local function repairQueuedTemplateProtectionXY(player, boundary, expectedKey,
     if not cellOk or not cell then
         return true
     end
-    for z = boundary.bitmap.minZ, boundary.bitmap.maxZ - 1 do
+    for z = boundary.managed.minZ, boundary.managed.maxZ - 1 do
         pcall(repairTemplateProtectionLayer, cell, x, y, z, boundary,
             manifest, repairIndex)
     end
@@ -961,8 +962,8 @@ local function reconcileCurrentTemplateCell(player, expectedBoundary, x, y)
     local ix, iy = integer(x), integer(y)
     if not contextOk then return false, boundary end
     if ix == nil or iy == nil
-        or not Bitmap.containsScope(boundary.bitmap, ix, iy,
-            boundary.bitmap.minZ) then
+        or not TemplateGeometry.inManagedRegion({ x = ix, y = iy,
+            z = boundary.managed.minZ }, boundary.managed) then
         return false, Constants.INVALID_RV_DATA
     end
     local expectedKey = queueKey(boundary, record)

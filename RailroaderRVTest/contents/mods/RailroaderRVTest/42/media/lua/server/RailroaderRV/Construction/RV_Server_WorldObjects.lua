@@ -6,7 +6,6 @@ local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local ProtectionManifest = require("RailroaderRV/RoomTemplate/RV_ProtectionManifest")
 local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
-local Bitmap = require("RailroaderRV/Common/RV_Bitmap")
 
 local function integer(value)
     local number = ServerUtil.toNumber(value)
@@ -22,7 +21,6 @@ local function sameIdentity(left, right)
     return type(left) == "table" and type(right) == "table"
         and tostring(left.rvId) == tostring(right.rvId)
         and integer(left.generation) == integer(right.generation)
-        and integer(left.bitmapVersion) == integer(right.bitmapVersion)
 end
 
 local function applyIntegerState(object, state, key, setter, getter)
@@ -905,7 +903,6 @@ local function generatorObjectTag(object)
         or nested.owner ~= Constants.MOD_ID
         or tostring(data.rvId) ~= tostring(nested.rvId)
         or integer(data.generation) ~= integer(nested.generation)
-        or integer(data.bitmapVersion) ~= integer(nested.bitmapVersion)
         or data.role ~= nested.role then
         return nil
     end
@@ -972,7 +969,7 @@ local function ensureGeneratorForEntry(player, record)
     end
     local manifestOk, accepted, manifest = pcall(
         server.currentRVManifestForRelocation, record.rvId,
-        record.generation, record.bitmapVersion)
+        record.generation)
     if not manifestOk or accepted ~= true or type(manifest) ~= "table"
         or manifest.state ~= "READY" or manifest.phase ~= "COMMITTED"
         or not sameIdentity(record, manifest)
@@ -991,7 +988,8 @@ local function ensureGeneratorForEntry(player, record)
     local x = anchorX + Constants.GENERATOR_OFFSET.x
     local y = anchorY + Constants.GENERATOR_OFFSET.y
     local z = anchorZ + Constants.GENERATOR_OFFSET.z
-    if not Bitmap.containsScope(record.boundary.bitmap, x, y, z) then
+    if not TemplateGeometry.inManagedRegion({ x = x, y = y, z = z },
+        record.boundary.managed) then
         return false, Constants.INVALID_RV_DATA
     end
 
@@ -1040,7 +1038,7 @@ local function ensureGeneratorForEntry(player, record)
 
     local createOk, created = pcall(createGenerator, cell, square,
         Constants.SPRITES.generator.sprite, record.generation,
-        { rvId = record.rvId, bitmapVersion = record.bitmapVersion })
+        { rvId = record.rvId })
     if not createOk or not created then
         local rollbackCallOk, rollbackOk, rollbackReason = pcall(
             rollbackEntryGenerator, square, before, record.boundary)

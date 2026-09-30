@@ -16,8 +16,7 @@ local pendingRemovals = {}
 local REMOVAL_CONFIRM_TICKS = 20
 
 local function markNeedsReconcile(identity, record)
-    local key = Util.identityKey(identity.rvId,
-        identity.generation, identity.bitmapVersion)
+    local key = Util.identityKey(identity.rvId, identity.generation)
     record.water.state = U.WATER_STATE_NEEDS_RECONCILE
     local committed = Store.commit(record, identity)
     if committed ~= true then runtimeFaults[key] = true end
@@ -35,8 +34,7 @@ local function currentMappingRecord(identity)
 end
 
 local function copyIdentity(identity)
-    return { rvId = identity.rvId, generation = identity.generation,
-        bitmapVersion = identity.bitmapVersion }
+    return { rvId = identity.rvId, generation = identity.generation }
 end
 
 local function copyMappingRecord(record)
@@ -58,15 +56,13 @@ local function sinkCoordinates(object)
 end
 
 local function pendingKey(identity, x, y, z)
-    return Util.identityKey(identity.rvId,
-        identity.generation, identity.bitmapVersion)
+    return Util.identityKey(identity.rvId, identity.generation)
         .. ":" .. tostring(x) .. ":" .. tostring(y)
         .. ":" .. tostring(z)
 end
 
 local function pendingCount(identity)
-    local key = Util.identityKey(identity.rvId,
-        identity.generation, identity.bitmapVersion)
+    local key = Util.identityKey(identity.rvId, identity.generation)
     local count = 0
     for _, pending in pairs(pendingRemovals) do
         if pending.identityKey == key then count = count + 1 end
@@ -184,8 +180,7 @@ function M.onObjectRemoved(object)
     end
     local recordOk, recordOrReason = Store.getRecord(identity, false)
     if not recordOk then return false, recordOrReason end
-    local key = Util.identityKey(identity.rvId,
-        identity.generation, identity.bitmapVersion)
+    local key = Util.identityKey(identity.rvId, identity.generation)
     if recordOrReason.water.state ~= U.WATER_STATE_ACTIVE
         and not (recordOrReason.water.state == U.WATER_STATE_NEEDS_RECONCILE
             and pendingCount(identity) > 0 and not runtimeFaults[key]) then
@@ -245,8 +240,7 @@ function M.setConnection(identity, context, hint, record)
     if type(record) ~= "table" or type(record.water) ~= "table" then
         return false, C.INVALID_RV_DATA
     end
-    local key = Util.identityKey(identity.rvId,
-        identity.generation, identity.bitmapVersion)
+    local key = Util.identityKey(identity.rvId, identity.generation)
     if runtimeFaults[key] then return false, C.INVALID_RV_DATA end
     if record.water.state ~= U.WATER_STATE_ACTIVE then
         return false, C.INVALID_RV_DATA

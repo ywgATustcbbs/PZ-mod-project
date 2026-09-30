@@ -58,8 +58,6 @@ local function isTaggedBoundarySupportWall(object)
         or data.rvId ~= tag.rvId
         or C.finiteInteger(data.generation) == nil or C.finiteInteger(data.generation) < 1
         or C.finiteInteger(data.generation) ~= C.finiteInteger(tag.generation)
-        or C.finiteInteger(data.bitmapVersion) ~= C.BITMAP_VERSION
-        or C.finiteInteger(tag.bitmapVersion) ~= C.BITMAP_VERSION
         or data.role ~= tag.role or not boundaryRoles[tag.role]
         or not expected or expected.protectionClass ~= ProtectionManifest.PROHIBITED
         or C.finiteInteger(tag.protectionClass) ~= expected.protectionClass

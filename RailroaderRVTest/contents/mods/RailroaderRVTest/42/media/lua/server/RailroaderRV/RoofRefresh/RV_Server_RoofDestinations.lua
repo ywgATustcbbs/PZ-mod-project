@@ -4,7 +4,7 @@ local COMMAND_MODULE = ctx.COMMAND_MODULE
 local COMMAND_RELOCATE = ctx.COMMAND_RELOCATE
 local Constants = ctx.Constants
 local Boundary = ctx.Boundary
-local Bitmap = ctx.Bitmap
+local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
@@ -139,7 +139,7 @@ local function roofRefreshPosition(position, label)
         error("RailroaderRVTest: roof refresh " .. tostring(label)
             .. " z is outside the legal world range")
     end
-    -- Keep the exact finite server position in the transaction.  Bitmap and
+    -- Keep the exact finite server position in the transaction. Geometry and
     -- world safety callers floor this snapshot only for square membership;
     -- the return payload and teleportTo use these raw coordinates verbatim.
     return { x = x, y = y, z = z }
@@ -167,12 +167,9 @@ end
 local function currentRoofRefreshContext(player, request)
     local requestGeneration = type(request) == "table"
         and ServerUtil.integer(request.generation) or nil
-    local requestBitmapVersion = type(request) == "table"
-        and ServerUtil.integer(request.bitmapVersion) or nil
     if type(request) ~= "table"
         or tostring(request.rvId or "") == ""
-        or requestGeneration == nil or requestGeneration < 1
-        or requestBitmapVersion ~= Constants.BITMAP_VERSION then
+        or requestGeneration == nil or requestGeneration < 1 then
         return false, Constants.INVALID_RV_DATA
    end
     if not Boundary or type(Boundary.boundaryForPlayer) ~= "function" then
@@ -187,7 +184,6 @@ local function currentRoofRefreshContext(player, request)
     end
     if tostring(boundary.rvId) ~= tostring(request.rvId)
         or ServerUtil.integer(boundary.generation) ~= requestGeneration
-        or ServerUtil.integer(boundary.bitmapVersion) ~= requestBitmapVersion
         or relation.inside ~= true
         or tostring(boundaryIdentity.key) ~= tostring(request.identityKey) then
         return false, Constants.INVALID_RV_DATA
@@ -205,15 +201,15 @@ local function currentRoofRefreshContext(player, request)
         return false, Constants.INVALID_RV_DATA
     end
     local manifestCallOk, manifestAccepted, manifest = pcall(
-        server.currentRVManifestForBoundary, request.rvId,
-        requestGeneration, requestBitmapVersion)
+        server.currentRVManifestForBoundary, request.rvId, requestGeneration)
     if not manifestCallOk or manifestAccepted ~= true
         or type(manifest) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
-    local bitmap = type(Boundary.cachedBitmap) == "function"
-        and Boundary.cachedBitmap(record) or nil
-    if type(bitmap) ~= "table" then
+    local anchor = TemplateGeometry.anchorFromManaged(boundary.managed)
+    if not anchor or anchor.x ~= ServerUtil.integer(manifest.anchor.x)
+        or anchor.y ~= ServerUtil.integer(manifest.anchor.y)
+        or anchor.z ~= ServerUtil.integer(manifest.anchor.z) then
         return false, Constants.INVALID_RV_DATA
     end
     return true, {
@@ -222,40 +218,31 @@ local function currentRoofRefreshContext(player, request)
         relation = relation,
         identity = boundaryIdentity,
         manifest = manifest,
-        bitmap = bitmap,
+        anchor = anchor,
     }
 end
 
 local function roofRefreshDestination(context, request)
-    local bitmap = context and context.bitmap
-    if type(bitmap) ~= "table" then
+    local boundary = context and context.boundary
+    local anchor = context and context.anchor
+    if type(boundary) ~= "table" or type(anchor) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
     local phase = tostring(request.phase or "")
     if phase == "temporary" then
-        local width = ServerUtil.requiredInteger(bitmap.width, "roof refresh bitmap width")
-        local height = ServerUtil.requiredInteger(bitmap.height, "roof refresh bitmap height")
-        local originX = ServerUtil.requiredInteger(bitmap.originX, "roof refresh bitmap originX")
-        local originY = ServerUtil.requiredInteger(bitmap.originY, "roof refresh bitmap originY")
-        if width ~= Constants.RV_MANAGED_WIDTH
-            or height ~= Constants.RV_MANAGED_HEIGHT then
-            return false, Constants.INVALID_RV_DATA
-        end
-        local centerZ = ServerUtil.requiredInteger(bitmap.minZ,
-            "roof refresh bitmap center z")
+        local centerZ = ServerUtil.requiredInteger(anchor.z,
+            "roof refresh center z")
         if centerZ < WORLD_MIN_Z or centerZ > WORLD_MAX_Z then
             return false, Constants.INVALID_RV_DATA
         end
         -- Force the RV scope to leave the loaded chunk set.  The center comes
-        -- from the current validated bitmap (the same layout contract used by
+        -- from the current validated template anchor (the same layout contract used by
         -- generation), then the current refresh vector is subtracted.  Never
         -- replace this with a fixed absolute world coordinate or a boundary
         -- edge/staging square.
         local destination = {
-            x = originX + math.floor(width / 2)
-                - ROOF_REFRESH_REMOTE_OFFSET_X,
-            y = originY + math.floor(height / 2)
-                - ROOF_REFRESH_REMOTE_OFFSET_Y,
+            x = anchor.x - ROOF_REFRESH_REMOTE_OFFSET_X,
+            y = anchor.y - ROOF_REFRESH_REMOTE_OFFSET_Y,
             z = centerZ - ROOF_REFRESH_REMOTE_OFFSET_Z,
         }
         if destination.z < WORLD_MIN_Z or destination.z > WORLD_MAX_Z then
@@ -271,8 +258,8 @@ local function roofRefreshDestination(context, request)
     if not destinationOk then return false, Constants.INVALID_RV_DATA end
     local x, y, z = math.floor(destination.x), math.floor(destination.y),
         math.floor(destination.z)
-    if not Bitmap.containsScope(bitmap, x, y, z)
-        or not Bitmap.isActive(bitmap, x, y, z) then
+    if not TemplateGeometry.isWalkableInManagedRegion(
+        { x = x, y = y, z = z }, boundary.managed) then
         return false, "roof refresh return position is not current active RV geometry"
     end
     return true, destination
@@ -404,17 +391,15 @@ local function validatedRoofRefreshReturn(pending)
     end
     local contextOk, contextOrReason = currentRoofRefreshContext(livePlayer,
         { rvId = pending.rvId, generation = pending.generation,
-            bitmapVersion = pending.bitmapVersion,
             identityKey = identityOrReason.key })
     if not contextOk then return false, contextOrReason end
     local returnPosition = copyRoofRefreshPosition(pending.returnPosition)
     if not returnPosition then return false, Constants.INVALID_RV_DATA end
     local returnX, returnY, returnZ = math.floor(returnPosition.x),
         math.floor(returnPosition.y), math.floor(returnPosition.z)
-    if not Bitmap.containsScope(contextOrReason.bitmap, returnX, returnY,
-        returnZ)
-        or not Bitmap.isActive(contextOrReason.bitmap, returnX, returnY,
-            returnZ) then
+    if not TemplateGeometry.isWalkableInManagedRegion(
+        { x = returnX, y = returnY, z = returnZ },
+        contextOrReason.boundary.managed) then
         return false, "roof refresh return position is not current active RV geometry"
     end
     return true, {
@@ -472,7 +457,6 @@ local function rollbackRoofRefreshRelocation(pending)
         onlineId = identity.onlineId,
         rvId = tostring(pending.rvId),
         generation = ServerUtil.integer(pending.generation),
-        bitmapVersion = ServerUtil.integer(pending.bitmapVersion),
         x = returnPosition.x, y = returnPosition.y, z = returnPosition.z,
         roofRepairTransition = true,
         roofRepairPhase = "return",

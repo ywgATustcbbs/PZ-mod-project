@@ -27,14 +27,13 @@ local FINAL_RELOCATION_SCAN_RETRY_TICKS = 10
 local FINAL_RELOCATION_SCAN_MAX_ATTEMPTS = 4
 local pendingFinalRelocation = nil
 
-local function reopenFinalRelocationScan(rvId, generation, bitmapVersion)
+local function reopenFinalRelocationScan(rvId, generation)
     local pending = pendingFinalRelocation
     local args = type(pending) == "table" and pending.args
     local exactGeneration = finiteInteger(generation)
-    local exactBitmapVersion = finiteInteger(bitmapVersion)
     if type(args) ~= "table" or pending.failed ~= true
         or rvId == nil or tostring(rvId) == ""
-        or exactGeneration == nil or exactBitmapVersion == nil then
+        or exactGeneration == nil then
         return false
     end
     local phase = pending.teleported and "post" or "pre"
@@ -42,8 +41,7 @@ local function reopenFinalRelocationScan(rvId, generation, bitmapVersion)
     if pending.failedPhase ~= phase
         or pending[triggerRetryKey] == true
         or tostring(args.rvId) ~= tostring(rvId)
-        or finiteInteger(args.generation) ~= exactGeneration
-        or finiteInteger(args.bitmapVersion) ~= exactBitmapVersion then
+        or finiteInteger(args.generation) ~= exactGeneration then
         return false
     end
     pending.failed = false
@@ -85,7 +83,7 @@ function Client.onFillWorldObjectContextMenu(playerNum, context, worldObjects, t
 end
 
 local function tryFinalRelocationGuardScan(
-    rvId, generation, bitmapVersion, pending, phase)
+    rvId, generation, pending, phase)
     local completeKey = phase .. "ScanComplete"
     if pending[completeKey] then return true end
     if pending.failed then return false end
@@ -98,7 +96,7 @@ local function tryFinalRelocationGuardScan(
 
     pending[attemptsKey] = (pending[attemptsKey] or 0) + 1
     local scanCallOk, scanOk = pcall(refreshRoomOwnershipByIdentity,
-        rvId, generation, bitmapVersion)
+        rvId, generation)
     if scanCallOk and scanOk == true then
         pending[completeKey] = true
         return true
@@ -127,14 +125,13 @@ local function tryApplyFinalRelocation(args, pending)
     local token = args.token
     local rvId = args.rvId
     local generation = finiteInteger(args.generation)
-    local bitmapVersion = finiteInteger(args.bitmapVersion)
     local onlineId = finiteInteger(args.onlineId)
     local x = finiteNumber(args.x)
     local y = finiteNumber(args.y)
     local z = finiteNumber(args.z)
     if type(token) ~= "string" or token == "" or rvId == nil
         or tostring(rvId) == "" or generation == nil or generation < 1
-        or bitmapVersion ~= C.BITMAP_VERSION or onlineId == nil
+        or onlineId == nil
         or x == nil or y == nil or z == nil or z < -32 or z > 31 then
         return false
     end
@@ -143,7 +140,7 @@ local function tryApplyFinalRelocation(args, pending)
         return false
     end
     local guardFound, currentCheckReady = roomOwnershipGuardStatus(
-        rvId, generation, bitmapVersion)
+        rvId, generation)
     if guardFound ~= true then return false end
     -- A persistent current-square API failure is latched by the guard monitor.
     -- Do not complete a final relocation transaction until a later local check
@@ -165,7 +162,7 @@ local function tryApplyFinalRelocation(args, pending)
         -- Full pre-scan happens only after the destination is ready. If any
         -- footprint square is still unloaded, retry at a bounded interval.
         if not tryFinalRelocationGuardScan(
-                rvId, generation, bitmapVersion, pending, "pre") then
+                rvId, generation, pending, "pre") then
             return false
         end
         if not finalTargetRoomIsValid(x, y, z) then
@@ -216,7 +213,7 @@ local function tryApplyFinalRelocation(args, pending)
     if not pending.postScanComplete then
         if not finalTargetSquareIsLoaded(x, y, z)
             or not tryFinalRelocationGuardScan(
-                rvId, generation, bitmapVersion, pending, "post") then
+                rvId, generation, pending, "post") then
             return false
         end
     end
@@ -298,14 +295,13 @@ function Client.onServerCommand(module, command, args)
     local z = finiteNumber(args.z)
     local rvId = args.rvId
     local generation = finiteInteger(args.generation)
-    local bitmapVersion = finiteInteger(args.bitmapVersion)
     local roofRefreshTransition = args.roofRepairTransition == true
     local roofRefreshPhase = args.roofRepairPhase
     local generationTransition = args.generationTransition == true
     local generationPhase = args.generationPhase
     if type(token) ~= "string" or token == "" or onlineId == nil
         or rvId == nil or tostring(rvId) == "" or generation == nil
-        or generation < 1 or bitmapVersion ~= C.BITMAP_VERSION
+        or generation < 1
         or x == nil or y == nil or z == nil or z < -32 or z > 31 then
         return
     end
@@ -390,7 +386,6 @@ function Client.onServerCommand(module, command, args)
         onlineId = onlineId,
         rvId = tostring(rvId),
         generation = generation,
-        bitmapVersion = bitmapVersion,
         x = x,
         y = y,
         z = z,

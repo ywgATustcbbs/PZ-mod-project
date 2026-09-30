@@ -47,8 +47,6 @@ C.COMMAND_RV_ENTER = "EnterRV"
 C.COMMAND_RV_EXIT = "ExitRV"
 C.COMMAND_RV_TELEPORT = "RVTeleport"
 C.COMMAND_RV_BOUNDARY_CORRECTION = "RVBoundaryCorrection"
-C.COMMAND_RV_BITMAP = "RVBitmap"
-C.COMMAND_RV_BITMAP_CLEAR = "RVBitmapClear"
 C.COMMAND_RV_UTILITY = "RVUtility"
 C.COMMAND_RV_UTILITY_ACK = "RVUtilityAck"
 C.COMMAND_RV_UTILITY_SNAPSHOT = "RVUtilitySnapshot"
@@ -74,13 +72,10 @@ C.RV_REGION_SIZE = 100
 C.RV_REGION_SLOT_ROWS = 5
 C.RV_REGION_SLOT_COLUMNS = 20
 C.RV_REGION_SLOT_COUNT = C.RV_REGION_SLOT_ROWS * C.RV_REGION_SLOT_COLUMNS
-C.RV_MANAGED_WIDTH = 100
-C.RV_MANAGED_HEIGHT = 100
 -- Mapping identifies the RV's full supported world height. Construction's
 -- selected clear/managed bounds remain independently limited by the layout.
 C.RV_IDENTITY_MIN_Z = -32
 C.RV_IDENTITY_MAX_Z = 32
-C.BITMAP_VERSION = 6
 C.RV_REGION_MIN_OFFSET_X = -50
 C.RV_REGION_MIN_OFFSET_Y = -50
 C.RV_MANAGED_MIN_Z_OFFSET = 0
@@ -91,18 +86,13 @@ C.RV_MOUNT_REACH = 2.0
 C.RV_STOPPED_SPEED = 0.05
 C.RV_MAX_PASSENGERS = 5
 
--- The generation/management footprint uses the same half-open 100 x 100 XY
--- contract as the boundary bitmap.  maxX/maxY are exclusive.
-C.CLEAR_MIN_OFFSET_X = -50
-C.CLEAR_MAX_OFFSET_X = C.CLEAR_MIN_OFFSET_X + C.RV_MANAGED_WIDTH
-C.CLEAR_MIN_OFFSET_Y = -50
-C.CLEAR_MAX_OFFSET_Y = C.CLEAR_MIN_OFFSET_Y + C.RV_MANAGED_HEIGHT
+-- The generation/management footprint uses the allocated half-open RV region.
 C.BOUNDARY_TRANSITION_TIMEOUT_TICKS = 120
 C.BOUNDARY_SNAPSHOT_TIMEOUT_TICKS = 120
 C.BOUNDARY_SNAPSHOT_REFRESH_TICKS = 60
 
 -- Process-local relocation sentinel contract.  Both temporary destinations are
--- derived from the current RV managed-bitmap center; these values describe only
+-- derived from the current RV managed-region center; these values describe only
 -- the staging layer and the roof refresh center-offset vector.
 C.RELOCATION_SENTINEL_Z = -15
 C.ROOF_REFRESH_REMOTE_OFFSET_X = 18000
@@ -111,24 +101,7 @@ C.ROOF_REFRESH_REMOTE_OFFSET_Z = 15
 C.RELOCATION_SENTINEL_INTERVAL_TICKS = 5
 C.RELOCATION_SENTINEL_RETRY_COOLDOWN_TICKS = 10
 
--- Captured RV activity footprint: six rows by twenty-three columns.  The
--- source target cell (51,44) maps to x=0,y=0.  Row 1 is x=+1 (x=52) and row 6
--- is x=-4 (x=47); columns map y=-6..+16 (y=38..60).  The physical shell
--- extends one additional cell east and south, matching the captured objects.
-C.INTERIOR_MIN_OFFSET_X = -4
-C.INTERIOR_MAX_OFFSET_X = 1
-C.INTERIOR_MIN_OFFSET_Y = -6
-C.INTERIOR_MAX_OFFSET_Y = 16
-C.CAB_MIN_OFFSET_X = -4
-C.CAB_MAX_OFFSET_X = 1
-C.CAB_MIN_OFFSET_Y = -2
-C.CAB_MAX_OFFSET_Y = 1
 C.TEMPLATE_PROTECTION_REPAIR_SAMPLE_INTERVAL_TICKS = 10
-C.WALL_MIN_OFFSET_X = C.INTERIOR_MIN_OFFSET_X
-C.WALL_MAX_OFFSET_X = C.INTERIOR_MAX_OFFSET_X + 1
-C.WALL_MIN_OFFSET_Y = C.INTERIOR_MIN_OFFSET_Y
-C.WALL_MAX_OFFSET_Y = C.INTERIOR_MAX_OFFSET_Y + 1
-C.ROOF_Z_OFFSET = 1
 
 -- The isolated sprite is used only for captured hidden blockers and the RV
 -- generator. Water connections use existing native sink objects.

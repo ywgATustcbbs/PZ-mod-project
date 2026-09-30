@@ -5,10 +5,10 @@
 -- applies the returned plan only after validating the requesting player.
 
 require "RailroaderRV/Common/RV_Constants"
-local Bitmap = require "RailroaderRV/Common/RV_Bitmap"
 local CapturedTemplate = require "RailroaderRV/RoomTemplate/RV_Template"
 local RoomTemplate = require "RailroaderRV/RoomTemplate/RV_RoomTemplate"
 local ProtectionManifest = require "RailroaderRV/RoomTemplate/RV_ProtectionManifest"
+local TemplateGeometry = require "RailroaderRV/RoomTemplate/RV_TemplateGeometry"
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.Layout = RailroaderRV.Layout or {}
@@ -17,17 +17,22 @@ local Layout = RailroaderRV.Layout
 local C = RailroaderRV.Constants
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
+local walkAabbs = type(Template) == "table"
+    and type(Template.misc) == "table"
+    and Template.misc.walkAabbs or nil
 
 local templateValid, templateError = RoomTemplate.validate(Template)
 if not templateValid or type(templateObjects) ~= "table"
     or Template.metadata.templateVersion ~= C.CAPTURED_TEMPLATE_VERSION
     or Template.metadata.objectCount ~= #templateObjects
-    or Template.metadata.objectCount ~= 412
     or type(Template.misc.buildCells) ~= "table"
-    or #Template.misc.buildCells ~= 24 then
+    or type(walkAabbs) ~= "table" then
     error("RailroaderRV: current RoomTemplate contract is incomplete: "
         .. tostring(templateError or "ordered object index is incomplete"))
 end
+-- The physical room/wall plan currently describes the primary rectangular
+-- shell. Queries use all walk regions and generation still emits every object.
+local walkGeometry = walkAabbs[1]
 local protectionManifestValid, protectionManifestError =
     ProtectionManifest.validateTemplate(CapturedTemplate)
 if not protectionManifestValid then
@@ -38,45 +43,55 @@ end
 local buildCellSet = {}
 for i = 1, #Template.misc.buildCells do
     local cell = Template.misc.buildCells[i]
+    local cellZ = cell.z == nil and Template.metadata.anchor.z or cell.z
     if type(cell) ~= "table" or type(cell.x) ~= "number"
         or type(cell.y) ~= "number" or math.floor(cell.x) ~= cell.x
         or math.floor(cell.y) ~= cell.y
-        or cell.x < C.CAB_MIN_OFFSET_X or cell.x > C.CAB_MAX_OFFSET_X
-        or cell.y < C.CAB_MIN_OFFSET_Y or cell.y > C.CAB_MAX_OFFSET_Y then
-        error("RailroaderRV: captured cab build cell is outside the 6x4 contract")
+        or cell.x < Template.metadata.minX
+        or cell.x >= Template.metadata.maxXExclusive
+        or cell.y < Template.metadata.minY
+        or cell.y >= Template.metadata.maxYExclusive then
+        error("RailroaderRV: captured build cell is outside the template region")
     end
-    local key = tostring(cell.x) .. ":" .. tostring(cell.y)
+    local key = tostring(cell.x) .. ":" .. tostring(cell.y) .. ":"
+        .. tostring(cellZ)
     if buildCellSet[key] then
         error("RailroaderRV: captured cab build cell is duplicated")
     end
     buildCellSet[key] = true
 end
-for x = C.CAB_MIN_OFFSET_X, C.CAB_MAX_OFFSET_X do
-    for y = C.CAB_MIN_OFFSET_Y, C.CAB_MAX_OFFSET_Y do
-        if not buildCellSet[tostring(x) .. ":" .. tostring(y)] then
-            error("RailroaderRV: captured cab build mask is not a complete 6x4 rectangle")
-        end
-    end
+local roofZOffset = -math.huge
+for i = 1, #templateObjects do
+    roofZOffset = math.max(roofZOffset, templateObjects[i].z)
 end
-
 function Layout.eachStructureCoordinate(bounds, callback)
     for x = bounds.wallMinX, bounds.wallMaxX do
         for y = bounds.wallMinY, bounds.wallMaxY do
             callback(x, y, bounds.z)
         end
     end
-    local anchorX = bounds.roofMinX - C.INTERIOR_MIN_OFFSET_X
-    local anchorY = bounds.roofMinY - C.INTERIOR_MIN_OFFSET_Y
+    local anchorX, anchorY
+    if type(bounds.anchor) == "table" then
+        anchorX, anchorY = bounds.anchor.x, bounds.anchor.y
+    else
+        -- The client room-ownership payload carries the primary room bounds,
+        -- so recover its template anchor from the authored primary AABB.
+        anchorX = bounds.roomMinX - walkGeometry.minX
+        anchorY = bounds.roomMinY - walkGeometry.minY
+    end
     local seen = {}
     for i = 1, #templateObjects do
         local captured = templateObjects[i]
-        if captured.z == C.ROOF_Z_OFFSET then
+        if captured.z == roofZOffset then
             local x, y = anchorX + captured.x, anchorY + captured.y
-            local key = tostring(x) .. ":" .. tostring(y) .. ":"
-                .. tostring(bounds.roofZ)
-            if not seen[key] then
-                seen[key] = true
-                callback(x, y, bounds.roofZ)
+            if x >= bounds.roofMinX and x <= bounds.roofMaxX
+                and y >= bounds.roofMinY and y <= bounds.roofMaxY then
+                local key = tostring(x) .. ":" .. tostring(y) .. ":"
+                    .. tostring(bounds.roofZ)
+                if not seen[key] then
+                    seen[key] = true
+                    callback(x, y, bounds.roofZ)
+                end
             end
         end
     end
@@ -116,7 +131,7 @@ local function appendWall(result, x, y, z, north, sprite, role, corner)
         edgeNorth = north == true,
         edgeWest = north == false,
         axis = axis,
-        edgeKey = Bitmap.edgeKey(axis, x, y, z),
+        edgeKey = TemplateGeometry.edgeKey(axis, x, y, z),
     }
 end
 
@@ -143,19 +158,19 @@ end
 -- railing); choose the wall/railing object deterministically for edge
 -- ownership while generation still creates every object from the full
 -- captured table.
-local function wallCoordinatesForAnchor(cx, cy, cz)
+local function wallCoordinatesForAnchor(cx, cy, cz, interior)
     local result = {}
-    local interiorMinX = cx + C.INTERIOR_MIN_OFFSET_X
-    local interiorMaxX = cx + C.INTERIOR_MAX_OFFSET_X
-    local interiorMinY = cy + C.INTERIOR_MIN_OFFSET_Y
-    local interiorMaxY = cy + C.INTERIOR_MAX_OFFSET_Y
+    local interiorMinX = interior.minX
+    local interiorMaxX = interior.maxX
+    local interiorMinY = interior.minY
+    local interiorMaxY = interior.maxY
 
     local function addCapturedEdge(side, x, y, north)
         local candidates = {}
         for i = 1, #templateObjects do
             local captured = templateObjects[i]
             if captured.x == x - cx and captured.y == y - cy
-                and captured.z == 0
+                and captured.z == interior.z - cz
                 and (captured.class == "IsoThumpable" or captured.class == "IsoWindow")
                 and captured.north == north and isShellSprite(captured) then
                 candidates[#candidates + 1] = { index = i, object = captured }
@@ -173,7 +188,7 @@ local function wallCoordinatesForAnchor(cx, cy, cz)
             and y == interiorMinY
         local role = corner and "corner-nw"
             or (north and "wall-north" or "wall-west")
-        appendWall(result, x, y, cz, north, selected.object.sprite, role, corner)
+        appendWall(result, x, y, interior.z, north, selected.object.sprite, role, corner)
         result[#result].templateIndex = selected.index
         result[#result].templateIndices = {}
         for i = 1, #candidates do
@@ -202,9 +217,9 @@ end
 -- is hosted by N(x,y+1,z), where x/y are the adjacent interior cell. Keep
 -- the canonical edge metadata on every generated entry for later tagging and
 -- cleanup; never infer it back from an inactive tile at audit time.
-local function annotateWallEdges(wallCoordinates, cx, cy)
-    local interiorMaxX = cx + C.INTERIOR_MAX_OFFSET_X
-    local interiorMaxY = cy + C.INTERIOR_MAX_OFFSET_Y
+local function annotateWallEdges(wallCoordinates, interior)
+    local interiorMaxX = interior.maxX
+    local interiorMaxY = interior.maxY
     for i = 1, #wallCoordinates do
         local entry = wallCoordinates[i]
         local side, cellX, cellY
@@ -219,7 +234,7 @@ local function annotateWallEdges(wallCoordinates, cx, cy)
         else
             side, cellX, cellY = "west", entry.x, entry.y
         end
-        local edgeKey = Bitmap.edgeForSide(side, cellX, cellY, entry.z)
+        local edgeKey = TemplateGeometry.edgeForSide(side, cellX, cellY, entry.z)
         if not edgeKey then
             error("RailroaderRV: wall edge metadata is malformed")
         end
@@ -239,83 +254,66 @@ function Layout.make(cx, cy, cz)
     cy = math.floor(cy)
     cz = math.floor(cz)
 
-    local clear = rectangle(
-        cx + C.CLEAR_MIN_OFFSET_X,
-        cx + C.CLEAR_MAX_OFFSET_X,
-        cy + C.CLEAR_MIN_OFFSET_Y,
-        cy + C.CLEAR_MAX_OFFSET_Y,
-        nil,
-        cz + C.RV_MANAGED_MIN_Z_OFFSET,
-        cz + C.RV_MANAGED_MAX_Z_OFFSET,
-        true
-    )
-    local managed = Bitmap.makeScope(
-        cx + C.RV_REGION_MIN_OFFSET_X,
-        cy + C.RV_REGION_MIN_OFFSET_Y,
-        cz + C.RV_MANAGED_MIN_Z_OFFSET,
-        cz + C.RV_MANAGED_MAX_Z_OFFSET,
-        C.RV_MANAGED_WIDTH,
-        C.RV_MANAGED_HEIGHT
-    )
-    local bitmap = {
-        bitmapVersion = C.BITMAP_VERSION,
-        originX = managed.originX,
-        originY = managed.originY,
-        width = managed.width,
-        height = managed.height,
-        minZ = managed.minZ,
-        maxZ = managed.maxZ,
-        layers = {},
-        encoding = "bytes",
-    }
-    -- Activity is the full six-by-twenty-three base footprint. Buildability
-    -- is the explicit six-by-four cab; the roof layer is neither walkable nor
-    -- buildable.
-    for z = managed.minZ, managed.maxZ - 1 do
-        local layer = Bitmap.newLayer(managed.width, managed.height, false, false)
-        if z == cz then
-            for y = cy + C.INTERIOR_MIN_OFFSET_Y,
-                cy + C.INTERIOR_MAX_OFFSET_Y do
-                for x = cx + C.INTERIOR_MIN_OFFSET_X,
-                    cx + C.INTERIOR_MAX_OFFSET_X do
-                    local ix, iy = x - managed.originX, y - managed.originY
-                    Bitmap.setCell(layer, ix, iy, true, managed.width,
-                        managed.height, "walk")
-                end
-            end
-            for i = 1, #Template.misc.buildCells do
-                local cell = Template.misc.buildCells[i]
-                local x, y = cx + cell.x, cy + cell.y
-                Bitmap.setCell(layer, x - managed.originX, y - managed.originY,
-                    true, managed.width, managed.height, "build")
-            end
-        end
-        bitmap.layers[z] = layer
+    local managedMinZ, managedMaxZ = nil, nil
+    local function includeZ(minZ, maxZ)
+        managedMinZ = managedMinZ == nil and minZ or math.min(managedMinZ, minZ)
+        managedMaxZ = managedMaxZ == nil and maxZ or math.max(managedMaxZ, maxZ)
+    end
+    for index = 1, #templateObjects do
+        local object = templateObjects[index]
+        includeZ(object.z, object.z + 1)
+    end
+    for index = 1, #Template.misc.walkAabbs do
+        local box = Template.misc.walkAabbs[index]
+        includeZ(box.minZ, box.maxZExclusive)
+    end
+    for index = 1, #Template.misc.buildCells do
+        local cell = Template.misc.buildCells[index]
+        local z = cell.z == nil and Template.metadata.anchor.z or cell.z
+        includeZ(z, z + 1)
     end
 
+    local managed = {
+        originX = cx + Template.metadata.minX,
+        originY = cy + Template.metadata.minY,
+        width = Template.metadata.width,
+        height = Template.metadata.height,
+        minZ = cz + managedMinZ,
+        maxZ = cz + managedMaxZ,
+    }
+    local clear = rectangle(
+        managed.originX,
+        managed.originX + managed.width,
+        managed.originY,
+        managed.originY + managed.height,
+        nil,
+        managed.minZ,
+        managed.maxZ,
+        true
+    )
     local interior = rectangle(
-        cx + C.INTERIOR_MIN_OFFSET_X,
-        cx + C.INTERIOR_MAX_OFFSET_X,
-        cy + C.INTERIOR_MIN_OFFSET_Y,
-        cy + C.INTERIOR_MAX_OFFSET_Y,
-        cz
+        cx + walkGeometry.minX,
+        cx + walkGeometry.maxX - 1,
+        cy + walkGeometry.minY,
+        cy + walkGeometry.maxY - 1,
+        cz + walkGeometry.minZ
     )
     local wall = rectangle(
-        cx + C.WALL_MIN_OFFSET_X,
-        cx + C.WALL_MAX_OFFSET_X,
-        cy + C.WALL_MIN_OFFSET_Y,
-        cy + C.WALL_MAX_OFFSET_Y,
-        cz
+        interior.minX,
+        interior.maxX + 1,
+        interior.minY,
+        interior.maxY + 1,
+        interior.z
     )
     local roof = rectangle(
         interior.minX,
         interior.maxX,
         interior.minY,
         interior.maxY,
-        cz + C.ROOF_Z_OFFSET
+        cz + roofZOffset
     )
-    local wallCoordinates = wallCoordinatesForAnchor(cx, cy, cz)
-    annotateWallEdges(wallCoordinates, cx, cy)
+    local wallCoordinates = wallCoordinatesForAnchor(cx, cy, cz, interior)
+    annotateWallEdges(wallCoordinates, interior)
     local northCount, cornerCount = 0, 0
     for i = 1, #wallCoordinates do
         if wallCoordinates[i].north then northCount = northCount + 1 end
@@ -369,7 +367,6 @@ function Layout.make(cx, cy, cz)
         anchor = anchor,
         clear = clear,
         managed = managed,
-        bitmap = bitmap,
         shellEdges = shellEdges,
         templateObjects = {},
         room = interior,

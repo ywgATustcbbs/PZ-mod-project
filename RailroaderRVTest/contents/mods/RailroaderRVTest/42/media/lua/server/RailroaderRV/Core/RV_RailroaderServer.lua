@@ -28,8 +28,6 @@ end
 require("RailroaderRV/Common/RV_Constants")
 local boundaryLoaded, Boundary = pcall(require, "RailroaderRV/BoundaryGuard/RV_BoundaryServer")
 if not boundaryLoaded or type(Boundary) ~= "table" then Boundary = nil end
-local bitmapLoaded, Bitmap = pcall(require, "RailroaderRV/Common/RV_Bitmap")
-if not bitmapLoaded or type(Bitmap) ~= "table" then Bitmap = nil end
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.RailroaderServer = RailroaderRV.RailroaderServer or {}
@@ -149,7 +147,6 @@ local serverTransactionMutexStatus
 local ctx = {
     processIsServer = processIsServer,
     Boundary = Boundary,
-    Bitmap = Bitmap,
     Adapter = Adapter,
     C = C,
     unpackFn = unpackFn,

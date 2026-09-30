@@ -4,7 +4,6 @@
 -- its server-prepared manifest/layout identity before calling the existing
 -- clear and build operations; restore is limited to a current managed cell.
 local Constants = require("RailroaderRV/Common/RV_Constants")
-local Bitmap = require("RailroaderRV/Common/RV_Bitmap")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 
@@ -26,13 +25,11 @@ local function currentIdentity(manifest, generation)
     if type(manifest) ~= "table" then return nil end
     local rvId = manifest.rvId
     local manifestGeneration = Constants.finiteInteger(manifest.generation)
-    local bitmapVersion = Constants.finiteInteger(manifest.bitmapVersion)
     local slotIndex = Constants.finiteInteger(manifest.slotIndex)
     local anchor = manifest.anchor
     if type(rvId) ~= "string" or rvId == ""
         or manifestGeneration == nil or manifestGeneration < 1
         or manifestGeneration ~= generation
-        or bitmapVersion ~= Constants.BITMAP_VERSION
         or slotIndex == nil or slotIndex < 1
         or slotIndex > RegionSlots.COUNT
         or not validPoint(anchor)
@@ -42,7 +39,6 @@ local function currentIdentity(manifest, generation)
     return {
         rvId = rvId,
         generation = manifestGeneration,
-        bitmapVersion = bitmapVersion,
         slotIndex = slotIndex,
         anchor = { x = anchor.x, y = anchor.y, z = anchor.z },
     }
@@ -52,7 +48,6 @@ local function sameIdentity(left, right)
     return type(left) == "table" and type(right) == "table"
         and left.rvId == right.rvId
         and left.generation == right.generation
-        and left.bitmapVersion == right.bitmapVersion
         and left.slotIndex == right.slotIndex
         and samePoint(left.anchor, right.anchor)
 end
@@ -102,16 +97,9 @@ local function sameBounds(left, right)
         for _ in pairs(rightValue) do rightCount = rightCount + 1 end
         return count == rightCount
     end
-    if type(left.bitmap) ~= "table" or type(right.bitmap) ~= "table"
-        or type(Bitmap.encode) ~= "function" then
-        return false
-    end
-    local leftBitmap, rightBitmap = Bitmap.encode(left.bitmap),
-        Bitmap.encode(right.bitmap)
-    return type(leftBitmap) == "table" and type(rightBitmap) == "table"
-        and samePlainTree(leftBitmap, rightBitmap)
-        and samePlainTree(left.shellEdges, right.shellEdges)
+    return samePlainTree(left.shellEdges, right.shellEdges)
         and samePlainTree(left.wallCoordinates, right.wallCoordinates)
+        and samePlainTree(left.managed, right.managed)
 end
 
 function Construction.new(context, operations)
@@ -149,8 +137,8 @@ function Construction.new(context, operations)
         end
         local recomputedOk, recomputed = pcall(context.ServerSchema.boundsFor, layout)
         if not recomputedOk or not sameBounds(bounds, recomputed)
-            or bounds.clearMaxX - bounds.clearMinX ~= Constants.RV_MANAGED_WIDTH
-            or bounds.clearMaxY - bounds.clearMinY ~= Constants.RV_MANAGED_HEIGHT
+            or bounds.clearMaxX - bounds.clearMinX ~= template.metadata.width
+            or bounds.clearMaxY - bounds.clearMinY ~= template.metadata.height
             or bounds.clearMinZ ~= bounds.managedMinZ
             or bounds.clearMaxZ ~= bounds.managedMaxZ
             or bounds.clearMinZ >= bounds.clearMaxZ then
@@ -275,7 +263,6 @@ function Construction.new(context, operations)
         end
         local managed = boundary.managed
         local generation = Constants.finiteInteger(boundary.generation)
-        local bitmapVersion = Constants.finiteInteger(boundary.bitmapVersion)
         local originX = type(managed) == "table"
             and Constants.finiteInteger(managed.originX) or nil
         local originY = type(managed) == "table"
@@ -287,9 +274,8 @@ function Construction.new(context, operations)
         if type(managed) ~= "table"
             or type(boundary.rvId) ~= "string" or boundary.rvId == ""
             or generation == nil or generation < 1
-            or bitmapVersion ~= Constants.BITMAP_VERSION
-            or originX == nil or originY == nil or width ~= Constants.RV_MANAGED_WIDTH
-            or height ~= Constants.RV_MANAGED_HEIGHT
+            or originX == nil or originY == nil or width ~= RoomTemplate.WIDTH
+            or height ~= RoomTemplate.HEIGHT
             or ix < originX or ix >= originX + width
             or iy < originY or iy >= originY + height then
             return false, Constants.INVALID_RV_DATA

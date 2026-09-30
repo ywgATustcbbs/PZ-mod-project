@@ -4,6 +4,10 @@ local Core = ctx.Core
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
+local roofZOffset = -math.huge
+for i = 1, #(templateObjects or {}) do
+    roofZOffset = math.max(roofZOffset, templateObjects[i].z)
+end
 local COMMAND_MODULE = ctx.COMMAND_MODULE
 local COMMAND_REFRESH_ROOM_OWNERSHIP = ctx.COMMAND_REFRESH_ROOM_OWNERSHIP
 local COMMAND_RV_TELEPORT = ctx.COMMAND_RV_TELEPORT
@@ -103,20 +107,20 @@ local function structureCoordinates(bounds, callback, materializedRoofCoordinate
         end
     end
     if materializedRoofCoordinates == nil then
-        -- The captured roof is sparse: inspect the square hosts of its actual
-        -- logged objects, not every cell in the six-by-twenty-three outline.
-        local anchorX = ServerUtil.requiredInteger(bounds.roomMinX,
-            "room ownership roomMinX") - Constants.INTERIOR_MIN_OFFSET_X
-        local anchorY = ServerUtil.requiredInteger(bounds.roomMinY,
-            "room ownership roomMinY") - Constants.INTERIOR_MIN_OFFSET_Y
+        -- The captured roof is sparse: inspect hosts inside the primary shell
+        -- bounds, not every cell in its rectangular outline.
+        local anchorX = ServerUtil.requiredInteger(bounds.anchor.x,
+            "room ownership anchor.x")
+        local anchorY = ServerUtil.requiredInteger(bounds.anchor.y,
+            "room ownership anchor.y")
         for i = 1, #templateObjects do
             local captured = templateObjects[i]
-            if captured.z == Constants.ROOF_Z_OFFSET then
+            if captured.z == roofZOffset then
                 local x, y = anchorX + captured.x, anchorY + captured.y
-                if x < roofMinX or x > roofMaxX or y < roofMinY or y > roofMaxY then
-                    error("RailroaderRVTest: captured roof object is outside bounds")
+                if x >= roofMinX and x <= roofMaxX
+                    and y >= roofMinY and y <= roofMaxY then
+                    emitRoof(x, y, roofZ)
                 end
-                emitRoof(x, y, roofZ)
             end
         end
     else
@@ -466,9 +470,8 @@ local function clearInvalidRoomOwnershipNearPlayers(guards, playerStates,
     end
 end
 
-local function roomOwnershipGuardKey(rvId, generation, bitmapVersion)
-    return tostring(rvId) .. ":" .. tostring(generation) .. ":"
-        .. tostring(bitmapVersion)
+local function roomOwnershipGuardKey(rvId, generation)
+    return tostring(rvId) .. ":" .. tostring(generation)
 end
 
 local ROOF_COMPLETE_GENERATION_PHASES = {
@@ -493,7 +496,7 @@ local function collectMaterializedRoofCoordinates(cell, bounds)
 end
 
 local function registerServerRoomOwnershipGuard(generation, player, oldBounds,
-    newBounds, rvId, bitmapVersion)
+    newBounds, rvId)
     if rvId == nil or tostring(rvId) == "" then
         error("RailroaderRVTest: room ownership RV identity is incomplete")
     end
@@ -502,15 +505,9 @@ local function registerServerRoomOwnershipGuard(generation, player, oldBounds,
     if generationNumber < 1 then
         error("RailroaderRVTest: room ownership generation is invalid")
     end
-    local version = ServerUtil.requiredInteger(bitmapVersion,
-        "room ownership bitmapVersion")
-    if version < 1 then
-        error("RailroaderRVTest: room ownership bitmapVersion is invalid")
-    end
     local guard = {
         generation = generationNumber,
         rvId = tostring(rvId),
-        bitmapVersion = version,
         player = player,
         oldBounds = oldBounds,
         newBounds = newBounds,
@@ -529,7 +526,7 @@ local function registerServerRoomOwnershipGuard(generation, player, oldBounds,
         nextNeighborhoodProbeTick = tickAfter(ctx.serverTick,
             ROOM_OWNERSHIP_3X3_INTERVAL_TICKS),
     }
-    guard.key = roomOwnershipGuardKey(guard.rvId, guard.generation, version)
+    guard.key = roomOwnershipGuardKey(guard.rvId, guard.generation)
     roomOwnershipGuards[guard.key] = guard
     return guard
 end
@@ -565,17 +562,13 @@ local function refreshServerRoomOwnershipGuard(guard, phase, requireFullNewRoof)
     return cleared
 end
 
-local function refreshGenerationRoomOwnershipGuard(rvId, generation,
-    bitmapVersion, phase)
+local function refreshGenerationRoomOwnershipGuard(rvId, generation, phase)
     generation = ServerUtil.integer(generation)
-    bitmapVersion = ServerUtil.integer(bitmapVersion)
     if type(rvId) ~= "string" or rvId == ""
-        or generation == nil or generation < 1
-        or bitmapVersion == nil then
+        or generation == nil or generation < 1 then
         error("RailroaderRVTest: generation room ownership identity is invalid")
     end
-    local guard = roomOwnershipGuards[roomOwnershipGuardKey(rvId, generation,
-        bitmapVersion)]
+    local guard = roomOwnershipGuards[roomOwnershipGuardKey(rvId, generation)]
     if type(guard) ~= "table" then
         error("RailroaderRVTest: generation room ownership guard is unavailable")
     end
@@ -695,12 +688,10 @@ local function copyRoomRefreshBounds(target, prefix, bounds)
 end
 
 local function armClientRoomOwnershipGuard(generation, oldBounds, newBounds,
-    rvId, bitmapVersion)
+    rvId)
     local payload = {
         generation = generation,
         rvId = tostring(rvId),
-        bitmapVersion = ServerUtil.requiredInteger(bitmapVersion,
-            "client room ownership bitmapVersion"),
         hasOld = type(oldBounds) == "table",
     }
     if payload.hasOld then
@@ -715,17 +706,13 @@ local function armClientRoomOwnershipGuard(generation, oldBounds, newBounds,
     end
 end
 
-local function removeGeneration(cell, bounds, generation, rvId, bitmapVersion,
-    generationPhase)
+local function removeGeneration(cell, bounds, generation, rvId, generationPhase)
     if not cell or type(bounds) ~= "table"
         or ServerUtil.requiredInteger(generation, "rollback generation") < 1
-        or type(rvId) ~= "string" or rvId == ""
-        or ServerUtil.requiredInteger(bitmapVersion, "rollback bitmapVersion")
-            ~= Constants.BITMAP_VERSION then
+        or type(rvId) ~= "string" or rvId == "" then
         error("RailroaderRVTest: rollback target identity or cell is unavailable")
     end
-    local guard = roomOwnershipGuards[roomOwnershipGuardKey(rvId, generation,
-        bitmapVersion)]
+    local guard = roomOwnershipGuards[roomOwnershipGuardKey(rvId, generation)]
     if not guard then
         error("RailroaderRVTest: rollback room ownership guard is unavailable")
     end
@@ -733,7 +720,7 @@ local function removeGeneration(cell, bounds, generation, rvId, bitmapVersion,
     -- repeat generation.  This includes roof floors, generators and fixtures
     -- the final light, even when the failure occurs in the last phase.
     ServerSchema.walkBounds(cell, bounds, function(square)
-        ServerWorld.clearSquare(square, generation, rvId, bitmapVersion)
+        ServerWorld.clearSquare(square, generation, rvId)
     end)
 
     -- A successful pcall around ServerWorld.clearSquare is not enough on a dedicated
@@ -748,8 +735,7 @@ local function removeGeneration(cell, bounds, generation, rvId, bitmapVersion,
                 .. tostring(reason or "square snapshot failed"))
         end
         for i = 1, #objects do
-            if ServerWorld.isTaggedForGeneration(objects[i], generation, rvId,
-                bitmapVersion) then
+            if ServerWorld.isTaggedForGeneration(objects[i], generation, rvId) then
                 remaining = remaining + 1
             end
         end
@@ -790,7 +776,7 @@ end
 -- This helper intentionally accepts no client coordinates or client geometry;
 -- its caller supplies the server-validated current manifest bounds.
 local function armTargetedClientRoomOwnershipGuard(player, generation, newBounds,
-    rvId, bitmapVersion)
+    rvId)
     if player == nil then
         error("RailroaderRVTest: targeted room ownership player is unavailable")
     end
@@ -802,15 +788,9 @@ local function armTargetedClientRoomOwnershipGuard(player, generation, newBounds
     if rvId == nil or tostring(rvId) == "" then
         error("RailroaderRVTest: targeted room ownership RV identity is incomplete")
     end
-    local version = ServerUtil.requiredInteger(bitmapVersion,
-        "targeted room ownership bitmapVersion")
-    if version ~= Constants.BITMAP_VERSION then
-        error("RailroaderRVTest: targeted room ownership bitmapVersion is invalid")
-    end
     local payload = {
         generation = generationNumber,
         rvId = tostring(rvId),
-        bitmapVersion = version,
         hasOld = false,
     }
     copyRoomRefreshBounds(payload, "new", newBounds)

@@ -86,11 +86,10 @@ function Client.onCorrection(args)
     local online = integer(args.onlineId)
     local sequence = integer(args.sequence)
     local generation = integer(args.generation)
-    local bitmapVersion = integer(args.bitmapVersion)
     local rvId = args.rvId
     local x, y, z = number(args.x), number(args.y), number(args.z)
     if online == nil or not sequence or not generation or generation < 1
-        or bitmapVersion ~= C.BITMAP_VERSION or rvId == nil
+        or rvId == nil
         or tostring(rvId) == "" or not x or not y or not z then return end
     local player = localPlayerByOnlineId(online)
     if not player or (type(player.isDead) == "function" and player:isDead()) then return end
@@ -99,7 +98,6 @@ function Client.onCorrection(args)
     if not applyPosition(player, { x = x, y = y, z = z }) then return end
     state.rvId = tostring(rvId)
     state.generation = generation
-    state.bitmapVersion = bitmapVersion
     state.lastCorrectionSequence = sequence
     states[online] = state
 end

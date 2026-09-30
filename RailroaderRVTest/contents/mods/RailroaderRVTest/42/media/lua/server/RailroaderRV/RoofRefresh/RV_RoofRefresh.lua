@@ -89,11 +89,9 @@ local function roomRefreshFloorTarget(bounds)
     if type(bounds) ~= "table" then
         error("RailroaderRVTest: roof refresh bounds are unavailable")
     end
-    local roomMinX = integer(bounds.roomMinX, "roomMinX")
-    local roomMinY = integer(bounds.roomMinY, "roomMinY")
+    local anchorX = integer(bounds.anchor.x, "anchor.x")
+    local anchorY = integer(bounds.anchor.y, "anchor.y")
     local z = integer(bounds.z, "z")
-    local anchorX = roomMinX - C.INTERIOR_MIN_OFFSET_X
-    local anchorY = roomMinY - C.INTERIOR_MIN_OFFSET_Y
     return {
         kind = roofTarget.kind,
         x = anchorX + roofTarget.x,
@@ -198,7 +196,6 @@ local function identityTagSummary(tag)
     return "owner=" .. diagnosticValue(tag.owner)
         .. ",rvId=" .. diagnosticValue(tag.rvId)
         .. ",generation=" .. diagnosticValue(tag.generation)
-        .. ",bitmapVersion=" .. diagnosticValue(tag.bitmapVersion)
 end
 
 local function capturedFloorMismatch(floor, target, identity)
@@ -210,16 +207,11 @@ local function capturedFloorMismatch(floor, target, identity)
         return "identity expected=table observed=" .. diagnosticValue(identity)
     end
     local generation = toNumber(identity.generation)
-    local bitmapVersion = toNumber(identity.bitmapVersion)
     if identity.rvId == nil or tostring(identity.rvId) == ""
-        or generation == nil or math.floor(generation) ~= generation or generation < 1
-        or bitmapVersion == nil or math.floor(bitmapVersion) ~= bitmapVersion
-        or bitmapVersion ~= C.BITMAP_VERSION then
-        return "identity expected={rvId=nonempty,generation=positive integer,bitmapVersion="
-            .. diagnosticValue(C.BITMAP_VERSION) .. "} observed={rvId="
+        or generation == nil or math.floor(generation) ~= generation or generation < 1 then
+        return "identity expected={rvId=nonempty,generation=positive integer} observed={rvId="
             .. diagnosticValue(identity.rvId) .. ",generation="
-            .. diagnosticValue(identity.generation) .. ",bitmapVersion="
-            .. diagnosticValue(identity.bitmapVersion) .. "}"
+            .. diagnosticValue(identity.generation) .. "}"
     end
 
     local entry = target.identity
@@ -231,12 +223,11 @@ local function capturedFloorMismatch(floor, target, identity)
     local data = ServerWorld.objectModData(floor)
     local tag = type(data) == "table" and data.RailroaderRVTest or nil
     if not ServerWorld.isTaggedForGeneration(floor, generation,
-        identity.rvId, bitmapVersion) then
+        identity.rvId) then
         local rootTag = type(data) == "table" and data or nil
         return "generation identity expected={owner=" .. diagnosticValue(C.MOD_ID)
             .. ",rvId=" .. diagnosticValue(identity.rvId)
             .. ",generation=" .. diagnosticValue(generation)
-            .. ",bitmapVersion=" .. diagnosticValue(bitmapVersion)
             .. "} observed.root={" .. identityTagSummary(rootTag)
             .. "} observed.nested={" .. identityTagSummary(tag) .. "}"
     end
@@ -272,14 +263,11 @@ local lastFloorIdentityDiagnostic = {}
 local function reportFloorIdentityMismatch(target, identity, detail)
     local rvId = type(identity) == "table" and identity.rvId or nil
     local generation = type(identity) == "table" and identity.generation or nil
-    local bitmapVersion = type(identity) == "table" and identity.bitmapVersion or nil
     local key = diagnosticValue(rvId) .. ":" .. diagnosticValue(generation)
-        .. ":" .. diagnosticValue(bitmapVersion)
     if lastFloorIdentityDiagnostic[key] == detail then return end
     lastFloorIdentityDiagnostic[key] = detail
     print("[RailroaderRVTest] captured south-window floor identity mismatch rvId="
         .. diagnosticValue(rvId) .. " generation=" .. diagnosticValue(generation)
-        .. " bitmapVersion=" .. diagnosticValue(bitmapVersion)
         .. " target=" .. diagnosticValue(target.x) .. ","
         .. diagnosticValue(target.y) .. "," .. diagnosticValue(target.z)
         .. " failed=" .. detail)

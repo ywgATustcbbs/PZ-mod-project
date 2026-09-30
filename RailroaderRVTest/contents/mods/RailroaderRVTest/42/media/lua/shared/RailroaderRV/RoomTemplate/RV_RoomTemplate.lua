@@ -2,11 +2,9 @@
 --
 -- RV_Template remains the ordered capture source. This module compiles it
 -- once into the RoomTemplate schema; it never reads or mutates world objects.
-require "RailroaderRV/Common/RV_Constants"
 local Source = require "RailroaderRV/RoomTemplate/RV_Template"
 local Protection = require "RailroaderRV/RoomTemplate/RV_ProtectionManifest"
 
-local C = RailroaderRV.Constants
 local RoomTemplate = {}
 
 RoomTemplate.TEMPLATE_ID = "railroader-rv"
@@ -21,19 +19,9 @@ RoomTemplate.MAX_Y_EXCLUSIVE = 50
 RoomTemplate.MIN_Z = -32
 RoomTemplate.MAX_Z_EXCLUSIVE = 32
 
-local segments = {
-    { name = "negative", minZ = -32, maxZExclusive = 0 },
-    { name = "z0to3", minZ = 0, maxZExclusive = 4 },
-    { name = "z4to31", minZ = 4, maxZExclusive = 32 },
-}
-local segmentByName = {
-    negative = segments[1],
-    z0to3 = segments[2],
-    z4to31 = segments[3],
-}
 local sourceKeys = {
     templateVersion = true, sourceTarget = true, objectCount = true,
-    buildCells = true, objects = true,
+    buildCells = true, walkAabbs = true, objects = true,
 }
 local objectKeys = {
     x = true, y = true, z = true, class = true, name = true,
@@ -113,12 +101,33 @@ local function assertSource()
         or Source.objectCount ~= RoomTemplate.CURRENT_OBJECT_COUNT
         or not finiteInteger(Source.objectCount)
         or denseList(Source.objects) ~= Source.objectCount
-        or denseList(Source.buildCells) ~= 24
+        or not denseList(Source.buildCells)
+        or not denseList(Source.walkAabbs)
         or type(Source.sourceTarget) ~= "table"
         or not finiteInteger(Source.sourceTarget.x)
         or not finiteInteger(Source.sourceTarget.y)
         or not finiteInteger(Source.sourceTarget.z) then
         error("RailroaderRV: captured template source has the wrong current schema")
+    end
+
+    for index = 1, #Source.walkAabbs do
+        local box = Source.walkAabbs[index]
+        if type(box) ~= "table" or not exactKeys(box, {
+            minX = true, maxX = true, minY = true, maxY = true,
+            minZ = true, maxZExclusive = true,
+        }) or not finiteInteger(box.minX) or not finiteInteger(box.maxX)
+            or not finiteInteger(box.minY) or not finiteInteger(box.maxY)
+            or not finiteInteger(box.minZ) or not finiteInteger(box.maxZExclusive)
+            or box.minX < RoomTemplate.MIN_X
+            or box.maxX > RoomTemplate.MAX_X_EXCLUSIVE
+            or box.minY < RoomTemplate.MIN_Y
+            or box.maxY > RoomTemplate.MAX_Y_EXCLUSIVE
+            or box.minZ < RoomTemplate.MIN_Z
+            or box.maxZExclusive > RoomTemplate.MAX_Z_EXCLUSIVE
+            or box.minX >= box.maxX or box.minY >= box.maxY
+            or box.minZ >= box.maxZExclusive then
+            error("RailroaderRV: captured walk geometry is invalid")
+        end
     end
 
     for index = 1, Source.objectCount do
@@ -154,50 +163,28 @@ local function assertSource()
     local buildCellKeys = {}
     for index = 1, #Source.buildCells do
         local cell = Source.buildCells[index]
-        if type(cell) ~= "table" or not exactKeys(cell, { x = true, y = true })
+        if type(cell) ~= "table" or not exactKeys(cell,
+            { x = true, y = true }, { z = true })
             or not finiteInteger(cell.x) or not finiteInteger(cell.y)
+            or (cell.z ~= nil and (not finiteInteger(cell.z)
+                or cell.z < RoomTemplate.MIN_Z
+                or cell.z >= RoomTemplate.MAX_Z_EXCLUSIVE))
             or cell.x < RoomTemplate.MIN_X or cell.x >= RoomTemplate.MAX_X_EXCLUSIVE
             or cell.y < RoomTemplate.MIN_Y or cell.y >= RoomTemplate.MAX_Y_EXCLUSIVE then
             error("RailroaderRV: captured build-cell schema is invalid")
         end
-        local key = tostring(cell.x) .. ":" .. tostring(cell.y)
+        local key = tostring(cell.x) .. ":" .. tostring(cell.y) .. ":"
+            .. tostring(cell.z == nil and 0 or cell.z)
         if buildCellKeys[key] then
             error("RailroaderRV: captured build-cell identity is duplicated")
         end
         buildCellKeys[key] = true
     end
-    for x = C.CAB_MIN_OFFSET_X, C.CAB_MAX_OFFSET_X do
-        for y = C.CAB_MIN_OFFSET_Y, C.CAB_MAX_OFFSET_Y do
-            if not buildCellKeys[tostring(x) .. ":" .. tostring(y)] then
-                error("RailroaderRV: captured cab build mask is incomplete")
-            end
-        end
-    end
-end
-
-local function newRowWithEmptyFlags()
-    local row = {}
-    for x = RoomTemplate.MIN_X, RoomTemplate.MAX_X_EXCLUSIVE - 1 do
-        row[x] = { negative = false, z0to3 = false, z4to31 = false }
-    end
-    return row
 end
 
 local function copyState(source)
     local result = {}
     for key, value in pairs(source) do result[key] = value end
-    return result
-end
-
-local function copySegments()
-    local result = {}
-    for index = 1, #segments do
-        result[index] = {
-            name = segments[index].name,
-            minZ = segments[index].minZ,
-            maxZExclusive = segments[index].maxZExclusive,
-        }
-    end
     return result
 end
 
@@ -218,30 +205,16 @@ local function copyObject(source, index, protectionClass)
 end
 
 local function compileAabbs()
-    local walk = {
-        minX = C.INTERIOR_MIN_OFFSET_X,
-        maxX = C.INTERIOR_MAX_OFFSET_X + 1,
-        minY = C.INTERIOR_MIN_OFFSET_Y,
-        maxY = C.INTERIOR_MAX_OFFSET_Y + 1,
-        minZ = 0,
-        maxZExclusive = 1,
-    }
-    local buildMinX, buildMaxX = nil, nil
-    local buildMinY, buildMaxY = nil, nil
-    for index = 1, #Source.buildCells do
-        local cell = Source.buildCells[index]
-        buildMinX = buildMinX == nil and cell.x or math.min(buildMinX, cell.x)
-        buildMaxX = buildMaxX == nil and cell.x or math.max(buildMaxX, cell.x)
-        buildMinY = buildMinY == nil and cell.y or math.min(buildMinY, cell.y)
-        buildMaxY = buildMaxY == nil and cell.y or math.max(buildMaxY, cell.y)
+    local walk = {}
+    for index = 1, #Source.walkAabbs do
+        local box = Source.walkAabbs[index]
+        walk[index] = {
+            minX = box.minX, maxX = box.maxX,
+            minY = box.minY, maxY = box.maxY,
+            minZ = box.minZ, maxZExclusive = box.maxZExclusive,
+        }
     end
-    return { walk }, {
-        {
-            minX = buildMinX, maxX = buildMaxX + 1,
-            minY = buildMinY, maxY = buildMaxY + 1,
-            minZ = 0, maxZExclusive = 1,
-        },
-    }
+    return walk
 end
 
 local function compileRoofTargets(objects)
@@ -305,11 +278,6 @@ end
 
 assertSource()
 
-local bitmap = {}
-for y = RoomTemplate.MIN_Y, RoomTemplate.MAX_Y_EXCLUSIVE - 1 do
-    bitmap[y] = newRowWithEmptyFlags()
-end
-
 local celldef = {}
 local compiledObjects = {}
 for index = 1, Source.objectCount do
@@ -320,7 +288,7 @@ for index = 1, Source.objectCount do
 
     if source.x < RoomTemplate.MIN_X or source.x >= RoomTemplate.MAX_X_EXCLUSIVE
         or source.y < RoomTemplate.MIN_Y or source.y >= RoomTemplate.MAX_Y_EXCLUSIVE then
-        error("RailroaderRV: captured template object is outside the 100x100 region at "
+        error("RailroaderRV: captured template object is outside its region at "
             .. tostring(index))
     end
 
@@ -332,14 +300,9 @@ for index = 1, Source.objectCount do
     if not layer then layer = {}; cell.layers[source.z] = layer end
     layer[#layer + 1] = object
 
-    local flag
-    if source.z < 0 then flag = "negative"
-    elseif source.z <= 3 then flag = "z0to3"
-    else flag = "z4to31" end
-    bitmap[source.y][source.x][flag] = true
 end
 
-local walkAabbs, buildAabbs = compileAabbs()
+local walkAabbs = compileAabbs()
 local template = {
     metadata = {
         id = RoomTemplate.TEMPLATE_ID,
@@ -360,13 +323,10 @@ local template = {
         minY = RoomTemplate.MIN_Y,
         maxYExclusive = RoomTemplate.MAX_Y_EXCLUSIVE,
         objectCount = Source.objectCount,
-        segmentSchema = copySegments(),
     },
-    bitmap = bitmap,
     celldef = celldef,
     misc = {
         walkAabbs = walkAabbs,
-        buildAabbs = buildAabbs,
         buildCells = {},
         roofTargets = compileRoofTargets(compiledObjects),
     },
@@ -375,29 +335,27 @@ for index = 1, #Source.buildCells do
     template.misc.buildCells[index] = {
         x = Source.buildCells[index].x,
         y = Source.buildCells[index].y,
+        z = Source.buildCells[index].z,
     }
 end
 
 local templateRootKeys = {
-    metadata = true, bitmap = true, celldef = true, misc = true,
+    metadata = true, celldef = true, misc = true,
 }
 local metadataKeys = {
     id = true, displayName = true, templateVersion = true,
     anchor = true, sourceTarget = true,
     width = true, height = true, minX = true, maxXExclusive = true,
     minY = true, maxYExclusive = true, objectCount = true,
-    segmentSchema = true,
 }
 local pointKeys = { x = true, y = true, z = true }
 local cellKeys = { layers = true }
-local flagKeys = { negative = true, z0to3 = true, z4to31 = true }
 local aabbKeys = {
     minX = true, maxX = true, minY = true, maxY = true,
     minZ = true, maxZExclusive = true,
 }
 local miscKeys = {
-    walkAabbs = true, buildAabbs = true,
-    buildCells = true, roofTargets = true,
+    walkAabbs = true, buildCells = true, roofTargets = true,
 }
 local roofTargetKeys = {
     kind = true, x = true, y = true, z = true,
@@ -489,55 +447,9 @@ function RoomTemplate.validate(value)
         return false, "template metadata does not use the current identity/version"
     end
 
-    local segmentCount = denseList(metadata.segmentSchema)
-    if segmentCount ~= 3 then
-        return false, "template segment schema is incomplete"
-    end
-    for index = 1, 3 do
-        local actual, expected = metadata.segmentSchema[index], segments[index]
-        if not exactKeys(actual, { name = true, minZ = true, maxZExclusive = true })
-            or actual.name ~= expected.name or actual.minZ ~= expected.minZ
-            or actual.maxZExclusive ~= expected.maxZExclusive then
-            return false, "template segment schema is not current"
-        end
-    end
-
-    if type(value.bitmap) ~= "table" or type(value.celldef) ~= "table"
+    if type(value.celldef) ~= "table"
         or not exactKeys(value.misc, miscKeys) then
         return false, "template data tables are incomplete"
-    end
-    for y = RoomTemplate.MIN_Y, RoomTemplate.MAX_Y_EXCLUSIVE - 1 do
-        local bitmapRow = value.bitmap[y]
-        -- A dense coordinate-keyed row contains exactly one key per X.
-        local rowCount = 0
-        if type(bitmapRow) ~= "table" then
-            return false, "template bitmap row is missing"
-        end
-        for x, flags in pairs(bitmapRow) do
-            if not finiteInteger(x) or x < RoomTemplate.MIN_X
-                or x >= RoomTemplate.MAX_X_EXCLUSIVE
-                or not exactKeys(flags, flagKeys)
-                or type(flags.negative) ~= "boolean"
-                or type(flags.z0to3) ~= "boolean"
-                or type(flags.z4to31) ~= "boolean" then
-                return false, "template bitmap contains an invalid cell or flag"
-            end
-            rowCount = rowCount + 1
-        end
-        if rowCount ~= RoomTemplate.WIDTH then
-            return false, "template bitmap row is not dense"
-        end
-    end
-    local bitmapRows = 0
-    for y in pairs(value.bitmap) do
-        if not finiteInteger(y) or y < RoomTemplate.MIN_Y
-            or y >= RoomTemplate.MAX_Y_EXCLUSIVE then
-            return false, "template bitmap has an extra row"
-        end
-        bitmapRows = bitmapRows + 1
-    end
-    if bitmapRows ~= RoomTemplate.HEIGHT then
-        return false, "template bitmap is not 100 rows"
     end
 
     local objectCount, objectIndices = 0, {}
@@ -596,72 +508,31 @@ function RoomTemplate.validate(value)
         end
     end
 
-    for y = RoomTemplate.MIN_Y, RoomTemplate.MAX_Y_EXCLUSIVE - 1 do
-        for x = RoomTemplate.MIN_X, RoomTemplate.MAX_X_EXCLUSIVE - 1 do
-            local row = value.celldef[y]
-            local cell = row and row[x]
-            for segmentIndex = 1, #segments do
-                local segment = segments[segmentIndex]
-                local exists = false
-                if cell then
-                    for z = segment.minZ, segment.maxZExclusive - 1 do
-                        local objects = cell.layers[z]
-                        if objects ~= nil then
-                            exists = true
-                            break
-                        end
-                    end
-                end
-                if value.bitmap[y][x][segment.name] ~= exists then
-                    return false, "template bitmap summary does not match celldef"
-                end
-            end
-        end
-    end
-
     local misc = value.misc
-    if not validAabbList(misc.walkAabbs) or not validAabbList(misc.buildAabbs) then
-        return false, "template walk/build AABB data is invalid"
-    end
-    if #misc.walkAabbs ~= 1 or #misc.buildAabbs ~= 1 then
-        return false, "template walk/build AABB identity is not current"
-    end
-    local walk, build = misc.walkAabbs[1], misc.buildAabbs[1]
-    if walk.minX ~= C.INTERIOR_MIN_OFFSET_X
-        or walk.maxX ~= C.INTERIOR_MAX_OFFSET_X + 1
-        or walk.minY ~= C.INTERIOR_MIN_OFFSET_Y
-        or walk.maxY ~= C.INTERIOR_MAX_OFFSET_Y + 1
-        or walk.minZ ~= 0 or walk.maxZExclusive ~= 1
-        or build.minX ~= C.CAB_MIN_OFFSET_X
-        or build.maxX ~= C.CAB_MAX_OFFSET_X + 1
-        or build.minY ~= C.CAB_MIN_OFFSET_Y
-        or build.maxY ~= C.CAB_MAX_OFFSET_Y + 1
-        or build.minZ ~= 0 or build.maxZExclusive ~= 1 then
-        return false, "template walk/build AABB identity is not current"
+    if not validAabbList(misc.walkAabbs) then
+        return false, "template walk AABB data is invalid"
     end
     local buildCellCount = denseList(misc.buildCells)
-    if buildCellCount ~= 24 then return false, "template build-cell list is invalid" end
+    if not buildCellCount or buildCellCount == 0 then
+        return false, "template build-cell list is invalid"
+    end
     local buildCells = {}
     for index = 1, buildCellCount do
         local cell = misc.buildCells[index]
-        if not exactKeys(cell, { x = true, y = true })
+        if not exactKeys(cell, { x = true, y = true }, { z = true })
             or not finiteInteger(cell.x) or not finiteInteger(cell.y)
+            or (cell.z ~= nil and (not finiteInteger(cell.z)
+                or cell.z < RoomTemplate.MIN_Z
+                or cell.z >= RoomTemplate.MAX_Z_EXCLUSIVE))
             or cell.x < RoomTemplate.MIN_X or cell.x >= RoomTemplate.MAX_X_EXCLUSIVE
             or cell.y < RoomTemplate.MIN_Y or cell.y >= RoomTemplate.MAX_Y_EXCLUSIVE then
             return false, "template build-cell entry is invalid"
         end
-        local key = tostring(cell.x) .. ":" .. tostring(cell.y)
+        local key = tostring(cell.x) .. ":" .. tostring(cell.y) .. ":"
+            .. tostring(cell.z == nil and metadata.anchor.z or cell.z)
         if buildCells[key] then return false, "template build-cell entry is duplicated" end
         buildCells[key] = true
     end
-    for x = C.CAB_MIN_OFFSET_X, C.CAB_MAX_OFFSET_X do
-        for y = C.CAB_MIN_OFFSET_Y, C.CAB_MAX_OFFSET_Y do
-            if not buildCells[tostring(x) .. ":" .. tostring(y)] then
-                return false, "template build-cell mask is incomplete"
-            end
-        end
-    end
-
     local roofCount = denseList(misc.roofTargets)
     if roofCount ~= 1 then return false, "template roof target list is invalid" end
     for index = 1, roofCount do
@@ -725,22 +596,11 @@ function RoomTemplate.cellAt(value, x, y)
     return row and row[x] or nil
 end
 
-function RoomTemplate.segmentMayHaveLayer(value, x, y, segment)
-    if value ~= template or not cellCoordinates(x, y)
-        or not segmentByName[segment] then
-        return false
-    end
-    return value.bitmap[y][x][segment] == true
-end
-
 function RoomTemplate.hasLayer(value, x, y, z)
     if value ~= template or not cellCoordinates(x, y)
         or not RoomTemplate.supportsZ(z) then
         return false
     end
-    local segment = z < 0 and "negative"
-        or (z <= 3 and "z0to3" or "z4to31")
-    if value.bitmap[y][x][segment] ~= true then return false end
     local cell = RoomTemplate.cellAt(value, x, y)
     return cell ~= nil and type(cell.layers[z]) == "table"
         and #cell.layers[z] > 0
@@ -753,18 +613,12 @@ function RoomTemplate.hasAnyLayer(value, x, y, zMin, zMax)
         or zMin >= zMax then
         return false
     end
-    for segmentIndex = 1, #segments do
-        local segment = segments[segmentIndex]
-        local firstZ = math.max(zMin, segment.minZ)
-        local lastZ = math.min(zMax, segment.maxZExclusive)
-        if firstZ < lastZ and value.bitmap[y][x][segment.name] then
-            for z = firstZ, lastZ - 1 do
-                local cell = RoomTemplate.cellAt(value, x, y)
-                if cell and type(cell.layers[z]) == "table"
-                    and #cell.layers[z] > 0 then
-                    return true
-                end
-            end
+    local cell = RoomTemplate.cellAt(value, x, y)
+    if not cell then return false end
+    for z = zMin, zMax - 1 do
+        local objects = cell.layers[z]
+        if type(objects) == "table" and #objects > 0 then
+            return true
         end
     end
     return false

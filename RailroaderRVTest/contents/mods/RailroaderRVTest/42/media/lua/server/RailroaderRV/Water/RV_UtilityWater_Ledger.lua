@@ -16,7 +16,6 @@ local function mappedEntry(entry, identity, mappingRecord, sink)
     return type(entry) == "table"
         and tostring(entry.rvId) == tostring(identity.rvId)
         and entry.generation == identity.generation
-        and entry.bitmapVersion == identity.bitmapVersion
         and entry.slotIndex == mappingRecord.slotIndex
         and sameAnchor(entry.anchor, mappingRecord.anchor)
         and entry.x == sink.x and entry.y == sink.y and entry.z == sink.z
@@ -63,7 +62,6 @@ function M.newEntry(identity, mappingRecord, sink, connected, sequence)
     return {
         rvId = identity.rvId,
         generation = identity.generation,
-        bitmapVersion = identity.bitmapVersion,
         slotIndex = mappingRecord.slotIndex,
         anchor = { x = mappingRecord.anchor.x, y = mappingRecord.anchor.y,
             z = mappingRecord.anchor.z },
@@ -78,7 +76,6 @@ function M.copyEntry(entry)
     return {
         rvId = entry.rvId,
         generation = entry.generation,
-        bitmapVersion = entry.bitmapVersion,
         slotIndex = entry.slotIndex,
         anchor = { x = entry.anchor.x, y = entry.anchor.y, z = entry.anchor.z },
         x = entry.x, y = entry.y, z = entry.z,

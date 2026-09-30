@@ -254,8 +254,7 @@ local function processPendingWallRoofRefreshGroup(map, pending, record, server,
     if pending.relocationPhase == "temporary" then
         local readyFn = type(server.roofRefreshRelocationGroupReady) == "function"
             and server.roofRefreshRelocationGroupReady
-        local ready = readyFn and readyFn(pending.rvId, pending.generation,
-            pending.bitmapVersion) or false
+        local ready = readyFn and readyFn(pending.rvId, pending.generation) or false
         if not ready then return end
         for i = 1, #pending.players do
             local saved = pending.players[i]
@@ -485,7 +484,6 @@ beginRoofRefreshPhase = function(player, pending, phase)
                 roomKey = pending.roomKey,
                 rvId = pending.rvId,
                 generation = pending.generation,
-                bitmapVersion = pending.bitmapVersion,
                 phase = phase,
                 players = phase == "temporary" and descriptors or nil,
             })
@@ -547,8 +545,8 @@ promoteFollowUpWallRemoval = function(map, roomKey)
                             event.roomKey = currentRoomKey
                             event.rvId = tostring(record.rvId)
                             if waitingForGeneration then
-                                -- The current record/rvId/generation/
-                                -- bitmapVersion is now proven complete.  Give
+                                -- The current record/rvId/generation is now
+                                -- proven complete. Give
                                 -- this accepted event a fresh full lease.
                                 event.expiresAtTick = tickAfter(now,
                                     ROOF_REFRESH_QUEUED_DEADLINE_TICKS)
@@ -623,8 +621,6 @@ local function revalidateQueuedRoofRefreshAfterGeneration(map, roomKey,
         and roofRefreshRoomKey(record) or nil
     local identityMatches = currentRoomKey == roomKey
         and integer(record and record.generation) == integer(pending.generation)
-        and integer(record and record.bitmapVersion)
-            == integer(pending.bitmapVersion)
     if not waitingForGeneration and identityMatches then
         pending.revalidateUntilTick = nil
         return "ready"
@@ -646,8 +642,7 @@ local function revalidateQueuedRoofRefreshAfterGeneration(map, roomKey,
         return "expired"
     end
     if currentRoomKey == roomKey
-        and integer(record.generation) == integer(pending.generation)
-        and integer(record.bitmapVersion) == integer(pending.bitmapVersion) then
+        and integer(record.generation) == integer(pending.generation) then
         -- A generation-owned queue had its old lease paused rather than
         -- consumed.  Once the complete current identity is confirmed, start
         -- a fresh bounded rebind window; never carry the pre-generation
@@ -689,7 +684,6 @@ local function revalidateQueuedRoofRefreshAfterGeneration(map, roomKey,
     pending.players = players
     pending.rvId = tostring(record.rvId)
     pending.generation = integer(record.generation)
-    pending.bitmapVersion = integer(record.bitmapVersion)
     pending.identityKey = players[1].identityKey
     pending.returnPosition = players[1].originalPosition
     pending.startTick = tickAfter(now, 1)

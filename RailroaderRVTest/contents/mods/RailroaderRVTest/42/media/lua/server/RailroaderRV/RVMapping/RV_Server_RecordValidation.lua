@@ -13,14 +13,14 @@ local playerIdentity = ctx.playerIdentity
 local currentRoofRefreshContext = ctx.currentRoofRefreshContext
 local queueGeneration = ctx.queueGeneration
 
-local function currentMappingRecord(rvId, generation, bitmapVersion)
+local function currentMappingRecord(rvId, generation)
     local adapter = RailroaderRV and RailroaderRV.RailroaderServer
     if type(adapter) ~= "table"
         or type(adapter.currentMappingRecord) ~= "function" then
         return false, Constants.INVALID_RV_DATA
     end
     local ok, accepted, record = pcall(adapter.currentMappingRecord,
-        rvId, generation, bitmapVersion)
+        rvId, generation)
     if not ok or accepted ~= true or type(record) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
@@ -40,7 +40,6 @@ local function manifestViewForRecord(record)
         local bounds = ServerSchema.boundsFor(layout)
         local updatedAt = ServerUtil.integer(record.updatedAt)
         local generation = ServerUtil.integer(record.generation)
-        local bitmapVersion = ServerUtil.integer(record.bitmapVersion)
         local snapshot = {
             techVersion = Constants.TECH_VERSION,
             templateVersion = Constants.CAPTURED_TEMPLATE_VERSION,
@@ -50,7 +49,6 @@ local function manifestViewForRecord(record)
             anchor = anchor,
             bounds = bounds,
             rvId = tostring(record.rvId),
-            bitmapVersion = bitmapVersion,
             boundary = record.boundary,
             startedAt = updatedAt,
             state = "READY",
@@ -60,7 +58,7 @@ local function manifestViewForRecord(record)
             phaseUpdatedAt = updatedAt,
             completedAt = updatedAt,
         }
-        if updatedAt == nil or generation == nil or bitmapVersion == nil then
+        if updatedAt == nil or generation == nil then
             error(Constants.INVALID_RV_DATA)
         end
         return snapshot
@@ -71,9 +69,8 @@ local function manifestViewForRecord(record)
     return true, manifest
 end
 
-local function manifestForIdentity(rvId, generation, bitmapVersion,
-    allowRunning)
-    local recordOk, record = currentMappingRecord(rvId, generation, bitmapVersion)
+local function manifestForIdentity(rvId, generation, allowRunning)
+    local recordOk, record = currentMappingRecord(rvId, generation)
     if not recordOk then return false, record end
     local manifestOk, persisted = pcall(manifestTable)
     if not manifestOk or type(persisted) ~= "table" then
@@ -81,7 +78,6 @@ local function manifestForIdentity(rvId, generation, bitmapVersion,
     end
     local identityMatches = tostring(persisted.rvId) == tostring(rvId)
         and ServerUtil.integer(persisted.generation) == ServerUtil.integer(generation)
-        and ServerUtil.integer(persisted.bitmapVersion) == ServerUtil.integer(bitmapVersion)
     if tostring(persisted.rvId) == tostring(rvId) then
         if not identityMatches then return false, Constants.INVALID_RV_DATA end
         if persisted.state == "RUNNING" then
@@ -97,8 +93,6 @@ local function manifestForIdentity(rvId, generation, bitmapVersion,
                 and tostring(pending.rvId) == tostring(rvId)
                 and ServerUtil.integer(pending.generation)
                     == ServerUtil.integer(generation)
-                and ServerUtil.integer(pending.bitmapVersion)
-                    == ServerUtil.integer(bitmapVersion)
             if activeRunning then return true, persisted end
             return false, Constants.INVALID_RV_DATA
         end
@@ -134,16 +128,14 @@ function RV.Server.requestRailroaderGeneration(player, railroaderData)
 end
 
 -- Read-only current identity for the stateless -15 sentinel.
-function RV.Server.currentRVManifestForRelocation(rvId, generation,
-    bitmapVersion)
-    return manifestForIdentity(rvId, generation, bitmapVersion, false)
+function RV.Server.currentRVManifestForRelocation(rvId, generation)
+    return manifestForIdentity(rvId, generation, false)
 end
 
 -- BoundaryServer may inspect the current identity while generation is still
 -- RUNNING; ordinary relocation reads require READY.
-function RV.Server.currentRVManifestForBoundary(rvId, generation,
-    bitmapVersion)
-    return manifestForIdentity(rvId, generation, bitmapVersion, true)
+function RV.Server.currentRVManifestForBoundary(rvId, generation)
+    return manifestForIdentity(rvId, generation, true)
 end
 
 -- Rebuild the captured south-window floor's room/roof neighbours after an
@@ -154,7 +146,7 @@ function RV.Server.refreshRoofVisuals(player, record)
     end
     if type(record) ~= "table" then return false, Constants.INVALID_RV_DATA end
     local manifestOk, manifest = RV.Server.currentRVManifestForRelocation(
-        record.rvId, record.generation, record.bitmapVersion)
+        record.rvId, record.generation)
     if not manifestOk or type(manifest) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
@@ -163,7 +155,6 @@ function RV.Server.refreshRoofVisuals(player, record)
     local contextOk, contextOrReason = currentRoofRefreshContext(player, {
         rvId = manifest.rvId,
         generation = manifest.generation,
-        bitmapVersion = manifest.bitmapVersion,
         identityKey = identityOrReason.key,
     })
     if not contextOk then return false, contextOrReason end
@@ -171,7 +162,6 @@ function RV.Server.refreshRoofVisuals(player, record)
     local ok, result, reason = pcall(RoofRefresh.run, player, bounds, {
         rvId = manifest.rvId,
         generation = manifest.generation,
-        bitmapVersion = manifest.bitmapVersion,
     })
     if not ok then return false, safeErrorText(result) end
     return result == true, reason
@@ -189,7 +179,6 @@ function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
         or record.rvId == nil or tostring(record.rvId) ~= tostring(record.locoId)
         or type(record.boundary) ~= "table"
         or type(record.boundary.managed) ~= "table"
-        or type(record.boundary.bitmap) ~= "table"
         or type(record.boundary.shellEdges) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
@@ -198,13 +187,9 @@ function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
         ~= recordGeneration or recordGeneration < 1 then
         return false, Constants.INVALID_RV_DATA
     end
-    local recordBitmapVersion = ServerUtil.toNumber(record.bitmapVersion)
     local boundaryGeneration = ServerUtil.toNumber(record.boundary.generation)
-    local boundaryBitmapVersion = ServerUtil.toNumber(record.boundary.bitmapVersion)
-    if recordBitmapVersion ~= Constants.BITMAP_VERSION
-        or tostring(record.boundary.rvId) ~= tostring(record.rvId)
-        or boundaryGeneration ~= recordGeneration
-        or boundaryBitmapVersion ~= recordBitmapVersion then
+    if tostring(record.boundary.rvId) ~= tostring(record.rvId)
+        or boundaryGeneration ~= recordGeneration then
         return false, Constants.INVALID_RV_DATA
     end
 
@@ -215,7 +200,7 @@ function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
         return false, Constants.INVALID_RV_DATA
     end
     local manifestAccepted, manifest = RV.Server.currentRVManifestForBoundary(
-        record.rvId, recordGeneration, recordBitmapVersion)
+        record.rvId, recordGeneration)
     if manifestAccepted ~= true or type(manifest) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
@@ -223,26 +208,21 @@ function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
         return false, "RV manifest is not READY"
     end
     local manifestGeneration = ServerUtil.toNumber(manifest.generation)
-    local manifestBitmapVersion = ServerUtil.toNumber(manifest.bitmapVersion)
     if tostring(manifest.rvId) ~= tostring(record.rvId)
         or manifestGeneration ~= recordGeneration
-        or manifestBitmapVersion ~= recordBitmapVersion
         or tostring(manifest.boundary.rvId) ~= tostring(record.rvId)
-        or ServerUtil.toNumber(manifest.boundary.generation) ~= recordGeneration
-        or ServerUtil.toNumber(manifest.boundary.bitmapVersion) ~= recordBitmapVersion then
+        or ServerUtil.toNumber(manifest.boundary.generation) ~= recordGeneration then
         return false, Constants.INVALID_RV_DATA
     end
 
     local armedOk, armedError = pcall(armTargetedClientRoomOwnershipGuard,
-        player, recordGeneration, manifest.bounds, record.rvId,
-        recordBitmapVersion)
+        player, recordGeneration, manifest.bounds, record.rvId)
     if not armedOk then
         return false, safeErrorText(armedError)
     end
     print("[RailroaderRVTest] targeted room ownership monitor armed player="
         .. tostring(identityOrReason.key) .. " rvId=" .. tostring(record.rvId)
-        .. " generation=" .. tostring(recordGeneration)
-        .. " bitmapVersion=" .. tostring(recordBitmapVersion))
+        .. " generation=" .. tostring(recordGeneration))
     return true
 end
 

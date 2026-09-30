@@ -112,8 +112,7 @@ local function acknowledgeFinalRelocation(player, args)
     if manifest.state ~= "RUNNING"
         or manifest.phase ~= "FINAL_RELOCATE"
         or tostring(manifest.rvId) ~= tostring(pending.rvId)
-        or ServerUtil.integer(manifest.generation) ~= pending.generation
-        or ServerUtil.integer(manifest.bitmapVersion) ~= pending.bitmapVersion then
+        or ServerUtil.integer(manifest.generation) ~= pending.generation then
         return false, Constants.INVALID_RV_DATA
     end
     local anchor = manifest.anchor
@@ -227,8 +226,7 @@ local function rollbackPendingGenerationWorld(pending, reason)
         cell = cellOrReason
     end
     local rollbackOk, rollbackReason = pcall(removeGeneration, cell,
-        pending.bounds, pending.generation, pending.rvId,
-        pending.bitmapVersion)
+        pending.bounds, pending.generation, pending.rvId)
     if not rollbackOk then
         manifest.rollback = "FAILED"
         GenerationTransaction.rollback("world-retry",

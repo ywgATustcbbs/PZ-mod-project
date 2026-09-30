@@ -60,8 +60,6 @@ local function isTaggedWardrobe(object)
         or data.rvId ~= tag.rvId
         or C.finiteInteger(data.generation) == nil or C.finiteInteger(data.generation) < 1
         or C.finiteInteger(data.generation) ~= C.finiteInteger(tag.generation)
-        or C.finiteInteger(data.bitmapVersion) ~= C.BITMAP_VERSION
-        or C.finiteInteger(tag.bitmapVersion) ~= C.BITMAP_VERSION
         or data.role ~= "captured-template"
         or tag.role ~= data.role then
         return false

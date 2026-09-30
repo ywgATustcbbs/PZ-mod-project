@@ -141,13 +141,11 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
     local anchorZ = ServerUtil.requiredInteger(anchor.z, "layout anchor.z")
     local tagContext = {
         rvId = manifest and manifest.rvId,
-        bitmapVersion = manifest and manifest.bitmapVersion,
         anchorX = anchorX,
         anchorY = anchorY,
         anchorZ = anchorZ,
     }
-    if tagContext.rvId == nil or tostring(tagContext.rvId) == ""
-        or ServerUtil.toNumber(tagContext.bitmapVersion) == nil then
+    if tagContext.rvId == nil or tostring(tagContext.rvId) == "" then
         error("RailroaderRVTest: generation boundary identity is incomplete")
     end
     local templateObjects = layout.templateObjects

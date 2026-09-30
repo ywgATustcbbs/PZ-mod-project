@@ -50,7 +50,7 @@ function RV.Server.OnTick(tick)
     ctx.serverTick = tick or Core.getTick()
     -- Extend the token-scoped boundary lease before Boundary.onTick runs.  The
     -- roof transaction may temporarily place the player outside the active
-    -- bitmap while the engine settles room state; correction must stay paused
+    -- template geometry while the engine settles room state; correction must stay paused
     -- for that bounded transaction only.
     if not keepRoofRefreshTransitionAlive() then return end
     if not keepGenerationTransitionAlive() then return end

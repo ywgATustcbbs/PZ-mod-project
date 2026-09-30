@@ -46,7 +46,7 @@ local relocationPositionsEqual = ctx.relocationPositionsEqual
 -- remote relocation contract and must not publish these generation helpers.
 local function selectGenerationStagingDestination(layout, bounds)
     if type(layout) ~= "table" or type(bounds) ~= "table"
-        or type(layout.bitmap) ~= "table" then
+        or type(layout.managed) ~= "table" then
         error("RailroaderRVTest: generation staging contract is incomplete")
     end
     local originX = ServerUtil.requiredInteger(bounds.managedOriginX,
@@ -57,15 +57,15 @@ local function selectGenerationStagingDestination(layout, bounds)
         "generation managed width")
     local height = ServerUtil.requiredInteger(bounds.managedHeight,
         "generation managed height")
-    if width ~= ServerUtil.requiredInteger(layout.bitmap.width, "generation bitmap width")
-        or height ~= ServerUtil.requiredInteger(layout.bitmap.height,
-            "generation bitmap height")
-        or originX ~= ServerUtil.requiredInteger(layout.bitmap.originX,
-            "generation bitmap origin x")
-        or originY ~= ServerUtil.requiredInteger(layout.bitmap.originY,
-            "generation bitmap origin y")
+    if width ~= ServerUtil.requiredInteger(layout.managed.width, "generation managed width")
+        or height ~= ServerUtil.requiredInteger(layout.managed.height,
+            "generation managed height")
+        or originX ~= ServerUtil.requiredInteger(layout.managed.originX,
+            "generation managed origin x")
+        or originY ~= ServerUtil.requiredInteger(layout.managed.originY,
+            "generation managed origin y")
         or width <= 0 or height <= 0 then
-        error("RailroaderRVTest: generation staging bitmap identity is stale")
+        error("RailroaderRVTest: generation staging geometry is stale")
     end
     local destination = {
         x = originX + math.floor(width / 2),
@@ -152,9 +152,6 @@ local function relocatePlayerIntoHouse(player, prepared)
             generation = ServerUtil.requiredInteger(prepared.generation,
                 "final relocation generation"),
             rvId = tostring(prepared.rvId),
-            bitmapVersion = ServerUtil.requiredInteger(prepared.boundary
-                and prepared.boundary.bitmapVersion,
-                "final relocation bitmapVersion"),
             onlineId = prepared.identity.onlineId,
             x = x,
             y = y,
@@ -315,7 +312,6 @@ local function generateForPlayer(player, prepared)
             bounds, generation, {
                 rvId = prepared.rvId,
                 generation = generation,
-                bitmapVersion = boundaryOrReason.bitmapVersion,
                 slotIndex = prepared.slotIndex,
                 anchor = anchor,
             }, manifest)
@@ -330,10 +326,9 @@ local function generateForPlayer(player, prepared)
         -- outside both old and new structure footprints, while later client
         -- ticks repair any missed retired room ID.
         armClientRoomOwnershipGuard(generation, oldBounds, bounds,
-            prepared.rvId, boundaryOrReason.bitmapVersion)
+            prepared.rvId)
         local roomOwnershipGuard = registerServerRoomOwnershipGuard(generation,
-            player, oldBounds, bounds, prepared.rvId,
-            boundaryOrReason.bitmapVersion)
+            player, oldBounds, bounds, prepared.rvId)
         -- Keep the player at staging while the build pass creates and verifies
         -- each captured-object host square and the room-ownership scan checks
         -- the captured roof.
@@ -346,7 +341,6 @@ local function generateForPlayer(player, prepared)
         manifest.anchor = { x = anchor.x, y = anchor.y, z = anchor.z }
         manifest.bounds = bounds
         manifest.rvId = prepared.rvId
-        manifest.bitmapVersion = boundaryOrReason.bitmapVersion
         manifest.boundary = boundaryOrReason
         manifest.startedAt = math.floor(os.time())
         manifest.rollback = nil
@@ -408,7 +402,7 @@ local function generateForPlayer(player, prepared)
             -- captured model or powered generator in the world.
             local rollbackOk, rollbackError = pcall(function()
                 removeGeneration(cell, bounds, generation, manifest.rvId,
-                    manifest.bitmapVersion, manifest.phase)
+                    manifest.phase)
             end)
             if rollbackOk then
                 manifest.rollback = "COMPLETE"
@@ -500,8 +494,7 @@ local function finalizeGenerationAfterRelocate(player, prepared)
         if manifest.state ~= "RUNNING"
             or manifest.phase ~= "FINAL_RELOCATE"
             or tostring(manifest.rvId) ~= tostring(prepared.rvId)
-            or ServerUtil.integer(manifest.generation) ~= prepared.generation
-            or ServerUtil.integer(manifest.bitmapVersion) ~= prepared.bitmapVersion then
+            or ServerUtil.integer(manifest.generation) ~= prepared.generation then
             error(Constants.INVALID_RV_DATA)
         end
         local anchor = manifest.anchor
@@ -517,7 +510,7 @@ local function finalizeGenerationAfterRelocate(player, prepared)
             error("generation room ownership guard service is unavailable")
         end
         refreshGenerationRoomOwnershipGuard(prepared.rvId,
-            prepared.generation, prepared.bitmapVersion, "before-commit")
+            prepared.generation, "before-commit")
         if prepared.railroader ~= nil and not ctx.railroaderCommitHook then
             error("Railroader RV commit hook is unavailable")
         end
@@ -529,7 +522,7 @@ local function finalizeGenerationAfterRelocate(player, prepared)
         manifest.completedAt = math.floor(os.time())
         setManifestState(manifest, "READY")
         refreshGenerationRoomOwnershipGuard(prepared.rvId,
-            prepared.generation, prepared.bitmapVersion, "pre-mapping-commit")
+            prepared.generation, "pre-mapping-commit")
         if manifest.state ~= "READY"
             or manifest.phase ~= "COMMITTED" then
             error(Constants.INVALID_RV_DATA)
@@ -672,15 +665,10 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         .. ":" .. tostring(ctx.pendingSerial)
     local transitionRvId = rvId
     local transitionGeneration = generation
-    local transitionBitmapVersion = ServerUtil.requiredInteger(
-        layoutOrError.bitmap and layoutOrError.bitmap.bitmapVersion,
-        "planned generation bitmapVersion")
     if type(railroaderData) == "table" then
-        -- Keep the complete generation identity on the adapter's asynchronous
-        -- failure/commit payload as well as on the owned transaction record.
+        -- Keep the generation identity on the adapter's asynchronous payload.
         railroaderData.rvId = tostring(transitionRvId)
         railroaderData.generation = transitionGeneration
-        railroaderData.bitmapVersion = transitionBitmapVersion
     end
     local pending = {
         player = player,
@@ -693,7 +681,6 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         token = token,
         rvId = tostring(transitionRvId),
         generation = transitionGeneration,
-        bitmapVersion = transitionBitmapVersion,
         queuedAtTick = ctx.serverTick,
         acknowledged = false,
         relocationPhase = "temporary",
@@ -734,8 +721,7 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         return false, "RV boundary transition service is unavailable"
     end
     local transitionOk, transitionResult = pcall(Boundary.beginTransition,
-        player, transitionRvId, transitionGeneration, token, "generation",
-        transitionBitmapVersion)
+        player, transitionRvId, transitionGeneration, token, "generation")
     if not transitionOk or transitionResult ~= true then
         GenerationTransaction.release(token)
         return false, "RV boundary transition could not be armed"
@@ -750,20 +736,15 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         onlineId = identityOrReason.onlineId,
         rvId = tostring(transitionRvId),
         generation = transitionGeneration,
-        bitmapVersion = transitionBitmapVersion,
         x = stagingDestination.x,
         y = stagingDestination.y,
         z = stagingDestination.z,
         generationTransition = true,
         generationPhase = "temporary",
     }
-    -- Re-assert the complete generation identity after constructing the
-    -- asynchronous payload.  The marker below is only valid with this exact
-    -- RV/generation/bitmap snapshot; keep these assignments explicit so no
-    -- later payload extension can silently drop or replace one token.
+    -- Re-assert the generation identity after payload construction.
     relocatePayload.rvId = tostring(transitionRvId)
     relocatePayload.generation = transitionGeneration
-    relocatePayload.bitmapVersion = transitionBitmapVersion
     -- Only a Railroader-backed generation carries a local Ride transition
     -- hint.  The marker is intentionally server-created and is not part of
     -- the ordinary technical Generate protocol; its coordinates remain the

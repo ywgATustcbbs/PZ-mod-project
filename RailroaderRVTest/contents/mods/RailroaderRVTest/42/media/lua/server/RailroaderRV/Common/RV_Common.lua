@@ -182,26 +182,22 @@ local function playerScopeKey(identity)
     if identity == nil then return "<session>" end
     if type(identity) ~= "table"
         or not Common.exactKeys(identity, {
-            rvId = true, generation = true, bitmapVersion = true,
-            slotIndex = true, anchor = true,
+            rvId = true, generation = true, slotIndex = true, anchor = true,
         })
         or type(identity.rvId) ~= "string" or identity.rvId == "" then
         return nil
     end
     local generation = Common.integer(identity.generation)
-    local bitmapVersion = Common.integer(identity.bitmapVersion)
     local slotIndex = Common.integer(identity.slotIndex)
     local anchor = identity.anchor
-    if generation == nil or generation < 1 or bitmapVersion == nil
-        or bitmapVersion < 1 or slotIndex == nil or slotIndex < 1
+    if generation == nil or generation < 1 or slotIndex == nil or slotIndex < 1
         or not Common.exactKeys(anchor, { x = true, y = true, z = true }) then
         return nil
     end
     local x, y, z = Common.integer(anchor.x), Common.integer(anchor.y),
         Common.integer(anchor.z)
     if x == nil or y == nil or z == nil then return nil end
-    return Common.identityKey(identity.rvId, generation, bitmapVersion,
-        slotIndex, x, y, z)
+    return Common.identityKey(identity.rvId, generation, slotIndex, x, y, z)
 end
 
 function Common.newPlayerPositionCache(clock)

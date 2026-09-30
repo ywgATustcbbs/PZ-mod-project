@@ -1,18 +1,17 @@
 -- RailroaderRVTest current-schema and geometry helpers.
 --
 -- This module is pure with respect to persistence and events.  It validates
--- the current layout/bitmap contract and reports loaded-area status; callers
+-- the current layout contract and reports loaded-area status; callers
 -- remain responsible for transaction state, world mutation and fail-closed
 -- save handling.
 
-local Constants = require("RailroaderRV/Common/RV_Constants")
 local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
 local CapturedTemplate = require("RailroaderRV/RoomTemplate/RV_Template")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
 local ProtectionManifest = require("RailroaderRV/RoomTemplate/RV_ProtectionManifest")
-local Bitmap = require("RailroaderRV/Common/RV_Bitmap")
+local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local ServerUtil = require("RailroaderRV/Common/RV_ServerUtil")
 local ServerWorld = require("RailroaderRV/Common/RV_ServerWorld")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
@@ -38,14 +37,13 @@ local function boundsFor(layout)
     end
     local clear = layout.clear
     local managed = layout.managed
-    local bitmap = layout.bitmap
     local shellEdges = layout.shellEdges
     local room = layout.room
     local wall = layout.wall
     local roof = layout.roof
     local anchor = layout.anchor
     if type(clear) ~= "table" or type(managed) ~= "table"
-        or type(bitmap) ~= "table" or type(shellEdges) ~= "table"
+        or type(shellEdges) ~= "table"
         or type(room) ~= "table" or type(wall) ~= "table"
         or type(roof) ~= "table" or type(anchor) ~= "table" then
         error("RailroaderRVTest: layout bounds contract is incomplete")
@@ -99,44 +97,15 @@ local function boundsFor(layout)
     local managedOriginY = field(managed, "layout managed.originY", "originY")
     local managedWidth = field(managed, "layout managed.width", "width")
     local managedHeight = field(managed, "layout managed.height", "height")
-    if managedWidth ~= 100 or managedHeight ~= 100
+    if managedWidth ~= Template.metadata.width
+        or managedHeight ~= Template.metadata.height
         or managedMaxZ <= managedMinZ
-        or managedOriginX ~= ServerUtil.requiredInteger(bitmap.originX,
-            "layout bitmap.originX")
-        or managedOriginY ~= ServerUtil.requiredInteger(bitmap.originY,
-            "layout bitmap.originY")
-        or managedWidth ~= ServerUtil.requiredInteger(bitmap.width,
-            "layout bitmap.width")
-        or managedHeight ~= ServerUtil.requiredInteger(bitmap.height,
-            "layout bitmap.height")
-        or managedMinZ ~= ServerUtil.requiredInteger(bitmap.minZ,
-            "layout bitmap.minZ")
-        or managedMaxZ ~= ServerUtil.requiredInteger(bitmap.maxZ,
-            "layout bitmap.maxZ")
         or clear.minX ~= managedOriginX or clear.minY ~= managedOriginY
         or clear.maxX ~= managedOriginX + managedWidth
         or clear.maxY ~= managedOriginY + managedHeight
         or clearMinZ ~= managedMinZ or clearMaxZ ~= managedMaxZ
         or clear.halfOpen ~= true then
-        error("RailroaderRVTest: managed scope must be half-open 100x100xZ")
-    end
-    -- This is a runtime requirement for generated layout data: the bitmap
-    -- readers need one packed walk/build byte string for every managed z
-    -- level. Persisted bitmap versions are checked by the boundary readers;
-    -- this helper enforces the geometry needed by the current layout.
-    local layerByteLength = Bitmap and Bitmap.byteLength(managedWidth, managedHeight)
-    if not layerByteLength or type(bitmap.layers) ~= "table" then
-        error("RailroaderRVTest: layout bitmap has no usable layer data")
-    end
-    for z = managedMinZ, managedMaxZ - 1 do
-        local layer = Bitmap.layer(bitmap, z)
-        if type(layer) ~= "table"
-            or type(layer.walkBits) ~= "string"
-            or #layer.walkBits ~= layerByteLength
-            or type(layer.buildBits) ~= "string"
-            or #layer.buildBits ~= layerByteLength then
-            error("RailroaderRVTest: layout bitmap layer cannot serve current geometry")
-        end
+        error("RailroaderRVTest: managed scope does not match template bounds")
     end
     local scopeMinX, scopeMinY = managedOriginX, managedOriginY
     local scopeMaxX = managedOriginX + managedWidth
@@ -147,12 +116,12 @@ local function boundsFor(layout)
             or minY < scopeMinY or maxY >= scopeMaxY
             or z < managedMinZ or z >= managedMaxZ then
             error("RailroaderRVTest: " .. tostring(label)
-                .. " is outside the bitmap scope")
+                .. " is outside the managed region")
         end
     end
     if roomZ ~= az or wallZ ~= az or roofZ < managedMinZ
         or roofZ >= managedMaxZ then
-        error("RailroaderRVTest: layout structure z is outside the bitmap scope")
+        error("RailroaderRVTest: layout structure z is outside the managed region")
     end
     rectInside(roomMinX, roomMaxX, roomMinY, roomMaxY, roomZ, "room")
     rectInside(wallMinX, wallMaxX, wallMinY, wallMaxY, wallZ, "wall")
@@ -160,8 +129,10 @@ local function boundsFor(layout)
     for i = 1, #layout.wallCoordinates do
         local entry = layout.wallCoordinates[i]
         if type(entry) ~= "table"
-            or not Bitmap.containsScope(bitmap, entry.x, entry.y, entry.z) then
-            error("RailroaderRVTest: wall object host is outside bitmap scope")
+            or not TemplateGeometry.inManagedRegion({
+                x = entry.x, y = entry.y, z = entry.z,
+            }, managed) then
+            error("RailroaderRVTest: wall object host is outside managed region")
         end
     end
     return {
@@ -171,7 +142,7 @@ local function boundsFor(layout)
         managedOriginX = managedOriginX, managedOriginY = managedOriginY,
         managedWidth = managedWidth, managedHeight = managedHeight,
         managedMinZ = managedMinZ, managedMaxZ = managedMaxZ,
-        bitmap = bitmap, shellEdges = shellEdges,
+        managed = managed, shellEdges = shellEdges,
         roomMinX = roomMinX, roomMaxX = roomMaxX,
         roomMinY = roomMinY, roomMaxY = roomMaxY, roomZ = roomZ,
         wallMinX = wallMinX, wallMaxX = wallMaxX,
@@ -186,6 +157,7 @@ local function boundsFor(layout)
         roofMinY = roofMinY, roofMaxY = roofMaxY,
         z = az,
         roofZ = roofZ,
+        anchor = { x = ax, y = ay, z = az },
     }
 end
 
@@ -206,19 +178,14 @@ local function walkBounds(cell, bounds, fn, requireLoaded)
 end
 
 local function validateWallContract(bounds)
-    if type(bounds.wallCoordinates) ~= "table" or #bounds.wallCoordinates ~= 59
-        or bounds.wallObjectCount ~= 59 or bounds.wallCoordinateCount ~= 59
-        or bounds.northEdges ~= 12 or bounds.westEdges ~= 47
-        or bounds.wallCornerCount ~= 1 then
+    if type(bounds.wallCoordinates) ~= "table" then
         error("RailroaderRVTest: wall layout contract is invalid")
     end
-    local coordinates, orientations, exact, both, templateIndices = {}, {}, {}, {}, {}
-    local northwestEntries = {}
-    local uniqueCoordinates, northEdges, westEdges, corners = 0, 0, 0, 0
+    local orientations, exact, both, templateIndices = {}, {}, {}, {}
+    local northEdges, westEdges, corners = 0, 0, 0
     local nwKey = tostring(bounds.wallMinX) .. ":" .. tostring(bounds.wallMinY)
         .. ":" .. tostring(bounds.z)
-    local anchorX = bounds.roomMinX - Constants.INTERIOR_MIN_OFFSET_X
-    local anchorY = bounds.roomMinY - Constants.INTERIOR_MIN_OFFSET_Y
+    local anchorX, anchorY = bounds.anchor.x, bounds.anchor.y
     for i = 1, #bounds.wallCoordinates do
         local entry = bounds.wallCoordinates[i]
         if type(entry) ~= "table" or type(entry.x) ~= "number"
@@ -282,10 +249,6 @@ local function validateWallContract(bounds)
         end
         exact[exactKey] = true
         orientations[orientationKey] = true
-        if not coordinates[coordinateKey] then
-            coordinates[coordinateKey] = true
-            uniqueCoordinates = uniqueCoordinates + 1
-        end
         both[coordinateKey] = both[coordinateKey] or {}
         both[coordinateKey][orientation] = true
         local expectedCorner = entry.north == true and coordinateKey == nwKey
@@ -293,9 +256,6 @@ local function validateWallContract(bounds)
             or "wall-" .. orientation
         if entry.corner ~= expectedCorner or entry.role ~= expectedRole then
             error("RailroaderRVTest: wall role/corner does not match captured geometry")
-        end
-        if coordinateKey == nwKey then
-            northwestEntries[orientation] = entry
         end
         if entry.north then northEdges = northEdges + 1 else westEdges = westEdges + 1 end
         if entry.corner == true then corners = corners + 1 end
@@ -305,12 +265,11 @@ local function validateWallContract(bounds)
             error("RailroaderRVTest: wall ring cannot duplicate an orientation at " .. coordinateKey)
         end
     end
-    if not both[nwKey] or not both[nwKey].north or not both[nwKey].west
-        or not northwestEntries.north or northwestEntries.north.role ~= "corner-nw"
-        or not northwestEntries.west or northwestEntries.west.role ~= "wall-west"
-        or uniqueCoordinates ~= 58 or northEdges ~= 12 or westEdges ~= 47
-        or corners ~= 1 then
-        error("RailroaderRVTest: captured shell must contain 59 edges, north12/west47, with the NW corner-north/west pair")
+    if #bounds.wallCoordinates ~= bounds.wallCoordinateCount
+        or bounds.wallObjectCount ~= bounds.wallCoordinateCount
+        or bounds.northEdges ~= northEdges or bounds.westEdges ~= westEdges
+        or bounds.wallCornerCount ~= corners then
+        error("RailroaderRVTest: wall layout summary does not match its template edges")
     end
 end
 
@@ -391,35 +350,18 @@ local function validateTargetCoordinates(bounds, destination)
         or bounds.roofZ < WORLD_MIN_Z or bounds.roofZ > WORLD_MAX_Z then
         error("RailroaderRVTest: layout z bounds are outside the legal world")
     end
-    -- The selected matrix cell owns one half-open 100x100 managed region.
-    if bounds.clearMinX ~= targetX - 50 or bounds.clearMaxX ~= targetX + 50
-        or bounds.clearMinY ~= targetY - 50 or bounds.clearMaxY ~= targetY + 50
+    -- The selected matrix cell owns this template's half-open XY region.
+    if bounds.clearMinX ~= targetX + Template.metadata.minX
+        or bounds.clearMaxX ~= targetX + Template.metadata.maxXExclusive
+        or bounds.clearMinY ~= targetY + Template.metadata.minY
+        or bounds.clearMaxY ~= targetY + Template.metadata.maxYExclusive
         or bounds.z ~= targetZ or bounds.clearMinZ ~= bounds.managedMinZ
         or bounds.clearMaxZ ~= bounds.managedMaxZ then
         error("RailroaderRVTest: clear footprint does not match the selected RV slot")
     end
-    if bounds.clearMaxX - bounds.clearMinX ~= 100
-        or bounds.clearMaxY - bounds.clearMinY ~= 100 then
-        error("RailroaderRVTest: managed footprint must be exactly half-open 100x100")
-    end
-    if bounds.roomMaxX - bounds.roomMinX + 1 ~= 6
-        or bounds.roomMaxY - bounds.roomMinY + 1 ~= 23 then
-        error("RailroaderRVTest: room footprint must be exactly 6x23")
-    end
-    if bounds.wallMaxX - bounds.wallMinX + 1 ~= 7
-        or bounds.wallMaxY - bounds.wallMinY + 1 ~= 24 then
-        error("RailroaderRVTest: wall footprint must be exactly 7x24")
-    end
-    if bounds.roofMaxX - bounds.roofMinX + 1 ~= 6
-        or bounds.roofMaxY - bounds.roofMinY + 1 ~= 23 then
-        error("RailroaderRVTest: roof footprint must be exactly 6x23")
-    end
     if targetX < bounds.roomMinX or targetX > bounds.roomMaxX
         or targetY < bounds.roomMinY or targetY > bounds.roomMaxY then
         error("RailroaderRVTest: final relocation center is outside the interior")
-    end
-    if bounds.roofZ ~= bounds.z + 1 then
-        error("RailroaderRVTest: roof must be exactly one level above the base")
     end
     validateWallContract(bounds)
     validateShellEdgeContract(bounds)
@@ -439,7 +381,7 @@ local function validateTargetCoordinates(bounds, destination)
     end
 
     validWorldCoordinate(targetX, targetY, targetZ, "relocation target")
-    -- Validate the entire required 100x100 base footprint without requiring any
+    -- Validate the entire template base footprint without requiring any
     -- of those remote squares to be loaded yet.
     for y = bounds.clearMinY, bounds.clearMaxY - 1 do
         for x = bounds.clearMinX, bounds.clearMaxX - 1 do
@@ -469,15 +411,11 @@ local function preflightLoaded(cell, bounds)
     if not cell then
         error("RailroaderRVTest: preflight has no IsoCell")
     end
-    validateTargetCoordinates(bounds, {
-        x = bounds.clearMinX + math.floor(Constants.RV_MANAGED_WIDTH / 2),
-        y = bounds.clearMinY + math.floor(Constants.RV_MANAGED_HEIGHT / 2),
-        z = bounds.z,
-    })
+    validateTargetCoordinates(bounds, bounds.anchor)
     -- Missing squares are valid for this sparse template. The clear pass
     -- walks every managed coordinate but inspects only squares that exist;
     -- the build pass creates and reads back each current template-object host.
-    -- Do not require the 100x100 base plane or any upper Z layer to pre-exist.
+    -- Do not require the template base plane or any upper Z layer to pre-exist.
     return true
 end
 
@@ -530,6 +468,10 @@ local function eachStructureSquare(cell, bounds, callback)
         roofMinY = ServerUtil.requiredInteger(bounds.roofMinY, "saved bounds roofMinY"),
         roofMaxY = ServerUtil.requiredInteger(bounds.roofMaxY, "saved bounds roofMaxY"),
         roofZ = ServerUtil.requiredInteger(bounds.roofZ, "saved bounds roofZ"),
+        anchor = {
+            x = ServerUtil.requiredInteger(bounds.anchor.x, "saved bounds anchor.x"),
+            y = ServerUtil.requiredInteger(bounds.anchor.y, "saved bounds anchor.y"),
+        },
     }
     Layout.eachStructureCoordinate(scanBounds, function(x, y, z)
         local square = ServerWorld.getSquare(cell, x, y, z)

@@ -98,7 +98,6 @@ local function validUtilityMapping(value)
         and type(value.locoId) == "string" and value.locoId ~= ""
         and finiteInteger(value.generation) ~= nil
         and finiteInteger(value.generation) >= 1
-        and finiteInteger(value.bitmapVersion) == C.BITMAP_VERSION
 end
 
 local function rememberUtilityMapping(args)
@@ -109,7 +108,6 @@ local function rememberUtilityMapping(args)
         rvId = tostring(args.rvId or ""),
         locoId = tostring(args.locoId or ""),
         generation = finiteInteger(args.generation),
-        bitmapVersion = finiteInteger(args.bitmapVersion),
     }
     if validUtilityMapping(mapping) then
         Menu._rvUtilityMapping = mapping
@@ -228,7 +226,7 @@ function Menu.getUtilityMapping()
     if not validUtilityMapping(mapping) then return nil end
     return {
         rvId = mapping.rvId, locoId = mapping.locoId,
-        generation = mapping.generation, bitmapVersion = mapping.bitmapVersion,
+        generation = mapping.generation,
     }
 end
 
@@ -243,7 +241,6 @@ function Menu.acceptUtilityMapping(args)
         rvId = tostring(args.rvId or ""),
         locoId = tostring(args.locoId or ""),
         generation = finiteInteger(args.generation),
-        bitmapVersion = finiteInteger(args.bitmapVersion),
     }
     if not validUtilityMapping(mapping) then return false end
     Menu._rvUtilityMapping = mapping
@@ -304,11 +301,9 @@ local CURRENT_SQUARE_REFRESH_TICKS = 120
 local function generationTransitionMatches(pending, args)
     if type(pending) ~= "table" or type(args) ~= "table" then return false end
     local generation = finiteInteger(args.generation)
-    local bitmapVersion = finiteInteger(args.bitmapVersion)
     if pending.rvId == nil or args.rvId == nil
         or tostring(pending.rvId) ~= tostring(args.rvId)
-        or pending.generation == nil or generation ~= pending.generation
-        or pending.bitmapVersion == nil or bitmapVersion ~= pending.bitmapVersion then
+        or pending.generation == nil or generation ~= pending.generation then
         return false
     end
     if pending.token ~= nil and args.token ~= nil then
@@ -359,7 +354,6 @@ local function prepareRideTransition(args)
         seat = finiteInteger(args.seat), expires = nowMs() + 2500,
         rvId = args.rvId and tostring(args.rvId) or nil,
         generation = finiteInteger(args.generation),
-        bitmapVersion = finiteInteger(args.bitmapVersion),
     }
     if action == "generation-failed" then
         -- A failed generation ends the one-shot staging transition.  The
@@ -461,8 +455,6 @@ local function scheduleCurrentSquareRefresh(player, x, y, z, relation)
         rvId = type(relation) == "table" and relation.rvId or nil,
         generation = type(relation) == "table"
             and finiteInteger(relation.generation) or nil,
-        bitmapVersion = type(relation) == "table"
-            and finiteInteger(relation.bitmapVersion) or nil,
     }
     refreshCurrentSquare(player, x, y, z)
     if currentSquareMatches(player, x, y, z) then
@@ -517,14 +509,11 @@ end
 
 local function validGenerationFinalHint(args)
     local generation = type(args) == "table" and finiteInteger(args.generation)
-    local bitmapVersion = type(args) == "table"
-        and finiteInteger(args.bitmapVersion)
     return type(args) == "table" and args.railroaderTransition == true
         and type(args.token) == "string" and args.token ~= ""
         and args.locoId ~= nil and tostring(args.locoId) ~= ""
         and args.rvId ~= nil and tostring(args.rvId) ~= ""
         and generation ~= nil and generation >= 1
-        and bitmapVersion == C.BITMAP_VERSION
 end
 
 -- Called by RV_ContextMenu's generic FinalRelocate bridge.  It shares the
@@ -555,7 +544,6 @@ function Menu.prepareGenerationRelocation(args)
         locoId = args.locoId,
         rvId = tostring(args.rvId),
         generation = finiteInteger(args.generation),
-        bitmapVersion = finiteInteger(args.bitmapVersion),
         finalSeen = true,
         expiresAt = nowMs() + GENERATION_TRANSITION_TTL_MS,
     }
@@ -580,7 +568,6 @@ function Menu.prepareGenerationStaging(args)
         locoId = args.locoId,
         rvId = tostring(args.rvId),
         generation = finiteInteger(args.generation),
-        bitmapVersion = finiteInteger(args.bitmapVersion),
         expiresAt = nowMs() + GENERATION_TRANSITION_TTL_MS,
     }
     return true

@@ -32,7 +32,6 @@ local function identityValid(identity)
     return type(identity) == "table" and type(identity.rvId) == "string"
         and identity.rvId ~= "" and integer(identity.generation) ~= nil
         and integer(identity.generation) >= 1
-        and integer(identity.bitmapVersion) == C.BITMAP_VERSION
 end
 
 local function waterInteger(value)
@@ -87,8 +86,7 @@ end
 
 local function newRecord(identity)
     return { rvId = tostring(identity.rvId), generation = identity.generation,
-        bitmapVersion = identity.bitmapVersion, power = newPower(),
-        water = newWater() }
+        power = newPower(), water = newWater() }
 end
 
 function M.validateIdentity(identity)
@@ -111,8 +109,7 @@ function M.getRecord(identity, allowCreate)
             record = newRecord(identity)
         else
             if tostring(persisted.rvId) ~= tostring(identity.rvId)
-                or integer(persisted.generation) ~= integer(identity.generation)
-                or integer(persisted.bitmapVersion) ~= integer(identity.bitmapVersion) then
+                or integer(persisted.generation) ~= integer(identity.generation) then
                 return false, C.INVALID_RV_DATA
             end
             record = copyTable(persisted)
@@ -126,8 +123,7 @@ function M.commit(record, identity)
     if not gateOk then return false, gateReason end
     if type(record) ~= "table"
         or tostring(record.rvId) ~= tostring(identity.rvId)
-        or integer(record.generation) ~= integer(identity.generation)
-        or integer(record.bitmapVersion) ~= integer(identity.bitmapVersion) then
+        or integer(record.generation) ~= integer(identity.generation) then
         return false, C.INVALID_RV_DATA
     end
     local value = root(true)
@@ -155,8 +151,7 @@ function M.allRecords()
     local result = {}
     if value == nil or empty(value) then return true, result end
     for _, record in pairs(value.records) do
-        local identity = { rvId = record.rvId, generation = record.generation,
-            bitmapVersion = record.bitmapVersion }
+        local identity = { rvId = record.rvId, generation = record.generation }
         result[#result + 1] = { identity = identity, record = copyTable(record) }
     end
     return true, result
@@ -168,8 +163,7 @@ function M.snapshot(record)
     if power.charger then power.charger.modData = nil end
     if power.inverter then power.inverter.modData = nil end
     return { rvId = record.rvId, generation = record.generation,
-        bitmapVersion = record.bitmapVersion, power = power,
-        water = copyTable(record.water) }
+        power = power, water = copyTable(record.water) }
 end
 
 function M.waterSinkKey(x, y, z)

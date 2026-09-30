@@ -8,17 +8,19 @@ local Constants = ctx.Constants
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local manifestTable = ctx.manifestTable
-local Bitmap = require("RailroaderRV/Common/RV_Bitmap")
 local CapturedTemplate = require("RailroaderRV/RoomTemplate/RV_Template")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
+local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
 local ProtectionManifest = require("RailroaderRV/RoomTemplate/RV_ProtectionManifest")
 
 if type(Template) ~= "table" or type(Template.metadata) ~= "table"
     or Template.metadata.templateVersion ~= Constants.CAPTURED_TEMPLATE_VERSION
-    or Template.metadata.objectCount ~= 412 or type(templateObjects) ~= "table"
-    or #templateObjects ~= 412 or not RoomTemplate.validate(Template)
+    or Template.metadata.objectCount ~= RoomTemplate.CURRENT_OBJECT_COUNT
+    or type(templateObjects) ~= "table"
+    or #templateObjects ~= Template.metadata.objectCount
+    or not RoomTemplate.validate(Template)
     or not ProtectionManifest.validateTemplate(CapturedTemplate) then
     error("RailroaderRVTest: current template-recovery index is incomplete")
 end
@@ -47,18 +49,15 @@ local function sameIdentity(left, right)
     return type(left) == "table" and type(right) == "table"
         and tostring(left.rvId) == tostring(right.rvId)
         and integer(left.generation) == integer(right.generation)
-        and integer(left.bitmapVersion) == integer(right.bitmapVersion)
 end
 
-local function identityKey(rvId, generation, bitmapVersion)
+local function identityKey(rvId, generation)
     local currentGeneration = integer(generation)
-    local currentBitmapVersion = integer(bitmapVersion)
     if rvId == nil or tostring(rvId) == "" or not currentGeneration
-        or currentGeneration < 1 or not currentBitmapVersion then
+        or currentGeneration < 1 then
         return nil
     end
     return tostring(rvId) .. ":" .. tostring(currentGeneration)
-        .. ":" .. tostring(currentBitmapVersion)
 end
 
 local function queueKey(boundary, record)
@@ -68,10 +67,8 @@ local function queueKey(boundary, record)
         return nil
     end
     local generation = integer(boundary.generation)
-    local bitmapVersion = integer(boundary.bitmapVersion)
-    if not generation or generation < 1 or not bitmapVersion then return nil end
+    if not generation or generation < 1 then return nil end
     return tostring(boundary.rvId) .. ":" .. tostring(generation)
-        .. ":" .. tostring(bitmapVersion)
 end
 
 local function coordinateKey(x, y, z)
@@ -81,8 +78,7 @@ end
 local function currentProtectedCoordinateTargets(index, boundary, x, y, z)
     if type(index) ~= "table" or type(boundary) ~= "table"
         or tostring(index.rvId) ~= tostring(boundary.rvId)
-        or integer(index.generation) ~= integer(boundary.generation)
-        or integer(index.bitmapVersion) ~= integer(boundary.bitmapVersion) then
+        or integer(index.generation) ~= integer(boundary.generation) then
         return nil
     end
     local targets = type(index.byCoordinate) == "table"
@@ -114,48 +110,41 @@ local function validCurrentContext(player, expectedBoundary)
         or type(manifest.bounds) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
-    local region, bitmap = record.region, boundary.bitmap
-    if type(region) ~= "table" or type(bitmap) ~= "table" then
+    local region, managed = record.region, boundary.managed
+    if type(region) ~= "table" or type(managed) ~= "table"
+        or type(manifest.anchor) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
     local regionMinX, regionMinY = integer(region.minX), integer(region.minY)
     local regionMaxX, regionMaxY = integer(region.maxX), integer(region.maxY)
     local regionMinZ, regionMaxZ = integer(region.minZ), integer(region.maxZ)
-    local originX, originY = integer(bitmap.originX), integer(bitmap.originY)
-    local width, height = integer(bitmap.width), integer(bitmap.height)
-    local bitmapMinZ, bitmapMaxZ = integer(bitmap.minZ), integer(bitmap.maxZ)
+    local originX, originY = integer(managed.originX), integer(managed.originY)
+    local width, height = integer(managed.width), integer(managed.height)
+    local managedMinZ, managedMaxZ = integer(managed.minZ), integer(managed.maxZ)
+    local anchor = TemplateGeometry.anchorFromManaged(managed, Template)
     if not regionMinX or not regionMinY or not regionMaxX or not regionMaxY
         or not regionMinZ or not regionMaxZ or not originX or not originY
-        or not width or not height or not bitmapMinZ or not bitmapMaxZ
-        or regionMinX ~= originX or regionMinY ~= originY
-        or regionMaxX ~= originX + width or regionMaxY ~= originY + height
-        or regionMinZ ~= bitmapMinZ or regionMaxZ ~= bitmapMaxZ then
+        or not width or not height or not managedMinZ or not managedMaxZ
+        or not anchor or anchor.x ~= integer(manifest.anchor.x)
+        or anchor.y ~= integer(manifest.anchor.y)
+        or anchor.z ~= integer(manifest.anchor.z)
+        or originX < regionMinX or originY < regionMinY
+        or originX + width > regionMaxX or originY + height > regionMaxY
+        or managedMinZ < regionMinZ or managedMaxZ > regionMaxZ then
         return false, Constants.INVALID_RV_DATA
     end
     return true, boundary, record, manifest, identity
 end
 
-local function isCabCoordinate(x, y, anchor)
-    if type(anchor) ~= "table" then return false end
-    local anchorX, anchorY = integer(anchor.x), integer(anchor.y)
-    if not anchorX or not anchorY then return false end
-    local offsetX, offsetY = x - anchorX, y - anchorY
-    return offsetX >= Constants.CAB_MIN_OFFSET_X
-        and offsetX <= Constants.CAB_MAX_OFFSET_X
-        and offsetY >= Constants.CAB_MIN_OFFSET_Y
-        and offsetY <= Constants.CAB_MAX_OFFSET_Y
+local function isCabCoordinate(x, y, z, anchor)
+    return TemplateGeometry.isBuildable({ x = x, y = y, z = z }, anchor, Template)
 end
 
 local function isCabSideHostCoordinate(x, y, z, index)
     if integer(z) ~= integer(index.anchorZ) then return false end
-    local offsetX, offsetY = x - index.anchorX, y - index.anchorY
-    local eastHost = offsetX == Constants.CAB_MAX_OFFSET_X + 1
-        and offsetY >= Constants.CAB_MIN_OFFSET_Y
-        and offsetY <= Constants.CAB_MAX_OFFSET_Y
-    local southHost = offsetY == Constants.CAB_MAX_OFFSET_Y + 1
-        and offsetX >= Constants.CAB_MIN_OFFSET_X
-        and offsetX <= Constants.CAB_MAX_OFFSET_X
-    return eastHost or southHost
+    return TemplateGeometry.isBuildCellSideHost({ x = x, y = y, z = z }, {
+        x = index.anchorX, y = index.anchorY, z = index.anchorZ,
+    }, Template)
 end
 
 local function templateEntry(templateIndex, anchor)
@@ -211,25 +200,13 @@ local function buildRepairIndex(boundary, manifest)
     local index = {
         rvId = tostring(boundary.rvId),
         generation = integer(boundary.generation),
-        bitmapVersion = integer(boundary.bitmapVersion),
         anchorX = integer(anchor.x),
         anchorY = integer(anchor.y),
         anchorZ = integer(anchor.z),
         edges = edges,
         byCoordinate = {},
         protectedCoordinates = {},
-        cabEditableCoordinates = {},
     }
-    for offsetX = Constants.CAB_MIN_OFFSET_X, Constants.CAB_MAX_OFFSET_X do
-        for offsetY = Constants.CAB_MIN_OFFSET_Y, Constants.CAB_MAX_OFFSET_Y do
-            local x, y, z = index.anchorX + offsetX,
-                index.anchorY + offsetY, index.anchorZ
-            if not Bitmap.isBuildable(boundary.bitmap, x, y, z) then
-                return nil
-            end
-            index.cabEditableCoordinates[coordinateKey(x, y, z)] = true
-        end
-    end
     for templateIndex = 1, ProtectionManifest.OBJECT_COUNT do
         local protection = ProtectionManifest.get(templateIndex)
         if not protection then return nil end
@@ -241,8 +218,8 @@ local function buildRepairIndex(boundary, manifest)
         end
         local protected = protectionClass == ProtectionManifest.RESTORE_ONLY
             or protectionClass == ProtectionManifest.PROHIBITED
-        local editableCab = expected.z == anchor.z
-            and isCabCoordinate(expected.x, expected.y, anchor)
+        local editableCab = isCabCoordinate(expected.x, expected.y,
+            expected.z, anchor)
         local sideDoorOrWindow = isCabSideHostCoordinate(expected.x,
             expected.y, expected.z, index)
             and (expected.class == "IsoDoor" or expected.class == "IsoWindow")

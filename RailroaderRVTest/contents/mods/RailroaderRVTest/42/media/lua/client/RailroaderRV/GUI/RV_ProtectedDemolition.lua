@@ -126,12 +126,6 @@ local function templateTagFailureReason(data, tag)
     if dataGeneration ~= C.finiteInteger(tag.generation) then
         return fail("template-tag-generation-mismatch")
     end
-    if C.finiteInteger(data.bitmapVersion) ~= C.BITMAP_VERSION then
-        return fail("template-root-bitmap-version-mismatch")
-    end
-    if C.finiteInteger(tag.bitmapVersion) ~= C.BITMAP_VERSION then
-        return fail("template-tag-bitmap-version-mismatch")
-    end
     return nil
 end
 
@@ -235,15 +229,8 @@ local function resolveTemplateObject(object, tag)
     return nil, "template-index-does-not-match-world-coordinate"
 end
 
-local function cabDoorWindowHost(offset)
-    if type(offset) ~= "table" or offset.z ~= Template.metadata.sourceTarget.z then
-        return false
-    end
-    local east = offset.x == C.CAB_MAX_OFFSET_X + 1
-        and offset.y >= C.CAB_MIN_OFFSET_Y and offset.y <= C.CAB_MAX_OFFSET_Y
-    local south = offset.y == C.CAB_MAX_OFFSET_Y + 1
-        and offset.x >= C.CAB_MIN_OFFSET_X and offset.x <= C.CAB_MAX_OFFSET_X
-    return east or south
+local function cabDoorWindowHost(world, anchor)
+    return TemplateGeometry.isBuildCellSideHost(world, anchor, Template)
 end
 
 local function isCurrentProhibitedObject(object, character)
@@ -276,7 +263,7 @@ local function isCurrentProhibitedObject(object, character)
         return rejectInvalidRVData(character, tagFailure)
     end
 
-    local expected, index, protection, anchor, world, offset =
+    local expected, index, protection, anchor, world =
         resolveTemplateObject(object, tag)
     if not expected then
         return rejectInvalidRVData(character,
@@ -291,7 +278,7 @@ local function isCurrentProhibitedObject(object, character)
     if TemplateGeometry.cabContainsWorld(world, anchor, Template) then
         return false
     end
-    if cabDoorWindowHost(offset) and isDoorOrWindow(object) then
+    if cabDoorWindowHost(world, anchor) and isDoorOrWindow(object) then
         return false
     end
     if type(protection) ~= "table"

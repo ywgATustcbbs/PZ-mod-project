@@ -38,9 +38,8 @@ end
 
 local function mappingKey(value)
     if type(value) ~= "table" or value.rvId == nil
-        or value.generation == nil or value.bitmapVersion == nil then return nil end
-    return tostring(value.rvId) .. ":" .. tostring(value.generation) .. ":"
-        .. tostring(value.bitmapVersion)
+        or value.generation == nil then return nil end
+    return tostring(value.rvId) .. ":" .. tostring(value.generation)
 end
 
 local function utilityMapping()

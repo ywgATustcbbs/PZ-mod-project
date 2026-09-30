@@ -19,7 +19,6 @@ local lastScanTick = nil
 
 local function key(identity)
     return tostring(identity.rvId) .. ":" .. tostring(identity.generation)
-        .. ":" .. tostring(identity.bitmapVersion)
 end
 
 local function playerKey(player)
@@ -62,8 +61,7 @@ local function resolveRV(player)
     end
     local identity = context.identity
     if type(identity.rvId) ~= "string" or identity.rvId == ""
-        or Util.integer(identity.generation) == nil
-        or Util.integer(identity.bitmapVersion) ~= C.BITMAP_VERSION then
+        or Util.integer(identity.generation) == nil then
         return false, U.REASON_INVALID_RV_DATA
     end
     context.player = player
@@ -200,8 +198,7 @@ local function broadcastToRV(identity, record)
         local player = players[i]
         local contextOk, context = resolveRV(player)
         if contextOk and tostring(context.identity.rvId) == tostring(identity.rvId)
-            and context.identity.generation == identity.generation
-            and context.identity.bitmapVersion == identity.bitmapVersion then
+            and context.identity.generation == identity.generation then
             broadcast(context, record)
         end
     end

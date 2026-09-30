@@ -23,7 +23,6 @@ end
 
 local function identityKey(identity)
     return tostring(identity.rvId) .. ":" .. tostring(identity.generation)
-        .. ":" .. tostring(identity.bitmapVersion)
 end
 
 local function failClosed(identity)
@@ -84,7 +83,6 @@ local function generatedGenerator(object, identity)
         and tag.role == "generator"
         and tostring(tag.rvId) == tostring(identity.rvId)
         and Util.integer(tag.generation) == Util.integer(identity.generation)
-        and Util.integer(tag.bitmapVersion) == Util.integer(identity.bitmapVersion)
 end
 
 local function objectAt(identity, binding, player)
@@ -126,9 +124,9 @@ local function bindingFor(identity, record, player)
     if not squareOk or not xOk or not yOk or not zOk
         or ox ~= x or oy ~= y or oz ~= z then return nil end
     return { rvId = tostring(identity.rvId), generation = identity.generation,
-        bitmapVersion = identity.bitmapVersion, x = x, y = y, z = z,
+        x = x, y = y, z = z,
         objectToken = tostring(identity.rvId) .. ":" .. tostring(identity.generation)
-            .. ":" .. tostring(identity.bitmapVersion) .. ":" .. x .. ":" .. y .. ":" .. z,
+            .. ":" .. x .. ":" .. y .. ":" .. z,
         objectFingerprint = objectFingerprint(object) }
 end
 

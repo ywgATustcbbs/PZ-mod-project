@@ -101,8 +101,7 @@ function Adapter.resolveCurrentUtilityRV(player)
         end
     end
     return true, {
-        identity = { rvId = tostring(record.rvId), generation = integer(record.generation),
-            bitmapVersion = integer(record.bitmapVersion) },
+        identity = { rvId = tostring(record.rvId), generation = integer(record.generation) },
         record = record, relation = relation, train = train, status = status,
         phase = "READY",
         authorized = true, locomotiveSide = locomotiveSide,
@@ -113,8 +112,7 @@ function Adapter.currentUtilityRecord(identity)
     local map = mapData()
     local record = recordForLoco(map, identity.rvId)
     if not record or not validMappingRecord(record)
-        or integer(record.generation) ~= integer(identity.generation)
-        or integer(record.bitmapVersion) ~= integer(identity.bitmapVersion) then
+        or integer(record.generation) ~= integer(identity.generation) then
         return false, C.INVALID_RV_DATA
     end
     return true, record
@@ -130,7 +128,6 @@ local function settleUtilityTransition(record, player, phase)
     end
     local ok, accepted, reason = pcall(server.settleRVUtilityLoad, {
         rvId = tostring(record.rvId), generation = record.generation,
-        bitmapVersion = record.bitmapVersion,
     }, player)
     if not ok or accepted ~= true then
         print("[RailroaderRVTest] utility transition settlement failed phase="
@@ -165,12 +162,9 @@ local function movePlayer(player, position, action, relation)
         payload.seat = relation.seat
         if relation.rvId ~= nil and tostring(relation.rvId) ~= ""
             and integer(relation.generation) ~= nil
-            and integer(relation.generation) >= 1
-            and integer(relation.bitmapVersion) ~= nil
-            and integer(relation.bitmapVersion) == C.BITMAP_VERSION then
+            and integer(relation.generation) >= 1 then
             payload.rvId = tostring(relation.rvId)
             payload.generation = integer(relation.generation)
-            payload.bitmapVersion = integer(relation.bitmapVersion)
         end
     end
     local sentCallOk, sentResult = callGlobal("sendServerCommand", player,
@@ -312,7 +306,7 @@ local function enterExisting(player, train, record, key, sourceRole,
     local transitionToken = newTransitionToken("entry", record)
     if Boundary and type(Boundary.beginTransition) == "function" then
         local armed = Boundary.beginTransition(player, record.locoId,
-            record.generation, transitionToken, "entry", record.bitmapVersion)
+            record.generation, transitionToken, "entry")
         if armed ~= true then
             return false, "RV boundary entry transition could not be armed"
         end
@@ -329,7 +323,6 @@ local function enterExisting(player, train, record, key, sourceRole,
     local moved = movePlayer(player, target, "enter", {
         locoId = trainId(train), role = sourceRole, seat = sourceSeat,
         rvId = record.locoId, generation = record.generation,
-        bitmapVersion = record.bitmapVersion,
     })
     if not moved then
         map.players[playerName(player)] = oldRelation
@@ -450,7 +443,6 @@ local function restoreAfterGenerationFailure(player, data)
         movePlayer(player, source, "generation-failed", {
             locoId = data.locoId, role = data.sourceRole, seat = data.sourceSeat,
             rvId = data.rvId, generation = data.generation,
-            bitmapVersion = data.bitmapVersion,
         })
     end
     if Boundary and type(Boundary.clearPlayer) == "function" then
@@ -528,9 +520,7 @@ local function commitGeneration(player, data, prepared)
     candidateRecord.enterPosition = copyPosition(data.entryPosition)
     candidateRecord.locoPosition = train and trainPose(train)
         or copyPose(data.locoPosition)
-    candidateRecord.bitmapVersion = C.BITMAP_VERSION
     candidateRecord.boundary = prepared.boundary
-    candidateRecord.managed = prepared.boundary.managed
     if not candidateRecord.rvPosition or not candidateRecord.enterPosition
         or not candidateRecord.locoPosition
         or number(candidateRecord.locoPosition.dirX) == nil
@@ -576,11 +566,9 @@ local function commitGeneration(player, data, prepared)
     -- settled post-commit refresh below broadcasts only after Mapping is current.
     local utilityOk, utilityAccepted, utilityReason = pcall(
         server.initializeUtilityRecord,
-        { rvId = candidateRecord.rvId, generation = candidateRecord.generation,
-            bitmapVersion = candidateRecord.bitmapVersion },
+        { rvId = candidateRecord.rvId, generation = candidateRecord.generation },
         { identity = {
             rvId = candidateRecord.rvId, generation = candidateRecord.generation,
-            bitmapVersion = candidateRecord.bitmapVersion,
         }, record = candidateRecord })
     if not utilityOk or utilityAccepted ~= true then
         map.locomotives, map.players = oldLocomotives, oldPlayers
@@ -591,8 +579,7 @@ local function commitGeneration(player, data, prepared)
     if type(server.settleRVUtilityLoad) == "function" then
         local settleOk, settled, settleReason = pcall(server.settleRVUtilityLoad,
             { rvId = tostring(candidateRecord.rvId),
-                generation = candidateRecord.generation,
-                bitmapVersion = candidateRecord.bitmapVersion }, player)
+                generation = candidateRecord.generation }, player)
         if not settleOk or settled ~= true then
             print("[RailroaderRVTest] new RV entry load refresh failed reason="
                 .. tostring(settleOk and settleReason or settled))
@@ -646,7 +633,7 @@ local function exitPlayer(player)
         local transitionToken = newTransitionToken("exit", record)
         if Boundary and type(Boundary.beginTransition) == "function" then
             local armed = Boundary.beginTransition(player, record.locoId,
-                record.generation, transitionToken, "exit", record.bitmapVersion)
+                record.generation, transitionToken, "exit")
             if armed ~= true then
                 return false, "RV boundary exit transition could not be armed"
             end
@@ -655,7 +642,6 @@ local function exitPlayer(player)
         local moved = movePlayer(player, target, "exit", {
             locoId = record.locoId, role = "beside", seat = nil,
             rvId = record.locoId, generation = record.generation,
-            bitmapVersion = record.bitmapVersion,
         })
         if not moved then
             if Boundary and type(Boundary.completeTransition) == "function" then
@@ -695,7 +681,7 @@ local function exitPlayer(player)
     local transitionToken = newTransitionToken("exit", record)
     if Boundary and type(Boundary.beginTransition) == "function" then
         local armed = Boundary.beginTransition(player, record.locoId,
-            record.generation, transitionToken, "exit", record.bitmapVersion)
+            record.generation, transitionToken, "exit")
         if armed ~= true then
             return false, "RV boundary exit transition could not be armed"
         end
@@ -714,7 +700,6 @@ local function exitPlayer(player)
     local moved = movePlayer(player, target, "exit", {
         locoId = trainId(train), role = role, seat = seat,
         rvId = record.locoId, generation = record.generation,
-        bitmapVersion = record.bitmapVersion,
     })
     if not moved then
         if role ~= "beside" then forgetTrainSeat(train, player, onlineId) end

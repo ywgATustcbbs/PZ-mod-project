@@ -1,6 +1,5 @@
 -- RV_BoundaryServer: Objects responsibilities.
 return function(ctx)
-local Bitmap = ctx.Bitmap
 local Boundary = ctx.Boundary
 local Core = ctx.Core
 local C = ctx.C
@@ -10,11 +9,12 @@ local integer = ctx.integer
 local call = ctx.call
 local identity = ctx.identity
 local square = ctx.square
-local decodeBoundary = ctx.decodeBoundary
+local currentBoundary = ctx.currentBoundary
 local boundaryKey = ctx.boundaryKey
 local sameBoundary = ctx.sameBoundary
 local Common = require("RailroaderRV/Common/RV_Common")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
+local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
 local templateValid, templateError = RoomTemplate.validate(Template)
@@ -117,14 +117,8 @@ local function shellEdgeAllowed(boundary, tag, objectX, objectY, objectZ)
     local managed = type(boundary) == "table" and boundary.managed or nil
     local originX = type(managed) == "table" and integer(managed.originX) or nil
     local originY = type(managed) == "table" and integer(managed.originY) or nil
-    local width = type(managed) == "table" and integer(managed.width) or nil
-    local height = type(managed) == "table" and integer(managed.height) or nil
-    local anchorX = originX and width
-        and originX + math.floor(width / 2) or nil
-    local anchorY = originY and height
-        and originY + math.floor(height / 2) or nil
-    local anchorZ = type(managed) == "table" and integer(managed.minZ) or nil
-    if anchorX == nil or anchorY == nil or anchorZ == nil then return false end
+    local anchor = TemplateGeometry.anchorFromManaged(managed, Template)
+    if not originX or not originY or not anchor then return false end
     local keys = {}
     if type(tag.edgeKey) == "string" then keys[#keys + 1] = tag.edgeKey end
     if type(tag.edgeKeys) == "table" then
@@ -140,13 +134,10 @@ local function shellEdgeAllowed(boundary, tag, objectX, objectY, objectZ)
             and tag.owner == OWNER
             and tag.rvId ~= nil
             and tag.generation ~= nil
-            and tag.bitmapVersion ~= nil
             and tostring(edge.rvId) == tostring(boundary.rvId)
             and integer(edge.generation) == boundary.generation
-            and integer(edge.bitmapVersion) == boundary.bitmapVersion
             and tostring(tag.rvId) == tostring(boundary.rvId)
             and integer(tag.generation) == boundary.generation
-            and integer(tag.bitmapVersion) == boundary.bitmapVersion
             and edge.replacementAllowed ~= false
             and shellEdgeHasTemplateIndex(edge, tag.templateIndex)
             and captured ~= nil and captured.class == tag.templateClass
@@ -156,9 +147,9 @@ local function shellEdgeAllowed(boundary, tag, objectX, objectY, objectZ)
             and captured.direction == tag.templateDirection
             and captured.north == edge.north
             and edge.role == tag.role
-            and captured.x == objectX - anchorX
-            and captured.y == objectY - anchorY
-            and captured.z == objectZ - anchorZ
+            and captured.x == objectX - anchor.x
+            and captured.y == objectY - anchor.y
+            and captured.z == objectZ - anchor.z
             and integer(edge.objectX) == objectX
             and integer(edge.objectY) == objectY
             and integer(edge.objectZ or edge.z) == objectZ then
@@ -195,8 +186,8 @@ end
 -- deliberately fail-closed for missing/ambiguous metadata.
 function Boundary.isCurrentShellWall(object, boundary)
     if not object or type(boundary) ~= "table" then return false end
-    local bitmap, rvId, generation, bitmapVersion = decodeBoundary(boundary)
-    if not bitmap then return false end
+    local current = currentBoundary(boundary)
+    if not current then return false end
     local isThumpable = Common.classInstance(object, "IsoThumpable")
     local isWindow = Common.classInstance(object, "IsoWindow")
     if not isThumpable and not isWindow then
@@ -206,7 +197,8 @@ function Boundary.isCurrentShellWall(object, boundary)
     if not indexOk or integer(index) == nil or integer(index) < 0 then return false end
     local x, y, z, square = objectCell(object)
     if not x or not y or not z or not square
-        or not Bitmap.containsScope(bitmap, x, y, z) then
+        or not TemplateGeometry.inManagedRegion({ x = x, y = y, z = z },
+            current.managed) then
         return false
     end
 
@@ -217,12 +209,10 @@ function Boundary.isCurrentShellWall(object, boundary)
         or tag ~= nested
         or tostring(data.owner) ~= OWNER
         or tostring(nested.owner) ~= OWNER
-        or tostring(data.rvId) ~= rvId
-        or tostring(nested.rvId) ~= rvId
-        or integer(data.generation) ~= generation
-        or integer(nested.generation) ~= generation
-        or integer(data.bitmapVersion) ~= bitmapVersion
-        or integer(nested.bitmapVersion) ~= bitmapVersion then
+        or tostring(data.rvId) ~= current.rvId
+        or tostring(nested.rvId) ~= current.rvId
+        or integer(data.generation) ~= current.generation
+        or integer(nested.generation) ~= current.generation then
         return false
     end
 
@@ -306,9 +296,9 @@ local function shellEdgeKeysForAction(boundary, x, y, z, axis)
     end
     local direct
     if axis == "N" or axis == "W" then
-        direct = Bitmap.edgeKey(axis, x, y, z)
+        direct = TemplateGeometry.edgeKey(axis, x, y, z)
     elseif axis == "E" or axis == "S" then
-        direct = Bitmap.edgeForSide(axis, x, y, z)
+        direct = TemplateGeometry.edgeForSide(axis, x, y, z)
     end
     if direct and boundary.shellEdges[direct] then
         appendShellEdgeKey(result, seen, direct)
@@ -319,10 +309,10 @@ local function shellEdgeKeysForAction(boundary, x, y, z, axis)
         -- still requires the resulting ledger edge to own the actual object
         -- host, so this cannot attribute an ordinary neighbouring build.
         local candidates = {
-            Bitmap.edgeKey("N", x, y, z),
-            Bitmap.edgeKey("W", x, y, z),
-            Bitmap.edgeForSide("E", x, y, z),
-            Bitmap.edgeForSide("S", x, y, z),
+            TemplateGeometry.edgeKey("N", x, y, z),
+            TemplateGeometry.edgeKey("W", x, y, z),
+            TemplateGeometry.edgeForSide("E", x, y, z),
+            TemplateGeometry.edgeForSide("S", x, y, z),
         }
         for i = 1, #candidates do
             if boundary.shellEdges[candidates[i]] then
@@ -367,14 +357,11 @@ local function sameOwner(tag, boundary)
     -- unowned so build audit/cleanup fail open rather than allowing an object
     -- from another RV or generation to be accepted by omitted fields.
     if tostring(tag.owner) ~= OWNER or tag.rvId == nil
-        or tag.generation == nil or tag.bitmapVersion == nil then
+        or tag.generation == nil then
         return false
     end
     if tostring(tag.rvId) ~= tostring(boundary.rvId) then return false end
     if integer(tag.generation) ~= boundary.generation then
-        return false
-    end
-    if integer(tag.bitmapVersion) ~= boundary.bitmapVersion then
         return false
     end
     return true
@@ -399,46 +386,36 @@ local function disallowedPlayerBuild(object, boundary)
     if not object or type(boundary) ~= "table" or protectedWorldObject(object) then
         return false
     end
-    local bitmap, rvId, generation, bitmapVersion = decodeBoundary(boundary)
-    if not bitmap then return false end
+    local current = currentBoundary(boundary)
+    if not current then return false end
     local x, y, z, sq = objectCell(object)
     if not x or not y or not z or not sq
-        or not Bitmap.containsScope(bitmap, x, y, z) then
+        or not TemplateGeometry.inManagedRegion({ x = x, y = y, z = z },
+            current.managed) then
         return false
     end
     local tag = rvTag(object)
     if type(tag) ~= "table" or tag.owner ~= OWNER or tag.playerBuilt ~= true
-        or tostring(tag.rvId) ~= tostring(rvId)
-        or integer(tag.generation) ~= generation
-        or integer(tag.bitmapVersion) ~= bitmapVersion
+        or tostring(tag.rvId) ~= current.rvId
+        or integer(tag.generation) ~= current.generation
         or shellEdgeAllowed(boundary, tag, x, y, z) then
         return false
     end
     local cells = footprint(tag, x, y, z)
     if not cells then return false end
-    local anchorX = bitmap.originX + math.floor(bitmap.width / 2)
-    local anchorY = bitmap.originY + math.floor(bitmap.height / 2)
-    local anchorZ = bitmap.minZ
-    local cabOnly, buildableOnly = true, true
+    local anchor = TemplateGeometry.anchorFromManaged(current.managed, Template)
+    if not anchor then return false end
+    local buildableOnly = true
     for i = 1, #cells do
         local cell = cells[i]
-        if not Bitmap.containsScope(bitmap, cell.x, cell.y, cell.z) then
+        if not TemplateGeometry.inManagedRegion(cell, current.managed) then
             return false
         end
-        if cell.x < C.CAB_MIN_OFFSET_X + anchorX
-            or cell.x > C.CAB_MAX_OFFSET_X + anchorX
-            or cell.y < C.CAB_MIN_OFFSET_Y + anchorY
-            or cell.y > C.CAB_MAX_OFFSET_Y + anchorY
-            or cell.z ~= anchorZ then
-            cabOnly = false
-        end
-        if not Bitmap.isBuildable(bitmap, cell.x, cell.y, cell.z) then
+        if not TemplateGeometry.isBuildable(cell, anchor, Template) then
             buildableOnly = false
         end
     end
-    -- Only z0 in the internal cab rectangle is a direct user-edit area.
-    -- Roof/shell objects at the same XY on z1 remain protected.
-    if cabOnly or buildableOnly then return false end
+    if buildableOnly then return false end
     return true, sq
 end
 
@@ -463,7 +440,8 @@ function Boundary.auditObject(object, player, forcedBoundary)
     end
     local x, y, z, sq = objectCell(object)
     if not x or not y or not z then return false, "object coordinate unavailable" end
-    if not Bitmap.containsScope(boundary.bitmap, x, y, z) then
+    if not TemplateGeometry.inManagedRegion({ x = x, y = y, z = z },
+        boundary.managed) then
         return false, "object is outside managed scope"
     end
     local tag = rvTag(object)
@@ -482,14 +460,16 @@ function Boundary.auditObject(object, player, forcedBoundary)
         local cell = cells[i]
         -- Full/composite footprints must remain entirely in this one RV
         -- scope.  This check is before any removal call.
-        if not Bitmap.containsScope(boundary.bitmap, cell.x, cell.y, cell.z) then
+        if not TemplateGeometry.inManagedRegion(cell, boundary.managed) then
             return false, "footprint crosses managed scope"
         end
-        if not Bitmap.isBuildable(boundary.bitmap, cell.x, cell.y, cell.z) then
+        local anchor = TemplateGeometry.anchorFromManaged(boundary.managed,
+            Template)
+        if not anchor or not TemplateGeometry.isBuildable(cell, anchor, Template) then
             return false, "inactive object ownership is uncertain"
         end
     end
-    return false, "object is in build bitmap"
+    return false, "object is in a template build cell"
 end
 
 local function markTagPlayerBuilt(object, builder, action)
@@ -506,14 +486,12 @@ local function markTagPlayerBuilt(object, builder, action)
     end
     if type(action) ~= "table" or action.rvId == nil
         or tostring(action.rvId) == "" or integer(action.generation) == nil
-        or integer(action.generation) < 1
-        or integer(action.bitmapVersion) ~= C.BITMAP_VERSION then
+        or integer(action.generation) < 1 then
         return false
     end
     local tag = rvTag(object)
     if tag and (tostring(tag.rvId) ~= tostring(action.rvId)
-        or integer(tag.generation) ~= integer(action.generation)
-        or integer(tag.bitmapVersion) ~= integer(action.bitmapVersion)) then
+        or integer(tag.generation) ~= integer(action.generation)) then
         -- An existing tag from another RV/generation is ambiguous.  Do not
         -- overwrite it merely because a build event happened at the same
         -- coordinate; the required fail-open policy preserves the object.
@@ -544,10 +522,9 @@ local function markTagPlayerBuilt(object, builder, action)
     tag.builder = builder and builder.key or nil
     tag.rvId = action and action.rvId or tag.rvId
     tag.generation = action and action.generation or tag.generation
-    tag.bitmapVersion = action and action.bitmapVersion or tag.bitmapVersion
     -- Replace optional attribution fields exactly.  Retaining an old edge or
     -- footprint after a generation swap could make unrelated metadata appear
-    -- authoritative for the current bitmap identity.
+    -- authoritative for the current generation.
     tag.edgeKey = action.edgeKey
     tag.edgeKeys = action.edgeKeys
     tag.footprint = action.footprint
@@ -580,20 +557,17 @@ function BuilderActionLedger.prune(tick)
     return true
 end
 
-function BuilderActionLedger.invalidateForGeneration(rvId, generation,
-    bitmapVersion)
+function BuilderActionLedger.invalidateForGeneration(rvId, generation)
     local expectedRvId = rvId ~= nil and tostring(rvId) or nil
     local expectedGeneration = integer(generation)
-    local expectedBitmapVersion = integer(bitmapVersion)
     if not expectedRvId or expectedRvId == "" or not expectedGeneration
-        or not expectedBitmapVersion then
+        or expectedGeneration < 1 then
         return false
     end
     for key, action in pairs(BuilderActionLedger.actions) do
         if type(action) ~= "table"
             or tostring(action.rvId) == expectedRvId
-                and (integer(action.generation) ~= expectedGeneration
-                    or integer(action.bitmapVersion) ~= expectedBitmapVersion) then
+                and integer(action.generation) ~= expectedGeneration then
             BuilderActionLedger.actions[key] = nil
         end
     end
@@ -617,7 +591,8 @@ function BuilderActionLedger.uniqueCandidate(object, x, y, z, tick)
             local boundary = action.boundary
             local current = Boundary.boundaryForPlayer(action.player)
             if sameBoundary(current, boundary)
-                and Bitmap.containsScope(boundary.bitmap, x, y, z) then
+                and TemplateGeometry.inManagedRegion({ x = x, y = y, z = z },
+                    boundary.managed) then
                 if candidate ~= nil then return nil end
                 candidate = action
             end
@@ -647,10 +622,8 @@ function Boundary.pruneBuilderActionLedger(tick)
     return BuilderActionLedger.prune(tick)
 end
 
-function Boundary.invalidateBuilderActionsForGeneration(rvId, generation,
-    bitmapVersion)
-    return BuilderActionLedger.invalidateForGeneration(rvId, generation,
-        bitmapVersion)
+function Boundary.invalidateBuilderActionsForGeneration(rvId, generation)
+    return BuilderActionLedger.invalidateForGeneration(rvId, generation)
 end
 
 function Boundary.onProcessAction(actionName, player, args)
@@ -666,12 +639,14 @@ function Boundary.onProcessAction(actionName, player, args)
     local z = commandCoordinate(args, "z")
     if not x or not y or not z then return end
     local boundary = Boundary.boundaryForPlayer(player)
-    if not boundary or not Bitmap.containsScope(boundary.bitmap, x, y, z) then return end
+    if not boundary or not TemplateGeometry.inManagedRegion({
+        x = x, y = y, z = z,
+    }, boundary.managed) then return end
     local id = identity(player)
     if not id then return end
     local item = commandArgument(args, "item")
     local action = { player = player, identity = id, rvId = boundary.rvId,
-        generation = boundary.generation, bitmapVersion = boundary.bitmapVersion,
+        generation = boundary.generation,
         x = x, y = y, z = z,
         boundary = boundary, footprint = commandArgument(args, "footprint"),
         expires = Core.tickAdd(Boundary._tick, 2) }
@@ -692,10 +667,9 @@ function Boundary.onProcessAction(actionName, player, args)
     -- later object-added callback cannot match this intent uniquely, the
     -- object stays untagged and the repair queue deliberately preserves it.
     -- Keep the async attribution key generation-scoped as well as
-    -- player-scoped.  A replacement/generation swap must not overwrite a
-    -- still-expiring build action from an older bitmap identity.
+    -- player-scoped. A replacement build cannot reuse a stale action.
     BuilderActionLedger.invalidateForGeneration(boundary.rvId,
-        boundary.generation, boundary.bitmapVersion)
+        boundary.generation)
     BuilderActionLedger.submit(id.key .. ":" .. boundaryKey(boundary), action)
 
     -- The standard build callback may run before or after this listener. If
@@ -709,7 +683,9 @@ function Boundary.onProcessAction(actionName, player, args)
     if object then
         local objectX, objectY, objectZ = objectCell(object)
         if objectX and objectY and objectZ
-            and Bitmap.containsScope(boundary.bitmap, objectX, objectY, objectZ)
+            and TemplateGeometry.inManagedRegion({
+                x = objectX, y = objectY, z = objectZ,
+            }, boundary.managed)
             and actionMatchesObject(action, objectX, objectY, objectZ) then
             markTagPlayerBuilt(object, id, action)
         end

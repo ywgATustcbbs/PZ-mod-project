@@ -359,7 +359,6 @@ scheduleRoofRefresh = function(map, record, source, eventKey, coordinateKey)
         players = players,
         rvId = tostring(record.rvId),
         generation = integer(record.generation),
-        bitmapVersion = integer(record.bitmapVersion),
         identityKey = players[1].identityKey,
         returnPosition = players[1].originalPosition,
         startTick = Core.tickAdd(now, 1),
@@ -481,10 +480,7 @@ local function cheapShellWallCandidate(object)
         return false
     end
     local generation = integer(data.generation)
-    local bitmapVersion = integer(data.bitmapVersion)
-    if generation == nil or generation ~= integer(nested.generation)
-        or bitmapVersion == nil
-        or bitmapVersion ~= integer(nested.bitmapVersion) then
+    if generation == nil or generation ~= integer(nested.generation) then
         return false
     end
 
@@ -563,7 +559,7 @@ local function queueWallRoofRefreshForObject(object, source)
     end
 
     -- The two events may be raised for one removal.  The room key is the
-    -- current rvId:generation:bitmapVersion identity, so one delayed schedule
+    -- current rvId:generation identity, so one delayed schedule
     -- collapses duplicates. A distinct stable event key during an active cycle
     -- is retained as a bounded follow-up instead of being swallowed.
     local pending = pendingWallRoofRefreshes[roomKey]

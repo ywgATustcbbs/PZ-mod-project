@@ -56,11 +56,6 @@ if not boundaryLoaded or type(Boundary) ~= "table" then
     Boundary = nil
     print("[RailroaderRVTest] RV boundary service unavailable; boundary hooks disabled")
 end
-local bitmapLoaded, Bitmap = pcall(require, "RailroaderRV/Common/RV_Bitmap")
-if not bitmapLoaded or type(Bitmap) ~= "table" then
-    Bitmap = nil
-    print("[RailroaderRVTest] RV bitmap contract unavailable")
-end
 local roofRefreshOk, RoofRefresh = pcall(require, "RailroaderRV/RoofRefresh/RV_RoofRefresh")
 if not roofRefreshOk or type(RoofRefresh) ~= "table"
     or type(RoofRefresh.run) ~= "function" then
@@ -85,7 +80,7 @@ local playerPositionCache = Common.newPlayerPositionCache(Core)
 
 -- A wall-removal refresh relocates every authoritative player in the current
 -- RV scope as one transaction.  The target is derived from the current
--- bitmap/layout center and offset by the current contract vector; it is not a
+-- template/layout center and offset by the current contract vector; it is not a
 -- persisted coordinate or a client-provided destination.
 local roofRefreshRelocationGroup = nil
 local roofRefreshGroupFailure = nil
@@ -150,7 +145,6 @@ local ctx = {
     Core = Core,
     GenerationTransaction = GenerationTransaction,
     Boundary = Boundary,
-    Bitmap = Bitmap,
     RoofRefresh = RoofRefresh,
     RV = RV,
     ServerUtil = ServerUtil,

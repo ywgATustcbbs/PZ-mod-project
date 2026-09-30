@@ -1,98 +1,101 @@
-# Shared / RailroaderRV / Power 模块分析
+# shared/RailroaderRV/Power 模块分析
 
-## 范围与分析口径
+## 假设、范围、成功条件与验证方式
 
-- 范围：`contents/mods/RailroaderRVTest/42/media/lua/shared/RailroaderRV/Power/` 下全部 Lua 代码文件，仅此文件夹。
-- 文件数：2。逐函数清单包含命名函数、赋值函数、传给 `pcall` 的匿名闭包和配方回调赋值；`P.BATTERY_CAPACITY_FACTOR` 是现有函数的同一引用，不另计一个函数体。
-- 依据当前源码解释语义。输入参数和回调生命周期按调用方式及命名推断；没有运行游戏或验证 Project Zomboid 的运行时回调签名。
-- 只读核对：列举文件、按行查看两个文件、用函数声明/赋值/匿名函数正则扫描交叉检查，并搜索 Power 相关模块的 `require` 与配置字段引用。未改源码、未运行 runtime 测试。
+- **假设**：只分析模组当前目录 media/lua/shared/RailroaderRV/Power/ 的直接子文件，即 [RV_UtilityPowerConfig.lua](../../contents/mods/RailroaderRVTest/42/media/lua/shared/RailroaderRV/Power/RV_UtilityPowerConfig.lua)（73 行）与 [RV_UtilityItems.lua](../../contents/mods/RailroaderRVTest/42/media/lua/shared/RailroaderRV/Power/RV_UtilityItems.lua)（49 行）。行号以本次读取的文件版本为准；这里是 RV 电力系统的共享参数/纯计算与制作回调注册区，同时被 server 与 client 加载。
+- **范围**：覆盖上述 2 个文件及其全部具名函数、局部函数、表方法和匿名函数表达式；只读检查跨端消费者以判断共享接口的实际使用面。唯一写入目标为本报告与同事务的 server-Power.md。只读参考 `media/scripts/RV_UtilityPower.txt`（配方 `OnCreate` 绑定与物品定义），不逐函数分析。
+- **成功条件**：每个函数都有精确起始行、参数含义、返回值或副作用、模块语义和必要性判断；列出「可提取机会」并明确共享层不得依赖 server helper 这一约束对提取方案的影响；给出拆分判断与接口边界证据。不运行游戏或 runtime 测试。
+- **验证方式**：目录文件枚举与逐行编号读取；用 `function` 关键字与赋值扫描取得全部函数体位置后逐行核对；在 media/lua 全域检索两个模块的 require 点、配置字段与回调键的消费点；在 shared 子树检索是否存在对 server/client 路径的 require；对照 `RV_UtilityPower.txt` 的 `OnCreate` 绑定行核对回调键名。源码扫描是静态分析，不替代运行时验证。
+- **区分口径**：标「源码事实」的是同仓文件可直接读到的证据（例如消费者位置、要求的字段名）；标「条件性推断」的是依赖运行时行为、未被静态断言覆盖的判断（例如引擎回调签名与执行时机）。
 
-## 1. 文件夹模块职责
+## 目录职责与清单
 
-这个文件夹承担共享 RV 电力系统的配置/纯计算，以及共享的可制作电气组件回调注册。服务端会读取其中的配置并执行世界状态逻辑；共享层本身的这两份代码不负责世界对象扫描或服务端权威状态变更。
+Power/（shared）目录承担两类职责：一是 RV 电力系统唯一的参数与纯计算来源（燃油热值、发电功率、电池健康曲线、设备额定功率、扫描预算、制作质量），二是充电器/逆变器两个物品的制作完成回调注册。
 
-### `RV_UtilityPowerConfig.lua`
+| 文件 | 函数定义数 | 主要职责 |
+|---|---:|---|
+| [RV_UtilityPowerConfig.lua](../../contents/mods/RailroaderRVTest/42/media/lua/shared/RailroaderRV/Power/RV_UtilityPowerConfig.lua) | 4 | 集中声明电力系统常量与设备功率表，并提供电池参数换算与制作效率两个纯函数（4 个均为表方法：2 个函数表达式 + 2 个 `function P.*` 定义） |
+| [RV_UtilityItems.lua](../../contents/mods/RailroaderRVTest/42/media/lua/shared/RailroaderRV/Power/RV_UtilityItems.lua) | 6 | 注册 RVCharger/RVInverter 制作的 OnCreate 回调，把按 Electrical 等级与随机偏移算出的效率写入产出物 condition（2 个局部函数 + 2 个 pcall 匿名函数 + 2 个表方法） |
+| **总计** | **10** | 10 个函数体定义（Config 4 + Items 6）；`P.BATTERY_CAPACITY_FACTOR = P.BATTERY_CHARGE_FACTOR`（L21）是同一函数对象的别名赋值，不计入函数定义数 |
 
-此文件构造局部表 `P` 并以 `return P` 暴露模块接口。它集中保存燃料、发电机、电池、设备扫描/负载、效率及条件值常量，并提供电池参数和制作效率两项纯计算。
+依赖方向（源码事实）：`RV_UtilityItems.lua:2` require shared 配置；`RV_UtilityPowerConfig.lua` 不 require 任何 RV 模块，只写全局 `RailroaderRV`（L2）并返回局部表 `P`。**本目录不 require 任何 server/client 路径**（在 media/lua/shared 子树检索 `RailroaderRV/server`、`RailroaderRV/client`、`RV_ServerUtil`、`RV_Common` 均无匹配），加载方向保持 shared → 无、server → shared。
 
-配置项按职责分组（均为文件内明确赋值，单位/含义依字段名及注释）：
+## 逐文件、逐函数分析
 
-- 燃料/发电：`FUEL_WH_PER_L=1250`、`GAS_GENERATOR_POWER_W=5000`、`VIRTUAL_FUEL_CAPACITY_L=100`、`NATIVE_GENERATOR_CONDITION_MAX=100`、`IDLE_FUEL_FRACTION=0.10`、`RESTART_CHARGE_FRACTION=0.05`。
-- 数值比较与持久化校验：`NUMERIC_EPSILON=0.000001`、`PERSISTED_POWER_TOLERANCE=0.01`。
-- 充电器/逆变器默认效率：均为 `0.90`。
-- 电池：容量 `720 Wh`，最大充电功率 `250 W`，最大放电功率 `1500 W`；充电和容量共用一条健康曲线，放电使用另一条健康曲线。
-- 设备扫描：间隔 `10` ticks，每 tick 扫描 `20` 个 squares。`DEVICE_POWER_W` 为设备类型的功率表：Light 60、Radio 15、TV 100、Fridge 125、Freezer 150、FridgeFreezer 160、Washer 500、Dryer 4500、Microwave 2000、Stove 3000、LuxuryOven 4000（单位字段为 W）。
-- 制作质量：基础效率 `0.75`，每级 Electrical 增加 `0.02`，随机偏移范围 `-0.05..0.05`，最终夹在 `0.70..0.98`；`COMPONENT_CONDITION_MAX=1000`。
+### RV_UtilityPowerConfig.lua
 
-文件第 2 行还初始化全局 `RailroaderRV`，但本文件后续没有读写该全局；表 `P` 是通过返回值提供给调用者的。该初始化就当前文件计算功能而言没有可见必要性。
+模块无事件注册、无副作用（除 `RailroaderRV` 全局表的空值初始化），L3 建局部表 `P`，L73 `return P` 暴露全部字段。数值常量按用途分组：燃油/发电（L5-L11）、电池与健康曲线（L15-L24）、设备扫描预算与功率表（L26-L40）、制作质量（L42-L48）。这些字段是 server 结算（[RV_UtilityPower.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Power/RV_UtilityPower.lua)）、设备适配（[RV_UtilityPowerDevices.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Power/RV_UtilityPowerDevices.lua)）、账本默认值（[RV_UtilityStore.lua:78-79](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_UtilityStore.lua:78)）、扫描节拍（[RV_UtilityServer.lua:309](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_UtilityServer.lua:309)）与客户端显示（[RV_UtilityDashboard.lua:359](../../contents/mods/RailroaderRVTest/42/media/lua/client/RailroaderRV/GUI/RV_UtilityDashboard.lua:359)）共同读取的权威来源。
 
-#### 函数逐项说明
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
+|---|---|---|
+| P.BATTERY_CHARGE_FACTOR（L18） | health 预期为 0..1 的健康比例；返回 `1-(1-health)^2`，无副作用。 | **必须**：电池最大充电功率随健康度衰减的曲线；由 `batteryParameters` 在 L55 调用。函数本身不夹紧输入，规范化交给调用方。 |
+| P.BATTERY_DISCHARGE_FACTOR（L22） | health 同上；返回 `health*health`，无副作用。 | **必须**：最大放电功率随健康度衰减的另一条曲线；由 `batteryParameters` 在 L56 调用。 |
+| P.batteryParameters（L50） | condition 当前耐久、maxCondition 耐久上限；任一非 number 或 maxCondition<=0 返回 nil，否则把比值夹到 0..1 后返回 {health,capacityWh,maxChargePowerW,maxDischargePowerW}，无副作用。 | **必须**：把物品耐久换算成电池容量与充放电上限的唯一公式。server 的三处调用（Power L218 重算电池包、L423 安装校验、L461 拆卸恢复）共享同一结果，若公式分叉会出现「装上与拆下容量不一致」。 |
+| P.craftEfficiency（L65） | electricalLevel Electrical 等级（转数字后夹到 0..10）、randomOffset 随机质量偏移（转数字，非法按 0）；返回夹在 `CRAFT_EFFICIENCY_MIN..CRAFT_EFFICIENCY_MAX` 内的基础值+等级贡献+偏移，无副作用。 | **必须**：制作效率的唯一公式；`RV_UtilityItems.createComponent` 依赖它把等级与随机性折算成产出物 condition，server 侧 `installComponent` 又按 `COMPONENT_CONDITION_MAX` 反推效率，两端必须用同一标度。 |
 
-| 函数 / 行号 | 参数 | 返回值与副作用 | 本模块内语义及必要性 |
-|---|---|---|---|
-| `P.BATTERY_CHARGE_FACTOR(health)`，19–21 | `health`：预期为 0..1 的电池健康比例。 | 返回 `1 - (1-health)^2`；无副作用。 | 充电功率随健康度变化的曲线。`batteryParameters` 调用它；是当前共享电池参数规则的一部分。函数本身未夹紧输入，规范化由 `batteryParameters` 完成。 |
-| `P.BATTERY_CAPACITY_FACTOR`，22 | 无新参数；直接引用 `P.BATTERY_CHARGE_FACTOR`。 | 是同一个函数对象，不产生新闭包。 | 为容量因子提供单独的语义名称，同时复用充电曲线；`batteryParameters` 通过该名称计算容量。当前等式意味着容量与充电功率退化曲线相同。 |
-| `P.BATTERY_DISCHARGE_FACTOR(health)`，23–25 | `health`：预期为 0..1 的健康比例。 | 返回 `health * health`；无副作用。 | 放电能力随健康度变化的曲线；由 `batteryParameters` 使用。 |
-| `P.batteryParameters(condition, maxCondition)`，51–64 | `condition`：当前电池 condition；`maxCondition`：该电池 condition 上限。 | 参数类型不为 number 或 `maxCondition <= 0` 时返回 `nil`。否则把比值夹在 0..1，返回 `{health, capacityWh, maxChargePowerW, maxDischargePowerW}`；无副作用。 | 把物品 condition 统一换算为电池健康、容量及功率上限。此函数将输入校验、曲线与标称参数集中到共享 API；服务端电力模块和开发存档 schema gate 均实际调用它，因此是避免两边公式漂移的必要共享规则。 |
-| `P.craftEfficiency(electricalLevel, randomOffset)`，66–72 | `electricalLevel`：Electrical 等级，转换为数字并夹紧到 0..10；`randomOffset`：随机质量偏移，转为数字，缺失/非法时按 0。 | 返回 `base + level*perLevel + offset`，并夹紧到 0.70..0.98；无副作用。 | 计算组件制作效率，交由制作回调写入新物品 condition。单一公式保证等级贡献与上下界一致；当前制作回调直接依赖它。 |
+**同文件中的别名与非常量字段**：`P.BATTERY_CAPACITY_FACTOR`（L21）与 `P.BATTERY_CHARGE_FACTOR` 是同一函数对象，`batteryParameters` 通过它计算容量（L54），语义上「容量曲线=充电曲线」是显式选择。`P.LuxuryOven = 4000`（L39）在设备功率表里但 `RV_UtilityPowerDevices.classify` 没有对应分支，属于当前未被消费的条目（与设备适配的新增类型预留一致，无功能影响）。
 
-### `RV_UtilityItems.lua`
+### RV_UtilityItems.lua
 
-此文件依赖 `RV_UtilityPowerConfig`，初始化/复用全局 `Recipe.OnCreate` 表，并注册 Charger 和 Inverter 两个制作回调。回调把按角色 Electrical 等级和随机偏移算出的效率编码进产出物 condition。它从共享常量入口被加载：`Common/RV_UtilityConstants.lua:18–19` 将配置放进 `U.POWER` 并 `require` 本文件以注册回调。
+模块 L4 初始化/复用全局 `Recipe.OnCreate` 表，L41/L45 注册两个回调键，L49 `return Recipe.OnCreate` 把该表作为模块返回值。它由 [RV_UtilityConstants.lua:15](../../contents/mods/RailroaderRVTest/42/media/lua/shared/RailroaderRV/Common/RV_UtilityConstants.lua:15) 以 `require("RailroaderRV/Power/RV_UtilityItems")` 触发加载（返回值未被使用，加载即注册）。回调键名与 [RV_UtilityPower.txt:37](../../contents/mods/RailroaderRVTest/42/media/scripts/RV_UtilityPower.txt:37)、`:59` 的 `OnCreate = Recipe.OnCreate.RVUtilityCharger/RVUtilityInverter` 逐字对应，产出物类型 `RailroaderRVTest.RVCharger`/`RVInverter` 与 Power L573/L580 安装校验、客户端 Dashboard L292/L300 的物品识别类型一致。
 
-#### 函数逐项说明
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
+|---|---|---|
+| randomOffset（L6） | 无参数；全局 `ZombRandFloat` 存在时用配置的 `CRAFT_EFFICIENCY_RANDOM_MIN/MAX` 调用并以 pcall 隔离异常，成功且为 number 才返回，否则返回 0。不改变游戏状态。 | **保留理由**：为制作质量提供可选随机扰动；RNG 全局缺失或抛错时回退为零偏移，因此不是基础流程的硬依赖，但去掉会破坏「同配方产出有质量差异」的设计。 |
+| createComponent（L15） | craftRecipeData 制作完成数据（要求 `getAllCreatedItems()`），player 制作玩家（可选，用于读 `Perks.Electricity` 等级）；无返回值。成功取得首个产出物后计算效率，把 `floor(efficiency*COMPONENT_CONDITION_MAX+0.5)` 经 `setCondition` 写入物品；依赖缺失/调用失败时提前返回，等级不可用按 0。 | **必须**：两个组件配方共用的制作后处理，把品质持久化到物品 condition，供后续安装时换算效率。它把桥接保护（pcall）与业务计算收敛在一处，两个回调只是转发。 |
+| createComponent 中匿名函数（L19） | 无显式参数，捕获 `craftRecipeData`；在 pcall 内调用 `craftRecipeData:getAllCreatedItems()`，返回产出物集合。 | **实现必需**：Java/Lua 桥接调用可能抛错，必须隔离并把成功标志交给外层判断。 |
+| createComponent 中匿名函数（L25） | 无显式参数，捕获 `createdItems`；在 pcall 内返回 `createdItems:get(0)`，即第一个产出物。 | **实现必需**：索引 0 的读取同样可能抛错；用同一模式保护，避免回调抛异常打断制作流程。 |
+| Recipe.OnCreate.RVUtilityCharger（L41） | craftRecipeData、player，与引擎配方回调形参一致；调用 `createComponent` 后结束，自身无返回值，副作用是可能更新产出物 condition。 | **必须**：`RV_UtilityPower.txt` 的 RVCharger 配方把 `OnCreate` 绑定到该键，缺少注册则充电器不会带质量。函数体与下一项完全相同。 |
+| Recipe.OnCreate.RVUtilityInverter（L45） | 同上一项；调用 `createComponent`，无返回值，副作用同上。 | **必须**：RVInverter 配方的 `OnCreate` 绑定键；注册本身必需，但独立函数体不是业务所需（见可提取机会）。 |
 
-| 函数 / 行号 | 参数 | 返回值与副作用 | 本模块内语义及必要性 |
-|---|---|---|---|
-| `randomOffset()`，6–13 | 无显式参数。 | 若全局 `ZombRandFloat` 是函数，则用配置范围调用并以 `pcall` 隔离异常；成功且结果为数字时返回该值，否则返回 `0`。不改游戏状态。 | 为新组件质量提供可选随机扰动。支持设计中的质量随机性；不是基础制作流程的硬依赖，因为 RNG 缺失/失败时可退回零偏移。 |
-| 匿名闭包（`pcall(function() ... end)`），19–21 | 无显式参数；闭包捕获 `craftRecipeData`。 | 闭包返回 `craftRecipeData:getAllCreatedItems()` 的结果；外层 `pcall` 接收成功标志及结果。 | 保护 Java/Lua 桥接调用失败不向外抛出；错误时回调安全退出。它不是独立业务函数，保护边界有价值，但匿名包装本身可由其他等效错误处理写法替代。 |
-| 匿名闭包（`pcall(function() return createdItems:get(0) end)`），25 | 无显式参数；闭包捕获 `createdItems`。 | 返回索引 `0` 的产出物；外层 `pcall` 接收成功标志及物品。 | 保护读取第一个产出物的桥接调用。与上一闭包同类，仅该局部调用需要保护；没有证据表明值得为这两个点另建通用抽象。 |
-| `createComponent(craftRecipeData, player)`，15–39 | `craftRecipeData`：制作完成数据；代码要求它有 `getAllCreatedItems()`，返回集合须有 `get(0)`。`player`：制作玩家；可选地用于读取 `Perks.Electricity` 等级。 | 无显式返回值。成功取得首个物品后，计算效率并将 `floor(efficiency*1000+0.5)` 通过 `setCondition` 写到物品上；缺少依赖/调用失败时提前退出。等级不可用时默认 0。 | Charger 和 Inverter 共用的制作后处理：把品质/效率持久化到物品 condition，供后续逻辑读取。对两个配方的共同功能是必要的；已正确收敛到一个内部函数。 |
-| `Recipe.OnCreate.RVUtilityCharger(craftRecipeData, player)`，41–43 | 同配方回调形参：制作数据及制作玩家。 | 调用 `createComponent`；自身无返回值，效果是可能更新新物品 condition。 | 将共同组件逻辑绑定到 Charger 配方名。注册项是引擎配方回调契约所需；此处包装函数体和另一个回调完全相同。 |
-| `Recipe.OnCreate.RVUtilityInverter(craftRecipeData, player)`，45–47 | 同上。 | 调用 `createComponent`；自身无返回值，效果是可能更新新物品 condition。 | 将共同组件逻辑绑定到 Inverter 配方名。注册项必要；单独包装闭包并非业务所需，可考虑让两个键直接引用 `createComponent`，前提是确认引擎允许同一函数直接用作两项回调。 |
+**回调契约说明（条件性推断）**：`craftRecipeData`/`player` 的形参顺序与 `getAllCreatedItems`、`getPerkLevel(player, Perks.Electricity)`、`setCondition` 的用法按 B42 常见配方回调约定书写，本报告只核对了本仓脚本绑定与调用形态，未运行引擎验证签名。
 
-回调所用 `Perks`、`ZombRandFloat` 和物品方法均通过全局/对象成员探测及 `pcall` 使用。具体引擎签名未在此项静态分析中另行核验。
+## 模块间复用、提取和职责拆分
 
-## 1.2 模块间调用关系与数据边界
+### 已有共用与可提取机会
 
-Power 文件夹内部的实际依赖为：
+- **共享层的硬约束（源码事实 + 约束推论）**：`media/lua/shared` 是 server 与 client 都会加载的路径，`require` 只能指向同样在两端可用的模块。**shared 不得 require server helper（例如 `RailroaderRV/Common/RV_ServerUtil`、`RailroaderRV/Common/RV_Common`、`RailroaderRV/Common/RV_ServerWorld`），server 路径也不应被 shared 反向依赖**——本目录当前没有任何此类 require，这是必须保持的性质。**对提取方案的影响**：任何「把 server 里的通用 helper 提到 shared 以便两端共用」的方案都不成立，因为 server helper 的实现本身依赖服务端 API（`Common.invoke` 的 pcall 访问模式、`ServerWorld` 的 cell/square 访问）。**可行的方向只有相反方向**：把「不含世界访问、不含 API 调用、纯数值/纯表变换」的规则放到 shared，再由 server 单向 require；本目录的 `batteryParameters`、`craftEfficiency` 与 `DEVICE_POWER_W` 正是按这条线划分的。
+- **`batteryParameters` 已是正确的共享粒度（源码事实）**：输入是物品耐久两个数，输出是容量与功率上限，没有对象访问；server 三处调用（Power L218/L423/L461）与客户端的字段消费都建立在同一结果上。**结论：保持现状，不要下沉到 server，也不要再加一层 getter。**
+- **`craftEfficiency` 与 `COMPONENT_CONDITION_MAX` 构成一对跨端标度（源码事实）**：制作回调写 condition、server 安装时按 `P.COMPONENT_CONDITION_MAX` 校验（Power L491）并换算效率（L510）。二者同处 shared 配置，任何改动必须同时考虑两侧，这是**当前划分正确**的证据。
+- **设备额定功率留在 shared、设备状态适配留在 server（源码事实）**：`P.DEVICE_POWER_W`（L28-L40）是纯数据，被 server 适配器消费；`readActive`/`devicePowerW`（Devices L104-L159）依赖 `getDeviceData`、`isModeWasher`、`isPowered`、`Activated` 等引擎对象方法，只在能解析世界对象的一侧有意义。**结论**：不要把设备适配上移 shared；客户端已经通过快照字段 `currentLoadW`/`deviceCount` 消费结果（[RV_UtilityDashboard.lua:385-407](../../contents/mods/RailroaderRVTest/42/media/lua/client/RailroaderRV/GUI/RV_UtilityDashboard.lua:385)）。
+- **两个配方回调可共用同一函数引用（源码事实，收益有限）**：`RVUtilityCharger`（L41）与 `RVUtilityInverter`（L45）函数体逐字相同，都只调 `createComponent`。可写成 `Recipe.OnCreate.RVUtilityCharger = createComponent` 与 `...RVUtilityInverter = createComponent`，省下两个闭包。**净收益很小**，且要先确认引擎对同一函数作为两个 `OnCreate` 键没有额外要求；**建议保留显式包装**，因为显式形参在当前文件中同时起到文档作用。
+- **`randomOffset` 不建议上移（源码事实）**：它只服务本文件的制作回调，全仓没有第二处 `CraftEfficiency` 随机需求；抽成全局工具属于投机扩展。
+- **可考虑的 shared 内部收敛**：`RV_UtilityItems.lua` 通过 `P.craftEfficiency` 与 `P.COMPONENT_CONDITION_MAX` 两个字段依赖配置，粒度已经合适；若未来新增第三、第四个可制作组件，应复用 `createComponent` 而不是复制回调体。
 
-- `RV_UtilityItems.lua:2` 通过 `require("RailroaderRV/Power/RV_UtilityPowerConfig")` 取得配置接口；随后调用 `P.craftEfficiency` 并读取制作随机范围及 condition 标度。
-- `RV_UtilityPowerConfig.lua` 不依赖 Power 文件夹内其他文件；它返回 `P`。
+### 是否进一步拆分
 
-与其他文件夹有关、仅限 Power 证据的实际引用：
+- **当前不建议拆分**：两个文件合计 122 行、10 个函数（Config 4 + Items 6），职责边界就是「参数与纯公式」对「制作回调注册」，引用方向单一（Items → Config），没有共享可变状态。拆出 `RV_BatteryConfig`/`RV_DevicePowerConfig` 之类只会增加 require 与加载顺序考虑，收益为零。
+- **未来拆分条件**：若电力配置出现独立生命周期或独立消费者（例如客户端要单独校验电池曲线、或设备功率表增长到几十项并由不同模块维护），再按「电池与效率公式」/「设备功率与扫描预算」两块拆分才有净收益；这是条件，不是当前必须改动。
+- **不建议把 `RV_UtilityItems.lua` 合并进配置文件**：它是注册引擎回调的副作用模块，由 `RV_UtilityConstants` 显式 require 触发加载；把注册逻辑混进纯数据模块会让「加载配置」与「注册回调」两个时机不可分离。
 
-- `shared/RailroaderRV/Common/RV_UtilityConstants.lua:18` 将同一配置模块赋给 `U.POWER`；第 19 行 require `RV_UtilityItems.lua` 触发配方回调注册。
-- `server/RailroaderRV/Power/RV_UtilityPower.lua:5` require 配置，使用 `batteryParameters` 和燃料、电池、epsilon、效率等配置字段。
-- `server/RailroaderRV/Power/RV_UtilityPowerDevices.lua:4` require 配置，读取设备功率表及扫描预算（例如第 58–87、153、160–161、277 行）。
-- `server/RailroaderRV/Core/RV_UtilityStore.lua:6` require 配置并用默认充电器/逆变器效率初始化数据（第 109–110 行）。
-- `server/RailroaderRV/Core/RV_DevSaveSchemaGate.lua:945` require 配置，并用其字段校验组件 condition、燃料/发电上限、电池派生字段及默认效率（第 1121、1143、1149、1167、1177–1188 行）。
+## 对外接口、跨模块数据访问与隐藏状态
 
-## 2. 通用功能与提取机会
+### 公开合同
 
-- `batteryParameters` 已是跨服务端电力逻辑与 schema 校验共用的纯计算接口；继续保留集中实现，避免重复重建电池字段。底层 charge/capacity 曲线也已通过同一函数对象复用。
-- `craftEfficiency` 已把制作效率规则独立于配方回调，`createComponent` 负责物品桥接/写入。当前边界清楚，不需要再提取。
-- 两个 recipe 回调内容重复，但只是一行转发；可以直接共享同一回调函数引用，可能省去两个微小闭包。收益有限，且应先确认回调系统对共享函数引用的要求。
-- `pcall` 中的两个匿名闭包均是单点 Java/Lua 对象访问保护。它们虽有相似外壳，但操作目标、结果不同，当前代码量不足以支持新增通用“安全调用”层；没有观察到这类帮助函数在本文件夹内重复使用的证据。
-- `randomOffset` 是制作域的窄小辅助函数。没有本范围内的跨模块复用证据，不建议抽成全局工具。
+- **RV_UtilityPowerConfig**：以 `return P` 暴露整张字段表（L73）。消费者分三类（源码事实）：server 结算与适配（Power L5、Devices L4）、账本默认值（[RV_UtilityStore.lua:78-79](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_UtilityStore.lua:78) 只用两个默认效率）、跨端汇总入口（[RV_UtilityConstants.lua:14](../../contents/mods/RailroaderRVTest/42/media/lua/shared/RailroaderRV/Common/RV_UtilityConstants.lua:14) 把同一张表挂成 `U.POWER`）。此外 [RV_UtilityServer.lua:309](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_UtilityServer.lua:309) 经 `U.POWER.DEVICE_SCAN_INTERVAL_TICKS` 读扫描节拍、[RV_UtilityDashboard.lua:359](../../contents/mods/RailroaderRVTest/42/media/lua/client/RailroaderRV/GUI/RV_UtilityDashboard.lua:359) 经 `U.POWER.VIRTUAL_FUEL_CAPACITY_L` 读油量上限。**`U.POWER` 与 `P` 是同一张可变表**，因此「消费者只读」是约定而非强制。
+- **RV_UtilityItems**：`return Recipe.OnCreate`（L49），同时把两个回调键写入全局 `Recipe.OnCreate` 表（L41、L45）。真正的对外合同是那两个键名与 `RV_UtilityPower.txt` 的绑定行，不是返回值；`RV_UtilityConstants.lua:15` 只 require 不使用返回值。
+- **RV_UtilityPowerConfig 的隐藏状态**：无。`local P` 是局部名字，导出后即为公开表；文件内没有缓存或计数器。
+- **RV_UtilityItems 的隐藏状态**：只有 `local P`（配置引用）与局部函数 `randomOffset`/`createComponent`；除此之外没有模块级可变状态，回调之间不共享数据。
 
-## 3. 是否进一步拆分
+### 直接读写其他模块的数据
 
-现有两个文件按职责已分开：一个是全电力系统共用常量/纯公式，另一个是物品制作回调与物品写入。当前均较小、引用明确，进一步拆分会增加模块加载与依赖管理成本，没有明显收益。
+1. **没有发现本目录读取其他模块的私有 local 表或闭包变量**（源码事实）。`RV_UtilityItems` 只读 `P` 的公开字段（`CRAFT_EFFICIENCY_RANDOM_MIN/MAX`、`craftEfficiency`、`COMPONENT_CONDITION_MAX`），`P` 是 `RV_UtilityPowerConfig` 明确 return 的表。
+2. **对全局命名空间的写入是显式接口副作用**：`Recipe = Recipe or {}`、`Recipe.OnCreate = Recipe.OnCreate or {}`（L3-L4）与 `RailroaderRV = RailroaderRV or {}`（Config L2）。前者登记引擎配方回调（必需，否则 `RV_UtilityPower.txt` 的 `OnCreate` 找不到函数）；后者只是初始化共享根表，本文件后续没有读写该全局。
+3. **反向数据访问：shared 被 server/client 读取，而不是 shared 读取它们**（源码事实）。Power/Devices/Store/UtilityServer 读配置字段、Dashboard 读 `U.POWER`，均属于消费公开配置接口。**边界结论**：本目录没有需要改为接口的直读点；把标量常量再包一层 getter 只会增加样板，不增强「只读配置」的语义。若将来要防止误写，正确做法是约定加注释或冻结字段，而不是逐个加访问器。
+4. **没有发现跨端不一致的读取路径**（源码事实）：server 与 client 拿到的都是同一张 `U.POWER` 表（通过 shared `RV_UtilityConstants`），因此不存在「两端各自复制常量导致漂移」的风险；本目录的公式函数 `batteryParameters`/`craftEfficiency` 也只有 server 侧调用，客户端展示的充放电上限直接来自快照字段而不是重新计算。
 
-`RV_UtilityPowerConfig.lua` 同时包含燃料、电池、设备和制作参数，但这些都是同一共享电力系统的权威调参与公式入口，且服务端多个模块按需读取。只有当这些领域出现独立生命周期、独立消费者或显著增长时，再按领域拆分才可能有净收益；这是未来条件，不是当前必须改动。
+### 接口边界问题
 
-## 4. 直接访问模块内部数据及接口判断
+- **`U.POWER` 与 `P` 双入口（源码事实）**：同一张表既可 `require("RailroaderRV/Power/RV_UtilityPowerConfig")` 直接拿到，也可经 `U.POWER` 访问。两种写法在仓内都真实存在（Devices L4 直连；UtilityServer L309 走 `U.POWER`）。它不是数据泄漏，但会让「配置的规范入口」不明确。建议：新代码统一走其中一个（`U.POWER` 更利于跨端一致性），旧代码不必为此改动。
+- **`P.LuxuryOven` 无消费者（源码事实）**：`DEVICE_POWER_W` 中的 `LuxuryOven = 4000` 在 `classify` 里没有对应分支，属于预留条目；保留无害，但不要在文档/代码里把它当作已支持设备。
+- **回调注册依赖 require 副作用（源码事实 + 条件性推断）**：`RV_UtilityItems` 的返回值无人使用，注册完全依赖「被 require 一次」；如果未来有人把 `RV_UtilityConstants.lua:15` 的 require 当成冗余删掉，两个 `OnCreate` 键会静默消失、制作出的组件 condition 不再按效率设置。**建议**：在该 require 处保留说明性注释（当前已有「触发注册」的语义位置），不要在重构中移除。
+- **`RV_UtilityItems` 导出 `Recipe.OnCreate` 表而非自身 API（源码事实）**：模块返回值是全局注册表，任何 require 它的模块都会拿到这张全局表并可能写入。当前只有 `RV_UtilityConstants` require 且不使用返回值，风险为零；若后续新增消费者，应明确「返回值只读」。
 
-- `RV_UtilityPowerConfig.lua` 用 `local P` 隐藏局部变量名，再 `return P`；调用方拿到的是模块明确导出的表。`U.POWER` 又将这张表挂到共享常量对象。因此其他模块直接读取 `P.X` / `PowerConfig.X` 是访问公开配置接口，不是绕过 Lua 局部变量访问模块内部状态。
-- 已搜索到的外围引用是配置字段读取和 `batteryParameters` 调用，没有发现外围代码改写这些字段。该表本身可变，故接口约定应保持为消费者只读；目前把标量常量再包一层 getter 收益很低，会增加样板且不增强纯数据语义。对于派生数据，已有 `batteryParameters` 函数接口，schema gate 和服务端逻辑共同使用它。
-- `RV_UtilityItems.lua` 对全局 `Recipe.OnCreate` 的写入是注册引擎回调的显式接口副作用；两个命名键就是外部配方系统入口。此处不能只保留文件局部函数而不登记回调。
-- 当前没有证据显示 Power 代码直接访问其他 Power 文件夹模块的未导出局部变量。模块间边界主要是 `require` 返回值和配方回调注册。
+## 函数清单、覆盖和验证记录
 
-## 静态核对记录
-
-- 文件枚举：`rg --files 'media/lua/shared/RailroaderRV/Power'`，得到 `RV_UtilityPowerConfig.lua`、`RV_UtilityItems.lua`，共 2 个文件。
-- 函数候选扫描：`rg --pcre2 -n --glob '*.lua' '(?:^\s*(?:local\s+)?function\s+[\w.:]+|^\s*[\w.]+\s*=\s*function\s*\(|function\s*\()' 'media/lua/shared/RailroaderRV/Power'`，返回 10 个函数体位置；逐行阅读后确认包括 4 个配置函数体、2 个命名内部辅助函数、2 个 `pcall` 匿名闭包、2 个 recipe 回调。第 22 行容量因子是别名，不是新函数体。
-- 交叉引用扫描：对 `media/lua` 搜索 `RV_UtilityPowerConfig`、`RV_UtilityItems`、关键函数和配置字段；然后检查 `PowerConfig.*` / `P.*` 读取位置，形成上文调用关系清单。
-- 未覆盖项：未检查其他子文件夹的函数实现；仅查看 Power 相关调用点作为边界证据。未运行静态分析器或游戏测试，也未验证引擎回调签名及运行时行为。
-- 修改：只新增本模块分析文档；本次范围内 Lua 源码未修改。
+- **扫描文件**：RV_UtilityPowerConfig.lua（73 行，4 个函数定义：2 个函数表达式 L18/L22 + 2 个 `function P.*` 定义 L50/L65）、RV_UtilityItems.lua（49 行，6 个函数定义：2 个局部函数 L6/L15 + 2 个匿名函数表达式 L19/L25 + 2 个表字段函数 L41/L45）；目录枚举确认除这两个文件外无其他代码文件，两文件合计 122 行、10 个函数定义。
+- **函数计数口径**：计入具名函数、`local function`、表方法（`M.foo = function` / `function M:foo()`）与作为参数/回调传入的匿名函数表达式；不计入别名赋值。本目录 10 项全部计入定义，另有 1 项别名（Config L21 `P.BATTERY_CAPACITY_FACTOR = P.BATTERY_CHARGE_FACTOR`）按口径不计；`type(ZombRandFloat) == "function"`（Items L7）、`type(craftRecipeData.getAllCreatedItems) ~= "function"`（L16）等是类型判断，不是函数定义，未计数。
+- **逐行交叉核对**：以 `function` 关键字扫描取得全部定义行（Config 4 行：L18/L22/L50/L65；Items 6 行：L6/L15/L19/L25/L41/L45），再逐行编号读取两份全文（1-73、1-49）核对每个条目的起始行、参数、返回值与副作用；`createComponent` 的控制流与两个 pcall 边界逐句确认。本目录没有含 `function` 字样的注释行，关键字命中数与定义数一致。
+- **跨模块调用扫描**：在 media/lua 全域检索 `RV_UtilityPowerConfig`、`RV_UtilityItems`、`U.POWER`、`UtilityConstants`，确认消费者为 server Power/Store/UtilityServer 与 client Dashboard/UtilityClient/ContextMenu；在 media/lua/shared 检索 `RailroaderRV/server`、`RailroaderRV/client`、`RV_ServerUtil`、`RV_Common` 均无匹配，据此确认「shared 不依赖 server helper」当前成立。回调键名与 `RV_UtilityPower.txt:37`、`:59` 逐字比对一致；`permanentlyRemove` 之类的引擎细节不在本报告范围。
+- **未覆盖项**：没有穷举每个配置字段的全部读取行，也没有审计 Power 目录外模块的内部实现；未运行游戏、服务器或任何测试脚本，配方回调签名与执行时机未做运行时验证（已在文中标为条件性推断）。
+- **修改范围**：仅更新本分析文档与同事务的 server-Power.md；未修改任何 Lua 源码、配置或测试文件。

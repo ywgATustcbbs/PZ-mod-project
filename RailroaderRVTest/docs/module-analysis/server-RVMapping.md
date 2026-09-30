@@ -1,210 +1,256 @@
-# 服务端 RVMapping 子目录代码分析
+# server/RailroaderRV/RVMapping 模块分析
 
-## 假设、范围与成功条件
+## 假设、范围、成功条件与验证方式
 
-- 假设：分析对象是 `contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/` 当前实际存在的全部代码。本报告按文件划分模块，不把同名目录之外的脚本纳入实现评价。
-- 范围：4 个 Lua 文件，源码行数分别为 Mapping 620、EntryExit 811、Train 623、RecordValidation 333。目录中没有 `RV_RegionSlots.lua`，源码对它存在 `require`；本任务不检查被引用目录外实现。
-- 成功条件：列全具名、赋值、嵌套和匿名函数；按函数说明职责、本模块语义、参数、返回/副作用与必要性；记录模块间复用、拆分和跨模块数据访问的判断及源码行号。
-- 验证方式：只读列文件、函数声明扫描和带行号源文逐段交叉核对；完成后校验文档存在、章节/表格行数和路径。未运行游戏或测试脚本。
-- 限制：跨目录依赖仅依据本目录可见的调用点和注释描述；未打开兄弟目录、官方脚本或反编译来源，故不把本报告当作对外部接口实现的独立核验。
+- **假设**：只分析模组当前目录 media/lua/server/RailroaderRV/RVMapping/ 的 4 个直接子文件，并按本次读取的当前源码解释；行号全部来自本轮实际读取（本目录 4 个文件合计 1871 行 —— EntryExit 720、Mapping 312、Train 623、RecordValidation 216）。本目录**没有** `RV_RegionSlots.lua`，被 require 的实现位于 `media/lua/shared/RailroaderRV/RVMapping/RV_RegionSlots.lua`（155 行），按只读参考使用。旧报告使用的 620/811/333 行与 113 个函数来自精简前代码，已失效。
+- **范围**：覆盖本目录 4 个 Lua 文件的全部具名函数、`local function`、表方法/`Adapter.x = function`、以及作为参数或函数值出现的匿名函数表达式；只读检查调用方，用于判断导出 API 的实际使用面与跨模块数据访问。唯一写入目标是本报告。
+- **成功条件**：每个函数都有精确起始行、参数含义、返回值或副作用、模块语义和必要性判断；另给出复用/拆分建议、接口边界、外部 Railroader 依赖清单和证据；明确区分「源码事实」与「条件性推断」。不运行游戏、服务器或任何测试脚本。
+- **验证方式**：用 `Get-Content ... .Count`（包含空行）统计每个文件行数；用 `function` 关键字全目录扫描后逐行编号全文读取交叉核对定义与起始行；用整个 media/lua 树的 grep 核对导出符号调用点、跨模块字段读写、以及外部 `RR.*` 依赖；对每个「零赋值/零调用」的结论做全树标识符穷举（如 `serverTransactionMutexStatus` 全树仅 8 处命中）。源码扫描与静态调用点分析是静态证据，不替代运行时验证。
 
-## 文件与模块职责
+## 目录职责与清单
 
-| 文件 | 模块职责 | 主要共享面 |
+RVMapping/ 是 Railroader 适配层：它把外部 Railroader 实现的列车/乘员运行时记录抽象成 RV 自己的列车与座位模型（Train），把 ModData 中的持久化映射记录抽象成槽位/区域/身份查询（Mapping），承载玩家进出 RV 与生成提交/失败恢复的事务（EntryExit），并暴露供通用服务端使用的映射 manifest 与屋顶/房间监视接口（RecordValidation）。本节的顺序是**装配顺序**（见 Core/RV_RailroaderServer.lua L112-L117），不是字母序。
+
+| 文件 | 函数定义数 | 主要职责 |
+|---|---:|---|
+| [RV_RailroaderServer_Train.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_RailroaderServer_Train.lua) | 45 | 唯一的 Railroader 兼容适配层：SP/MP 权威列车表选择、外部列车记录字段读写、姿态/座位/距离计算、玩家角色与座位变更；同时提供 number/integer/call/callGlobal 等通用保护调用 helper |
+| [RV_RailroaderServer_Mapping.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_RailroaderServer_Mapping.lua) | 19 | 持久化映射记录的读取与校验、区域/槽位推导与分配、按服务端坐标反查 RV、映射变更 epoch 与边界校验缓存失效、屋顶刷新与房间监视的调度包装 |
+| [RV_RailroaderServer_EntryExit.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_RailroaderServer_EntryExit.lua) | 20 | 玩家进出 RV 的服务端事务：权限与位置判定、座位摘除/恢复、map 关系写入、生成请求排队、生成提交时的原子 map 交换与失败回滚；另暴露 utility 上下文解析接口 |
+| [RV_Server_RecordValidation.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_Server_RecordValidation.lua) | 15 | 映射 manifest 只读视图（由 slotIndex + 模板重建 anchor/bounds）、当前身份查询、生成事务 hook 安装点、屋顶视觉刷新与房间所有权监视的服务端入口 |
+| **总计** | **99** | 87 个具名函数（77 个 `local function` + 10 个表方法）+ 12 个匿名函数表达式（含 4 个模块工厂） |
+
+**函数计数口径**：计入具名函数、`local function`、表方法（`function Adapter.x()`、`function RV.Server.x()`）、`Adapter.x = function`/`rvLocal = function` 这类函数值赋值、以及作为参数/回调的匿名函数表达式与 `return function(ctx)` 模块工厂；**不计入** `M.foo = localFunction` 导出别名赋值，也排除 `type(x) == "function"` 比较行与含 "function" 字样的注释行。4 个文件的关键字命中数分别为 Mapping 22（19 定义 + 3 类型判定）、Train 52（45 定义 + 7 类型判定）、EntryExit 41（20 定义 + 21 类型判定）、RecordValidation 22（15 定义 + 7 类型判定/注释），合计 137 命中、99 定义。
+
+## 逐文件、逐函数分析
+
+### RV_RailroaderServer_Train.lua
+
+模块在 [RV_RailroaderServer_Train.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_RailroaderServer_Train.lua)，是本模块唯一的**外部实现形状依赖集中点**：它直接读外部 `RR` 全局的 `ServerTrain.active` / `TrainEntity.active` / `Ride` / `Body`，以及列车记录上的 `driver`、`passengers`、`pose`、`engine`、`_seatNames`、`_claims`、`_cmdSeq`、`_stopping`、`_starting`、`_cruise*` 等下划线字段。文件不注册事件、不写存档，只把结果写入 `ctx`（L595-L622，28 个字段）。文件内自带 `number/integer/call/callGlobal`（L7-L41），因为整个 RVMapping 子树的算术与 Java 调用都经 `ctx` 从本文件取，而不 require Common。头部注释（L137-L141、L465-L467）声明「镜像官方 board/release 的可见写入」这一策略。
+
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
 |---|---|---|
-| `RV_RailroaderServer_Mapping.lua` | 初始化当前 schema 的列车映射存档；定义区域/记录校验、槽位分配、坐标反查；维护屋顶刷新缓存和墙体移除回调去重。 | 通过 `ctx` 输出映射服务；向 `Adapter` 暴露区域分配和映射身份查询；为 BoundaryValidation 注入窄依赖。 |
-| `RV_RailroaderServer_EntryExit.lua` | 解析并授权玩家进入/退出；处理列车座位和玩家映射关系；接驳生成事务、生成提交与失败恢复。 | 读取 Mapping/Train 写入 `ctx` 的函数；调用 `Boundary`、`RailroaderRV.Server`、`ServerTeleport`。 |
-| `RV_RailroaderServer_Train.lua` | 适配 Railroader 列车记录与 SP/MP 权威来源；提供玩家/列车位置、方向、距离、座位查询和座位变更。 | 将通用 helper 写入 `ctx`，供 EntryExit 和 Mapping 调用。 |
-| `RV_Server_RecordValidation.lua` | 验证当前映射、manifest、bitmap 和几何身份；提供生成 hook、屋顶刷新及房间所有权监视的服务端 API。 | 向 `RV.Server` 注册窄接口；依赖 `ctx`、Adapter 的 current mapping 查询、Boundary 与 roof helper。 |
+| 模块工厂 `return function(ctx)`（L2） | ctx：装配根注入的 processIsServer/C/C unpackFn 等。返回前把 28 个 helper 写入 ctx（L595-L622）。无其他副作用。 | **必须**：本文件是 RVMapping 的通用 helper 提供者，Mapping L11-L17 与 EntryExit L13-L39 都从 ctx 取这些函数，缺它整个子树无法装配。 |
+| number（L7） | value 任意值；number 原样返回，string 走 tonumber，其他非 nil 走保护 `value + 0`，结果非 number 时 nil。不检查 NaN/无穷。 | **必须**：Java/Kahlua 数值代理转换的唯一入口，Mapping 内 20 处、EntryExit 内 8 处使用。 |
+| number 中匿名闭包（L15） | 捕获 value，保护执行 `value + 0`。 | **实现必需**：数值代理强转可能抛错，必须折叠为 nil 而不是中断请求。 |
+| integer（L22） | value 任意值；number 后要求 `math.floor(v) == v`，否则 nil。 | **必须**：槽位、generation、座位、onlineId 的整数判定；Mapping 37 处、EntryExit 15 处使用。**注意**：本实现不排除 `math.huge`（`math.floor(huge) == huge`），与 Common 的 `integer`（RV_Common.lua L72 经 isFiniteNumber 拒绝非有限值）语义不同，见复用章节。 |
+| call（L28） | target、method 字符串、可变参数；method 非字符串或 target 为 nil 时 false,nil；否则 pcall 执行 `target[method](target, ...)`。返回 pcall 的 ok 与全部结果。 | **必须**：服务端读取 Java 玩家/动物对象属性的唯一保护通道（playerId L49、playerName L64 等全走它）。 |
+| call 中匿名闭包（L31） | 捕获 target/method/args，执行方法调用。 | **实现必需**：Java proxy 方法调用异常不得逃出 call。 |
+| callGlobal（L36） | name 全局名、可变参数；`rawget(_G, name)` 非函数时 false,nil，否则 pcall 调用。 | **必须**：`getWorld`/`getOnlinePlayers`/`sendServerCommand` 等全局 engine API 的保护入口。 |
+| callGlobal 中匿名闭包（L40） | 捕获 fn/args，执行全局函数。 | **实现必需**：同上，异常必须折叠为 pcall 结果。 |
+| safeCall（L43） | target、method、可变参数；把 call 结果折叠为 `ok == true` 布尔。 | **保留理由**：6 个座位/移动标志调用点（L484-L486、L499-L501、L538-L539、L543、L559-L561、L580-L582）只需要「没抛错」，不关心返回值。它与 Common.callSucceeded（要求首返回值不等于 false）语义不同，替换会改变这些调用点的判定，因此不能当作同一 helper 合并。 |
+| playerId（L48） | player；优先 `getOnlineID` 的整数，SP 非服务端 pass 退到 `getPlayerNum`，再退 0；服务端缺失返回 nil。 | **必须**：座位表键与关系记录 onlineId 的唯一来源；服务端 fail-closed 语义（nil）是 EntryExit L142/L151/L359/L652 拒绝请求的依据。 |
+| playerName（L63） | player；`getUsername` 非空字符串或 nil。 | **必须**：map.players 以用户名索引；nil 时 EntryExit L214 直接抛错，是关系表完整性的前提。 |
+| playerDead（L70） | player；`isDead` 严格 true。 | **必须**：进出 RV 的存活门（EntryExit L51、L355、L588、L598）。 |
+| playerPosition（L75） | player；三次 getX/getY/getZ 全成功且可数值化时返回 `{x,y,z}`，否则 nil。 | **必须**：服务端权威坐标来源；EntryExit L385-L387 的 fallback 与 Train.hullDistance L359 都依赖它，客户端坐标永不参与。 |
+| copyPosition（L87） | position；x/y/z 全可数值化时返回新表，否则 nil。 | **必须**：坐标值对象复制，避免把 Railroader 记录或调用方表引用写进存档（EntryExit L194/L206/L215/L254/L299/L404/L441）。 |
+| newTransitionToken（L94） | kind 字符串、record 可选；递增 `ctx.transitionSequence` 并返回 `kind:locoId:generation:os.time():seq` 字符串。副作用：ctx 序列自增。 | **必须**：Boundary 过渡的一次性令牌（EntryExit L306、L625、L673）；序列保证同一 tick 内也不重复。 |
+| copyPose（L104） | position；copyPosition 成功后若 dirX/dirY 可数值化且长度 > 0.0001 则归一化写入，返回新表。 | **必须**：持久化列车姿态必须带单位方向；Train.persistedBesidePosition L329 与 EntryExit L513 依赖归一化后的方向做旁站推导。 |
+| animalType（L117） | animal；`getAnimalType` 的字符串或 nil。 | **实现必需**：isRailroaderLocomotive 的取值步骤；单独成函数使「读类型」与「判类型」分层，便于诊断非 rr_loco 目标。 |
+| isRailroaderLocomotive（L122） | animal；类型等于 `"rr_loco"`。 | **必须**：findTrain L179 用它排除非 Railroader 的动物/车辆，避免把别的 Animal 当列车目标。 |
+| animalId（L126） | animal；`getAnimalID` 值或 nil。 | **实现必需**：trainId 的第二来源，供记录缺 `id` 时构造 identity。 |
+| trainId（L131） | train；优先记录 `id` 字段，否则 `train.animal` 的 animalId；非表返回 nil。 | **必须**：全模块按单一规则提取 locomotive ID；EntryExit L260、L324、L389、L394、L692 都经它，规则若分散会立刻不一致。 |
+| trainList（L142） | 无参数。返回权威列车表与来源标签 `"singleplayer"`/`"server"`/nil。SP 优先 `RR.TrainEntity.active`；否则 `RR.ServerTrain.active`；co-op host（processIsServer）在 server 表空时**显式返回 nil**，不回退本地镜像。 | **必须**：SP/MP 权威来源选择是本文件最关键的语义边界（L137-L141、L156-L162 注释）。若删掉 processIsServer 分支，co-op host 会把本地镜像当权威，座位写入会写错表。 |
+| findTrain（L170） | locoId；在 trainList 中按 tostring 比较 trainId 并要求 isRailroaderLocomotive，返回 train 与 authority。 | **必须**：Mapping L235、EntryExit L72/L374/L426/L503/L589 的唯一列车解析入口。 |
+| authorityForTrain（L187） | train；在 trainList 中做引用相等的反查，返回 authority 或 nil。 | **必须**：座位变更必须先知道该表属于 SP 还是 MP（L469、L494、L554、L577）；引用比较是「同一个表才是同一权威」的唯一可靠判定。 |
+| trainPosition（L198） | train；优先 animal 的 getX/getY/getZ，否则复制 `train.pose`，都不可用返回 nil。 | **必须**：范围判定、出口落点与 snapshot 的坐标来源；EntryExit L73、L236 与 Train.hullDistance L359 使用。 |
+| trainSpeed（L216） | train；依次取 `drive.v`、`train.v`、`train.speed` 首个可数值化值，默认 0。 | **实现必需**：外部实现把速度放在哪个字段并不固定，三级回退集中在此处；trainMoving 是唯一消费者，删掉会把三级探测复制到判定里。 |
+| trainMoving（L225） | train；`math.abs(trainSpeed) > C.RV_STOPPED_SPEED`（缺省 0.05）。 | **必须**：进门/出门的移动门（EntryExit L378、L591、L653）；移动列车禁止非乘客上车。 |
+| trainDirection（L229） | train；依次读记录 dirX/dirY、`train.pose`、animal 的 `getForwardDirection`，缺省朝北，返回单位向量。 | **必须**：座位、旁站与姿态计算的方向基础；三级回退同样是外部实现形状适配（L229-L248）。 |
+| trainPose（L250） | train；trainPosition 成功后附加归一化方向，返回新表。 | **必须**：持久化姿态（EntryExit L344、L512、L703）与 OnTick 位置刷新（Core/RV_RailroaderServer_Tick.lua L52）的唯一来源。 |
+| trainSize（L258） | train；animal `getAnimalSize` 的可数值化值，缺省 0.7。 | **实现必需**：官方 geometry 函数（seatWorld/hullDistance）需要尺寸参数；缺省值避免 animal 不可读时整条路径失败。 |
+| seatPosition（L268） | train、seat 索引（0 为司机位）；优先调用外部 `RR.Body.seatWorld(pose, size, seat)`，失败时用本地固定偏移表（L288-L292）按方向旋转计算。返回坐标或 nil。 | **必须**：出 RV 落座的几何计算；外部函数是官方公式（L266-L267 注释），本地回退保证 Body 模块尚未挂载时仍可用，两者都不能删。 |
+| besidePosition（L303） | train；车体右侧 2 tile 的坐标或 nil。 | **必须**：无空座时的安全落点（EntryExit L667），与 seatPosition 并列构成三种出口落点。 |
+| usableCoordinate（L311） | position；z 必须落在 -32..31，且经 `getWorld():isValidSquare(floor 后坐标)` 为 true。 | **必须**：卸载列车的旁站回退必须先证明目标格合法（persistedBesidePosition L347），否则会把玩家放进非法方块。 |
+| persistedBesidePosition（L327） | record；读 `record.locoPosition`，要求完整方向向量，依次试 6 个候选（左右各 2 tile、四正方向 1 tile）并返回首个 usableCoordinate 通过者，否则 nil。 | **必须**：列车未加载时唯一合法出口路径（EntryExit L619）；它只能用持久化姿态，不伪造座位，是「inactive 列车也能出门」的核心。 |
+| hullDistance（L358） | player、train；优先外部 `RR.Body.hullDistance(pose, size, playerX, playerY)`，失败时退化为中心点距离。 | **必须**：MOUNT_REACH 交互范围判定（EntryExit L246-L250）。回退分支保证 Body 不可用时不会放宽范围（注释 L354-L357）。 |
+| seatForPlayer（L381） | train、onlineId；在 `train.passengers` 中按数字键直取、否则按字符串键比较，返回座位或 nil。 | **必须**：恢复已占座位的依据（EntryExit L433）；键类型在 MP 运行中会漂移，两种比较都必需。 |
+| isDriver（L395） | train、onlineId；`train.driver` 的字符串比较。 | **实现必需**：playerRole L430 的 MP 分支第一步；单独成函数使「司机」这一外部字段判定只有一个位置。 |
+| freePassengerSeat（L399） | train；按 1..C.RV_MAX_PASSENGERS（缺省 5）找第一个未被占用的座位号，否则 nil。 | **必须**：出口自动选座（EntryExit L656、L661）；容量上限来自常量，不硬编码。 |
+| playerRole（L413） | train、onlineId；SP 分支按外部的 `RR.Ride.current == train` 或 `train.rider == true`，再用 `train.seat`/`train.passenger` 区分 driver/passenger；MP 分支用 isDriver/seatForPlayer；都不匹配返回 `"external", nil`。 | **必须**：角色分类决定进门门禁、座位摘除与关系写入；SP 与 MP 走两套外部字段合同（注释 L415-L417），不能只保留一套。 |
+| singleplayerMount（L436） | train、seat；优先 `RR.Ride.mountRecord(train, true, seat)`，要求 `ride.current == train`；否则直接写 `train.rider/seat/passenger`。返回 true。 | **保留理由**：两个分支都写外部状态，且第二个分支只在客户端 Ride 模块未挂载于该 Lua pass 时生效（注释 L443-L444）。删掉回退会让 SP 登车静默失败，保留则可被官方接口出现后替换。 |
+| singleplayerDismount（L451） | train；若 `RR.Ride.current == train` 则 pcall `ride.dismount(true)`；随后强制清 `train.rider/seat/passenger`。返回 true。 | **保留理由**：与 singleplayerMount 对称，故意在官方 dismount 之外再写一遍持久化字段，保证服务端 Lua pass 看不到客户端 Ride 表时状态仍一致（注释 L457-L458）。 |
+| syncSeatAfterPut（L468） | train、player、onlineId、seat、role、authority；SP 直接返回；MP 写 `_seatNames[onlineId]`、清 `_claims[name]` 与占用同座的 claim、司机位清 `_cmdSeq[onlineId]`，再设玩家 BlockMovement/CanShout/IsResting 并 pcall `RR.ServerTrain.markResync(train)`。 | **必须**：直接改写座位表后必须同步外部瞬态数据与客户端，否则 Railroader 的官方视角与实际座位不一致（注释 L465-L467）。这是本文件对**外部私有字段**依赖最集中的函数。 |
+| forgetTrainSeat（L493） | train、player、onlineId、可选 authority；返回被移除的 role/seat。SP 走 singleplayerDismount 并复位玩家标志；MP 按 role 清 `driver`（并把 throttle/brakeInput、`_stopping/_stopHold`、`_starting/_startEnv/_startPlayer`、engine.phase、hornOn、`_cmdSeq` 一并复位）或从 `passengers` 删除；随后清 `_seatNames`、`_claims`，复位玩家标志并 `player:setBed(nil)`。 | **必须**：RV 事务摘座不能走官方 release 命令，必须自己把官方释放分支清过的同一批字段清干净（注释 L507-L512、L540-L542）。这是进门/出口/失败回滚共用的唯一摘座实现（EntryExit L271 转发）。 |
+| forgetTrainSeat 中匿名闭包（L544） | 捕获 player，pcall 执行 `player:setBed(nil)`。 | **实现必需**：清 transient cab shelter 标记；Java 调用可能抛错，不能中断摘座流程。 |
+| putPassenger（L552） | train、player、onlineId、seat；SP 走 singleplayerMount 并置玩家标志；MP 先拒绝同座冲突，再写 `passengers[onlineId] = seat` 并 syncSeatAfterPut。返回布尔。 | **必须**：出口落座与失败恢复（EntryExit L333、L409、L417、L438、L683）都经它；座位冲突检查必须在写入前完成。 |
+| putDriver（L575） | train、player、onlineId；SP 走 singleplayerMount(0)；MP 仅在 `train.driver == nil` 时写入，并清 `_cruise/_cruiseNotch` 后 syncSeatAfterPut。返回布尔。 | **必须**：驾驶位分配（EntryExit L331、L407、L415、L684）；清 `_cruise` 对应官方 board 分支（注释 L587-L588），不清理会让 debug cruise 在下一 tick 重新接管。 |
 
-函数清单共 **113 项**：Mapping 28、EntryExit 23、Train 45、RecordValidation 17。数字包含文件初始化闭包和代码中的匿名闭包；不把 `type(x) == "function"` 之类类型检查误计为定义。
+### RV_RailroaderServer_Mapping.lua
 
-## Mapping：`RV_RailroaderServer_Mapping.lua`
+模块在 [RV_RailroaderServer_Mapping.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_RailroaderServer_Mapping.lua)。它是持久化映射记录（ModData `C.RV_MAP_KEY`）的**唯一读取方与查询门面**：区域/槽位推导、记录校验、按服务端坐标反查、槽位分配、映射 epoch 递增与边界校验缓存失效。文件不注册事件；`Adapter` 上挂 3 个方法（L309-L311），`ctx` 上挂 11 个字段（L298-L308）。文件只读 `ModData.get`（L30）而不创建容器，容器创建属 Core（Core/RV_RailroaderServer.lua L46 `getOrCreate`）。**本文件不读取任何外部 Railroader 字段** —— 列车侧全部经 ctx 调用 Train 的函数。
 
-行号是函数定义或函数值赋值所在行。
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
+|---|---|---|
+| 模块工厂 `return function(ctx)`（L2） | ctx：装配根上下文；L3-L17 捕获 Core/Boundary/Adapter/C/RegionSlots/Z 边界与 Train/Mapping 提供的 helper。副作用：装配 BoundaryValidation（L150）并写 ctx/Adapter（L298-L311）。 | **必须**：本文件是按共享上下文装配的模块工厂，且 BoundaryValidation 的唯一装配点在此。 |
+| invalidateBoundaryValidationCache（L22） | 无参数；清 `validatedMapCache`，若子验证器已创建则调其 `invalidate()`。无返回。 | **必须**：映射变更后必须丢弃旧边界校验结果；由 markMappingChanged L36、Adapter 导出 L311（Core/RV_RailroaderServer_Tick.lua L87-L88）与生成失败 hook（Tick L87-L89）使用。`validatedMapCache` 本身当前只在 L19/L23 出现，是只写死变量，见复用章节。 |
+| mapData（L29） | 无参数；返回 `ModData.get(C.RV_MAP_KEY)`。**无 schema gate、无错误抛出**，键不存在时返回 nil。 | **必须**：映射树的唯一读取口（7 处使用并导出到 ctx L298）。注意它与旧报告描述的「严格拒绝旧容器」不同：当前实现直接透传，nil 由各调用方自行处理。 |
+| markMappingChanged（L33） | boundaryChanged 可选；调 `Adapter.advanceMappingEpoch()`，`boundaryChanged ~= false` 时再 invalidateBoundaryValidationCache。无返回，副作用为 epoch 自增与缓存失效。 | **必须**：映射变更的唯一通知点（EntryExit L350、L648、L708，Tick L68 传 false 以免动位置更新也清边界缓存）；epoch 是 UtilityServer 重发映射快照的触发器。 |
+| rvRegion（L42） | anchor 可选；无 anchor 时用 C.TELEPORT_X/Y 基点，返回覆盖 `COLUMNS × ROWS` 个槽位的**整片 RV identity 区域**，Z 取 C.RV_IDENTITY_MIN_Z..MAX_Z。 | **必须**：区分「整片分配空间」与「单个槽位」的基准；recordAtPlayerCoordinate L228、Tick L29、WallReload L71 都用无参形式做范围粗筛。 |
+| regionForAnchor（L60） | anchor；在 rvRegion 结果上把 maxX/maxY 收窄为单个 RV_REGION_SIZE，返回该槽位区域（保留 Z）。 | **必须**：allocateRVRegion L280 为新槽位返回的空间范围；与 RegionSlots.indexToRegion 不同，它带 Z（见接口章节的 Z 缺失问题）。 |
+| playerPositionInRegion（L67） | player、region；依次保护读取 getZ/getX/getY，Z 用 floor 半开区间、X/Y 用原值半开区间；全部通过返回 `{x,y,z}`，任一失败返回 nil。 | **必须**：不能用请求方坐标做归属授权，因此坐标只能从这里来（recordAtPlayerCoordinate L228）；同时被注入 BoundaryValidation（L155），是该子模块唯一的玩家坐标来源。 |
+| inRegion（L92） | position、region；要求 `region.minZ`/`maxZ`/`minX`/`minY`/`maxX`/`maxY` 全部可数值化（缺任一即 false），再按 Z 半开 + X/Y 半开判定。 | **必须**：已映射记录的槽位归属判定（L231）与 WallReload 的成员捕获（WallReload L75）。当前两个调用点传入的都是 `RegionSlots.indexToRegion` 的 **XY-only** 结果，因此判定恒为 false —— 见接口边界问题，这是本文件最严重的形状不匹配。 |
+| validRegion（L110） | region；要求 minX/minY/minZ/maxZ 为整数、maxX/maxY 恰为 min + RV_REGION_SIZE、minZ/maxZ 恰为 identity Z 常量、且落在 WORLD_MIN_Z..WORLD_MAX_Z+1。 | **当前不是功能必需**：它要求持久化 region 带 Z，是「区域是持久化值对象」时代的校验器。当前没有任何写入映射记录的 region，`ctx.validRegion`（L302）也无活消费者（EntryExit L43 的导入是死导入），属孤儿校验器。保留理由是它编码了「槽位区域必须恰好一格、Z 必须 identity 常量」这一完整形状约束，未来若要持久化区域可直接复用。 |
+| recordRegion（L122） | record；`RegionSlots.indexToRegion(integer(record.slotIndex))`，slotIndex 无效时 nil。 | **必须**：映射记录 → 区域的唯一推导（L231、L263）。返回的是 XY-only 区域，与 inRegion 的 Z 要求不匹配，这是当前缺陷的汇聚点。 |
+| validMappingRecord（L126） | record；要求 table、`generated == true`、`locoId` 非空字符串、`slotIndex` 可整数化、`generation` 可整数化且 ≥ 1。 | **必须**：身份主门。8 处使用（L232 抛错、L250、L262、L286、L520 的 commit 复验，另导出 ctx L303 与作为子依赖注入 BoundaryValidation L157）。 |
+| validRecord（L134） | record；直接返回 validMappingRecord(record)。 | **当前不是功能必需**：零额外语义的薄别名（L134-L136）。5 处引用（L238、L390，导出 L304，注入 L157 经 validRecord）可全部替换为主校验器；保留只是命名便利。 |
+| recordForLoco 函数值赋值（L138） | map、locoId；遍历 `map.locomotives`，用 `tostring(record.locoId) == tostring(locoId)` 匹配，返回 record 与其表键，未命中返回 `nil, nil`。 | **必须**：调用方不能假设表键等于 locoId，字符串规范化必须集中（8 处使用，含 Adapter/ctx 导出 L308 与注入 L156）。前向声明在 L10 是因为它要在 L150 的注入表里被引用。 |
+| onlinePlayersSnapshot 匿名回调（L162） | 无参数；若 `ctx.onlinePlayersSnapshot` 是函数则调用并透传，否则返回空表。 | **必须**：BoundaryValidation 需要在线玩家快照，但不能直接依赖全局 getOnlinePlayers（Sentinel L79-L115 实现）；此闭包是可选的窄注入点，缺省空表保证子模块不会因缺依赖而 nil 调用。 |
+| refreshRoofForPlayer（L172） | player、record、_force（当前未读取）、reason；经 `RailroaderRV.Server` 取 refreshRoofVisuals，pcall 调用并把真实/延迟都折叠为 `false/true, detail`，同时打印诊断。 | **必须**：EntryExit L349（已有 RV 进入）与 L583（生成提交后）共用的屋顶/房间同步入口；设计上 best-effort（注释 L168-L171：失败不得否决已成功的传送，由调用方重试）。`_force` 参数当前未被使用，属未使用形参。 |
+| armRoomOwnershipMonitor（L200） | player、record、reason；取 `RailroaderRV.Server.armCurrentRoomOwnershipMonitor`，pcall 调用；失败返回 `false, C.INVALID_RV_DATA` 或具体原因，成功返回 true。 | **必须**：进入已有 RV 或重连时必须补装客户端 stale-room 监视（生成事务之外的路径，注释 L196-L199）；唯一调用点 EntryExit L303，且在改座位/移动玩家**之前**执行。 |
+| recordAtPlayerCoordinate（L227） | map、player；先用 playerPositionInRegion(player, rvRegion()) 粗筛，再逐条记录用 inRegion 定位；命中且 validMappingRecord 失败时抛 C.INVALID_RV_DATA；命中后按 findTrain/trainPosition 区分 `"active-mapped"`/`"inactive-mapped"`，无命中返回 `"unmapped-rv"`，区域外返回 `"outside-rv"`。 | **必须**：反向归属解析的唯一实现，注释（L221-L226）明确「从乘客坐标出发，绝不问房间/对象/客户端 ID」。它是 resolveCurrentUtilityRV L58、enterPlayer L369、exitPlayer L607 的前置判定，状态字符串是公开语义（4 种取值被三处消费）。 |
+| allocateRVRegion（L245） | locoId 可选；已有记录时复用其 slotIndex 并要求 indexToAnchor 可解析（返回 `true, slotIndex, anchor, region, generation`）；否则遍历现有记录建占用表（拒绝重复槽位），经 `RegionSlots.findFirstFree` 取新槽（返回 `true, slotIndex, anchor, regionForAnchor(anchor)`）；失败返回 `false, 原因`。 | **必须**：RV 空间的唯一分配入口，且是「持久化记录只记槽位」的落实点（注释 L273-L275）。**返回位置需注意**：第 4 位是 region 表、generation 在第 5 位，而消费方 GenerationFlow.lua L354 把第 4 位绑定为 `priorGeneration`，见接口边界问题。 |
+| currentMappingRecord（L283） | rvId、generation；recordForLoco 命中且 validMappingRecord 通过且记录 generation 与参数整数相等时返回 `true, record`，否则 `false, C.INVALID_RV_DATA`。 | **必须**：对外唯一窄身份查询（Adapter L310）。消费方：Common/RV_ServerTeleport.lua L22-L25、RV_Server_RecordValidation.lua L15-L27（内部再包一层 pcall）、另有 2 处经 Adapter 类型检查的调用点。 |
 
-| 函数（行） | 参数含义 | 返回值 / 副作用 | 当前必要性 |
-|---|---|---|---|
-| 模块初始化 `return function`（2） | `ctx`：服务端组合根注入的常量、适配器与 helper。 | 无显式返回；配置 schema gate，构造 boundary validator，并把实现写到 `ctx` / `Adapter`。 | 必需：本文件是按共享上下文装配的模块工厂。 |
-| `serverTransactionMutexStatus`（19） | 任意参数原样转发。 | 返回 `ctx.serverTransactionMutexStatus` 的全部结果。 | 条件必需：给下面队列清理提供事务忙闲查询的局部入口；单纯转发可直接捕获 ctx 函数，但保留可读性尚可。 |
-| `invalidateBoundaryValidationCache`（44） | 无。 | 清空 `validatedMapCache`；若 validator 已创建则调用 `invalidate`，否则标记 Adapter warm-pending。 | 必需：映射 epoch 变化后避免继续使用旧边界校验结果。 |
-| `mapData`（53） | 无。 | 返回 ModData 中当前 schema 的 RV 映射表；不可用、格式不符或 schema gate 未就绪时抛错。仅空的新容器会初始化 `schemaVersion/locomotives/players`。 | 必需：所有映射查询和槽位分配共用的当前 schema 入口；严格拒绝非空旧容器是开发期存档门要求。 |
-| `markMappingChanged`（102） | `boundaryChanged`：显式 `false` 时跳过边界 epoch/cache 失效。 | 递增 Adapter mapping epoch；通常也递增 boundary epoch 并清缓存。 | 必需：通知服务端缓存映射更新；不广播整个 map 是该模块注释说明的设计。 |
-| `rvRegion`（114） | `anchor`：可选锚点表；缺省时用常量基点。 | 返回完整 RV identity 区域矩形，宽高由 region size × slot 行列数构成，Z 使用 identity min/max。 | 必需：区分单个 slot 与整个 RV 分配空间，也用于玩家范围筛选。 |
-| `regionForAnchor`（132） | `anchor`：slot 锚点。 | 返回该锚点对应的单 slot 区域（在完整区域上把 maxX/maxY 收窄一个 region size）。 | 必需：持久化某列车 RV 的空间范围。 |
-| `playerPositionInRegion`（139） | `player`：玩家对象；`region`：边界表。 | 成功返回 `{x,y,z}`，否则 nil；以服务端玩家坐标检查半开区间。 | 必需：不能用请求方给的坐标做归属授权。 |
-| `inRegion`（164） | `position`：坐标表；`region`：边界表。 | 返回合法坐标是否落在半开区间内。 | 必需：与 player 取值版本配套，用于每条已映射记录的区域判定。 |
-| `validRegion`（182） | `region`：待验证的持久化 region。 | 返回尺寸、整数坐标、固定 Z 和世界 Z 限制是否全部满足。 | 必需：拒绝陈旧或伪造的区域边界。 |
-| `validMapRelation`（194） | `relation`：玩家映射关系；`requireLocoId`：是否要求非空列车 ID。 | 返回当前 schema gate 及关系字段类型/范围是否合法。 | 必需：声明了稳定关系 schema 的共享校验规则。 |
-| `validMappingRecord`（202） | `record`：列车映射记录。 | 返回记录是否属于当前 gate、generated RV identity、generation 与 bitmap 版本。 | 必需：身份主门；分配、坐标反查、commit 都依赖。 |
-| `validRecord`（211） | `record`：映射记录。 | 直接返回 `validMappingRecord(record)`。 | 可合并：当前无额外语义；可删薄别名并统一调用主校验器。 |
-| `recordForLoco`（215，赋值函数） | `map`：映射根；`locoId`：目标列车 ID。 | 返回匹配的 record 和其表键；缺失时两个 nil。 | 必需：调用方不应假设 map table key 等于 ID；字符串规范化集中在此处。 |
-| `onlinePlayersSnapshot`（239，匿名回调） | 无显式参数；捕获 `ctx`。 | 调用 ctx 快照提供者，缺失时返回空表；作为依赖注入给 BoundaryValidation。 | 必需：提供边界校验所需在线玩家快照而不让其直接依赖全局。 |
-| `roofRefreshRoomKey`（245） | `record`：映射记录。 | 返回 `rvId:generation:bitmapVersion` 键；身份不完整时 nil。 | 必需：用 generation 身份隔离屋顶刷新缓存。 |
-| `isWallRemovalSource`（257） | `source`：墙体移除来源字符串。 | 返回来源是否是三个被抑制/跟进处理的移除事件之一。 | 必需：集中限定对哪些破坏事件作延迟处理。 |
-| `markSuppressedRoomTransition`（263） | `pending`：pending transition 记录。 | 对有效墙体来源和 room key 记录 token、短期过期 tick；无返回值。 | 必需：避免墙拆除触发的房间转换和 RV relocation 重复生效。 |
-| `consumeSuppressedRoomTransition`（276） | `roomKey`：待消费房间键。 | 删除过期/匹配 suppression 并返回布尔值；匹配时记录诊断日志。 | 必需：抑制标记必须一次性消费。 |
-| `pruneRoofRefreshDedupeState`（295） | `now`：可选 tick。 | 清掉过期 seen/suppression/follow-up 项；mutex 状态不可确认时保守保留 generation 队列。 | 必需：限制事件状态增长，并保护 generation 中事件。 |
-| `pruneRoofRefreshDedupeState` 内闭包（302，匿名） | 无；捕获 mutex 查询。 | 安全执行 mutex 查询，`pcall` 返回调用成功和 active 状态。 | 条件必需：将可能抛错的锁查询转为 fail-closed 分类；可由稳定的安全调用 helper 替代。 |
-| `wallRemovalEventKey`（354） | `object`：移除的世界对象；`roomKey`：RV 房间身份。 | 返回对象索引事件键及坐标别名；缺索引时用坐标 fallback，坐标无效时 nil。 | 必需：不保留 userdata 也能跨移除回调去重。 |
-| `refreshRoofForPlayer`（396） | `player`、`record`、`force`：是否跳过缓存、`reason`：日志原因。 | 返回成功与详情；调用 `RV.Server.refreshRoofVisuals`，成功后写缓存/玩家状态并记录日志。 | 必需：现有 RV 进入与 OnTick 重试共用 roof refresh 入口。 |
-| `pruneRoofRefreshRooms`（437） | `now`：可选 tick。 | 删除格式无效、未来时间或超过 TTL 的缓存项。 | 必需：使 room cache 有界且可在当前 identity 变化后失效。 |
-| `armRoomOwnershipMonitor`（457） | `player`、`record`、`reason`。 | 返回布尔值及失败原因；调用服务端 targeted monitor API。 | 必需：已有 RV 进入/重连也要补装生成事务以外的 ownership guard。 |
-| `recordAtPlayerCoordinate`（484） | `map`：已读映射；`player`：服务端玩家对象。 | 返回 record、key、live train、状态；状态为 active/inactive mapped、outside-rv 或 unmapped-rv。无写入。 | 必需：以服务端坐标反向定位 RV，不从世界房间或客户端 ID 推断归属。 |
-| `allocateRVRegion`（502） | `locoId`：可选列车 ID，已存在则复用原槽。 | 返回成功、slot、anchor、region、可选 generation；失败返回原因。读当前 map/manifest 并防止重复槽分配。 | 必需：generation 前为 RV 选唯一空间并保留当前 manifest 占用槽。 |
-| `currentMappingRecord`（579） | `rvId`、`generation`、`bitmapVersion`：待查身份三元组。 | 返回成功与 record；任何 schema 或 identity 不匹配返回统一无效数据错误。 | 必需：提供给 Adapter 与 RecordValidation 的窄身份查询接口。 |
+### RV_RailroaderServer_EntryExit.lua
 
-### Mapping 访问与边界
+模块在 [RV_RailroaderServer_EntryExit.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_RailroaderServer_EntryExit.lua)。它承载玩家进出 RV 的服务端事务：权限/位置/座位判定 → Boundary 过渡 → 移动玩家 → 写 map 关系 → 刷新屋顶；首次进入额外走生成队列，生成提交时以「克隆 + 一次性交换顶层 locomotives/players 表」的方式原子发布，失败时逐项回滚。文件在 `Adapter` 上挂 2 个方法（L50、L111），在 `ctx` 上挂 7 个字段（L713-L719，被 Sentinel 与 Tick 消费）。
 
-- `mapData` 直接读写 `ModData` 的 map 容器及 schema 字段（53–99）；`allocateRVRegion` 另从 `ModData.get(C.MANIFEST_KEY)` 读取单条生成事务记录（531–570）。这些是映射/空间分配拥有的持久化合同，空容器初始化有显式限制。
-- 本文件直接访问 Adapter 的 `_mappingEpoch`、`_boundaryValidationEpoch`、`_boundaryValidationWarmPending`、`_ticks`（103–108、271、296、420）。这些以下划线命名的状态是模块间共享的隐藏缓存/时钟状态。将 epoch 递增和取当前 tick 包装成 Adapter 方法会减少字段耦合；收益中等，因为本文件本身是 adapter 的组成实现且需要同步失效缓存。
-- BoundaryValidation 通过构造器注入窄函数和一个在线快照闭包（227–244）。这是明确的内部接口；优于让它反查 Mapping 局部函数。
-- `ctx` 输出 `mapData`、校验、区域、刷新、坐标反查及分配函数（596–616）；Adapter 公开 `allocateRVRegion/currentMappingRecord`（617–618）。这是本子目录内其余模块实际依赖的合同。
+注意其装配位置：Train(L112) → Mapping(L113) → **EntryExit(L114)** → WallReload(L115) → Sentinel(L116) → Tick(L117)。因此 L10 的 `recordForLoco` 转发**可以**直接捕获（Mapping 已先运行），而 L11 的 `transactionBlocks` 转发**必须**延迟读取（`ctx.wallReloadTransactionBlocks` 由 Sentinel L191 在 EntryExit 之后才写入）。
 
-## EntryExit：`RV_RailroaderServer_EntryExit.lua`
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
+|---|---|---|
+| 模块工厂 `return function(ctx)`（L2） | ctx；L3-L48 捕获依赖（含 4 个导入在文件内未被使用，见复用章节）。副作用：写 Adapter L50/L111 与 ctx L713-L719。 | **必须**：进出 RV 与生成三钩子的装配点；Tick L13-L15 与 Sentinel L19-L22 都从它发布的 ctx 字段取值。 |
+| recordForLoco 转发（L10） | 可变参数原样转发 `ctx.recordForLoco`。 | **保留理由**：纯转发，无独立语义。装配顺序上（Mapping L113 先于 EntryExit L114）可以直接捕获 ctx 成员，因此它当前不是功能必需；保留使本文件对「谁提供映射查询」保持名称稳定，代价是 3 处间接层。 |
+| transactionBlocks 转发（L11） | 可变参数原样转发 `ctx.wallReloadTransactionBlocks`。 | **必须**：这是真正需要延迟读取的转发 —— `ctx.wallReloadTransactionBlocks` 由 Sentinel L191 写入，而 Sentinel 在 L116 才装配；若改成在 L11 直接捕获，值为 nil，进门/出门/生成提交的事务门（L276、L363、L614）会全部失效。 |
+| Adapter.resolveCurrentUtilityRV（L50） | player；死亡或缺失返回 `false,"permission-denied"`。正常路径：读 map.players[name] 关系与 recordAtPlayerCoordinate 结果；区域外但记录声明在线且 `inside == false` 时，额外用 recordForLoco + 乘客关系 + 在线 ID 交叉核对并经 sourceWithinRange 判定为 `"locomotive-bound"`；随后要求 relation/rider/onlineId/locoId 全一致，非 locomotive 路径再用 pcall(Adapter.validateCurrentBoundaryPlayer) 复验 `boundaryRecord == record` 且 `inside == true`。成功返回含 identity/record/relation/train/status/phase="READY"/authorized 的上下文表。 | **必须**：utility（水/电）命令的授权入口，也是「utility 上下文只对这一个 mapping 有效」的落实点（注释 L90-L94）。返回结构被 Core/RV_UtilityServer.lua L54-L66 严格消费（`authorized`、`identity.rvId`、`identity.generation`、`phase == "READY"`、`record.locoId`、`record.generation`）。 |
+| Adapter.currentUtilityRecord（L111） | identity（含 rvId/generation）；recordForLoco 命中且 validMappingRecord 通过且 generation 整数相等时返回 `true, record`，否则 `false, C.INVALID_RV_DATA`。 | **必须**：tick 期重解析当前映射记录（Core/RV_UtilityServer.lua L153-L160 与 L169，是 Power/Water 周期性任务的记录来源）。它与 Adapter.currentMappingRecord（Mapping L283）规则相同但独立实现 —— 见复用章节。 |
+| settleUtilityTransition（L121） | record、player、phase；取 `RailroaderRV.Server.settleRVUtilityLoad` 并以 `{rvId, generation}` + player pcall 调用；任何失败打印诊断并返回 false。 | **必须**：座位/位置变更前必须让 utility 负载状态收敛（L343、L633、L691），否则旧 RV 的用电用水结算会挂在新上下文上。失败只记录不阻断，是「utility 不是进出前提」这一策略的体现。 |
+| sendResult（L140） | player、ok、reason；playerId 为 nil 时直接返回；否则 callGlobal sendServerCommand 发 COMMAND_RV_TELEPORT 结果包 `{ok, onlineId, reason}`。无返回。 | **必须**：拒绝路径的统一客户端应答；唯一外部调用点是 Sentinel L75（命令被拒时）。 |
+| movePlayer（L148） | player、position、action、relation 可选；构造 `{ok, action, onlineId, x,y,z}` 作为**本地过渡提示**（relation 有效时附 locoId/role/seat 与经验证的 rvId/generation），callGlobal 发送；单机无网络通道时允许继续，服务器上未送达则返回 false；`action == "enter"` 且 relation 是表时委托 `ServerTeleport.teleportToRVSpawn(player, relation, position)`，否则 `ServerTeleport.teleportToPosition(player, position)`。返回布尔。 | **必须**：唯一同时含「发送过渡提示」与「执行权威传送」的步骤（注释 L156-L158：提示不是可信输入，服务端座位快照仍为权威）。4 个调用点覆盖进门（L323）、生成失败回退（L443）、卸载列车出门（L634）、正常出门（L692）。 |
+| markPlayerOutside（L184） | map、record、key（**未被使用**）、player、position、seat、role；用户名不可得时直接返回；写 `map.players[name]` 的 locoId/onlineId/inside=false/role/seat/exitPosition，record 存在时同步 `record.players[name]`（record.players 非表则抛 INVALID_RV_DATA）。无返回。 | **必须**：出口成功后持久化「在外」关系（L644、L704），是重连后仍能识别归属的唯一依据。`key` 形参未被读取，属未使用形参（两处调用都传了 key）。 |
+| markPlayerInside（L211） | map、record、key（**未被使用**）、player、sourcePosition、sourceRole、sourceSeat；用户名缺失抛错、坐标不可用抛 INVALID_RV_DATA、record.players 非表抛错；同时在 `map.players[name]` 与 `record.players[name]` 写入 inside=true 的完整关系（含 enterPosition）。无返回。 | **必须**：进入与生成提交共用的可逆关系写入（L321、L524）；两份写入（顶层与记录内）是「关系冗余 + 交叉校验」设计的基础（resolveCurrentUtilityRV L82-L87 正靠这两份互相印证）。`key` 形参未被使用。 |
+| otherGeneratedRecord（L235） | map、locoId；返回第一个 validRecord 且 locoId 不同的记录，无则 nil。 | **必须**：防止同一 RV 被另一个车头占用的门禁（L394-L396）；判定必须遍历全表而非只查当前 loco。 |
+| sourceWithinRange 函数值赋值（L245） | player、train；`hullDistance <= reach`，reach 优先取外部 `RR.Ride.MOUNT_REACH`（可数值化时），否则 C.RV_MOUNT_REACH。 | **必须**：外部玩家上车的距离门（L382、L74）；优先采用官方 MOUNT_REACH 使 RV 交互范围与 Railroader 一致（注释与 Train L354-L357 同源）。这是本文件唯一直接读外部 `RR.Ride.MOUNT_REACH` 的位置（L247-L248）。 |
+| requestData（L253） | train、player、role、seat、sourcePosition；entryPosition/locoPosition 任一不可得抛 INVALID_RV_DATA；返回 `{locoId, sourceRole, sourceSeat, playerUsername, playerOnlineId, entryPosition, locoPosition}`。 | **必须**：把进门阶段的服务端可信状态交给生成事务（注释 L263-L265：不在进门事件里捕获固定目的地，槽位由生成事务分配）。 |
+| removeSeatForEntry（L270） | train、player、onlineId；直接返回 `forgetTrainSeat(...)`。 | **保留理由**：纯转发（L270-L272），2 处调用（L314、L401）。它把「进门必须摘座」的意图命名出来，属于可读性成本而非功能必需的间接层。 |
+| enterExisting（L274） | player、train、record、key、sourceRole、sourceSeat、sourcePosition、map；依次：事务门（L276）→ Boundary 服务可用性（L280-L283）→ `RailroaderRV.Server.Construction.ensureGeneratorForEntry(player, record)`（L292-L293，要求返回严格 true）→ 读 record.rvPosition → armRoomOwnershipMonitor → newTransitionToken + beginTransition → 摘座 → 备份旧 relation 与 record.players → markPlayerInside → movePlayer；移动失败则还原 relation/record.players、按角色还座、Boundary.clearPlayer 并返回 `"RV entry teleport failed"`；成功则 completeTransition、settleUtilityTransition、刷新 record.locoPosition、refreshRoofForPlayer 并 markMappingChanged。返回 true 或 false,原因。 | **必须**：已生成 RV 的重复进入路径与首次生成路径的事务语义完全不同（注释 L345-L348：屋顶刷新失败不得否决已成功传送），必须独立实现与独立回滚。 |
+| enterPlayer（L354） | player、locoId；死亡/身份缺失/事务忙拒绝；recordAtPlayerCoordinate 得 lookupState，`"unmapped-rv"` 抛 INVALID_RV_DATA；已在 RV 内返回 `"player is already inside an RV"`；目标列车必须是活动 Railroader 车头（findTrain）；移动列车拒绝司机与外部玩家；外部玩家需 sourceWithinRange；来源坐标取玩家位置或座位位置；已有记录走 enterExisting；同一车头被别的记录占用则拒绝；否则摘座 → requestData → 要求 `RailroaderRV.Server.requestRailroaderGeneration` 可用并排队，任何失败都按角色还座并返回原因。 | **必须**：服务端进门主流程与客户端输入的信任边界（只接受 locoId，位置/角色/座位全部由服务端推导）。它同时是生成队列的唯一入口。 |
+| restoreAfterGenerationFailure（L424） | player、data；data 非表或无 player 时直接返回；列车存在且 onlineId 可解析时按 `data.removedRole` 恢复司机位（要求 `train.driver == nil`）或乘客位（要求该座未被他人占用，遍历 passengers 比对）；把玩家移到 `copyPosition(data.sourcePosition)`；最后 Boundary.clearPlayer。无返回。 | **必须**：生成失败补偿（Tick L86-L91 安装为 failure hook）。两个 precheck（driver 为空、座位未被占）是幂等性的关键 —— 若座位在失败期间被他人占用，不能强抢。 |
+| commitGeneration（L453） | player、data、prepared；校验 generation/slotIndex 可整数化、`RegionSlots.indexToAnchor(slotIndex)` 的 x/y/z 与 `prepared.anchor` 完全一致（L459-L466）；拒绝槽位被他人占用；`Boundary.boundaryFor({locoId, generation, slotIndex})` 必须返回表；克隆 record 与 map 两个顶层表构造 candidateMap；写**持久化字段集**（L504-L513，见表后契约）；要求 rvPosition 与带方向的 locoPosition 齐备；pcall(validMappingRecord) 复验；markPlayerInside 写关系；`Boundary.builderActionLedger.invalidateForGeneration` 必须返回 true；要求 `RailroaderRV.Server.initializeUtilityRecord` 可用；**一次性交换** `map.locomotives/map.players` 后 markMappingChanged（失败则换回并重放 markMappingChanged）；再调 initializeUtilityRecord（失败换回全部并返回原因）；最后 best-effort settleRVUtilityLoad 与 refreshRoofForPlayer。返回 true 或 false,原因。 | **必须**：生成世界结果与持久化身份的原子提交钩子（Tick L85 安装为 commit hook）。顺序性注释（L538-L543、L550-L556、L580-L582）说明「Mapping 先于 Utility」「不在此处释放 transition lease」两条硬约束，是整个模块最不可拆的语义。 |
+| validateGeneration（L587） | player、data；玩家死亡/缺失返回 false,"player is dead"；findTrain(data.locoId) 失败返回 `"locomotive disappeared during generation"`；`data.sourceRole ~= "passenger"` 且列车在移动时拒绝。返回 true 或 false,原因。 | **必须**：生成耗时期间的再授权钩子（Tick L84 安装）。只有乘客允许在生成期间随车移动（注释语义：乘客已被摘座，司机必须停车）。 |
+| exitPlayer（L597） | player；死亡拒绝；Boundary 服务必须可用；recordAtPlayerCoordinate 得 record/key/train/lookupState；`"outside-rv"` 返回 `"player is outside the RV area"`，无记录返回 INVALID_RV_DATA，事务忙拒绝。**列车不在线**分支：要求 `persistedBesidePosition(record)` 可得且 lookupState 恰为 `"inactive-mapped"`，arm transition → settle → movePlayer 到旁站 → markPlayerOutside → clearPlayer → markMappingChanged。**列车在线**分支：按是否移动决定 passenger/司机/旁站三种落点，arm transition → putPassenger/putDriver → 失败回滚 transition → settle → movePlayer → 失败则摘座回滚 → 刷新 record.locoPosition → markPlayerOutside → clearPlayer → markMappingChanged。 | **必须**：出口主流程；两个分支的失败语义不同（卸载列车绝不能伪造座位，注释 L621-L623），且三种落点选择顺序（空乘客位优先、其次驾驶位、最后旁站）是出口可用性的核心。 |
 
-| 函数（行） | 参数含义 | 返回值 / 副作用 | 当前必要性 |
-|---|---|---|---|
-| 模块初始化（2） | `ctx`：前序模块提供的服务和共享状态。 | 无显式返回；捕获依赖并在结尾将 entry/exit hooks 写回 ctx。 | 必需：共享服务装配点。 |
-| `recordForLoco`（10，转发） | 任意参数。 | 转发 `ctx.recordForLoco` 的所有结果。 | 可合并：薄 wrapper 可直接使用 ctx 成员；当前仅用于局部命名便利。 |
-| `roofRefreshTransactionBlocks`（11，转发） | 任意参数。 | 转发事务阻塞结果。 | 条件必需：调用方清晰度有帮助；无独立逻辑。 |
-| `currentGeometryGate`（12，转发） | 任意参数。 | 转发当前 geometry gate 结果。 | 条件必需：调用方清晰度有帮助；无独立逻辑。 |
-| `Adapter.resolveCurrentUtilityRV`（51） | `player`：服务端玩家。 | 返回授权结果和 identity/record/relation/train/status 上下文；验证玩家位置、关系、在线身份、边界和当前 schema。 | 必需：水/utility 这类操作从可信服务端位置解析 RV 的入口。 |
-| `Adapter.validateCurrentUtilityIdentity`（128） | `identity`：服务端异步任务保存的 RV identity。 | 返回有效与 `{record,train}`；逐阶段拒绝并日志化，不写映射。 | 必需：tick settlement 再验证异步身份，不能使用旧 snapshot。 |
-| `reject`（129，嵌套局部函数） | `stage`：失败阶段字符串。 | 打印诊断并返回统一无效数据错误。 | 可合并：只在上层使用一次；内联也可，保留阶段标签便于定位。 |
-| `Adapter.currentUtilityRecord`（171） | `identity`：异步身份三元组。 | 再调 validate，返回当前 record 或统一错误。 | 条件必需：更窄的返回合同；若无外部调用者可并入 validator。 |
-| `settleUtilityTransition`（180） | `record`、`player`、`phase`：当前 RV、触发玩家、诊断阶段。 | 返回是否被 Server 接受；以 identity 调用 settlement。 | 必需：进出转换前等待 utility load 状态收敛。 |
-| `sendResult`（200） | `player`、`ok`、`reason`。 | 无显式返回；发 RV teleport 结果 server command。 | 必需：为调用者提供统一客户端结果应答。 |
-| `movePlayer`（208） | `player`、可信目标 `position`、`action`、可选 `relation`。 | 返回 teleport 是否完成；先发送服务器提示，SP 允许无网络 channel，entry 用 spawn teleport，其他动作用目标位置 teleport。 | 必需：把服务端 teleport 与客户端表现提示合并在一个事务步骤。 |
-| `markPlayerOutside`（248） | `map`、`record`、`key`（当前未使用）、`player`、可信落点、seat、role。 | 无显式返回；写 map.players 和可选 record.players 的 outside relation 与 exit position。 | 必需：出口成功后持久化关系；建议移除未用 `key` 参数以免误示表键参与逻辑。 |
-| `markPlayerInside`（277） | `map`、`record`、`key`（当前未使用）、`player`、原位置、原 role/seat。 | 无显式返回；写顶层与 RV record 双份 inside relation，字段格式异常时抛错。 | 必需：进入/生成提交都需可逆的玩家归属状态；`key` 可移除。 |
-| `otherGeneratedRecord`（303） | `map`、`locoId`：当前目标列车。 | 返回第一个已生成且绑定另一 locomotive 的记录，否则 nil。 | 必需：防止一个新的列车偷用已分配给另一列车的 RV。 |
-| `sourceWithinRange`（313，赋值函数） | `player`、`train`。 | 返回 hull distance 是否不大于 Railroader reach/配置 reach。 | 必需：外部玩家上车入口范围验证；供 utility 定位和 entry 授权复用。 |
-| `requestData`（321） | `train`、`player`、来源 role/seat、服务端来源坐标。 | 返回 generation 请求数据，含 locomotive ID、server entry position、完整 locomotive pose。 | 必需：将 entry 阶段可信状态传给生成事务。 |
-| `removeSeatForEntry`（338） | `train`、`player`、`onlineId`。 | 返回 `forgetTrainSeat` 得到的 role 与 seat。 | 可合并：纯转发；名称强调用途但无独立效果。 |
-| `enterExisting`（342） | 玩家、列车、现有 record/key、来源 role/seat/position、map。 | 返回成功或原因；依次检查事务/geometry/generator，布置 guard，拆座、记录关系、移动，失败则还原关系/座位。 | 必需：已有 RV 进入与首次生成路径的事务不同，需独立回滚。 |
-| `enterPlayer`（423） | `player`、请求目标 `locoId`。 | 返回是否接纳；验证玩家、事务、坐标、列车、角色、速度和交互范围；复用已有 RV 或清座后排队生成。 | 必需：服务端进入主流程，拒绝客户端提供的位置/角色。 |
-| `restoreAfterGenerationFailure`（493） | `player`、generation `data`。 | 无显式返回；尽量恢复原驾驶/乘客座、移回可信来源位置并清 boundary transition。 | 必需：generation 失败补偿。 |
-| `commitGeneration`（523） | `player`、原请求 `data`、事务生成的 `prepared` 结果。 | 返回成功/原因；验证槽位/anchor/region，构造 candidate map 与两份玩家关系，注册 Boundary，交换 map 表，初始化 utility，失败恢复原表。 | 必需：generation 世界结果与持久化身份的原子提交钩子。 |
-| `validateGeneration`（672） | `player`、generation `data`。 | 返回布尔值及拒绝原因；确认玩家仍可用、列车仍存在、非乘客列车未移动。 | 必需：生成耗时期间的再次授权/目标状态校验。 |
-| `exitPlayer`（682） | `player`。 | 返回成功或原因；从服务端坐标解析 RV，验证几何；按列车是否在线/是否移动选择旁站或驾驶/乘客座，teleport、更新关系并清 transition。 | 必需：服务端出口主流程及失败补偿。 |
+**持久化 mapping 记录字段集契约（L504-L513）**：candidateRecord 只写 `generated = true`、`locoId`、`generation`、`slotIndex`、`rvPosition`、`locoPosition`，玩家关系由 L524 的 markPlayerInside 写 `players`；**anchor、managed region、bounds、shellEdges 一概不写**，读取时一律由 `slotIndex` 经 `RegionSlots.indexToAnchor`/`indexToRegion` 与编译期模板重新推导（L504-L506 的注释即契约声明）。本轮全树核查确认**不存在**任何对映射记录的 `anchor =`/`bounds =`/`region =`/`shellEdges =` 赋值（同名写法只出现在 `prepared`（GenerationFlow.lua L405）、layout（RV_Layout.lua L312）、bounds 字段（RV_ServerSchema.lua L40）与 manifest 视图（RV_Server_RecordValidation.lua L51）中）。因此任何对映射记录直接读 `record.anchor` 的代码都是越界读取 —— 本仓确实存在一处，见「直接读写其他模块的数据」第 4 条。
 
-### EntryExit 访问与边界
+### RV_Server_RecordValidation.lua
 
-- `mapData` 返回原始持久化 map；EntryExit 直接读写 `map.players`、`record.players` 和 `map.locomotives`，包括拷贝 candidate table 后整体交换两个顶层表（62–93、248–300、484–491、523–669、690–800）。这使事务提交可同步替换完整视图并在失败时恢复原表；把每个字段改为独立接口的收益低于维护 candidate clone/swap 的复杂度。建议长期只给关系读写加窄接口，不要隐藏事务提交所需的 map snapshot。
-- `Boundary.beginTransition/completeTransition/clearPlayer/registerGeneration` 与 `RailroaderRV.Server.*` 是显式方法接口；本文件同时检查方法存在和返回状态（352–380、612–669、686–800）。
-- `RV.Server`、`RailroaderRV.Server` 在不同段落读取同一全局的嵌套引用（108–114、151–168、180–197、474–482、618–669）。可统一成一个局部获取函数以减少空值检查重复，但直接访问公开 Server 方法本身不属于隐藏状态。
-- 可见的直接函数耦合主要来自 `ctx` 注入：EntryExit 捕获 Train 和 Mapping helper（14–49）。依赖显式且职责窄；`recordForLoco`、`removeSeatForEntry` 等薄 wrapper 若没有调试或替换价值可清理。
+模块在 [RV_Server_RecordValidation.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_Server_RecordValidation.lua)。它把「持久化映射记录 + slotIndex + 编译期模板」重建成只读 manifest 视图，并为通用服务端发布生成 hook 安装点、屋顶刷新与房间监视入口。注意它的装配者不是 Railroader 适配层，而是通用服务端：Core/RV_Server.lua L148 在 RoomOwnership(L141)/WorldObjects(L142)/GenerationBuild(L143)/PlayerValidation(L144)/GenerationFlow(L147) 之后才 require 本文件，因此 `ctx.safeErrorText`(GenerationBuild L178)、`ctx.playerIdentity`(PlayerValidation L321)、`ctx.queueGeneration`(GenerationFlow L468)、`ctx.armTargetedClientRoomOwnershipGuard`(RoomOwnership L561) 均已就绪。manifest 视图刻意**不携带任何 mutation 状态**（注释 L29-L34：已发布记录必然是已提交的，读者不应把伪造的 `state` 当成真实生成状态）。
 
-## Train：`RV_RailroaderServer_Train.lua`
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
+|---|---|---|
+| 模块工厂 `return function(ctx)`（L2） | ctx（通用服务端 ctx）；L3-L13 捕获 Constants/Boundary/ServerSchema/RV/ServerUtil 与 4 个延迟/直接依赖。副作用：向 `RV.Server` 注册 8 个方法（L74、L78、L82、L86、L98、L102、L130、L159）。 | **必须**：`RV.Server` 上这 8 个方法是本模块对外的全部合同，装配点唯一。 |
+| safeErrorText 转发（L10） | 可变参数原样转发 `ctx.safeErrorText`。 | **保留理由**：延迟读取转发。装配顺序上 GenerationBuild(L143) 先于本文件(L148)，`ctx.safeErrorText` 已就绪，所以直接捕获也可行；保留它使本文件不依赖具体装配次序，代价是一层间接。 |
+| currentMappingRecord（L15） | rvId、generation；要求 `RailroaderRV.RailroaderServer.currentMappingRecord` 是函数，pcall 调用并要求 `accepted == true` 且 record 是表，否则 `false, Constants.INVALID_RV_DATA`。 | **必须**：把 Adapter 的**隐藏实现访问**折叠成严格查询（与 Mapping L283 同名但不同层）；manifestForIdentity L64 是唯一调用点。 |
+| manifestViewForRecord（L35） | record；slotIndex/generation 必须可整数化，`RegionSlots.indexToAnchor(slotIndex)` 与 `Boundary.boundaryFor(record)` 必须可用；pcall 内用 `Layout.make(anchor.x, anchor.y, anchor.z)` 造 layout，返回 `{generation, slotIndex, anchor, bounds = ServerSchema.boundsFor(layout), rvId = tostring(record.locoId), boundary}`。 | **必须**：本文件的核心 —— 「记录只存 slotIndex，anchor/bounds/shellEdges 全部按 slotIndex + 模板重建」（注释 L29-L34）。这是持久化字段集契约的读取侧实现。 |
+| manifestViewForRecord 中 pcall 匿名闭包（L46） | 捕获 record/anchor/slotIndex/generation/boundary；执行 Layout.make 与 boundsFor 并组装 manifest。 | **实现必需**：模板编译与 bounds 展开可能抛错（缺模板/非法 anchor），必须折叠为一次原子只读失败而不是让错误逃出查询接口。 |
+| manifestForIdentity（L63） | rvId、generation；先 currentMappingRecord，再 manifestViewForRecord，任一失败返回 `false, 原因`。返回 `true, view`。 | **必须**：两个公开 manifest 入口的共同实现；注释 L66-L68 明确「已发布映射记录就是全部权威，几何事实全部由模板推导，本 map 之外没有任何持久化」。 |
+| RV.Server.setRailroaderValidationHook（L74） | callback；`ctx.railroaderValidationHook = type(callback) == "function" and callback or nil`。 | **必须**：生成前复验钩子的安装点，由 Core/RV_RailroaderServer_Tick.lua L84 调用（EntryExit.validateGeneration）。 |
+| RV.Server.setRailroaderCommitHook（L78） | callback；同上写 `ctx.railroaderCommitHook`。 | **必须**：提交钩子安装点，Tick L85 调用（EntryExit.commitGeneration）。 |
+| RV.Server.setRailroaderFailureHook（L82） | callback；同上写 `ctx.railroaderFailureHook`。 | **必须**：失败补偿钩子安装点，Tick L86-L91 调用（先 invalidateBoundaryValidationCache 再 EntryExit.restoreAfterGenerationFailure）。 |
+| RV.Server.requestRailroaderGeneration（L86） | player、railroaderData；data 非表或三个 hook 任缺返回 `false, "...unavailable"`；否则 `queueGeneration(player, nil, railroaderData)`。 | **必须**：进入生成事务的服务端唯一入口，EntryExit L406-L413 是唯一调用点。三 hook 齐备检查是「钩子未安装时不得开始生成」的门。 |
+| RV.Server.currentRVManifestForRelocation（L98） | rvId、generation；返回 manifestForIdentity 的结果。 | **必须**：普通进出/utility 的当前身份查询。消费方：WallReloadProtection L107/L111、RV_Server_WorldObjects.lua L708/L714（generator 存在性检查用它做门）、本文件 L138（refreshRoofVisuals）。 |
+| RV.Server.currentRVManifestForBoundary（L102） | rvId、generation；返回 manifestForIdentity 的结果 —— **与 currentRVManifestForRelocation 完全同实现**。 | **必须（名字保留）**：消费方是 BoundaryValidation L131-L136（边界校验）与 WallReloadProtection L464-L468（墙重载请求），它们按名字表达语义。旧报告的 `allowRunning` 参数与 RUNNING 事务特例已不存在，两个入口当前无任何行为差异，属「保留的两个名字、一份实现」。 |
+| currentRoofRefreshContext（L109） | player、expected（含 rvId/generation）；`Boundary.boundaryForPlayer(player)` 必须给出 boundary 与 relation，且 boundary.rvId/generation 必须与 expected 完全相等；再由 playerIdentity 取身份。返回 `{boundary, relation, identity}`。 | **必须**：屋顶刷新前的 readiness 上下文。注释 L106-L108 说明目的：预期身份只能来自服务端当前 manifest，绝不来自客户端 payload 或存储副本。 |
+| RV.Server.refreshRoofVisuals（L130） | player、record；pcall require RV_RoofRefresh 并要求 `.run` 是函数；record 必须是表；用 `record.locoId/generation` 取 currentRVManifestForRelocation；再取 currentRoofRefreshContext(player, {rvId = manifest.rvId, generation = manifest.generation}) 做身份比对；最后 pcall(RoofRefresh.run, player, manifest.bounds)。返回 `result == true, reason`。 | **必须**：Mapping L177 的唯一被调方（经 refreshRoofForPlayer）。身份二次比对是它不能被内联进 Mapping 的原因：Mapping 只知道记录，不知道玩家的实时 boundary/relation。 |
+| RV.Server.armCurrentRoomOwnershipMonitor（L159） | player、record；record 必须是表、`generated == true`、locoId 非空字符串、`players` 是表；generation 必须有限整数 ≥1；`Boundary.boundaryFor(record)` 必须给出 `managed` 与 `shellEdges` 两张表（L172-L176 的壳边/墙形状校验）；playerIdentity 必须通过；若 `ctx.GenerationTransaction.current()` 的 rvId/generation 与记录一致则拒绝（`"RV generation is still in progress"`）；再取 currentRVManifestForBoundary 并比对 rvId/generation；最后 pcall(armTargetedClientRoomOwnershipGuard, player, generation, manifest.bounds, locoId)。返回 true 或 false,原因。 | **必须**：Mapping L205 的唯一被调方（经 armRoomOwnershipMonitor），也是 WallReload 的重装路径（RV_RailroaderServer_WallReload.lua L39-L42）。它是「已生成 RV 进入/重连也要补装监视」这一需求的全部实现，含 generation 进行中的互斥判定。 |
 
-| 函数（行） | 参数含义 | 返回值 / 副作用 | 当前必要性 |
-|---|---|---|---|
-| 模块初始化（2） | `ctx`：服务器状态与配置。 | 无显式返回；构建本地函数并把通用/列车 helper 写入 ctx（595–622）。 | 必需：其余模块通过该表使用 Train adapter。 |
-| `number`（7） | `value`：外部数值或可强转 userdata。 | 不额外检查 NaN/无穷；返回 number 或 nil。 | 必需：统一兼容 Java/Lua 数值类型。 |
-| 闭包 `value + 0`（15，匿名） | 捕获 `value`。 | 尝试 coercion，结果受 pcall 保护。 | 条件必需：只用于特殊 userdata 强转。 |
-| `integer`（22） | 任意待转换值。 | 返回整数或 nil。 | 必需：ID、seat 与坐标边界需要整数检查。 |
-| `call`（28） | `target`、方法名、任意方法参数。 | 返回 pcall 的成功标记与被调用返回值；方法以 target 作 self。 | 必需：安全调用 PZ/Java 对象方法并兼容缺失对象。 |
-| 闭包 `target[method]`（31，匿名） | 捕获目标、方法名、参数数组。 | 执行方法调用并转发返回。 | 必需：`call` 的受保护方法调用体。 |
-| `callGlobal`（36） | 全局函数名及参数。 | 返回 pcall 状态和全局函数返回值。 | 必需：安全调用 `getWorld/sendServerCommand` 等全局 API。 |
-| 闭包 `fn(...)`（40，匿名） | 捕获全局函数与参数数组。 | 执行全局函数，转发返回值。 | 必需：`callGlobal` 受保护调用体。 |
-| `safeCall`（43） | `target`、方法名、任意参数。 | 仅返回方法是否成功执行的布尔值。 | 必需：运动/休息等不需读取返回值的 player 设置。 |
-| `playerId`（48） | `player`。 | 返回 online ID；SP 非服务器 pass 缺失时尝试 playerNum，最终本地默认 0；服务器缺失时 nil。 | 必需：关系记录和座位键的身份来源。 |
-| `playerName`（63） | `player`。 | 返回非空 username 或 nil。 | 必需：映射以名称索引关系表。 |
-| `playerDead`（70） | `player`。 | 返回是否被安全读取为 dead=true。 | 必需：entry/exit 权限门。 |
-| `playerPosition`（75） | `player`。 | 返回服务端 `{x,y,z}` 或 nil。 | 必需：来源坐标和 hull range 计算。 |
-| `copyPosition`（87） | position 表。 | 验证/复制有限数值含义的 x/y/z；错误返回 nil。 | 必需：不共享传入坐标表且不保留杂项字段。 |
-| `newTransitionToken`（94） | `kind`：entry/exit 类型；`record`：可选当前 mapping。 | 返回含 type、loco、generation、时间和递增序列的 token；递增 ctx 序列。 | 必需：Boundary transition 一次性身份。 |
-| `copyPose`（104） | locomotive pose 表。 | 返回复制的位置；合法时归一化方向向量。 | 必需：persisted fallback 需要方向但不接受非单位向量。 |
-| `animalType`（117） | animal 对象。 | 返回调用 getAnimalType 的字符串值或 nil。 | 必需：限制目标只接受 Railroader locomotive。 |
-| `isRailroaderLocomotive`（122） | animal 对象。 | 返回是否为 rr_loco。 | 必需：不把其他 Animal/train 当目标。 |
-| `animalId`（126） | animal 对象。 | 返回 getAnimalID 值或 nil。 | 必需：从 train record 缺少 id 时构造 identity。 |
-| `trainId`（131） | `train`：Railroader train record。 | 返回 record.id 或其 animal ID；格式不符 nil。 | 必需：上层只依赖单一 locomotive ID 提取规则。 |
-| `trainList`（142） | 无。 | 返回当前权威 train table 与 `server/singleplayer` 来源标签；host 不回退空的 server 列表。 | 必需：SP/MP 权威数据源选择边界。 |
-| `findTrain`（170） | `locoId`：待查列车 ID。 | 返回匹配的 train 及权威标签；只接受 rr_loco。 | 必需：Mapping/EntryExit 按 ID 解析 live train。 |
-| `authorityForTrain`（187） | train record。 | 返回该表当前属于哪个权威列表，无法确认时 nil。 | 必需：决定 seat mutate 应遵守 SP 还是 MP schema。 |
-| `trainPosition`（198） | train record。 | 优先返回 live animal 坐标，否则复制记录 pose；均不可用时 nil。 | 必需：范围、exit 和 snapshot 坐标。 |
-| `trainSpeed`（216） | train record。 | 返回 drive.v、v、speed 首个可转换值；默认 0。 | 必需：入口/出口是否允许的移动判定基础。 |
-| `trainMoving`（225） | train record。 | 返回绝对速度是否大于 stopped threshold。 | 必需：调用点用此拒绝移动车辆 driver/安排 passenger。 |
-| `trainDirection`（229） | train record。 | 返回单位方向 x/y；依次读 record、pose、animal forward direction，缺省朝 north。 | 必需：座位、旁站及 pose 计算方向。 |
-| `trainPose`（250） | train record。 | 返回含位置和单位方向的表或 nil。 | 必需：事务快照 locomotive pose。 |
-| `trainSize`（258） | train record。 | 返回 animal size；缺省 0.7。 | 必需：官方 hull/seat geometry 函数的几何参数。 |
-| `seatPosition`（268） | train record、seat index（0 为驾驶位）。 | 返回目标座位坐标或 nil；优先官方 `RR.Body.seatWorld`，失败时用本地固定偏移公式。 | 必需：出 RV 后服务端安排正确列车座位位置。 |
-| `besidePosition`（303） | train record。 | 返回 locomotive 朝向右侧 2 tile 的旁站坐标或 nil。 | 必需：无可用座位时让玩家安全落到车旁。 |
-| `usableCoordinate`（311） | position 表。 | 返回坐标整数化后的 world square 是否存在；不改世界。 | 必需：卸载 locomotive 的 persisted beside fallback 需有效落点。 |
-| `persistedBesidePosition`（327） | RV mapping `record`。 | 仅用当前 record 的完整 locomotive pose，尝试六个相邻位置并返回第一个合法位置。 | 必需：locomotive 未加载时仍允许合法退出而不捏造座位。 |
-| `hullDistance`（358） | player、train。 | 返回 official Body hull distance 或中心距离 fallback；位置缺失 nil。 | 必需：外部上车的距离判断保持官方交互半径。 |
-| `seatForPlayer`（381） | train、`onlineId`。 | 返回 passengers 表匹配的 seat，支持数字/字符串 key；无匹配 nil。 | 必需：恢复已有 passenger role。 |
-| `isDriver`（395） | train、`onlineId`。 | 返回 driver 字段是否与玩家 ID 字符串相等。 | 必需：role 分类。 |
-| `freePassengerSeat`（399） | train。 | 返回第一个空闲乘客 seat 或 nil。 | 必需：出口分配 passenger seat。 |
-| `playerRole`（413） | train、`onlineId`。 | 返回 driver/passenger/external 及 seat；SP 与 MP 走不同状态合同。 | 必需：角色/座位决定移动门和映射内容。 |
-| `singleplayerMount`（436） | SP train record、seat。 | 优先调用 Ride.mountRecord；未挂载成功时写 rider/seat/passenger 字段；返回布尔值。 | 条件必需：B42 SP Ride 表可能在不同 Lua pass 不可见。 |
-| `singleplayerDismount`（451） | SP train record。 | 可见 Ride 时调用 dismount；随后清空 rider/seat/passenger 状态；返回 true。 | 条件必需：SP 离座后持久化状态需同步。 |
-| `syncSeatAfterPut`（468） | train、player、onlineId、seat、role、authority。 | MP 更新 seatNames/claims/cmd sequence，改变 player flags 并标记服务器 train resync；SP 不处理。 | 必需：直接 seat 写入后同步 Railroader 客户端和瞬时数据。 |
-| `forgetTrainSeat`（493） | train、player、onlineId、可选 authority。 | 返回被移除 role/seat；MP 清驾驶或乘客字段、claims、玩家状态并 markResync；SP dismount。 | 必需：RV 内玩家不能继续受列车座位 pin/输入控制。 |
-| `player:setBed` 闭包（544，匿名） | 捕获 `player`。 | 尝试清空玩家 bed 标记，外层 pcall 忽略异常。 | 条件必需：注释说明对应官方 release 的 transient cab shelter 清理；仅在可见 player 时使用。 |
-| `putPassenger`（552） | train、player、onlineId、目标 seat。 | 返回成功；SP 走 mount，MP 检查空位后写 passenger 表并同步。 | 必需：出口 passenger slot assignment 及失败恢复。 |
-| `putDriver`（575） | train、player、onlineId。 | 返回成功；SP mount seat 0，MP 仅在 driver 空时写 driver 并同步。 | 必需：出口驾驶位分配及失败恢复。 |
+## 模块间复用、提取和职责拆分
 
-### Train 访问与边界
+### 已有共用与可提取机会
 
-- 本文件是外部 Railroader 私有列车记录的适配层。它直接读 `RR.ServerTrain.active`、`RR.TrainEntity.active`、`RR.Ride.current` 及 train record 的 driver/passengers/rider/seat/engine 等字段（131–168、381–434）。入口把这些访问封装在 `trainList/findTrain/playerRole`，其他 RV 模块不必重复了解权威源选择。
-- 它直接读写带下划线的 Railroader 状态 `_seatNames`、`_claims`、`_cmdSeq`、`_stopping`、`_stopHold`、`_starting`、`_startEnv`、`_startPlayer`、`_cruise`、`_cruiseNotch`，也调用 `RR.ServerTrain.markResync`（468–491、493–549、575–591）。本文件注释称这些 board/release helper 在目标 Railroader 版本为 private；本分析未查阅外部源文件，因此这个可见代码内的事实是“实现依赖 private 字段”，其 API 状态仍待外部来源独立复核。
-- 如果官方侧提供稳定的 board/release 服务接口，改用它的收益高，因为当前 RV 代码需要镜像多个易变状态字段；若官方没有该接口，则另建本地抽象层只会封装而不会消除脆弱性，收益有限。现有 Train adapter 已将脆弱字段集中在一个模块，建议保持这一隔离并在官方接口出现后替换内部实现。
-- `RR.Body.seatWorld/hullDistance`、`RR.ServerTrain.markResync`、`RR.Ride.mountRecord/dismount` 是显式函数调用点；`ctx` 将稳定的 player/position/seat helper 作为内部 API 导出（595–622）。局部 `number/integer/call/callGlobal` 是四文件间可复用的通用候选，当前集中在此处且由其它模块接收，不应另复制。
+- **`number`/`integer` 已由 Train 单点提供，不要在别处再写一份**：Mapping L11-L12 与 EntryExit L13-L14 全部经 ctx 取 Train 的实现，本目录内没有第二份实现。全树核查显示真正重复的是 **Common/RV_Common.lua**（`toNumber` L57、`integer` L72）与 **shared 的 `RV_Constants.C.finiteNumber`/`finiteInteger`**（RV_Constants.lua L13-L37）。语义差异是实质性的：`Train.integer`（L22-L26）不排除非有限值（`math.floor(math.huge) == math.huge` → 返回 +inf），而 `Common.integer` 与 `C.finiteInteger` 都会拒绝。判断：**可以对齐，但不建议把整个 helper 家族搬到 Common** —— RVMapping 子树（Train/Mapping/EntryExit）当前完全不 require Common，全部经 ctx 取值；改成 Common 会新增一条 server→Common 依赖并让 Adapter 的装配根多一层 require。真正值得做的是给 `Train.integer` 补有限性判定，使它与另两份实现规则一致。
+- **`call`/`callGlobal`/`safeCall` 与 Common 的对应函数是「同规则不同严格度」的两套实现**：`Train.call`（L28-L34）对应 `Common.invoke`（RV_Common.lua L7），`Train.callGlobal`（L36-L41）对应 `Common.callGlobal`（L37），`Train.safeCall`（L43-L46）对应 `Common.callSucceeded`。关键差异：`Common.callSucceeded` 要求首返回值**不等于 false**，而 `Train.safeCall` 只看 pcall 是否成功。6 个 `safeCall` 调用点（Train L484-L486、L499-L501、L538-L539、L543、L559-L561、L580-L582）全都是「设置玩家标志、不关心返回值」的情形，因此**保留 safeCall 的弱契约是必要的**，把它替换为 callSucceeded 会引入 6 处行为变化。判断：三对函数属于「同一意图、两种返回语义」，合并前必须先统一语义，当前不建议合并。
+- **`copyPosition`/`copyPose` 是本目录独有且应保持独有**：Common 侧已无 `copyPoint`（旧报告提到的导出在当前源码中不存在），全树没有第二份坐标复制。`copyPose`（L104-L115）额外承担「方向向量归一化」，是持久化姿态契约的一部分，不应下移到通用层。
+- **`usableCoordinate` 与 ServerSchema.validWorldCoordinate 不能合并**：`Train.usableCoordinate`（L311-L322）返回布尔、把 z 夹在 -32..31、用于探测候选落点；`Common/RV_ServerSchema.validWorldCoordinate`（RV_ServerSchema.lua L81）失败即抛带角色标签的错误、z 范围来自 Constants、用于构建前门禁。一个是「探测」，一个是「断言」，返回契约相反。
+- **`playerPositionInRegion`（Mapping L67）与 `inRegion`（Mapping L92）不应合并**：输入契约不同（玩家对象 vs 坐标表），且当前两者对 Z 的要求不同（前者读 region.minZ/maxZ 失败即 nil，后者失败即 false）。旧报告已给出同样判断，本次复核成立。
+- **薄别名与转发层共 4 处，可按需清理**：`Mapping.validRecord`（L134，零额外语义）、`EntryExit.removeSeatForEntry`（L270，纯转发）、`EntryExit.recordForLoco`（L10，装配顺序允许直接捕获）、`RecordValidation.safeErrorText`（L10，装配顺序允许直接捕获）。四者都不是功能必需。**但 `EntryExit.transactionBlocks`（L11）必须保留** —— 它读取的 `ctx.wallReloadTransactionBlocks` 由 Sentinel 在 EntryExit 之后（L116 vs L114）写入，直接捕获会得到 nil，导致事务门失效。这一正一反两条证据说明本目录的「转发函数」不能按外观统一清理。
+- **两个同名身份查询存在重复实现**：`Mapping.currentMappingRecord`（L283-L291）与 `EntryExit.Adapter.currentUtilityRecord`（L111-L119）实现完全同构（recordForLoco + validMappingRecord + generation 整数相等 → `true, record`）。差异只在入口：前者读 `mapData()`，后者读同一个 `mapData()`（L112）。**可提取**：让 `currentUtilityRecord` 委托 `Adapter.currentMappingRecord`，净收益是消除一处规则漂移风险；成本为零（同文件族、同 ctx）。这是本目录最干净的一处提取机会。
+- **两处「已生成但要挑别的记录」的遍历可以共用判定**：`EntryExit.otherGeneratedRecord`（L235-L243）与 `Mapping.allocateRVRegion` 内的占用扫描（L261-L272）都在遍历 `map.locomotives` 并要求 `validRecord`/`validMappingRecord`。差异是前者找「别人的记录」、后者建槽位占用表，语义不同（占用扫描还要拒绝重复槽位并建 `occupied` 数组）。判断：**不建议合并**，提取出的公共函数只能覆盖循环头，收益低于阅读成本。
+- **未使用/死状态**（源码事实，供清理参考，不影响功能）：`Mapping.l19` 声明的 `validatedMapCache` 只在 L23 被写为 nil，没有任何读取者；`Mapping.l3` 与 `EntryExit.l3` 的 `require("RailroaderRV/Core/RV_Server_Core")` 在各自文件内均无 `Core.` 使用点；EntryExit 的 `safeCall`（L17）、`rvRegion`（L42）、`validRegion`（L43）三个导入在文件内零使用；`Mapping.refreshRoofForPlayer` 的 `_force` 形参与 `markPlayerOutside`/`markPlayerInside` 的 `key` 形参从未被读取；`ctx.validRegion`（Mapping L302）没有任何活消费者。
+- **`trainSize` 的缺省 0.7（L263）是硬编码几何常量**，而 `freePassengerSeat` 用 `C.RV_MAX_PASSENGERS`（L402）、`trainMoving` 用 `C.RV_STOPPED_SPEED`（L226）、`sourceWithinRange` 用 `C.RV_MOUNT_REACH`（L249）都走常量。判断：这是**不一致但不是缺陷**，0.7 是外部 animal size 不可读时的保守宽度；若要统一，应作为常量导出而不是就地改数。
 
-## RecordValidation：`RV_Server_RecordValidation.lua`
+### 是否进一步拆分
 
-| 函数（行） | 参数含义 | 返回值 / 副作用 | 当前必要性 |
-|---|---|---|---|
-| 模块初始化（2） | `ctx`：Server/Boundary/Schema/roof 服务依赖。 | 无显式返回；配置 record geometry gate 并为 `RV.Server` 注册服务。 | 必需：注册 server-side validation API。 |
-| `safeErrorText`（12，转发） | 任意参数。 | 转发 `ctx.safeErrorText` 全部结果。 | 条件必需：统一错误文本边界；可直接用 ctx，无独立逻辑。 |
-| `requireCurrentManifest`（13，转发） | 任意参数。 | 转发当前 manifest 验证。 | 必需性较低：仅被本文件的 snapshot helper 使用；若不扩展，可局部直接捕获 ctx。 |
-| `currentMappingRecord`（21） | `rvId`、`generation`、`bitmapVersion`。 | 返回成功与当前 record；Adapter 缺失、拒绝或异常统一映射为 INVALID_RV_DATA。 | 必需：将对 Adapter hidden implementation 的访问封装为严格查询。 |
-| `manifestViewForRecord`（35） | record：当前映射记录。 | 返回成功与从 record 当前 anchor/managed boundary 重建的 READY manifest 视图；失败统一拒绝。 | 必需：让映射记录与 manifest schema 以同一几何合同比较。 |
-| pcall snapshot closure（40，匿名） | 无显式参数；捕获 `record`、模块常量与 schema helper。 | 构造当前 schema snapshot，计算 layout/bounds 并调用 strict manifest validator；返回 snapshot 或被 pcall 捕获的错误。 | 必需：将可能抛错的构造/验证作为原子只读步骤。 |
-| `manifestForIdentity`（82） | identity 三元组；`allowRunning`：是否允许匹配的 active RUNNING generation。 | 返回通过身份和几何校验的 manifest view；只读持久化 manifest/mapping，不自动修复。 | 必需：统一普通 relocation 和 boundary guard 的当前 identity gate。 |
-| `RV.Server.setRailroaderValidationHook`（125） | callback：generation validation hook 或其他值。 | 在 ctx 保存合法 function，其他类型写 nil。 | 必需：供生成管线安装可替换验证 hook。 |
-| `RV.Server.setRailroaderCommitHook`（129） | callback：generation commit hook。 | 在 ctx 保存 function 或 nil。 | 必需：安装 EntryExit commit hook。 |
-| `RV.Server.setRailroaderFailureHook`（133） | callback：generation failure hook。 | 在 ctx 保存 function 或 nil。 | 必需：安装失败恢复 hook。 |
-| `RV.Server.requestRailroaderGeneration`（137） | player、`railroaderData`：服务端生成请求 snapshot。 | 返回 queueGeneration 结果；缺数据或任一 hook 缺失则拒绝。 | 必需：暴露进入生成事务的服务端入口。 |
-| `RV.Server.currentRVManifestForRelocation`（151） | identity 三元组。 | 返回 `manifestForIdentity(..., false)`，禁止 RUNNING 特例。 | 必需：普通进出/utility 只接受 ready current identity。 |
-| `RV.Server.currentRVManifestForBoundary`（160） | identity 三元组。 | 返回 `manifestForIdentity(..., true)`，仅特许匹配 active RUNNING transaction。 | 必需：generation 过程中 Boundary guard 仍能验证当前事务。 |
-| `currentRVRecordGeometryConsistent`（165） | record、manifest。 | 返回布尔值；比较 schema gate、RV/gen/bitmap、boundary identity 与 managed 六字段。 | 必需：把 current mapping 与 manifest 的持久化几何绑定。 |
-| `RV.Server.validateCurrentRVRecord`（211） | record。 | 返回成功与 manifest；先解析当前 relocation manifest，再比对几何。 | 必需：EntryExit 对当前记录的窄 read-only 验证接口。 |
-| `RV.Server.refreshRoofVisuals`（234） | player、record。 | 返回成功与 reason；验证当前 manifest 和玩家 roof context 后调用 RoofRefresh.run，可能更新房间/屋顶世界状态。 | 必需：封装屋顶可见刷新及当前身份验证；Mapping 调用此服务而不重复实现。 |
-| `RV.Server.armCurrentRoomOwnershipMonitor`（268） | player、record。 | 返回成功或错误；严格核对 mapping/boundary/manifest/READY 和玩家 identity 后发送 targeted guard。 | 必需：已有 RV 进入/重连的 ownership monitor 服务端入口。 |
+- **EntryExit 的「生成提交/失败恢复」簇（L424-L595）是最值得评估的拆分候选，判断：技术上成立，但优先级低于当前缺陷**。证据与成本核算（本次自行复核，结论与审计线索略有差异）：
+  - 簇由 3 个函数组成并已作为生成 hook 发布在 ctx 上：`restoreAfterGenerationFailure`（L424）→ `ctx.restoreAfterGenerationFailure`（L716）、`commitGeneration`（L453）→ L717、`validateGeneration`（L587）→ L718；安装方是 Core/RV_RailroaderServer_Tick.lua L84-L91，捕获方是同一文件 L13-L15（Tick 在 L117 装配，晚于 EntryExit L114，捕获成立）。因此**抽出后 ctx 公开面完全不变**，这一点审计线索成立。
+  - 对外部符号的依赖清单（逐行核对）：`mapData`/`markMappingChanged`/`recordForLoco`/`refreshRoofForPlayer`（Mapping 已导出 ctx L298/L299/L308/L305）、`integer`/`number`/`copyPosition`/`copyPose`/`findTrain`/`trainPose`/`playerId`/`playerDead`/`trainMoving`/`seatForPlayer`/`putDriver`/`putPassenger`（Train 已导出 ctx L596/L595/L604/L606/L608/L611/L600/L602/L610/L617/L621/L622）、`RegionSlots`/`Boundary`/`C`（L4/L7/L9 的直接 require/ctx）、`RailroaderRV.Server`（L534）。
+  - **需要提升的私有 helper 是 2 个而不是 1 个**：审计说「只需提升 `movePlayer`（L148）」，这正确但不完整 —— `commitGeneration` L524 还调用 `markPlayerInside`（L211）。好消息是 `markPlayerInside` 的**唯一调用点就在簇内**（L524，全树无其他引用），因此它可以随簇一起迁移，迁移后仍只需提升 `movePlayer` 一个。这是本次复核对审计结论的修正：**若 `markPlayerInside` 随簇迁移则零新增公开接口；若要求它留在 EntryExit 复用，则需提升 2 个**。
+  - 边界与成本：新文件的 `require(...)(ctx)` 必须插在 Core/RV_RailroaderServer.lua 的 EntryExit（L114）之后、Tick（L117）之前（它读 `ctx.movePlayer` 与 Mapping/Train 的导出）；EntryExit 会从 720 行降到约 520 行。风险是这段代码含本仓最敏感的顺序约束（map 表一次性交换、Utility 初始化的失败回滚、不提前释放 transition lease，L538-L556、L580-L582），移动会把这些约束从「同一个文件内相邻」变成「跨文件」。
+  - 判断：**可以拆，收益是让最危险的提交/回滚序列成为独立审查单元；但在当前存在功能阻断缺陷的前提下，拆分不是本轮该做的事**。若簇还要继续增长（例如新增第二种生成事务或第三方 hook），再拆的收益会明显上升。
+- **Train（623 行）不建议按行数拆**：40 个局部函数中，L198-L379 是「姿态/几何计算」，L142-L196 与 L381-L592 是「权威源选择 + 座位状态读写」。看似可分，但（a）几何函数（`trainDirection`/`trainSize`/`trainPosition`）被座位状态函数复用（`seatPosition` L268-L271、`syncSeatAfterPut` 无、`hullDistance` L359），拆开后必须把 `trainPosition`/`trainDirection`/`trainSize` 提为第二个文件的注入依赖，接口面净增；（b）**本文件存在的意义就是把外部 Railroader 实现形状集中在一个文件**，拆成两个文件会把「外部依赖」这一事实分散到两处，直接违背它当前的隔离价值。判断：**不拆**；若未来外部实现提供稳定的 board/release 接口，正确的动作是替换 L468-L550 的内部镜像实现，而不是拆文件。
+- **Mapping（312 行）不需要拆**：19 个函数里 L150-L167 是 BoundaryValidation 的依赖装配，其余是纯查询/推导。唯一可议的是把 L150-L167 的子 ctx 组装独立成「BoundaryValidation adapter」，但当前规模下这只是把 18 行搬走，反而让 `recordForLoco`/`validRecord`/`playerPositionInRegion`/`mapData`/`rvRegion` 的来源更难追踪。判断：**不拆**。
+- **RecordValidation（216 行）不需要拆**：15 个函数全部围绕「record → manifest 视图」与「基于该视图的两个副作用入口」，主题单一。`currentRoofRefreshContext`（L109）+`refreshRoofVisuals`（L130）与 `armCurrentRoomOwnershipMonitor`（L159）虽然是两个不同的世界副作用，但共享同一套 identity/manifest 前置校验，拆开会让这套校验复制两份。
 
-### RecordValidation 访问与边界
+## 对外接口、跨模块数据访问与隐藏状态
 
-- `manifestForIdentity` 从 `ctx.pendingGeneration` 直接读取 generation 状态（93–102）。这是 Server transaction 的隐藏状态字段。可让 ctx 提供 `isPendingGeneration(identity)`，让字段拥有者保留存储形态；本文件只需判断其身份匹配。收益中等，当前字段读取简短且 `ctx` 本身是组合根合同。
-- `RV.Server` 方法是本文件明确发布、其他本目录模块使用的接口；EntryExit 调用 `currentRVManifestForBoundary/currentRVRecordGeometryConsistent/validateCurrentRVRecord`，Mapping 调用 roof/monitor 服务。模块间以 API 方法交换身份结果，未发现调用方直接改写 RecordValidation 局部变量。
-- `record.boundary.managed` 和 manifest.boundary.managed 为当前持久化 schema 的直接字段访问（35–75、171–203、268–321）。这是 schema 比对本身的必要数据合同；由于本目录有 strict validator，不建议再包一层只转发同一字段的 getter。
+### 公开合同
 
-## 跨模块复用、重复职责和接口判断
+- **Train → ctx（28 字段，L595-L622）**：number、integer、call、callGlobal、safeCall、playerId、playerName、playerDead、playerPosition、copyPosition、newTransitionToken、copyPose、trainId、findTrain、trainPosition、trainMoving、trainPose、seatPosition、besidePosition、usableCoordinate、persistedBesidePosition、hullDistance、seatForPlayer、freePassengerSeat、playerRole、forgetTrainSeat、putPassenger、putDriver。消费方：EntryExit（L13-L39，25 个字段）、Mapping（L11-L17，6 个字段）、WallReloadProtection（经 ctx 取 playerPositionInRegion 等）。**不导出**：trainList、authorityForTrain、trainSpeed、trainDirection、trainSize、animalType、animalId、isRailroaderLocomotive、isDriver、singleplayerMount、singleplayerDismount、syncSeatAfterPut —— 即「权威源选择」与「SP/MP 座位机制的内部细节」被刻意关在文件内，外部只看到角色/座位/姿态结果。
+- **Mapping → ctx（11 字段，L298-L308）+ Adapter（3 字段，L309-L311）**：ctx 侧 mapData、markMappingChanged、rvRegion、inRegion、validRegion、validMappingRecord、validRecord、refreshRoofForPlayer、armRoomOwnershipMonitor、recordAtPlayerCoordinate、recordForLoco；Adapter 侧 allocateRVRegion、currentMappingRecord、invalidateBoundaryValidationCache。消费方：EntryExit（L40-L48，除 validRegion/inRegion 外全部）、Core/RV_RailroaderServer_Tick.lua（L9-L12、L29、L33、L68、L87）、WallReloadProtection（L28、L71）、Common/RV_ServerTeleport.lua（L22）、Construction/RV_Server_GenerationFlow.lua（L16）、RV_Server_RecordValidation.lua（L18-L21）。
+- **EntryExit → ctx（7 字段，L713-L719）+ Adapter（2 字段，L50、L111）**：ctx 侧 sendResult、movePlayer、enterPlayer、restoreAfterGenerationFailure、commitGeneration、validateGeneration、exitPlayer。消费方精确：Sentinel L19-L22（sendResult 用于 L75 应答，enterPlayer/exitPlayer 用于 L66/L69，**movePlayer 在 Sentinel 内被捕获但从未调用**），Tick L13-L15（三个生成 hook，L84-L91 安装）。Adapter 侧 resolveCurrentUtilityRV、currentUtilityRecord 由 Core/RV_UtilityServer.lua L51-L54、L156 与 Sentinel L120 消费，并经 Core/RV_Server_Commands.lua L417-L419 转出为 `RV.Server.resolveCurrentUtilityRV`。
+- **RecordValidation → RV.Server（8 方法）**：setRailroaderValidationHook(L74)、setRailroaderCommitHook(L78)、setRailroaderFailureHook(L82)、requestRailroaderGeneration(L86)、currentRVManifestForRelocation(L98)、currentRVManifestForBoundary(L102)、refreshRoofVisuals(L130)、armCurrentRoomOwnershipMonitor(L159)。消费方：Tick L79-L85（三个 setter）、EntryExit L406-L413（requestRailroaderGeneration）、Mapping L174-L177（refreshRoofVisuals）、Mapping L202-L205（armCurrentRoomOwnershipMonitor）、RV_Server_WorldObjects.lua L708/L714 与 WallReloadProtection L107/L111/L464-L468（两个 manifest 入口）、BoundaryValidation L131-L136（currentRVManifestForBoundary）。
+- **模块级隐藏状态**：本目录只有两处真正的模块级可变闭包状态 —— `Mapping` 的 `validatedMapCache`/`boundaryValidation`（L19-L20，前者已死）与 `Train` 无状态。`EntryExit`/`RecordValidation` 无模块级可变状态（`ctx.transitionSequence` 由 Train L95 递增，属 ctx 合同而非文件隐藏状态）。
 
-### 可复用函数/合同
+### 直接读写其他模块的数据
 
-1. `Train.number/integer/call/callGlobal/copyPosition` 经 ctx 输出并由 Mapping、EntryExit 使用（Train 7–46、87–92、595–604；Mapping 20–27；EntryExit 14–40）。这是当前目录内明确的通用层，应继续保持唯一实现。
-2. Mapping 的 `mapData/recordForLoco/validMappingRecord/currentMappingRecord` 经 ctx/Adapter 对 EntryExit 和 RecordValidation 提供唯一 map/schema 查询（Mapping 53–99、202–225、579–619；EntryExit 41–49；RecordValidation 21–33）。接口粒度足以供查询；持久化关系写入仍由事务编排模块负责。
-3. RecordValidation 的 manifest identity/geometry gate 与 roof/room 服务经 `RV.Server` 暴露；EntryExit 与 Mapping 依赖它们，而无需自行拼装 manifest schema（RecordValidation 82–123、165–229、234–330；EntryExit 108–168、474–482；Mapping 396–475）。
-4. `validRecord`（Mapping 211–213）、EntryExit 的 `removeSeatForEntry`（338–340）、Mapping/EntryExit 的若干 ctx 转发函数均只是别名。它们没有形成独立通用实现；不值得抽成公共工具，清理时可直接引用主函数。
-5. 检查到的四个文件没有两份相同的非平凡算法。`playerPositionInRegion` 与 `inRegion` 分别负责从玩家对象取坐标、测试已有坐标，输入合同不同；不应为表面相似合并。Mapping 与 RecordValidation 都处理 roof refresh，但前者管调度、缓存和重试，后者做 manifest gate 与 world refresh；职责互补。
+1. **本模块对 Railroader 之外的模块几乎没有「读内部字段」行为** —— 所有跨模块数据访问都经 ctx 函数或 `RV.Server`/`RailroaderRV.RailroaderServer` 方法。少数例外是设计上必须的全局桥：
+   - `EntryExit` L122-L123、L284-L285、L405、L534 用 `rawget(_G,"RailroaderRV")` 取 `RailroaderRV.Server`；`Mapping` L173、L201 同样。这是为了避免 RVMapping 反向依赖 Core，代价是失败时只能返回 false/固定原因。
+   - `Mapping` L30 **只读** `ModData.get(C.RV_MAP_KEY)`，从不创建容器；容器的创建与 schema 初始化在 Core/RV_RailroaderServer.lua L46-L56（`getOrCreate`）。因此 `mapData()` 在 `OnInitGlobalModData` 之前可能返回 nil，而 EntryExit L57 `map.players` 会直接索引 nil。**这是源码事实；是否可达取决于 run 顺序，属条件性推断，未运行验证**。
+2. **映射记录是 Value Object，字段直读是消费公开数据而不是访问隐藏状态**：EntryExit L299 读 `record.rvPosition`；Train L329 读 `record.locoPosition`；Tick L54-L57 读并写 `record.locoPosition`；EntryExit L57、L81、L187、L318、L486-L487、L601-L602 读 `map.players`/`record.players`；WallReload L65/L78、BoundaryServer_Geometry L362-L363、BoundaryValidation L123、RecordValidation L163 读 `record.players`；Mapping L128 与 RecordValidation L161 读 `record.generated`。判断：**不应改为新接口** —— 这些字段就是持久化 schema 本身，`modData` 契约见 AGENTS.md「模块之间按既定接口直接协作，不添加针对其他模块接口的验证」。
+3. **`record.slotIndex` 是全树共享的「唯一持久化坐标事实」，多处按同一规则重推导**（这与 L504-L513 的契约一致，属正确用法）：BoundaryServer_Geometry L215→L220（indexToAnchor）、Water/RV_UtilityWater_Objects.lua L37-L39（indexToAnchor + indexToRegion，且 L35-L36 注释明确写出「槽位分配是唯一持久化坐标事实；anchor 与 region 由当前模板矩阵推导」）、WallReload L69（indexToRegion）、RecordValidation L39-L42、Mapping L123/L253/L264、EntryExit L469/L510。
+4. **Power 读取映射记录的 `record.anchor` 是越界读取（本轮最重要的跨模块发现）**：`Power/RV_UtilityPowerDevices.lua` L235 `local anchor = type(record)=="table" and record.anchor or nil`，位于 `interior(record)`（L234-L260）。其两个调用点接收的都是**映射记录**而非 manifest 视图：`RV_UtilityServer.lua` L314 `Devices.scanTick(identity, mappingRecord, nil)`，其中 `mappingRecord` 来自 L169-L170 `forCurrentRecords` → `currentMappingRecord(identity)`（L153-L161）→ `adapter.currentUtilityRecord(identity)`（EntryExit L111-L119）→ 持久化映射记录；L227 `Devices.scanAll(identity, context.record, ...)` 的 `context.record` 来自 `resolveRV`（L48-L67）→ `RV.Server.resolveCurrentUtilityRV` → EntryExit L103-L108 的 `record = record`，同样是映射记录。
+   - 源码事实：全树**没有任何**对映射记录的 `anchor =` 赋值（唯一相关写法在 `prepared`（GenerationFlow L405）、layout（RV_Layout L312）、bounds（RV_ServerSchema L40）、manifest 视图（RecordValidation L51）中）。EntryExit L504-L513 的注释与 L482-L490 的字段复制逻辑共同确认 anchor 不在持久化字段集内。
+   - 条件性推断：L235 恒为 nil → `interior` 返回 nil → `scanAll` 返回 `false, "RV interior coordinates are invalid"`（L264，会直接否决 OP_REFRESH_DEVICES 命令）而 `scanTick` 返回 false（L276，设备扫描永不执行）。同目录的 Water 模块（L35-L39）走的是正确的 slotIndex 推导路径，两者对照说明这是**单个模块的实现偏差**而非契约变更。
+   - 判断：**应改为接口/改为契约内推导**。收益明确且成本极低 —— 把 L235 改成 `RegionSlots.indexToAnchor(integer(record.slotIndex))`（与 Water L38 完全同形），或让 UtilityServer 传入 manifest 视图（`currentRVManifestForRelocation` 返回的 `view.anchor`，RecordValidation L51）。这属于本报告的发现项，**本轮未做任何修改**。
+5. **外部模块绕过 Adapter 直接读外部 Railroader 实现的证据（客户端）**：`client/RailroaderRV/GUI/RV_RailroaderContextMenu.lua` 有 7 处 `rawget(_G,"RR")`：L206-L207 读 `RR.Ride`、L308-L309 读 `RR.TrainEntity.active`、L330-L331 读 `RR.Ride`、L473-L476 读 `RR.Ride`/`RR.MPClient`、L644-L645 与 L656-L657 读 `RR.BoardMenu`、L679-L680 读 `RR.RerailMenu`。判断：**保留直接访问**。客户端不能 require server 模块（Train.lua 是 server 侧适配层），因此菜单必须直接面对外部实现；其中 L309 的 `RR.TrainEntity.active` 与 Train.trainList L148-L151 的 SP 权威规则重复，是唯一有实际漂移风险的重复点，值得在外部实现形状变化时同步这两处。
 
-### 是否拆分模块
+### 接口边界问题
 
-- **优先考虑 Mapping 的墙体事件/屋顶刷新状态段**：`markSuppressedRoomTransition` 至 `pruneRoofRefreshRooms`（263–451）和 `refreshRoofForPlayer`（396–435）跨越约 190 行，维护 suppression、去重、缓存、日志与重试；与区域槽分配/映射校验（44–245、478–589）关注点不同。可以抽成 `RoofRefreshIntegration`，构造时显式注入现有共享状态和服务。收益是降低高耦合 Mapping 文件的认知负担；成本是新增模块生命周期与 OnTick 状态连接，若近期无独立变更，应暂缓。
-- **EntryExit 可考虑分离生成 commit**：`commitGeneration`（523–670）是两阶段生成事务的映射提交/回滚逻辑，与玩家 entry/exit 流程（342–521、682–800）有不同失败语义。可拆到 GenerationMappingCommit hook 文件，但需保持 map swap 与 utility initialization 原子顺序。分拆只有在事务钩子持续增长或单独审查需要时收益明显。
-- **Train 暂不建议进一步拆分**：文件偏长（623 行），但其下层读取权威列表、解析姿态、计算座位、维护列车座位状态，是同一个 Railroader compatibility adapter。拆为只读数据与写入座位会暴露共享 helper 和 authority source，当前收益不明显；已由本文件隔离 private 状态。
-- **RecordValidation 保持单文件**：所有函数都围绕 current identity/geometry gate，两个服务入口是校验后的副作用扩展；尺寸和主题仍相对一致。
+- **`serverTransactionMutexStatus` 在 Mapping L158 是裸全局读取，实际传入 nil（本轮最严重的接口缺陷）**。证据链：(a) L158 写作 `serverTransactionMutexStatus = serverTransactionMutexStatus,`，既不是 `ctx.` 前缀也不是本文件局部 —— Mapping L10-L20 的局部声明清单里没有这个名字；(b) 全树该标识符仅 8 处命中：Sentinel L8（注释）、L150（写 `Adapter.serverTransactionMutexStatus`）、L170（读 Adapter 字段）、L190（写 `ctx.serverTransactionMutexStatus`）、Mapping L158、BoundaryValidation L11（`local serverTransactionMutexStatus = ctx.serverTransactionMutexStatus`）、L64、L195（裸调用）；(c) **全树没有任何文件写裸全局** `_G.serverTransactionMutexStatus`；(d) 装配顺序 Core/RV_RailroaderServer.lua 为 Train(L112)→**Mapping(L113)**→EntryExit(L114)→WallReload(L115)→**Sentinel(L116)**→Tick(L117)，Mapping 早于 Sentinel L190 的 ctx 写入，因此即使改成 `ctx.serverTransactionMutexStatus` 在此刻同样是 nil（Sentinel L186-L189 的注释证明作者本意是走 ctx，旧报告中 Mapping 内确实存在 L19 的转发函数，现已消失）。
+  条件性推断：BoundaryValidation L11 取到 nil 后，L64（`validatePlayer` 路径）与 L195（`prewarmCurrentBoundaryPlayers` 路径）都是无保护的 `serverTransactionMutexStatus()` 调用，会因「调用 nil」而报错；其中 L195 的调用链（BoundaryValidation L217 ← Adapter.prewarmCurrentBoundaryPlayers ← Tick L37）在 Tick 内**没有** pcall 包裹，而 L64 的调用链在 EntryExit L95-L96 侧有 pcall。这是静态证据，**需运行时确认**。
+- **`inRegion` 要求 Z，而两个调用点都喂 XY-only 区域**（源码事实）：`RegionSlots.indexToRegion`（shared/RailroaderRV/RVMapping/RV_RegionSlots.lua L47-L56 `boundsForSlot` 只返回 minX/minY/maxX/maxY，L109-L113 直接返回它）→ `Mapping.recordRegion`（L122-L124）→ `Mapping.inRegion`（L95-L100 要求 minZ/maxZ 可数值化，否则 false）→ 恒 false。同一形状也出现在 `WallReloadProtection L69`→`L75`。对照：唯一带 Z 的区域生产者是 `Mapping.rvRegion`（L55-L57）与 `regionForAnchor`（L60-L65），而真正的 Z 判定在客户端是**显式分算**的（RV_UtilityContextMenu L78-L85 用 region 管 XY、用 `anchor.z + C.RV_MANAGED_*_Z_OFFSET` 管 Z）。
+  条件性推断的后果：`recordAtPlayerCoordinate`（L227-L243）恒走 L242 的 `"unmapped-rv"`，进而 exitPlayer L611 恒返回 `INVALID_RV_DATA`（在 RV 内出门失败）、resolveCurrentUtilityRV L80 恒返回 false（utility/水电命令被拒）、enterPlayer L370-L372 把「已在 RV 内」误报为 `INVALID_RV_DATA`、WallReload.insidePlayersForRecord 捕获列表恒为空。修正方向只有两条：让 `recordRegion` 补上 identity Z（复用 `rvRegion` 的 minZ/maxZ），或把 `inRegion` 的 Z 判定改为可选。**本轮未做任何修改。**
+- **`Adapter.allocateRVRegion` 的返回值位置与唯一消费方错位**（源码事实 + 条件性推断）：Mapping L280 返回 `(true, slotIndex, anchor, regionForAnchor(anchor))`，L256-L257 返回 `(true, slotIndex, anchor, RegionSlots.indexToRegion(slotIndex), integer(existing.generation))` —— **第 4 位恒为 region 表，generation 恒在第 5 位**。唯一消费方 Construction/RV_Server_GenerationFlow.lua L354 绑定 `local allocated, selectedSlot, anchor, priorGeneration = allocateRVRegion(...)`，把第 4 位当 `priorGeneration`、丢弃第 5 位；L366-L369 在 `priorGeneration ~= nil` 时拒绝并返回 `"same-slot rebuild is refused because the previous generation has no complete undo snapshot"`。由于成功路径上第 4 位不可能是 nil，条件性推断是：**首次 RV 生成请求必然被拒**，EntryExit L414-L420 随之回滚座位。GenerationFlow L352-L353 的注释与变量命名表明第 4 位本意是 region、`priorGeneration` 应取第 5 位。**本轮未做任何修改，需运行时确认。**
+- **`currentRVManifestForBoundary` 与 `currentRVManifestForRelocation` 当前完全同实现**（L98-L104 都是 `manifestForIdentity(rvId, generation)`）。旧报告中的 `allowRunning` 参数与「仅特许匹配 active RUNNING 事务」的特例已不存在。名字仍然表达两种语义（边界校验 vs 普通查询），但实现上没有任何区别 —— 这是文档/命名与实现脱节，不是缺陷。
+- **`EntryExit` 的死导入与死形参**：`Core`（L3）、`safeCall`（L17）、`rvRegion`（L42）、`validRegion`（L43）在文件内零使用；`markPlayerOutside`/`markPlayerInside` 的 `key` 形参（L184、L211）从未被读取；`Mapping.refreshRoofForPlayer` 的 `_force` 形参（L172）从未被读取。这些让文件的声明依赖面大于真实依赖面，删除它们不影响任何行为。
+- **`EntryExit.ctx.movePlayer`（L714）的导出消费者只有 Sentinel L20 的捕获，而 Sentinel 从未调用它**（全树 `movePlayer(` 只在 EntryExit 内部 L323/L443/L634/L692 与 Sentinel L20 的声明处出现）。当前是死导出；但它是生成簇拆分的前置条件（见拆分章节），因此保留有明确理由。
+- **`Adapters`/`RV.Server` 两条路径并存**：同一份能力同时可从 `RailroaderRV.RailroaderServer`（Adapter）与 `RailroaderRV.Server`（RV.Server）取到，例如映射身份查询有 `Adapter.currentMappingRecord`（Mapping L310）、`Adapter.currentUtilityRecord`（EntryExit L111）、`RV.Server.currentRVManifestForRelocation`（RecordValidation L98）三个入口，粒度和返回形状各不相同（record vs manifest）。判断：**这是分层而非重复** —— manifest 视图包含由模板推导的 anchor/bounds，而 record 查询只回持久化字段；调用方按需要选择。不建议合并。
 
-## 只读核对记录与未覆盖项
+### 外部 Railroader 适配边界
 
-- 文件清单：`RV_RailroaderServer_Mapping.lua`（620 行）、`RV_RailroaderServer_EntryExit.lua`（811 行）、`RV_RailroaderServer_Train.lua`（623 行）、`RV_Server_RecordValidation.lua`（333 行）。函数定义/赋值/嵌套闭包按 `rg -n "function|local function|=\\s*function|\\bfunction\\s*\\("` 扫描；随后以带行号完整源文及 EntryExit 缺失片段逐行核对。
-- 函数核对数：Mapping 28、EntryExit 23、Train 45、RecordValidation 17，共 113 项（计入匿名闭包和工厂函数）。表格中的行号指源文件对应定义行；调用/访问讨论给出相关范围。
-- 文档核对：本文档新建于 `docs/module-analysis/server-RVMapping.md`；完成后检查目标文件存在、各章节存在、四张函数表分别含预期条目数。
-- 未覆盖：本目录引用但未驻留本目录的 `RV_RegionSlots`、Core、BoundaryValidation、Teleport、Layout、schema gate、RoofRefresh、官方 Railroader 实现及外围调用方；相关接口只按本文件调用点描述。无 runtime、单机、服务器或联机测试。
+- **依赖性质说明**：以下全部是**对 Railroader（外部实现）运行时表形状的依赖**。本仓不含 Railroader 源码，因此本报告只陈述「本模组读了什么」这一源码事实，**不断言这些字段是否官方公开 API、也不断言它们会不会变化**。文件名与注释（Train L137-L141、L465-L467、L507-L512、L540-L542）表明作者已知其中一部分是私有实现细节。
+- **外部全局入口（6 处 `rawget(_G,"RR")` 于 Train，1 处于 EntryExit）**：
+  - `RR.ServerTrain.active`（Train L144、L153）与 `RR.ServerTrain.markResync`（Train L488、L546）—— 服务端权威列车表与重同步通知。
+  - `RR.TrainEntity.active`（Train L148、L163）—— SP 权威列车表。
+  - `RR.Ride.current`（Train L421、L441、L454）、`RR.Ride.mountRecord`（L439）、`RR.Ride.dismount`（L454）—— 本地 Ride 权威与上下车操作。
+  - `RR.Body.seatWorld`（Train L280）、`RR.Body.hullDistance`（Train L371）—— 座位与车体距离的官方几何公式。
+  - `RR.Ride.MOUNT_REACH`（EntryExit L248）—— 交互半径常量。
+- **外部列车记录字段依赖清单（文件:行）**：
+  - 身份与几何：`train.id`（L132）、`train.animal`（L134、L199、L236、L259）、`getAnimalType`（L118）、`getAnimalID`（L127）、`getAnimalSize`（L260）、`getForwardDirection`→`getX/getY`（L237-L241）、`train.pose`（L209、L232、L272、L362）、`train.lastPose`（L362）、`train.dirX/dirY`（L230-L231）。
+  - 运动状态：`train.drive.v`（L219）、`train.v`（L220）、`train.speed`（L221）。
+  - 乘员（MP）：`train.driver`（L396、L430、L585）、`train.passengers`（L383-L387、L401、L522-L526、L564-L570）。
+  - 乘员（SP）：`train.rider`（L421、L445、L459）、`train.seat`（L423-L424、L446、L460）、`train.passenger`（L423、L447、L461）。
+  - **下划线私有字段**：`train._seatNames`（L470-L472、L530-L534）、`train._claims[].seat`（L473-L479、L537）、`train._cmdSeq`（L481-L483、L521）、`train._stopping`/`train._stopHold`（L513）、`train._starting`/`train._startEnv`/`train._startPlayer`（L514）、`train._cruise`/`train._cruiseNotch`（L589）。
+  - 其它状态字段：`train.throttle`（L506）、`train.brakeInput`（L506）、`train.engine.running`（L515）、`train.engine.phase`（L516-L518）、`train.hornOn`（L520）。
+  - 玩家侧 engine 调用（座位副作用的一部分）：`setBlockMovement`（L484、L499、L538、L559、L580）、`setCanShout`（L485、L500、L539、L560、L581）、`setIsResting`（L486、L501、L543、L561、L582）、`setBed`（L544）。
+- **隔离判断**：上述依赖**全部集中在 RV_RailroaderServer_Train.lua**（唯一例外是 EntryExit L247-L249 的 `RR.Ride.MOUNT_REACH`，它只读一个数值常量）。Mapping 与 RecordValidation 完全不接触外部实现，EntryExit 只经 ctx 调用 Train 的函数。这是本模块最重要的结构性质：外部实现形状变化的影响面被限制在 1 个文件内。建议保持这一性质 —— 若未来需要新的外部字段，应加在 Train 并导出为语义化函数（如 `trainMoving`/`seatForPlayer`），而不是在调用方直接读字段。
 
-## 第二阶段接口更新
+## 函数清单、覆盖和验证记录
 
-EntryExit 的生成器存在性检查现在经 `RV.Server.Construction.ensureGeneratorForEntry` 调用；其当前记录/manifest/boundary 身份验证及 fail-closed 行为归受控 Construction 世界服务。Mapping 变更通过 `Adapter.advanceMappingEpoch()` 递增 epoch；UtilityServer 查询用 `Adapter.currentMappingEpoch()`。Train、RecordValidation 与 mapping record 仍按已验证 value-object 合同直接读取。见[第二阶段报告](phase2-structure-optimization.md)。
+- **扫描文件与行数**（`(Get-Content f).Count`，含空行）：RV_RailroaderServer_Mapping.lua **312**、RV_RailroaderServer_Train.lua **623**、RV_RailroaderServer_EntryExit.lua **720**、RV_Server_RecordValidation.lua **216**；本目录 4 个文件合计 **1871** 行。目录扫描确认 server/RailroaderRV/RVMapping/ 只有这 4 个文件，没有子目录；`RV_RegionSlots.lua` 位于 shared/RailroaderRV/RVMapping/（155 行），按依赖只读引用。
+- **函数计数**：`function` 关键字扫描得 Mapping 22 命中 → 19 定义 + 3 处 `type(x)=="function"` 判定；Train 52 命中 → 45 定义 + 7 处类型判定；EntryExit 41 命中 → 20 定义 + 21 处类型判定；RecordValidation 22 命中 → 15 定义 + 7 处类型判定/含 "function" 字样的注释。合计 137 命中、**99** 定义 = 87 具名（77 `local function` + 10 表方法）+ 12 匿名（含 4 个 `return function(ctx)` 模块工厂与 8 个回调/函数值表达式）。按 kind 分布：local 77、method 10、anon 12。逐文件：Train 45（40 local + 1 工厂 anon + 4 回调 anon）、Mapping 19（16 local + 1 工厂 anon + 2 函数值 anon）、EntryExit 20（16 local + 2 method + 1 工厂 anon + 1 函数值 anon）、RecordValidation 15（5 local + 8 method + 1 工厂 anon + 1 回调 anon）。
+- **匿名条目定位**：Train L15、L31、L40、L544（4 个 pcall 闭包）+ L2 工厂；Mapping L138（recordForLoco 函数值）、L162（onlinePlayersSnapshot 回调）+ L2 工厂；EntryExit L245（sourceWithinRange 函数值）+ L2 工厂；RecordValidation L46（manifest 构造 pcall 闭包）+ L2 工厂。`EntryExit.l12 local sourceWithinRange` 与 `Mapping.l10 local recordForLoco` 只是前向声明，不另计。
+- **逐行交叉核对**：4 个文件均按编号全文读取（312/623/720/216 行全覆盖），条目中的行号是定义语句（`function`/`local function`/`x = function`）的起始行。导出位置：Train 写 ctx L595-L622（28 字段）；Mapping 写 ctx L298-L308（11 字段）与 Adapter L309-L311（3 字段）；EntryExit 写 Adapter L50/L111 与 ctx L713-L719（7 字段）；RecordValidation 写 `RV.Server` L74/L78/L82/L86/L98/L102/L130/L159（8 方法）。
+- **跨模块调用扫描**：在 media/lua 全树（client/server/shared）按 ctx 注入、Adapter 字段、`RV.Server` 方法、`require` 别名四种绑定方式检索本模块导出符号，确认每个导出字段的真实调用点（见公开合同小节）。为此做了 4 次全树穷举核对：`serverTransactionMutexStatus`（8 命中，结论见接口章节）、`_mappingEpoch`/`currentMappingEpoch`/`advanceMappingEpoch`（5 命中，全部在 Core/RV_RailroaderServer.lua L81-L88 与 RV_UtilityServer.lua L279-L280、Mapping L34）、映射记录 `anchor`/`bounds`/`region`/`shellEdges` 赋值（0 命中）、`record.slotIndex` 读取（6 个文件、14 处，全部走 slotIndex→模板推导）。
+- **「零写入」结论的核对方法**：对 L504-L513 的持久化字段集契约，用 `\.anchor\s*=|anchor =`、`record\.(bounds|region|shellEdges|rvPosition|locoPosition|generated|players)\s*=` 两轮全树检索，确认不存在对映射记录的 anchor/bounds/region/shellEdges 写入；命中的 `anchor =` 全部位于 `prepared`（GenerationFlow L194/L405）、layout（RV_Layout L312）、bounds 字段（RV_ServerSchema L40）、manifest 视图（RecordValidation L51）或局部变量（12 处 `local anchor =`），均非映射记录写入。
+- **未覆盖项 / 条件性推断**：未穷举每个 API 的每一行调用（大文件只核查命中符号所在行及其上下文）；未打开 Railroader 外部实现源码，因此所有 `RR.*` 字段**只按本模组读取点陈述，不评估其公开性与稳定性**；本报告 3 项高危结论（L158 的 nil mutex、`inRegion` 的 Z 缺失、`allocateRVRegion` 的返回值错位）中的「运行时必然失败」部分属**条件性推断**，依据是静态调用链与形状比对，**未运行任何测试**予以确认；「生成簇拆分的净收益」「合并 number/integer 的净收益」属条件性推断，未做改造实验。本报告用于替换描述精简前代码的旧版报告（旧版行数 620/811/623/333、函数数 113，均已失效）。
+- **修改范围**：仅重写本分析文档；未修改任何 Lua 源码、配置或测试文件，未运行游戏、服务器或任何测试脚本。
+
+### 旧报告与当前源码的差异（本次修订更正项）
+
+- 行数：Mapping 620→312、EntryExit 811→720、Train 623→623、RecordValidation 333→216；函数数 28/23/45/17（113）→ 19/20/45/15（99）。
+- 已不存在的函数：Mapping 的 `serverTransactionMutexStatus` 转发、`validMapRelation`、`roofRefreshRoomKey`、`isWallRemovalSource`、`markSuppressedRoomTransition`、`consumeSuppressedRoomTransition`、`pruneRoofRefreshDedupeState`、`wallRemovalEventKey`、`pruneRoofRefreshRooms`；EntryExit 的 `currentGeometryGate`、`Adapter.validateCurrentUtilityIdentity`、`reject`；RecordValidation 的 `requireCurrentManifest`、`currentRVRecordGeometryConsistent`、`RV.Server.validateCurrentRVRecord`。
+- 已不存在的内外部状态耦合：旧报告称 Mapping 直读 `Adapter._boundaryValidationEpoch`/`_boundaryValidationWarmPending`/`_ticks`（旧 L103-L108、271、296、420），当前 Mapping 只剩 `Adapter.advanceMappingEpoch()`（L34）与 3 个 Adapter 方法写入（L309-L311），`_mappingEpoch` 已不再被任何外部文件直读（全树仅 Core L81/L82/L88，即 Adapter 自身）。
+- 已失效的参数：`manifestForIdentity` 的 `allowRunning`（旧 L82 契约）已移除，两个 `currentRVManifestFor*` 入口当前同实现。
+- 旧报告称 `mapData` 会在 schema gate 未就绪时抛错并把 `record.boundary.managed` 当作持久化几何比较；当前 `mapData`（L29-L31）直接透传 `ModData.get`，且 `record.boundary` 已不存在（几何改由 `Boundary.boundaryFor` 推导）。
+- 旧报告「第二阶段接口更新」提到的 `EntryExit → RV.Server.Construction.ensureGeneratorForEntry` 本次核实成立，当前调用点与签名见逐函数表（EntryExit L292-L293，签名 `(player, record)`，实现在 Construction/RV_Server_GenerationBuild.lua L158-L162，底层为 Construction/RV_Server_WorldObjects.lua L702-L729）。

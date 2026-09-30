@@ -1,321 +1,266 @@
-# `server/RailroaderRV/Core/` 模块分析
+# server/RailroaderRV/Core 模块分析
 
-## 假设、范围与完成标准
+## 假设、范围、成功条件与验证方式
 
-- 按实际目录将每个 Lua 文件视为一个实现模块；同文件中的局部函数、赋值给表字段的函数、返回给 `ctx` 的加载闭包、嵌套函数和匿名回调都计入清单。匿名回调按所在调用点命名。
-- 只读分析 `contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/` 的 10 个 Lua 文件。为判断本目录 API 的使用方及跨模块直接访问，只对相邻服务端代码做符号级引用搜索，不把相邻模块纳入逐函数分析。
-- 目标交付是每个定义都列出源码起始行、参数含义、返回值/副作用、当前实现中是否承担必要职责；另总结复用、拆分与数据边界。
-- 静态检查覆盖全部 10 个文件及函数表达式；逐行核对每个定义的位置；文档清单数与扫描数一致。未运行游戏、runtime 测试或修改 Lua 源码。
+- **假设**：只分析模组当前目录 `contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/` 的**直接子文件**；所有行号以本次实际读取的当前版本为准，不沿用旧报告。本目录是服务端组合根（composition root）与进程内事件/时钟层，按当前 B42 服务端调用语义解释。
+- **范围**：覆盖本目录当前存在的 **8 个 Lua 文件**及其全部具名函数、`local function`、表方法（`function Adapter.x()`、`Adapter.x = function()`、`M.x = function()`）、模块加载闭包 `return function(ctx)`，以及作为参数/回调传入的匿名函数表达式。为判断公开 API 使用面、跨模块数据访问与加载顺序，只对相邻服务端/客户端 Lua 做符号级检索，不把相邻目录纳入逐函数分析。唯一写入目标是本报告。
+- **成功条件**：每个函数都有精确起始行、参数类型与含义、返回值或副作用、本模块语义、以加粗结论开头的必要性判断与原因；另外给出复用/提取建议、拆分判断、接口边界与证据。
+- **验证方式**：`Get-ChildItem -File` 枚举目录文件；用函数定义正则扫描与逐行编号读取交叉核对函数数与起始行；在 `contents/mods/RailroaderRVTest/42/media/lua` 全树检索导出 API 调用点、`Adapter._*` 隐藏状态、`ModData`/`ctx` 访问点；完成后复核报告文件数、条目数与行号引用。**未运行游戏、服务器或任何测试脚本**；源码扫描是静态分析，不替代运行时验证。
+- **静态发现与条件性推断的区分**：凡涉及"某符号在生产树上不存在"的结论，均同时给出**源码事实**（检索范围与命中位置）与**条件性推断**（若事实成立时的行为后果）。本报告不宣称任何运行时行为已验证。
 
-## 目录模块划分
+## 目录职责与清单
 
-| 文件 | 职责 |
-|---|---|
-| `RV_Server.lua` | 服务端组合根：加载公共依赖，创建 `RV.Server` 与共享 `ctx`，装配生成、屋顶刷新、记录验证、命令等子模块。 |
-| `RV_Server_Commands.lua` | `RV.Server` 的 tick 与客户端命令入口；驱动生成事务和 utility 命令，并向 `RV.Core` 注册事件。 |
-| `RV_Server_ManifestValidation.lua` | 把 manifest 的开发期校验委托给 schema gate，并在 `ctx` 上发布当前 manifest 状态接口。 |
-| `RV_Server_Core.lua` | 进程内 64 位逻辑 tick、稳定事件分发器和具名 handler 注册表。 |
-| `RV_DevSaveSchemaGate.lua` | 开发期一次性验证 mapping、manifest、utility ledger 与 mapping/manifest geometry；失败后 fail-closed。源码明确标记发行前整体移除。 |
-| `RV_UtilityStore.lua` | utility ModData ledger 的读、复制、提交、快照与当前 identity 门禁。 |
-| `RV_UtilityServer.lua` | 服务端 utility 协议、nonce/idempotency、身份解析、utility 操作调度和周期性维护。 |
-| `RV_RailroaderServer.lua` | Railroader 服务端适配器组合根，避免 client-only process 注册服务端 handler，并装配 adapter 子模块。 |
-| `RV_RailroaderServer_Tick.lua` | Railroader adapter 的 tick 生命周期、屋顶刷新队列推进、mapping 位置采样和 generation hook 安装。 |
-| `RV_RailroaderServer_Sentinel.lua` | Railroader Enter/Exit 命令、玩家快照与 utility mapping 同步；校验服务锁、mapping 几何并处理临时 sentinel cell 返还。 |
+Core/ 当前含 8 个 Lua 文件，承担五类职责：服务端组合根与命令/tick 汇总（RV_Server.lua、RV_Server_Commands.lua）、进程内逻辑时钟与唯一引擎事件分发（RV_Server_Core.lua）、utility 协议与 ModData 持久仓库（RV_UtilityServer.lua、RV_UtilityStore.lua）、Railroader adapter 的组合根/事务门/周期工作（RV_RailroaderServer.lua、RV_RailroaderServer_Sentinel.lua、RV_RailroaderServer_Tick.lua）。
 
-## 函数清单与逐函数职责
+| 文件 | 函数定义数 | 主要职责 |
+|---|---:|---|
+| [RV_RailroaderServer.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_RailroaderServer.lua) | 5 | Railroader adapter 组合根：进程角色短路、一次性存档 schema 版本比较、mapping epoch 读写、按序装配 Train/Mapping/EntryExit/WallReload/Sentinel/Tick |
+| [RV_RailroaderServer_Sentinel.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_RailroaderServer_Sentinel.lua) | 10 | Enter/Exit 命令门、在线玩家快照、utility mapping 候选同步、服务级事务互斥查询与命令安装器 |
+| [RV_RailroaderServer_Tick.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_RailroaderServer_Tick.lua) | 5 | adapter 周期工作：wall reload 推进、train pose 采样、boundary 预热、room ownership 监视器重排、generation hook 安装 |
+| [RV_Server.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_Server.lua) | 1 | 服务端组合根：构造 `RV.Server` 与共享 `ctx`，装配 10 个内部子模块，转出传送与 utility 入口 |
+| [RV_Server_Commands.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_Server_Commands.lua) | 13 | `RV.Server` 的 tick 与客户端命令入口；驱动 generation 阶段机、utility 命令、模板抓取与事件注册 |
+| [RV_Server_Core.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_Server_Core.lua) | 16 | 进程内逻辑 tick（单一 Lua number）、唯一引擎事件分发器、具名 tick/命令/事件注册表 |
+| [RV_UtilityServer.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_UtilityServer.lua) | 24 | utility 协议门面：请求校验、RV 解析、操作分派、快照/ACK 广播与周期维护 |
+| [RV_UtilityStore.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_UtilityStore.lua) | 19 | utility ModData 仓库：当前 identity 门禁、记录读取/提交/枚举/快照 |
+| **总计** | **93** | 79 个具名/局部/表方法定义 + 14 个匿名函数表达式（3 个模块加载闭包、1 个命令过滤器、6 个引擎事件回调、3 个遍历回调、1 个 hook 回调） |
 
-以下“必要性”是对当前源码所实现的运行职责的判断，不代表该函数必须保持目前的拆分或命名。
+函数数包括具名局部/嵌套函数、`local function`、表字段函数、模块加载闭包，以及 pcall/遍历/事件回调中的匿名函数；`M.x = localFunction` 这类导出别名赋值不重复计数（本目录此类赋值集中在 RV_Server.lua:96、:99、:138、:139）。
 
-### `RV_UtilityStore.lua` — 持久化仓库（20 个函数表达式）
+## 逐文件、逐函数分析
 
-| 函数 / 行 | 职责、参数与输出/副作用 | 当前功能必要性 |
+### RV_RailroaderServer.lua
+
+模块在 [RV_RailroaderServer.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_RailroaderServer.lua)。它不定义事件、不写业务状态，职责是"进程角色判定 + 一次性 schema 版本比较 + epoch 接口 + 装配链"。L24-L26 在 client-only 进程整体短路并返回空表；L28-L30 软加载 Constants 与 Boundary 服务；L32-L35 取得/创建全局 `RailroaderRV.RailroaderServer` 作为 Adapter；L95-L108 构造 adapter 私有 `ctx`；L112-L117 以 `require(...)(ctx)` 装配 6 个子模块；L119 返回 Adapter。L66-L79 是 `OnInitGlobalModData` 的一次性注册；L91-L92 的 `transitionSequence`/`recordForLoco` 局部变量在写入 ctx（L106-L107）后不再被本文件读写，属组合根遗留占位（源码事实，非函数条目）。
+
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
 |---|---|---|
-| `integer(value)` L11 | 数值整数归一化；非 number 或非整数返回 `nil`。 | 是：校验 ledger 的 schema/identity 数字字段。 |
-| `number(value)` L15 | 仅接受 number，否则 `nil`。 | 否（当前无调用点）：目标文件内符号检索只命中定义，属可清理的局部死代码；不影响其它 ledger 校验。 |
-| `empty(value)` L19 | 输入 table 时检查是否无键；非 table 为 false。 | 是：区分空的新容器与已有持久数据。 |
-| `copyTable(value)` L25 | 递归复制 table，保留非 table 原值；输入一个 ledger 子树，输出脱离 ModData 的工作副本。 | 是：防止未 commit 修改直接污染持久根。 |
-| `identityValid(identity)` L32 | 检查 `{rvId,generation,bitmapVersion}` 当前标识；输出布尔值。 | 是：新建/枚举阶段的 schema 身份门禁。 |
-| `waterInteger(value)` L39 | 校验有限整数；输出原值或 `nil`。 | 是：sink 坐标需为有限格点整数。 |
-| `waterSinkKey(x,y,z)` L45 | 三个坐标转 `x:y:z` 字符串；无效输入返回 `nil`。 | 是：水槽 ledger 的稳定键，另由 `M.waterSinkKey` 暴露给水模块。 |
-| `readRoot()` L52 | 无参数；先检查 schema gate，再 `ModData.get` STORE_KEY；根未创建时返回 nil，异常/类型不符则抛 `INVALID_RV_DATA`。 | 是：统一所有读取的 fail-closed 入口。 |
-| `root(allowCreate)` L66 | 读取根；允许时用 `getOrCreate` 初始化空根的 schemaVersion/records；输出已初始化根或抛错误。 | 是：只在显式创建路径初始化当前 schema。 |
-| `currentIdentityGate(identity)` L82 | 检查 identity 并调用 `RV.Server.currentRVManifestForBoundary`、`validateCurrentUtilityIdentity`；输出 `true` 或 `false, reason`。 | 是：保证记录归属当前 manifest 和 mapping。 |
-| `newWater()` L98 | 无参数，构造当前水 ledger 默认记录；输出 table。 | 是：新 utility record 初始化。 |
-| `newPower()` L103 | 无参数，按 UtilityConstants/PowerConfig 默认构造电力字段、空设备和状态；输出 table。 | 是：新 utility record 初始化。 |
-| `newRecord(identity)` L116 | 输入 RV identity，拼出 rvId/generation/bitmapVersion 与默认 power/water；输出新记录。 | 是：允许创建新 RV utility 记录。 |
-| `M.validateIdentity(identity)` L122 | 输入 identity，原样转交当前身份 gate；输出 `bool, reason?`。 | 是：供扫描调用者确认记录仍是当前 RV。 |
-| `M.getRecord(identity,allowCreate)` L126 | 输入身份及创建开关；先过 gate，再读取匹配持久记录并复制；没有记录仅在 allowCreate 时生成工作副本；输出 `true,record` 或 `false,reason`。 | 是：power/water 服务唯一受控记录读取口。 |
-| `M.commit(record,identity)` L154 | 输入脱离存储的工作记录及身份；检查字段一致、更新持久根副本并 transmit；失败回滚根中旧记录；输出成功布尔值/失败原因。 | 是：提供明确提交点及失败原子性。 |
-| `M.allRecords()` L185 | 无参数；读取根，校验每个键与 identity 基本契约并深拷贝，输出 `true,entries` 或拒绝原因。 | 是：周期维护需安全枚举记录。 |
-| `M.validateGenerationUtilityState(identity)` L210 | 输入候选新 identity；检查所有现存记录中同 RV 的 generation/bitmapVersion 是否已匹配；输出 `true` 或拒绝原因。 | 是：generation 改世界状态前的 utility 持久状态门禁。 |
-| `M.snapshot(record)` L227 | 输入记录；复制 power/water 并剔除设备 `modData`，输出面向网络的快照。 | 是：防止内部实体元数据进入客户端消息，且网络状态与可变仓库脱离。 |
-| `M.waterSinkKey(x,y,z)` L237 | 公共薄封装，坐标参数同私有 helper；输出 canonical sink key。 | 是：仓库对水 ledger 消费者的最小接口。 |
+| processIsClient（L10） | 无参数；返回 boolean。`_G.isClient` 不是函数时 `false`，否则 `pcall(isClient)` 成功且严格等于 `true` 才 `true`。无副作用。语义：adapter 的客户端进程探测。 | **必须**：L24 的 client-only 短路是本文件唯一的进程隔离手段，客户端 Lua pass 不应注册服务端命令 handler。 |
+| processIsServer（L16） | 无参数；返回 boolean。`_G.isServer` 不是函数时返回 `true`（兼容只暴露服务端 pass 的环境），否则返回 pcall 结果。无副作用。语义：与 processIsClient 组成进程角色判定，并经 L96 注入 ctx。 | **必须**：L24 判定依赖它；`ctx.processIsServer` 另被 4 个目录复用（`RV_RailroaderServer_Train.lua:3`、`RV_RailroaderServer_EntryExit.lua:6`、`RV_RailroaderServer_WallReload.lua:14`、`RV_BoundaryServer_Geometry.lua:3`）。 |
+| checkSaveSchemaVersion（L42） | 无参数（对事件实参不敏感）；无返回值。副作用：首次调用置 `Adapter._saveSchemaVersionChecked`；`ModData.getOrCreate(C.RV_MAP_KEY)`；空根时写入 `schemaVersion = C.SAVE_SCHEMA_VERSION`、`locomotives = {}`、`players = {}` 并提前返回；版本不一致时只 `print` 警告，不拦截、不迁移、不转换。语义：全模组唯一的存档 schema 版本比较点。 | **必须**：与工作区约束「Lua 中只维护一个 schema 版本号并写入 ModData，启动时集中比较，不一致只报警不拦截」一一对应；L66-L79 是它唯一注册路径，缺失则版本比较完全不发生。 |
+| Adapter.currentMappingEpoch（L83） | 无参数；返回闭包上值 `mappingEpoch`（number，L82 取 `Adapter._mappingEpoch or 0`）。无副作用。语义：`_mappingEpoch` 的只读访问器。 | **必须**：`RV_UtilityServer.lua:279-280` 用它判断 mapping 是否已换代并据此重发 utility mapping；这是当前唯一的 epoch 读取接口，直接读下划线字段的旧路径已不存在。 |
+| Adapter.advanceMappingEpoch（L86） | 无参数；返回自增后的 epoch（number）。副作用：`mappingEpoch` 自增并写回 `Adapter._mappingEpoch`。语义：mapping 变更的唯一 epoch 递增点。 | **必须**：`RVMapping/RV_RailroaderServer_Mapping.lua:34` 在 `markMappingChanged` 中调用；不推进 epoch，utility 层不会重发候选 mapping。 |
 
-### `RV_UtilityServer.lua` — utility 服务端协议与调度（37 个函数表达式）
+### RV_RailroaderServer_Sentinel.lua
 
-| 函数 / 行 | 职责、参数与输出/副作用 | 当前功能必要性 |
+模块在 [RV_RailroaderServer_Sentinel.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_RailroaderServer_Sentinel.lua)，以 `return function(ctx)` 工厂形式被 adapter 组合根装配（L9-L212）。它只拥有两件事：所有 adapter 路径共用的在线玩家快照，以及"现在能否发生座位/mapping/边界变更"的唯一互斥查询。L9-L22 捕获注入依赖（含 EntryExit 写入的 `enterPlayer`/`exitPlayer`/`sendResult`/`movePlayer`），L184 记录 `Adapter._ticks`，L189-L191 把三个回调写回共享 ctx，L211 自调用安装器。
+
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
 |---|---|---|
-| `key(identity)` L20 | 将 RV id、generation、bitmapVersion 组成锁键。 | 是：以完整版本身份隔离并发操作。 |
-| `playerKey(player)` L25 | 调用玩家 online ID/name，name 缺失时取 full name；输出稳定会话键或 nil。 | 是：绑定会话与 idempotency 到连接身份。 |
-| `stableReason(reason)` L35 | 将非法 RV 数据/已知错误映射为协议原因字符串。 | 是：稳定地向客户端报告失败类别。 |
-| `send(player,command,payload)` L45 | 通过公共 `sendServerCommand` 发送 RailroaderRV 命令；输出调用是否成功。 | 是：ack/snapshot 的统一消息出口。 |
-| `resolveRV(player)` L51 | 输入权威 server player；调用 `RV.Server.resolveCurrentUtilityRV`，再验证身份字段、补入 context.player；输出 `true,context` 或 `false,reason`。 | 是：操作权限与 RV 归属均由服务端解析。 |
-| `serviceBusy()` L73 | 无参数；查询 generation/roof transaction 活跃状态；缺少服务或读取失败时按 busy；输出布尔值。 | 是：阻止 utility 写与大事务竞态。 |
-| `validText(value,maxLength)` L90 | 校验非空 string 和长度上限；输出 bool。 | 是：request/session nonce 字段约束。 |
-| `validHint(value)` L94 | `nil` 或 table 可接受；输出 bool。 | 是：位置 hint 只能以可检查的数据容器进入协议。 |
-| `validRequest(args)` L99 | 验证请求 table 的精确字段集合、ID/nonce/operation/hints；输出 `bool,reason`。 | 是：协议 allow-list 和基本输入门禁。 |
-| `knownOperation(operation)` L113 | 检查操作名是否为已实现的 utility 指令。 | 是：拒绝未支持操作。 |
-| `acquire(identity)` L123 | 获取按身份区分的进程内锁；输出 `true,key` 或 busy。 | 是：避免同一 RV 同步重入写入。 |
-| `release(identityKey)` L130 | 释放指定锁；无输出。 | 是：配合锁生命周期。 |
-| `withGuard(identity,callback)` L134 | 获取锁后 `pcall(callback)`，总是释放锁；callback 无实参且约定返回 `accepted,result`；输出该结果或稳定错误。 | 是：所有受保护 utility 修改共享一致的锁与异常路径。 |
-| `acknowledge(player,requestId,accepted,result)` L143 | 构造并发送 ack；成功时选取序号/传输字段，失败时标准化 reason。 | 是：协议对每个请求给出结果。 |
-| `remember(session,requestId,response)` L160 | 写入当前会话响应去重表，最多保留约 64 项；无返回值。 | 是：重复请求可重放结果，限制会话内存增长。 |
-| `sessionFor(nonce,player,previous)` L174 | 新 nonce/玩家建会话，并继承 retired nonce 集且 retire 旧 nonce；输出 session table。 | 是：重连隔离旧 idempotency namespace。 |
-| `replaceSession(id,player,nonce,previous)` L180 | 建立并保存新 session；输出 session。 | 是：集中替换会话状态。 |
-| `broadcast(context,record)` L186 | 输入授权上下文和记录；生成 Store/Power 快照并发给当前玩家。 | 是：统一序列化 utility 状态。 |
-| `broadcastToRV(identity,record)` L193 | 枚举在线玩家并重新解析每人当前 RV，仅向身份三元组一致者广播。 | 是：将更新同步到当前同 RV 玩家而不信任客户端归属。 |
-| `currentMappingRecord(identity)` L210 | 通过 adapter 公共 `currentUtilityRecord` 取有效 mapping record；输出 `bool,record/reason`。 | 是：周期扫描必须把 utility ledger 与当前 mapping 对齐。 |
-| `forCurrentRecords(callback)` L223 | 读取 `Store.allRecords`，逐个通过 identity 与 mapping 校验后调用 `callback(identity,record,mappingRecord)`；无结果表返回。 | 是：周期维护统一排除过期/未映射记录。 |
-| `M.handleCommand(player,args)` L239 | 校验请求、会话 nonce、重复 ID、忙碌状态、RV/phase；在身份锁内调 Water/Power/Devices，成功或部分 settle 时向 RV 广播，保存并发送 ack；返回 `bool,result/reason`。 | 是：客户端 utility intent 唯一服务端调度入口。 |
-| `handleCommand` 内身份锁 callback L291 | 无显式参数；闭包使用已验证的 context/identity/args/工作记录分派水、电、设备、snapshot 操作；返回 `accepted,detail` 并可能改写/广播数据。 | 是：操作需要在 `withGuard` 的锁区内执行。 |
-| `syncUtilityMappings()` L360 | 无参数；按在线玩家快照和 adapter epoch 重发候选 utility mapping 同步；更新/清理 `mappingSyncState`。 | 是：重连或 mapping 更新后恢复客户端提示。 |
-| `M.onTick(tick)` L390 | 输入逻辑 tick；忽略无效/重复 tick，跑 water removal reconciliation、定期 mapping sync 和设备扫描。 | 是：周期服务入口。 |
-| `onTick` 的 `forCurrentRecords` callback L405 | 输入 identity/record/mappingRecord；启动 power runtime，成功后执行设备扫描。 | 是：每条有效 RV 记录的周期设备维护动作。 |
-| `M.onObjectRemoved(object)` L414 | 输入即将移除的世界对象；安全转交 Water 留下短期 witness；输出成功或待重试原因。 | 当前 wiring 未证实：注释称由 Core owner 注册，但目录引用扫描未找到调用点；`RV_Server_Commands.lua:L292-L294` 注册的是 room ownership scan callback。若确实无动态外部调用，此 facade 当前不起作用，需由项目维护者决定接线或移除。 |
-| `M.onEveryTenMinutes()` L424 | 无参数；枚举当前记录、在 RV 锁内结算并刷新负载，成功后广播。 | 是：游戏时间周期性结算资源消耗。 |
-| `onEveryTenMinutes` 枚举 callback L425 | 输入 identity/record；为该记录调用 `withGuard` 完成 settlement。 | 是：把批量循环逐条包进身份锁。 |
-| 上述 `withGuard` callback L426 | 无参数；以现存 record 结算并返回 Power 结果。 | 是：锁内提交避免 tick/命令重入。 |
-| `M.onEveryHour()` L435 | 无参数；对所有当前记录调用 native proxy maintenance。 | 是：按小时维护实体 proxy。 |
-| `onEveryHour` 枚举 callback L436 | 输入 identity/record；转交 Power native proxy 维护。 | 是：适配每条记录的周期任务。 |
-| `M.settleAndRefreshLoad(identity,player)` L441 | 输入当前 identity 与可选玩家；读取、锁内结算、成功后广播；输出 `bool,record/reason`。 | 是：向 generation/其他服务提供 utility load 结算接口。 |
-| 上述 `withGuard` callback L444 | 无参数；调用 Power settlement 并返回状态/更新记录。 | 是：该公开接口也必须遵守统一锁。 |
-| `M.snapshotForPlayer(player)` L453 | 输入 server player；重解析当前 RV 后读取并发送快照；输出成功/record 或失败原因。 | 当前项目内无调用点：作为将来/外部 require API 有效；若它应承担重连初始快照，当前 `syncUtilityMappings` 路径并未调用它。现有 command snapshot 操作由 `handleCommand` 实现。 |
-| `M.validateGenerationUtilityState(identity)` L462 | 输入候选 identity；转交 Store 的 generation 持久状态校验；输出 bool/reason。 | 是：被 generation 流作为前置门禁。 |
-| `M.initializeRecord(identity,context)` L469 | 输入 generation 身份和上下文；调用 Power 初始化并记录日志，可向当前玩家广播；输出初始化记录或原因。 | 是：新 generation 成功后建立其 utility 状态。 |
+| 文件加载闭包 `return function(ctx)`（L9） | 参数 `ctx`：adapter 组装根注入表（`Adapter`、`C`、`Boundary`、`processIsServer`、`WORLD_MIN_Z/WORLD_MAX_Z`，以及 Train/EntryExit/WallReload 先写入的 `integer/call/callGlobal/playerId/playerName/sendResult/movePlayer/enterPlayer/exitPlayer`）；无返回值。副作用：require Core 与 WallReloadProtection，定义 8 个函数，写回 `ctx.onlinePlayersSnapshot`/`serverTransactionMutexStatus`/`wallReloadTransactionBlocks`，并调用安装器。语义：本文件唯一装配入口。 | **必须**：`ctx` 是本文件与 adapter 其他子模块之间唯一的注入契约；去掉工厂即失去依赖注入点。 |
+| commandArgument（L24） | `args`：客户端命令参数（Lua table / Java 参数容器 / nil）；`key`：字段名 string。返回 table 时 `args[key]`，否则 `call(args,"get",key)` 成功时的值；取不到返回 nil。副作用：无（`call` 内部受保护）。语义：归一命令参数容器的取值适配器。 | **必须**：`Adapter.OnClientCommand` 读取 `locoId` 只能用这一条路径；B42 下参数既可能是 Lua table 也可能是 Java 容器，缺则 Enter 恒报"locomotive id is missing"。 |
+| wallReloadBusy（L33） | `rvId`：参数**当前实现未使用**（L58、L161 均以 `nil` 调用）。返回 `busy(boolean), reason(string?)`：`RailroaderRV.Server` 缺失或 `isWallReloadTransactionActive` 不是函数 → `true,"RV transaction gate is unavailable"`；pcall 失败或返回非 boolean → 同左；active 为 true → `true, reason`（reason 非空字符串则用它，否则 `"RV wall reload is in progress"`）；否则 `false`。无副作用。语义：wall reload 一半的服务级互斥查询。 | **必须**：`Adapter.OnClientCommand`（L58）与 `serverTransactionMutexStatus`（L161）都依赖它；fail-closed 分支（接口缺失即视为 busy）不可删。未使用参数属噪声，可清理但与本轮功能无关。 |
+| Adapter.OnClientCommand（L50） | `module`：命令所属 mod id；`command`：命令名；`player`：权威服务端玩家对象；`args`：命令参数。无显式返回值。副作用：仅处理 `C.MOD_ID` 且命令为 Enter/Exit；先查 wall reload 门，Enter 需 `locoId`，再 `pcall(enterPlayer/exitPlayer)`；失败时 `print("[RailroaderRVTest] Railroader RV command rejected: …")` 并 `sendResult(player,false,reason or "request rejected")`。L57 以 `ok,result,reason = true,nil,nil` 预置分支状态，L71 把 pcall 的异常文本搬进 `result`。语义：Enter/Exit 的服务端权威入口。 | **必须**：这是 Enter/Exit 唯一的服务端校验与执行路径（客户端发送点 `client/RailroaderRV/GUI/RV_RailroaderContextMenu.lua:163,173`）。注意其注册依赖 `installTransactionGate` 成功，见「接口边界问题 #1」。 |
+| onlinePlayersSnapshot（L79） | 无参数；返回 Lua array（可能为空），元素为引擎玩家对象。副作用：无。逻辑：`getOnlinePlayers` → `size()/get(i)`，无 size 时 `pairs` 兜底，按对象引用去重；结果为空时回退 `getPlayer()`。语义：跨模块共用的在线玩家快照实现。 | **必须**：全树 23 处引用（BoundaryGuard、RoomOwnership、WallReloadProtection、RVMapping、UtilityServer 与 adapter 自身），是唯一把 Java 在线容器安全转成 Lua array 的实现；缺失会让所有遍历退回 Java 容器访问。 |
+| Adapter.onlinePlayersSnapshot（L115） | 无参数；返回私有实现的结果。无副作用。语义：把私有快照挂到 adapter 公共面供其他目录调用。 | **必须**：`RV_UtilityServer.lua:141`、`RV_RailroaderServer_Tick.lua:27`、`RV_WallReloadProtection.lua:189` 等以特征探测方式调用它；没有它，跨目录取玩家列表需各自访问引擎容器。 |
+| Adapter.syncUtilityMapping（L119） | `player`：服务端玩家对象。返回：成功 `true, identity`；`resolveCurrentUtilityRV` 拒绝、上下文/identity/record 结构不符、`onlineId`/`rvId`/`generation`/`locoId` 任一不可用时 `false`。副作用：调用 `Adapter.resolveCurrentUtilityRV`（由 RVMapping/EntryExit 提供）解析当前 RV，并以 `callGlobal("sendServerCommand", player, C.MOD_ID, C.COMMAND_RV_UTILITY_MAPPING, payload)` 下发 `{ok, onlineId, rvId, locoId, generation}` 候选提示。语义：重连/换代后重建客户端 utility affordance。 | **必须**：`RV_UtilityServer.lua:290` 是唯一调用点；它是客户端重连后恢复 utility 面板的唯一服务端推送路径（注意只是 hint，权限由 utility 命令路径再次解析）。 |
+| Adapter.serverTransactionMutexStatus（L150） | 无参数。返回 `generationActive(boolean), wallBusy(boolean), reason(string?)`；`RailroaderRV.Server` 缺失或 `isGenerationTransactionActive` 不是函数 → `nil, nil, "RV generation transaction state is unavailable"`；generation pcall 失败或返回非 boolean → `nil, nil, C.INVALID_RV_DATA`。无副作用（只读进程状态）。语义：服务级"现在能否改座位/mapping/边界/玩家位置"的唯一汇总查询。 | **保留理由（职责必须，当前依赖缺失）**：汇总查询本身是 generation 与 wall reload 互斥的核心，被 BoundaryValidation:64/:195 与 Mapping 装配消费；但 generation 一半的提供方在当前源码树中不存在，见「接口边界问题 #1」，因此当前实现恒走 `nil` 分支。 |
+| Adapter.wallReloadTransactionBlocks（L168） | `rvId`：当前实现未参与过滤（L146-L149 注释明确说明这是刻意的服务级互斥）。返回：`generationBusy == nil` → `true, mutexReason`；generation 忙 → `true,"RV generation transaction is in progress"`；wall 忙 → `true, reason`；否则 `false`。无副作用。语义：EntryExit 传送/改 relation 前的 fail-closed 门。 | **必须**：`RVMapping/RV_RailroaderServer_EntryExit.lua:11` 包装为 `transactionBlocks` 后用于进入/退出判定；没有它，Enter/Exit 会与 generation、wall reload 竞争同一 RV 作用域。 |
+| Adapter.installTransactionGate（L197） | 无参数。返回：`Adapter._gateInstalled` 已置位 → `true`；`RailroaderRV.Server` 不是 table、或缺少 `isGenerationTransactionActive`/`isWallReloadTransactionActive` 任一函数 → `false`；成功时置位 `_gateInstalled` 并用 `Core.onCommand(C.COMMAND_RV_ENTER/EXIT, Adapter.OnClientCommand)` 注册，返回 `true`。副作用：向 Core 命令总线注册 handler。语义：一次性安装器，解决 PZ 字母序加载下 adapter 可能早于 `RV_Server.lua` 的时序问题。 | **必须**：它是 Enter/Exit 命令注册的唯一入口，且被 `RV_Server_Commands.lua:411-414` 二次调用；当前因门禁条件不满足而返回 `false`（见接口边界问题 #1）。 |
 
-### `RV_Server_ManifestValidation.lua` — manifest gate 适配器（3 个函数表达式）
+### RV_RailroaderServer_Tick.lua
 
-| 函数 / 行 | 职责、参数与输出/副作用 | 当前功能必要性 |
+模块在 [RV_RailroaderServer_Tick.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_RailroaderServer_Tick.lua)，同样是 `return function(ctx)` 工厂（L2-L109）。屋顶刷新队列退役后，它只剩四件周期工作：推进 wall reload、每 120 tick 采样 train pose、预热边界缓存、重排 room ownership 监视器；此外承担 generation hook 的安装（L76-L97）与两个可选对象事件回调的注册（L101-L106）。
+
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
 |---|---|---|
-| 文件加载闭包 `return function(ctx)` L2 | 输入组合根 `ctx`；装配依赖并调用 `Gate.configureManifest`，无返回值。 | 是：把 RV_Server 的依赖注入给一次性 gate，而不让 gate 自行猜取业务模块。 |
-| `requireCurrentManifest(manifest)` L23 | 输入 manifest；gate 未通过时抛 `INVALID_RV_DATA`，通过时返回原表。 | 是：向其他 RV_Server 子模块提供“当前已校验”门禁；内容扫描由 gate 完成。 |
-| `ctx.currentManifestValid()` 闭包 L28 | 无参数；返回 gate 是否 ready。 | 是：提供只读状态接口给组合根的其他服务模块。 |
+| 文件加载闭包 `return function(ctx)`（L2） | 参数 `ctx`：adapter 共享注入表（`Adapter`、`call`、`findTrain`、`trainPose`、`mapData`、`markMappingChanged`、`rvRegion`、`playerPositionInRegion`、`restoreAfterGenerationFailure`、`commitGeneration`、`validateGeneration`）。无返回值。副作用：require Core 与 WallReloadProtection、写 `Adapter._ticks`、定义 3 个函数、调用 `installTransactionHooks()`、条件注册 OnObjectAboutToBeRemoved / OnDestroyIsoThumpable。语义：本文件唯一装配入口。 | **必须**：捕获的 ctx 字段是 Trainer/Mapping/EntryExit 提供的调用期契约，去掉工厂则 adapter 无 tick 生命周期。 |
+| prewarmBoundaryPlayersInScope（L21） | `map`：当前 TrainMap ModData 根（透传给预热函数）。无返回值。副作用：特征探测 `RailroaderRV.RailroaderServer.onlinePlayersSnapshot` 与 `prewarmCurrentBoundaryPlayers`，用 `playerPositionInRegion(player, rvRegion())` 过滤出候选玩家，调用 `prewarmCurrentBoundaryPlayers(map, candidates)`。语义：为站在 RV 范围内的玩家保温 boundary 校验缓存。 | **必须**：BoundaryValidation 的校验缓存有 60 tick TTL（`RV_RailroaderServer_BoundaryValidation.lua:19`），且其自身只在 OnGameStart/OnServerStarted/OnCreatePlayer 预热；本函数是游戏运行中唯一的周期性保温驱动，缺失会让越界纠正落在冷校验上。 |
+| Adapter.OnTick（L40） | `tick`：Core 逻辑 tick。无返回值。副作用：写 `Adapter._ticks`；先 `WallReload.onTick()`（无 pcall，异常会向上冒）；非 30 的倍数立即返回；每 120 tick 遍历 `map.locomotives` 更新 `record.locoPosition` 并记录 `changed`；调用预热与（若存在）`Adapter.rearmRoomOwnershipMonitors(tick)`；`changed` 时 `markMappingChanged(false)`。语义：adapter 全部周期工作的唯一生命周期入口。 | **必须**：wall reload 状态机、train pose 持久化、边界预热都挂在这一个 tick 上；注意 `WallReload.onTick()` 未受 pcall 保护，其异常会中断本文件剩余 tick 工作（与 `RV.Server.OnTick` 的逐段 pcall 策略不同）。 |
+| Adapter.installTransactionHooks（L76） | 无参数。返回：`RailroaderRV.Server` 缺失或 `setRailroaderValidationHook`/`setRailroaderCommitHook`/`setRailroaderFailureHook` 任一不是函数 → `false`；否则注册三个 hook，首次同时 `Core.onTick(Adapter.OnTick)` 并置 `Adapter._tickRegistered`，返回 `true`。副作用：把 adapter 的 validation/commit/failure 回调注入 generation 事务，并向 Core 注册 tick。语义：可选 Railroader 事务与通用 generation 生命周期的接合点。 | **必须**：三个 hook 的 setter 由 `RVMapping/RV_Server_RecordValidation.lua:74/78/82` 提供，`RV_Server_Commands.lua:421-427` 依赖本函数返回 `true` 才认为 adapter 已接合；tick 注册也在这里，缺则 adapter 完全停摆。 |
+| installTransactionHooks 中匿名函数（L86，传给 `server.setRailroaderFailureHook`） | 参数 `...`：generation 失败上下文（透传）。返回值：`restoreAfterGenerationFailure(...)` 的结果。副作用：若 `Adapter.invalidateBoundaryValidationCache` 存在则先调用它，清掉陈旧 geometry 缓存。语义：失败回滚前的缓存失效钩子。 | **实现必需**：失败路径必须先无效化 boundary 校验缓存，否则回滚后守卫仍按旧缓存判定；用匿名闭包是因为它需要同时捕获 `Adapter` 与 `restoreAfterGenerationFailure`。 |
 
-### `RV_Server_Core.lua` — 逻辑时钟与事件总线（28 个函数表达式）
+### RV_Server.lua
 
-| 函数 / 行 | 职责、参数与输出/副作用 | 当前功能必要性 |
+模块在 [RV_Server.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_Server.lua)。它是服务端组合根：L7-L17 定义命令名常量与三个 hook 占位，L22-L24 声明 hook 局部（由 RecordValidation 通过 setter 写 ctx），L26-L44 实现模块加载回退，L49-L84 加载公共依赖与 adapter，L72-L74 创建 `RV.Server`，L86-L93 声明进程内状态，L95-L100 转出 utility 入口，L105-L136 构造 `ctx`，L138-L139 转出传送入口，L141-L150 装配 10 个子模块，L152 返回 `RV.Server`。本文件只有 1 个函数定义；`RV.Server.initializeUtilityRecord`（L96）、`RV.Server.settleRVUtilityLoad`（L99）、`RV.Server.teleportToPosition`（L138）、`RV.Server.teleportToRVSpawn`（L139）都是别名赋值，按计数口径不计入。
+
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
 |---|---|---|
-| `isUInt32(value)` L17 | 校验 0..2^32−1 整数 number；返回 bool。 | 是：两段式 tick 的字字段校验。 |
-| `isTick(value)` L23 | 检查精确 `{hi32,lo32}` table 和两个 UInt32；返回 bool。 | 是：所有 tick 运算和入口共用的结构契约。 |
-| `copyTick(value)` L36 | 复制已知 tick 的两字段；返回新 table。 | 是：避免调用者直接改 Core 时钟对象。 |
-| `validDelay(value)` L40 | 校验非负、安全整数 tick 延迟；返回 bool。 | 是：防止精度溢出破坏 tick deadline。 |
-| `tickCompare(left,right)` L46 | 比较两个 tick；输出 -1/0/1，非法时 `nil,reason`。 | 是：统一时序先后判断。 |
-| `tickAdd(tick,delta)` L57 | tick 加安全整数或两字 tick；输出新 tick，非法/溢出为 `nil,reason`。 | 是：所有跨帧截止时间计算。 |
-| `tickReached(now,deadline)` L78 | 是否已到 deadline；输出 bool/reason。 | 是：事务与缓存 deadline 检查。 |
-| `tickElapsed(now,since)` L84 | 计算两个 tick 的无符号差；逆序/非法时 nil+reason。 | 是：避免把大 tick 转成不精确的单 number。 |
-| `tickElapsedAtLeast(now,since,duration)` L100 | 判断 elapsed 是否达时长；输出 bool/reason。 | 是：跨帧超时判断共用入口。 |
-| `addModulo(left,right,modulus)` L106 | 安全地算模加法；输出余数。 | 是：服务 64-bit tick 的模运算而不构造不精确大数。 |
-| `multiplyModulo(left,right,modulus)` L112 | 倍增算法作模乘；输出余数。 | 是：计算高位字对 interval 的贡献。 |
-| `tickModuloFor(tick,interval)` L124 | 校验 tick/周期后判断 tick 模 interval 是否为 0；输出 bool 或 `false,reason`。 | 是：大 tick 周期调度的精确实现。 |
-| `getTick()` L150 | 无参数；返回当前进程时钟副本。 | 是：Core 公共只读时钟接口。 |
-| `formatTick(tick)` L154 | 格式化为 `hi32:lo32`，非法为 `invalid`。 | 是：便于日志显示而不丢失两段信息。 |
-| `tickModulo(interval)` L159 | 对内部当前 tick 调用 `tickModuloFor`；输出 bool/reason。 | 是：调用方不用接触 Core 内部时钟状态。 |
-| `nextTick()` L163 | 增加全局 tick，跨 lo32 进位；溢出返回 false/reason。 | 是：单一 dispatcher 上 OnTick 的时钟推进点。 |
-| `callOrdered(entries,predicate,...)` L176 | 顺序调用 entries 中通过可选 predicate 的 `callback`；透传事件参数；异常 fail-fast。 | 是：保持同一 dispatcher 内事务顺序和失败隔离。 |
-| `dispatchEvent(eventName,...)` L190 | 等 gate ready 后按 OnTick、OnClientCommand 或普通事件分派；OnTick 先递增 tick。 | 是：全部注册 handler 唯一入口，启动 gate 未过时不运行 RV 逻辑。 |
-| tick predicate 闭包 L198 | 输入一个注册项；用当前 tick 与 entry.interval 判定是否调用。 | 是：将周期筛选留在中央时钟里。 |
-| command predicate 闭包 L206 | 输入一个注册项；通配符或命令名相等时返回 true。 | 是：命令分发按注册名过滤。 |
-| `ensureEngineListener(eventName)` L215 | 输入允许注册的引擎事件名；安全读取 `Events[eventName].Add`、建 dispatcher 并注册；返回成功/错误。 | 是：保证 Core 注册成功前不向调用者谎报 handler 已安装。 |
-| 读取事件闭包 L218 | 无显式参数；在 `pcall` 中取 `Events[eventName]`；输出 event。 | 是：引擎 API 访问异常时走失败返回。 |
-| 读取 Add 闭包 L223 | 无显式参数；在 `pcall` 中读取 `event.Add`；输出 Add 函数。 | 是：保护 Java/引擎代理属性访问。 |
-| dispatcher 闭包 L233 | 输入引擎传入的 varargs；调用 `dispatchEvent(eventName,...)`。 | 是：让每个 engine event 仅安装本模块拥有的单个入口。 |
-| `registerTick(name,interval,callback)` L244 | 校验 ID/周期/函数，拒绝同名不同配置，确保 OnTick dispatcher 后登记；返回 bool/reason。 | 是：所有定期 server 服务的公开注册口。 |
-| `registerCommand(name,callback)` L271 | 校验命令/函数并按名字去重，确保 OnClientCommand dispatcher；返回 bool/reason。 | 是：命令 handler 的公开注册口。 |
-| `registerEvent(eventName,name,callback)` L303 | 只允许 allowlist 事件；具名去重后确保 dispatcher，返回 bool/reason。 | 是：对象/动作事件共用的注册口。 |
-| `sendToClient(player,command,payload)` L331 | 验证玩家和命令，取 module id，安全调用 `sendServerCommand`；返回 bool/reason。 | 当前项目内无调用点：公共 helper 本身完整，但实际命令服务采用 Common `Util`；可统一调用策略或移除这项未使用导出。 |
+| loadModule（L26） | `name`：模块路径 string；`globalName`：调试用全局名 string。返回 table：`pcall(require,name)` 成功且结果为 table 时返回它；否则回退 `rawget(_G, globalName)`；再回退 `RailroaderRV.Constants` / `RailroaderRV.Layout`；全部失败返回空表 `{}`。无副作用（除 require 本身的加载）。语义：公共契约的软加载，避免缺失时 nil 解引用。 | **必须**：`Constants` 在 L49 由它加载，后续 `Constants.WORLD_MIN_Z/WORLD_MAX_Z`（L134-L135）与 `Constants.COMMAND_RV_UTILITY`（Commands 侧）都依赖它；`loadModule` 返回空表保证这些读取不抛 nil。普通加载失败时静默降级为空表属设计取舍，见接口边界问题。 |
 
-### `RV_Server_Commands.lua` — RV_Server 命令与 tick 汇总（6 个函数表达式）
+### RV_Server_Commands.lua
 
-| 函数 / 行 | 职责、参数与输出/副作用 | 当前功能必要性 |
+模块在 [RV_Server_Commands.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_Server_Commands.lua)，以 `return function(ctx)` 工厂形式（L2-L431）接收 RV_Server 组合根的 ctx。前半（L22-L264）是 generation 阶段机与模板抓取，后半（L266-L428）是 `RV.Server.OnTick`/`OnClientCommand` 与注册/装配。L46-L84 的模板抓取工具函数只在开发期 `DumpTemplateCapture` 命令里使用；L386-L393 是 Core 注册段；L401-L428 是 adapter 二次装配段。
+
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
 |---|---|---|
-| 文件加载闭包 `return function(ctx)` L2 | 从组合根取依赖并安装 `RV.Server` handler/事件；无返回值。 | 是：把依赖注入与事件生命周期绑定在 server 服务装配阶段。 |
-| `safeErrorText(...)` L15 | varargs 转交 ctx 的安全错误文本格式化；输出安全字符串。 | 是：错误日志不直接 stringify 任意异常对象。可由直接调用格式化器代替，但封装便于此模块的注入边界。 |
-| `isInvalidRVData(reason)` L43 | 检查 reason 是否包含常量中的 fail-closed marker；输出 bool。 | 是：识别 schema 错误并通知玩家/取消事务。 |
-| `RV.Server.OnTick(tick)` L49 | 输入逻辑 tick；阻止 gate 未通过；更新 `ctx.serverTick`；维持迁移 lease、推进 room/roof 状态；调 utility tick；恢复/取消/校验 generation relocation 与 ACK、目标加载，最后触发生成。无显式返回值，可能修改事务和世界。 | 是：当前聚合事务的主 tick 协调器。 |
-| `RV.Server.OnClientCommand(module,command,player,args)` L198 | 按 mod/命令分派 utility、Enter/Exit 让 adapter 处理、两种 relocation ACK 或 Generate；验证失败通知/日志，成功后排队 generation。 | 是：服务端权威命令入口。 |
-| `requireCoreRegistration(ok,reason)` L278 | 注册失败则抛错；无成功返回值。 | 是：启动时 fail-fast，防止 server 以为 handler 已可用。 |
+| 文件加载闭包 `return function(ctx)`（L2） | 参数 `ctx`：RV_Server 组合根注入表（命令常量、`Core`、`Constants`、`Boundary`、`RV`、`ServerSchema`、`ServerUtil`、`ServerWorld`、`UtilityServer`、`GenerationTransaction`、`safeErrorText`、RoomOwnership 与 generation 各阶段注入函数）。无返回值。副作用：require RoomTemplate/TemplateGeometry/WallReloadProtection，取当前模板与有序对象列表，定义 11 个函数 + 2 个 handler，并向 Core 注册 tick/命令/对象事件。语义：本文件唯一装配入口。 | **必须**：L20-L21 在装配期解析模板（`RoomTemplate.get(TEMPLATE_ID)`、`orderedObjects`），是 generation tick 与模板抓取的静态输入；去掉工厂则所有注入失效。 |
+| safeErrorText（L22） | `...`：任意错误值（透传）。返回 `ctx.safeErrorText(...)` 的结果（安全文本）。无副作用。语义：把 ctx 上的安全格式化器包装成本地调用形式。 | **必须**：`ctx.safeErrorText` 由 GenerationBuild 在装配后期写入（`RV_Server_GenerationBuild.lua:178`），而本模块在 L2 的 ctx 里读到的是 nil 占位；包装成函数使解析推迟到调用期，避免装配顺序崩溃。这是刻意的惰性转发，不是冗余别名。 |
+| isTransientObject（L47） | `object`：世界格对象。返回 boolean。玩家/车辆对象（`ServerWorld.isPlayerObject`/`isVehicleObject`）或 `IsoZombie`/`IsoAnimal`/`IsoDeadBody`/`IsoWorldInventoryObject` 之一为 `true`。无副作用。语义：模板抓取时过滤瞬时实体。 | **必须**：只有开发期 `DumpTemplateCapture` 使用；作为开发诊断工具的一部分，其存在性由该命令的功能决定。若该命令被移除，本函数随之成为死代码。 |
+| captureObjectClass（L58） | `object`：世界对象。返回类名尾段 string（去除 `class ` 前缀后取最后一段 `[^.]+`）。副作用：无（`ServerUtil.invoke` 受保护）。语义：抓取日志的类名归一。 | **必须**：同上，`DumpTemplateCapture` 输出格式的组成部分。 |
+| captureObjectName（L64） | `object`：世界对象。返回首个可用的 `getName`/`getObjectName`/`getCustomName` 值转成的 string，全不可用返回 nil。副作用：无。语义：抓取日志的名称归一。 | **必须**：同上。属性名候选列表必须覆盖 Java 对象的多种命名 API。 |
+| captureObjectState（L74） | `object`：世界对象。返回 `"key=value,…"` 形式的 string（依 `stateReaders` 顺序取 open/locked/hoppable/health/maxHealth/fuel/water/uses，取不到的字段跳过）。副作用：无。语义：抓取日志的状态摘要。 | **必须**：同上；`stateReaders`（L40-L45）是这份摘要的字段契约。 |
+| dumpTemplateCapture（L86） | `player`：发起命令的玩家。返回 `true`（成功）或 `false, reason`。副作用：仅 `print`，不改世界。校验权威玩家位置与生成权限，用 `TemplateGeometry.templateAnchorForWorld` 求锚点并确认玩家在模板编辑几何内；随后按 `Template.misc.walkAabbs`、`Template.misc.buildCells`（含 +1 邻居）与 `templateObjects` 三组宿主逐格调用 captureHost；最后打印 origin 与对象总数。语义：开发期把当前模板覆盖的世界对象采样成可核对的文本。 | **必须**：`C.COMMAND_DUMP_TEMPLATE_CAPTURE`（`RV_Server_Commands.lua:324-332`）的唯一实现，客户端入口 `client/RailroaderRV/GUI/RV_ContextMenu_Relocation.lua:35-36`；它是模板校准工具链的一部分。 |
+| captureHost（L102，dumpTemplateCapture 内嵌 local function） | `x,y,z`：相对锚点的宿主坐标。无返回值（返回 nil）。副作用：经 `seenHosts` 去重后取 square，遍历 `ServerWorld.squareSnapshot` 的对象，对非瞬时对象累计 `objectCount` 并逐条 `print` rel/class/name/sprite/north/direction/state。语义：单宿主格的抓取循环体。 | **实现必需**：把三层嵌套的坐标枚举收敛成一个去重、可复用的格处理函数，并在闭包内累计 `seenHosts` 与 `objectCount`；拆成顶层函数需要额外传状态。 |
+| isInvalidRVData（L159） | `reason`：错误文本/任意值。返回 boolean：`Constants.INVALID_RV_DATA` 是非空 string 且 `reason` 文本包含该 marker 时为 `true`。无副作用。语义：把"RV 数据合同错误"从普通业务失败中分离。 | **必须**：`RV.Server.OnClientCommand` 用它在 ACK 失败时决定是否走 abort（L341-L347）以及是否 `notifyFailure`（L372）；缺则客户端合同失配会一直等待无法接受的 ACK。 |
+| runGenerationAbort（L170） | `record`：当前 generation 记录（可为 nil）；`reason`：中止原因。无返回值。副作用：`record == nil` 直接返回；否则 `GenerationTransaction.cancel(reason)` 置 `cancelled`/`failureReason`，再 `pcall(abortGeneration, record, reason)`；pcall 失败时 `print` 日志。语义：所有 generation 阶段共用的唯一 abort 决策点。 | **必须**：注释明确约定 `cancel` 是请求信号、`abortGeneration` 是唯一观察者；把"标记取消 + 执行清理"合并成一处，保证失败操作只被标记一次、只记录一次、玩家可再次点击。 |
+| processPendingGeneration（L183） | 无参数。无返回值。副作用：读 `GenerationTransaction.current()`；`resolvePendingPlayer` 失败即返回；`ctx.serverTick > record.deadlineTick` 时按超时 abort；按 `record.stage` 推进状态机——`WAIT_STAGING` 需 `stagingAcked`、`playerIsAtStagingDestination`、`ServerSchema.targetAreaLoadStatus`（nil 时 abort，false 时返回等待），随后 `generateForPlayer`（失败 abort）；`BUILD` 分支一律 abort（"generation build did not complete"）；`WAIT_FINAL` 需 `finalAcked`，`finalizeGenerationAfterRelocate` 成功则 `GenerationTransaction.release()` 并打印 `generation committed READY`，特定"仍在同步"原因则返回等待，其他失败 abort。语义：generation 阶段机的唯一 tick 驱动器。 | **必须**：`record.stage` 是唯一阶段权威，本函数是 `WAIT_STAGING → BUILD → WAIT_FINAL → DONE` 的唯一推进者；被 `RV.Server.OnTick` 以 pcall 调用（L291-L295）。 |
+| RV.Server.OnTick（L266） | `tick`：Core 逻辑 tick（nil 时取 `Core.getTick()`）。无返回值。副作用：写 `ctx.serverTick`；逐段隔离调用 `WallReload.onTick`（pcall + 日志）、`keepGenerationTransitionAlive`（存在 generation 记录时）、`Boundary.onTick`（pcall）、`processServerRoomOwnershipGuards`、`UtilityServer.onTick(ctx.serverTick)`（pcall + 日志）、`processPendingGeneration`（pcall + 日志）。语义：服务端聚合 tick 协调器。 | **必须**：这是 wall reload、boundary sweep、utility 周期扫描、room ownership 守卫与 generation 阶段机唯一的公共驱动点；分段 pcall 是刻意的失败隔离（与 adapter OnTick 的裸调用不同）。 |
+| RV.Server.OnClientCommand（L298） | `module`：命令所属 mod id；`command`：命令名；`player`：权威玩家；`args`：命令参数。无返回值。副作用：按 module/command 分派——`Constants.COMMAND_RV_UTILITY` → `pcall(UtilityServer.handleCommand, player, args)`；Enter/Exit 直接 `return`（归 adapter）；`COMMAND_DUMP_TEMPLATE_CAPTURE` → `dumpTemplateCapture`；`COMMAND_FINAL_RELOCATE_ACK`/`COMMAND_RELOCATE_ACK` → 对应 acknowledge（异常折叠为 `false`，final ACK 且 reason 命中 INVALID_RV_DATA 时走 `runGenerationAbort`）；其余走 `validateRequest` + `queueGeneration`，拒绝时 `notifyFailure` + `print`。语义：服务端通用命令入口。 | **必须（但当前注册方式存疑）**：它是 Generate/RVUtility/两种 ACK/模板抓取唯一的分派实现；Enter/Exit 的抑制分支（L320-L323）保证同一事件上的两个 handler 不互相误报。注册方式见「接口边界问题 #2」。 |
 
-### `RV_Server.lua` — RV_Server 组合根（4 个函数表达式）
+### RV_Server_Core.lua
 
-| 函数 / 行 | 职责、参数与输出/副作用 | 当前功能必要性 |
+模块在 [RV_Server_Core.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_Server_Core.lua)。它是服务端唯一的逻辑时钟与事件总线：逻辑 tick 是一个普通 Lua number，由本模块持有，所有 RV 内存记录里的 tick 都产自它或在其上做算术，因此消费者直接比较数字而不校验 tick 形状。本模块只拥有瞬时调度状态，从不写 SandboxVars、ModData 或其他持久状态。L10-L21 在 `RailroaderRV.Core` 下建立可跨 require reload 存活的 backing state，L23-L30 定义事件名到回调数组的映射，L92-L99 导出 9 个函数，L106-L127 每进程只向引擎订阅一次。
+
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
 |---|---|---|
-| `loadModule(name,globalName)` L27 | 输入模块名与调试全局名；安全 require，按全局/RV 子字段回退，最后返回空 table。 | 是：缺失常量/layout 时阻止 nil 解引用；global fallback 仅供 debugger reload。 |
-| `ctx.samplePlayerPosition(player,tick,interval)` L161 | 位置缓存采样 facade；返回缓存器的采样结果。 | 是：把 Common cache 作为注入服务交给 relocation 子模块。 |
-| `ctx.getPlayerPosition(player,options)` L164 | 位置缓存读取 facade；返回缓存器当前位置与状态。 | 是：同上，集中共享取位缓存。 |
-| `ctx.invalidatePlayerPosition(player)` L167 | 使该玩家位置缓存失效；返回 cache 结果。 | 是：传送或位置身份变化后清除陈旧观察。 |
+| getTick（L32） | 无参数；返回 `state.tick`（number）。无副作用。语义：Core 的公共只读时钟接口。 | **必须**：全树 12 处调用（`RV_Server_Commands.lua:267`、`RV_Server.lua:87`、Sentinel:184、Tick:16、`RV_BoundaryServer.lua:36`、`RV_BoundaryServer_Sweep.lua:110`、`RV_RailroaderServer_BoundaryValidation.lua:74/149/178/197`、`RV_WallReloadProtection.lua:38`、`RV_RailroaderServer_WallReload.lua:288`）。 |
+| tickAdd（L36） | `tick`、`delta`：number。返回 `tick + delta`。无副作用。语义：tick 加法契约。 | **当前不是功能必需**：全树（`contents/mods/RailroaderRVTest/42/media/lua`）检索 `tickAdd(` 只命中定义行本身，无调用点。作为 Core 声明的时钟算术出口可保留，但删除不影响当前行为；若保留应在报告中标注为未使用导出。 |
+| tickReached（L40） | `now`、`deadline`：number。返回 `now >= deadline`。无副作用。语义：到期判定契约。 | **当前不是功能必需**：全树检索 `tickReached(` 只命中定义行，无调用点。同上。 |
+| tickElapsedAtLeast（L44） | `now`、`since`、`duration`：number。返回 `(now - since) >= duration`。无副作用。语义：经过时长判定契约。 | **当前不是功能必需**：全树检索 `tickElapsedAtLeast(` 只命中定义行，无调用点。同上；当前各模块改为自行比较 `ctx.serverTick` 与 deadline。 |
+| tickModulo（L48） | `interval`：number。返回 `state.tick % interval == 0`（boolean）。无副作用。语义：周期调度判定。 | **必须**：`RV_RailroaderServer_Tick.lua:45,48`、`RV_UtilityServer.lua:308,309`、`TemplateRecovery/RV_TemplateRecovery.lua:160` 依赖它；注意它读的是**模块内部** `state.tick`，而不是调用方传入的 tick。 |
+| dispatch（L55） | `eventName`：六个受支持事件名之一；`...`：引擎事件实参。无返回值。副作用：未知事件名 `error(...)`；否则按注册顺序 `pcall` 调用每个回调，首个失败时 `print("[RailroaderRVTest] <event> handler failed: …")` 并 `return`（停止该事件本次剩余回调，不重抛）。语义：引擎事件到 RV 回调列表的唯一分发器。 | **必须**：进程内每个引擎事件只安装一个 Core dispatcher（L106-L127），所有 RV handler 经此调度；失败隔离保证一个模块的异常不吞掉后续模块。 |
+| on（L70） | `eventName`：受支持事件名；`callback`：函数。无返回值。副作用：校验事件名（未知则 `error`）后把 callback 追加到对应列表。语义：底层具名事件注册口。 | **必须**：`onTick`（L78-L80）、`onCommand`（L85-L90）都建立在它之上；`RV_Server_Commands.lua:389/390/392/393` 与 `RV_RailroaderServer_Tick.lua:102/105` 直接使用它注册 Boundary/RoomOwnership/wall reload 回调。 |
+| onTick（L78） | `callback`：函数。无返回值。副作用：转交 `on("OnTick", callback)`。语义：tick 注册的语义化别名。 | **必须**：`RV_Server_Commands.lua:387` 与 `RV_RailroaderServer_Tick.lua:94` 使用；它把"注册到 OnTick"与事件名解耦。 |
+| onCommand（L85） | `command`：命令名 string；`callback`：函数。无返回值。副作用：向 `OnClientCommand` 注册一个包装函数（L86-L89），包装体在 `received ~= command` 时直接返回，否则转交 callback 并返回其结果。语义：具名命令注册口。 | **必须（实现与注释不一致，见接口边界问题 #2）**：Enter/Exit 的注册（Sentinel:206-207）依赖它；包装体是**精确字符串比较**，没有通配分支，因此 `RV_Server_Commands.lua:386` 的 `"*"` 注册不会匹配任何真实命令名，而 L82-L84 的注释却把 `"*"` 描述为 catch-all。 |
+| onCommand 中匿名函数（L86，注册到 `OnClientCommand`） | `module`、`received`、`player`、`args`：引擎命令实参。返回 callback 的返回值（或 nil）。副作用：按名过滤后转发。语义：命令名过滤器。 | **实现必需**：Core 用一层闭包把"事件级订阅"收敛成"命令级订阅"，避免每个模块各自做名字判断；代价是通配语义未实现。 |
+| Events.OnTick.Add 中匿名函数（L108） | 无参数。无返回值。副作用：`state.tick = state.tick + 1`，再 `dispatch("OnTick", state.tick)`。语义：唯一的 tick 推进点。 | **必须**：逻辑时钟只在这里推进一次、只由这一个 dispatcher 分发；缺则所有周期工作停摆。 |
+| Events.OnClientCommand.Add 中匿名函数（L112） | `module`、`command`、`player`、`args`。无返回值。副作用：`dispatch("OnClientCommand", …)`。语义：命令事件唯一入口。 | **必须**：所有服务端命令（含 adapter 的 Enter/Exit）都经此汇入 Core 注册表。 |
+| Events.OnProcessAction.Add 中匿名函数（L115） | `action`、`player`、`args`。无返回值。副作用：`dispatch("OnProcessAction", …)`。语义：动作事件唯一入口。 | **必须**：`RV_Server_Commands.lua:389` 把 `Boundary.onProcessAction` 注册到该事件；缺则 boundary 无法在玩家动作阶段介入。 |
+| Events.OnObjectAdded.Add 中匿名函数（L118） | `object`。无返回值。副作用：`dispatch("OnObjectAdded", …)`。语义：对象新增事件唯一入口。 | **必须**：`RV_Server_Commands.lua:390`（Boundary）与 `:393`（room ownership scan）都注册在此事件上。 |
+| Events.OnObjectAboutToBeRemoved.Add 中匿名函数（L121） | `object`。无返回值。副作用：`dispatch("OnObjectAboutToBeRemoved", …)`。语义：对象移除前事件唯一入口。 | **必须**：`RV_Server_Commands.lua:392`（room ownership removal scan）与 `RV_RailroaderServer_Tick.lua:102`（wall reload 触发）依赖它；这是拆墙重载的触发源。 |
+| Events.OnDestroyIsoThumpable.Add 中匿名函数（L124） | `object`。无返回值。副作用：`dispatch("OnDestroyIsoThumpable", …)`。语义：IsoThumpable 销毁事件唯一入口。 | **必须**：`RV_RailroaderServer_Tick.lua:105` 用它补足绕过 remove 事件的直接销毁路径（注释 L236-L237 说明是严格补充而非客户端路径）。 |
 
-### `RV_RailroaderServer.lua` — Railroader adapter 组合根（2 个函数表达式）
+### RV_UtilityServer.lua
 
-| 函数 / 行 | 职责、参数与输出/副作用 | 当前功能必要性 |
+模块在 [RV_UtilityServer.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_UtilityServer.lua)。它是 utility 协议门面：RV_Server 拥有事件注册并调用本模块处理服务端校验过的 generator 意图与 mapping 同步。按文件头注释，一条客户端命令被当作一条直线式服务端事务处理——Lua 服务端顺序执行 handler，因此不需要 per-RV 锁、session nonce 或幂等重放窗口。L17-L20 建立模块表与三个模块私有状态（`mappingSyncState`、`lastTick`、`lastScanTick`）；L175-L268 是唯一命令入口；L302-L341 是周期维护；L343-L356 是 generation 初始化；L358-L364 自行向引擎注册两个时间事件。
+
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
 |---|---|---|
-| `processIsClient()` L10 | 无参数；安全调用引擎 `isClient()`，无 API/失败时 false。 | 是：区分 client-only Lua pass。 |
-| `processIsServer()` L16 | 无参数；安全调用 `isServer()`；函数不存在时按 server 兼容路径返回 true。 | 是：与上一函数组合判断 client-only 进程。 |
+| playerKey（L22） | `player`：玩家对象。返回 `"<onlineId>:<name>"` string；ID 与 name 都取不到时 nil；name 回退顺序为 `getUsername` → `getFullName`。无副作用。语义：把玩家对象折叠成可比较的会话键。 | **必须**：`mappingSyncState`（L288-L298）以它为键做"该玩家是否已同步"的判定与失效清理；没有稳定键就无法区分同名/重连玩家。 |
+| stableReason（L32） | `reason`：内部错误文本。返回协议原因 string：含 `C.INVALID_RV_DATA` → `U.REASON_INVALID_RV_DATA`；`"outside-rv"`/`"unmapped-rv"`/`"permission-denied"` → 对应 `U.REASONS`；其他原样 `tostring`，nil 时 `U.REASONS.API_ERROR`。无副作用。语义：内部原因到客户端协议原因的映射。 | **必须**：客户端 `client/RailroaderRV/GUI/RV_UtilityClient.lua:253` 以 `U.REASON_INVALID_RV_DATA` 做特殊处理，故映射必须稳定；否则内部长文本会泄漏到协议并破坏客户端分支。 |
+| send（L42） | `player`：玩家对象（可为 nil）；`command`：客户端命令名；`payload`：数据表。返回 `Util.callGlobalSucceeded("sendServerCommand", player, C.MOD_ID, command, payload)` 的布尔结果；`player` 为 nil 时 false。无副作用（除网络发送）。语义：ack/snapshot 的统一消息出口。 | **必须**：`acknowledge`（L127）、`broadcast`（L134）都经它发送；集中处理 `sendServerCommand` 的失败折叠语义。 |
+| resolveRV（L48） | `player`：权威服务端玩家。返回成功 `true, context`（并在 context 上补 `context.player = player`）；失败 `false, reason`。校验链：`RailroaderRV.Server.resolveCurrentUtilityRV` 存在 → `pcall` 调用 → `accepted == true`、context 是 table、`context.authorized == true`、`context.identity` 是 table → `identity.rvId` 非空 string 且 `generation` 为整数。副作用：改写传入 context 的 `player` 字段。语义：utility 权限与 RV 归属的唯一服务端解析点。 | **必须**：所有 utility 操作都先经它；权限判定来自服务端 adapter（`RVMapping/RV_RailroaderServer_EntryExit.lua:50`），客户端 payload 不参与。 |
+| serviceBusy（L69） | 无参数。返回 boolean。`RailroaderRV.Server` 缺失 → `true`；`isGenerationTransactionActive` 存在则 pcall，异常或 `true` → `true`；`isWallReloadTransactionActive` 同理；否则 `false`。无副作用。语义：utility 写操作与两大事务的互斥查询。 | **保留理由（职责必须，当前一半失效）**：互斥本身必要；但 generation 一半因提供方缺失而恒被跳过（见接口边界问题 #1），与 Sentinel 的 fail-closed 口径不一致。 |
+| validText（L86） | `value`：任意值；`maxLength`：上限 number。返回 boolean：非空 string 且 `#value <= maxLength`。无副作用。语义：协议字符串字段约束。 | **必须**：`validRequest` 用 `U.MAX_REQUEST_ID_LENGTH` 与 64 约束 `requestId`/`operation`。 |
+| validHint（L90） | `value`：任意值。返回 boolean：nil 或 table 为 true。无副作用。语义：位置 hint 的容器准入。 | **必须**：`targetHint`/`sourceHint` 只允许以可检查的数据容器进入协议；放宽会允许标量绕过后续校验。 |
+| validRequest（L95） | `args`：客户端命令参数。返回 `true` 或 `false, U.REASONS.INVALID_REQUEST`。规则：必须是 table；字段只允许 `requestId`/`operation`/`targetHint`/`sourceHint`（未知字段即拒绝）；`requestId` 非空且不超 `U.MAX_REQUEST_ID_LENGTH`；`operation` 非空且不超 64；两个 hint 通过 `validHint`。无副作用。语义：utility 协议的 allow-list 门禁。 | **必须**：`M.handleCommand` 的第一道校验；精确字段集合是防止客户端夹带未定义字段的唯一边界。 |
+| knownOperation（L108） | `operation`：string。返回 boolean：属于 12 个已实现操作之一（addFuel/addBattery/connectWaterDevice/removeBattery/installCharger/removeCharger/installInverter/removeInverter/refreshDevices/requestSnapshot/startGenerator/stopGenerator）。无副作用。语义：操作白名单。 | **必须**：白名单与 L206-L258 的分派分支一一对应；没有它，未支持操作会落入最后的 `else` 分支被当作 generator 开关处理。 |
+| acknowledge（L118） | `player`、`requestId`、`accepted`：boolean、`result`：成功详情或失败原因。无返回值。副作用：构造 payload（`requestId`、`ok`；成功时 `reason = U.REASONS.OK` 且仅透传 table 结果的 `connected` 字段；失败时 `reason = stableReason(result)`）并 `send(player, C.COMMAND_RV_UTILITY_ACK, payload)`。语义：单请求结果回包。 | **必须**：每个被处理的 utility 请求都要回 ack，否则客户端 `RV_UtilityClient` 的 pending 状态无法收敛；`connected` 的窄透传是刻意的协议最小面。 |
+| broadcast（L130） | `context`：已授权上下文；`record`：utility 记录。无返回值。副作用：`Store.snapshot(record)` 并补 `payload.power = Power.snapshot(record, identity, context)`，然后 `send(context.player, C.COMMAND_RV_UTILITY_SNAPSHOT, payload)`。语义：向单个玩家发送 utility 快照。 | **必须**：`M.handleCommand` 的 snapshot 操作（L202）与 `M.initializeRecord`（L354）依赖它；设备/水位状态只能经此到达客户端。 |
+| broadcastToRV（L137） | `identity`：RV 身份；`record`：utility 记录。无返回值。副作用：经 `RailroaderRV.RailroaderServer.onlinePlayersSnapshot` 枚举在线玩家，对每个玩家重新 `resolveRV`，仅当 `context.identity.rvId` 与 `generation` 都与入参一致时 `broadcast`。语义：向当前同 RV、同代际的玩家同步状态。 | **必须**：utility 状态是 RV 级共享状态（发电机、水网），不广播则同 RV 其他玩家看到陈旧数据；按服务端重新解析而非按客户端声明分组，是权威性要求。 |
+| currentMappingRecord（L153） | `identity`：RV 身份。返回 `true, record` 或 `false, C.INVALID_RV_DATA`。副作用：无（`adapter.currentUtilityRecord` 由 EntryExit 提供）。语义：把 utility 账本与当前 mapping 对齐。 | **必须**：`forCurrentRecords`（L169）用它剔除已过期/未映射的记录；没有它，周期扫描会继续操作不再属于任何当前 RV 的记录。 |
+| forCurrentRecords（L163） | `callback`：函数，签名 `(identity, record, mappingRecord)`。无返回值。副作用：`Store.allRecords()` 遍历，`Store.validateIdentity(identity)` 通过且 `currentMappingRecord` 成功时调用 callback。语义：周期任务的统一记录枚举器。 | **必须**：`M.onTick`（L312）、`M.onEveryTenMinutes`（L319）、`M.onEveryHour`（L328）三个周期任务共用同一筛选规则，避免三处各写一套过期判定。 |
+| M.handleCommand（L175） | `player`：权威玩家；`args`：命令参数表。返回 `true, detail` 或 `false, reason`。副作用：校验请求与操作白名单；`serviceBusy` 时直接 ack 失败返回；`resolveRV` 失败时 ack 失败返回；`context.phase ~= "READY"` 时 ack `U.REASONS.PERMISSION`；`Store.getRecord(identity,false)` 失败时 ack 失败返回；`requestSnapshot` 直接 `broadcast` 并返回；其余按操作分派到 `Water.setConnection`、`Power.settleAndRefreshLoad` + `Power.addFuel`、`Devices.scanAll`、`Power.handleIntent`；失败时若已有 settle 结果则先 `broadcastToRV`，再 ack 失败；成功时 `broadcastToRV(identity, detail.record or record)` 后 ack 成功。语义：客户端 utility intent 的唯一服务端调度入口。 | **必须**：`RV_Server_Commands.lua:305-315` 是唯一调用点，全部 utility 操作（水、电、电池、充电器、逆变器、设备扫描、快照、发电机）都经此；settle-before-mutate 与失败广播是资源账本一致性的前提。 |
+| syncUtilityMappings（L270） | 无参数。无返回值。副作用：取 adapter 与 `onlinePlayersSnapshot`/`syncUtilityMapping`/`currentMappingEpoch`；epoch 变化或玩家对象变化时对每个在线玩家 `pcall(adapter.syncUtilityMapping, player)`，成功则更新 `mappingSyncState[key] = {player, epoch}`；最后删除不再在线的键。语义：重连或 mapping 换代后恢复客户端 utility 提示。 | **必须**：这是 `syncUtilityMapping` 的唯一调用点；`mappingSyncState` 的清理避免长期运行下按玩家键无限增长。 |
+| M.onTick（L302） | `tick`：逻辑 tick（非 number 直接返回；与 `lastTick` 相同则返回，防重复调度）。无返回值。副作用：更新 `lastTick`；每 30 tick 调 `syncUtilityMappings()`；按 `U.POWER.DEVICE_SCAN_INTERVAL_TICKS` 周期扫描设备（`Power.ensureRuntime` 成功才 `Devices.scanTick`），并保证同一 tick 不重复扫描。语义：utility 周期性服务入口。 | **必须**：被 `RV.Server.OnTick` 以 pcall 调用（`RV_Server_Commands.lua:286`）；去重与 modulo 检查都由 Core 的 tick 语义驱动。 |
+| forCurrentRecords 中匿名函数（L312，`M.onTick` 内） | `identity`、`record`、`mappingRecord`。无返回值。副作用：`Power.ensureRuntime(identity, record)` 为真时 `Devices.scanTick(identity, mappingRecord, nil)`。语义：每条有效 RV 的设备扫描动作。 | **实现必需**：设备扫描需要先确保 power runtime 存在，两步顺序只能在此闭包内表达。 |
+| M.onEveryTenMinutes（L318） | 无参数。无返回值。副作用：对每条当前记录 `Power.settleAndRefreshLoad(identity, nil, record)`，成功且返回 table 时 `broadcastToRV`。语义：按游戏时间结算 utility 负载。 | **必须**：由 L360 `Events.EveryTenMinutes.Add(M.onEveryTenMinutes)` 注册；这是不依赖 tick 频率的资源结算兜底（电力随时间消耗）。 |
+| forCurrentRecords 中匿名函数（L319，`M.onEveryTenMinutes` 内） | `identity`、`record`。无返回值。副作用：结算并把更新后的记录广播给同 RV 玩家。语义：逐记录的结算与同步动作。 | **实现必需**：把批量循环体收敛到一处，且 `player` 传 nil 表示由服务端自行结算。 |
+| M.onEveryHour（L327） | 无参数。无返回值。副作用：对每条当前记录 `Power.maintainNativeProxy(identity, record)`。语义：按小时维护实体 proxy。 | **必须**：由 L363 `Events.EveryHours.Add(M.onEveryHour)` 注册；native proxy 维护没有其他触发点。 |
+| forCurrentRecords 中匿名函数（L328，`M.onEveryHour` 内） | `identity`、`record`。无返回值。副作用：转交 `Power.maintainNativeProxy`。语义：逐记录的每小时维护动作。 | **实现必需**：同上，仅适配 `forCurrentRecords` 回调签名。 |
+| M.settleAndRefreshLoad（L333） | `identity`：RV 身份；`player`：可选玩家（可为 nil）。返回 `true, updated` 或 `false, reason/record`。副作用：`Store.getRecord(identity,false)`；`Power.settleAndRefreshLoad`；成功且返回 table 时 `broadcastToRV`。语义：向 generation/EntryExit 暴露的 utility 负载结算接口。 | **必须**：`RV_Server.lua:99` 把它转出为 `RV.Server.settleRVUtilityLoad`，`RVMapping/RV_RailroaderServer_EntryExit.lua:124,129,571,572` 在进入/退出前后调用；没有它，进出 RV 时电力账本不会与真值对齐。 |
+| M.initializeRecord（L343） | `identity`：新 RV 身份；`context`：含 `player` 的上下文。返回 `true, record` 或 `false, reason`。副作用：打印 `utility init begin/committed/failed` 日志；调用 `Power.initializeRecord(identity, context)`；成功且 `context.player` 存在时 `broadcast(context, record)`。语义：generation 成功后的 utility 初始化。 | **必须**：`RV_Server.lua:96` 转出为 `RV.Server.initializeUtilityRecord`，`RV_RailroaderServer_EntryExit.lua:535,558` 调用；没有它，新生成的 RV 没有 power/water 记录。 |
 
-### `RV_RailroaderServer_Tick.lua` — adapter tick 生命周期（7 个函数表达式）
+### RV_UtilityStore.lua
 
-| 函数 / 行 | 职责、参数与输出/副作用 | 当前功能必要性 |
+模块在 [RV_UtilityStore.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_UtilityStore.lua)。它是 utility power 与 native sink 管路状态的**当前版本专用**持久化层：读出的记录一律深拷贝，调用方改工作副本，只有显式 `M.commit` 才写回 ModData 并 `transmit`。L3-L5 require 常量、`RV_UtilityConstants` 与 `RV_UtilityPowerConfig`；L7 建立模块表；L9-L88 是 13 个私有 helper；L90-L165 是 6 个导出函数。注意：`M.validateIdentity`、`M.getRecord`、`M.commit` 的 identity 门禁只校验 `{rvId, generation}`，不校验 bitmap/slot 等几何字段（与旧报告描述的"三项身份"不同）。
+
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
 |---|---|---|
-| 文件加载闭包 `return function(ctx)` L2 | 接收 adapter 私有 ctx，捕获队列、mapping 操作并注册函数；无返回值。 | 是：按模块加载顺序装配 adapter tick 子系统。 |
-| `recordForLoco(...)` L9 | varargs 透传到 adapter 的同名查找接口；返回其结果。 | 是：消除本模块对上下文查找 helper 的重复绑定；可用局部直接别名替代。 |
-| `processPendingWallRoofRefreshes()` L33 | 无参数；检查 pending/follow-up 队列与 generation mutex，暂停或过期排队事务，读取当前 mapping、提升 follow-up、重验身份/状态并推进 roof relocation group；无直接返回值，改写 adapter 私有排程状态。 | 是：接受的 wall-removal 工作需有有界、可重验的推进路径。 |
-| `Adapter.OnTick(tick)` L173 | 输入 Core tick；设置 adapter tick、周期 prune/处理队列/sentinel；每 30 tick 读取 mapping，每 120 tick 更新 train pose；采样 roof-refresh 玩家并在 mapping 改变时提交。 | 是：adapter 所有 tick 工作的唯一生命周期入口。 |
-| `Adapter.installTransactionHooks()` L226 | 无参数；检查 RV.Server 的 validation/commit/failure setter，并安装 `validateGeneration`、`commitGeneration` 和 rollback hook；返回 bool。 | 是：把可选 Railroader 事务与通用 generation 生命周期接合。 |
-| failure hook 闭包 L236 | 接收任意失败参数；失效 boundary cache 后转交 generation rollback；返回恢复结果。 | 是：失败回滚必须先清陈旧 geometry cache。 |
-| `requireCoreRegistration(ok,reason)` L247 | 失败时抛出注册错误；无成功返回。 | 是：命令/tick/对象回调缺注册时停止 adapter 装配。 |
+| integer（L9） | `value`：任意值。返回有限整数 number，否则 nil。无副作用。语义：modData 数值字段的整数归一。 | **必须**：`identityValid`（L32）与 `M.getRecord`/`M.commit` 的 generation 比较都依赖它，保证 `"1"` 与 `1` 不会产生误判。 |
+| number（L13） | `value`：任意值。返回 `type(value) == "number"` 时的原值，否则 nil。无副作用。语义：宽松数值过滤 helper。 | **当前不是功能必需**：本文件内无调用点（全树检索 `number(` 在本文件只命中定义行本身），是同文件内的死代码。删除不影响任何行为；保留会误导读者以为存在第二套数值契约。 |
+| empty（L17） | `value`：任意值。返回 boolean：非 table 为 false，无键 table 为 true，有键为 false。无副作用。语义：区分"未初始化的空根"与"已有持久数据"。 | **必须**：`root`（L57）、`M.getRecord`（L100）、`M.allRecords`（L150）三处用它判断 ModData 根是否为空，决定是否新建记录。 |
+| copyTable（L23） | `value`：任意值（表或标量）。返回递归深拷贝；非 table 原样返回。无副作用。语义：把持久数据与工作副本隔离。 | **必须**：`M.getRecord`（L113）、`M.commit`（L132）、`M.allRecords`（L153）、`M.snapshot`（L160）都依赖它；没有它，调用方改工作副本就会直接污染 ModData 根。 |
+| identityValid（L30） | `identity`：任意值。返回 boolean：table 且 `rvId` 为非空 string、`generation` 为整数且 `>= 1`。无副作用。语义：utility 身份的结构门禁。 | **必须**：`currentIdentityGate` 的唯一判据，被 3 个导出函数共用；`>= 1` 约束排除了 generation 0/负数这类无效代际。 |
+| waterInteger（L36） | `value`：任意值。返回有限整数 number，否则 nil（显式排除 NaN 与 ±inf）。无副作用。语义：水槽坐标的整数归一。 | **必须**：`waterSinkKey` 依赖它拒绝非有限坐标；ModData 反序列化可能带回 NaN/inf。 |
+| waterSinkKey（L42） | `x, y, z`：任意值。返回 `"%d:%d:%d"` string；任一坐标不能归一时返回 nil。无副作用。语义：水槽的规范键。 | **必须**：`M.waterSinkKey`（L163）转出它，`Water/RV_UtilityWater_Ledger.lua:13` 用它生成 sink key；键格式必须与写入方一致。 |
+| readRoot（L47） | 无参数。返回 `ModData.get(U.STORE_KEY)` 的原始值（可为 nil）。无副作用。语义：所有读取的唯一底层入口。 | **必须**：`root`、`M.getRecord`、`M.allRecords` 都经它读根；集中一处便于观察 ModData 键访问。 |
+| root（L52） | `allowCreate`：boolean。返回 ModData 根（table 或 nil）。副作用：`allowCreate` 为真且根为 nil 时 `ModData.getOrCreate(U.STORE_KEY)`；根为空 table 且 `allowCreate == true` 时写入 `value.records = {}`。语义：唯一允许创建持久根的路径。 | **必须**：`M.commit`（L127）是唯一调用点；把"创建"限制在提交路径，保证读取路径不会意外初始化持久数据。 |
+| currentIdentityGate（L63） | `identity`：任意值。返回 `true` 或 `false, C.INVALID_RV_DATA`。无副作用。语义：把结构校验与错误文案合并成一个门禁。 | **必须**：`M.validateIdentity`（L91）、`M.getRecord`（L95）、`M.commit`（L120）共用；集中返回统一的 fail-closed 标记（`C.INVALID_RV_DATA`）。 |
+| newWater（L68） | 无参数。返回新水 ledger 默认表 `{sinks = {}, state = U.WATER_STATE_ACTIVE}`。无副作用。语义：新记录的水默认值。 | **必须**：`newRecord` 使用；默认状态常量来自共享 `RV_UtilityConstants`，不能内联。 |
+| newPower（L73） | 无参数。返回新电力记录默认表（generator/circuitState/generatorEnabled/两类电量/功率/效率/设备槽/时间戳/sequence/state），效率默认值取 `PowerConfig.DEFAULT_CHARGER_EFFICIENCY` 与 `DEFAULT_INVERTER_EFFICIENCY`。无副作用。语义：新记录的电力默认值。 | **必须**：字段集合必须与 `Power/RV_UtilityPower.lua` 的读写集合一致；缺字段会让 power 服务在首个 tick 读到 nil。 |
+| newRecord（L85） | `identity`：已通过门禁的 RV 身份。返回 `{rvId = tostring(identity.rvId), generation = identity.generation, power = newPower(), water = newWater()}`。无副作用。语义：新 RV 的 utility 记录构造器。 | **必须**：`M.getRecord` 在 `allowCreate == true` 时的两条创建分支（L102、L107）都依赖它。 |
+| M.validateIdentity（L90） | `identity`：任意值。返回 `true` 或 `false, C.INVALID_RV_DATA`（转交 `currentIdentityGate`）。无副作用。语义：向扫描调用者确认记录身份仍符合当前契约。 | **必须**：`RV_UtilityServer.lua:168` 是唯一调用点，用于 `forCurrentRecords` 过滤；导出它是为了让 utility 服务不必复制门禁规则。 |
+| M.getRecord（L94） | `identity`：RV 身份；`allowCreate`：boolean。返回 `true, record`（脱离 ModData 的深拷贝）或 `false, reason`。副作用：`allowCreate == true` 且根/记录缺失时调用 `newRecord`（**不写回存储**，只返回工作副本）。逻辑：门禁 → 读根 → 根缺失/为空或 `records[id]` 缺失时按 `allowCreate` 决定新建或拒绝 → 命中时比较 `rvId` 与 `generation`，不一致返回 `C.INVALID_RV_DATA`，一致则 `copyTable`。语义：power/water 服务唯一受控的记录读取口。 | **必须**：全树 8 处调用（`RV_UtilityPower.lua:322/377/414/451/499/524/626`、`RV_UtilityServer.lua:195/334`）；深拷贝语义是"未提交修改不得污染持久根"的前提。 |
+| M.commit（L119） | `record`：工作副本；`identity`：RV 身份。返回 `true` 或 `false, reason`。副作用：门禁；校验 `record` 是 table 且 `rvId`/`generation` 与 identity 一致；`root(true)`；先保存 `previous`，再 `value.records[id] = copyTable(record)`；`ModData.transmit` 不存在或 `pcall(ModData.transmit, U.STORE_KEY)` 返回 false 时把 `previous` 写回并返回 `U.REASONS.CANONICAL_COMMIT_FAILED`；成功后保持调用方工作副本与存储脱离。语义：utility 状态的唯一提交点。 | **必须**：`RV_UtilityPower.lua:236`、`Water/RV_UtilityWater_Commands.lua:50` 依赖它；内存回滚 + transmit 失败检测是资源账本与库存补偿保持一致的关键（调用方据失败补偿物品变更）。 |
+| M.allRecords（L147） | 无参数。返回 `true, entries`；`entries` 每项为 `{identity = {rvId, generation}, record = 深拷贝}`。根为 nil 或空时返回 `true, {}`。无副作用。语义：周期维护的安全枚举口。 | **必须**：`RV_UtilityServer.lua:164`（`forCurrentRecords`）唯一调用点；深拷贝保证周期任务不会持有可变持久引用。 |
+| M.snapshot（L158） | `record`：utility 记录。返回 `{rvId, generation, power = 深拷贝, water = 深拷贝}`。无副作用。语义：面向网络的记录投影。 | **必须**：`RV_UtilityServer.lua:132`（`broadcast`）与 `RV_UtilityPower.lua:649` 使用；它定义了什么字段允许进入客户端消息（不含设备 modData 等内部字段——本实现通过只投影 power/water 两个子树达成）。 |
+| M.waterSinkKey（L163） | `x, y, z`：任意值。返回规范 sink key 或 nil（转交私有 `waterSinkKey`）。无副作用。语义：仓库对水 ledger 消费者的最小接口。 | **必须**：`Water/RV_UtilityWater_Ledger.lua:13` 唯一调用点；导出它避免水模块复制键格式。 |
 
-### `RV_RailroaderServer_Sentinel.lua` — adapter 安全门与 sentinel（21 个函数表达式）
+## 模块间复用、提取和职责拆分
 
-| 函数 / 行 | 职责、参数与输出/副作用 | 当前功能必要性 |
-|---|---|---|
-| 文件加载闭包 `return function(ctx)` L2 | 捕获 adapter、world APIs、队列及安全检查 helper，然后将接口写回 ctx；无返回值。 | 是：Sentinel 是组合 adapter 的一部分，依赖该共享契约。 |
-| `commandArgument(args,key)` L37 | 从 Lua table 取值，或对 Java Args 调 `get(key)`；返回参数或 nil。 | 是：同时兼容两种引擎命令参数容器。 |
-| `Adapter.OnClientCommand(module,command,player,args)` L44 | 只处理本 mod 的 Enter/Exit；检查 roof claim，校验 Enter 的 locoId，调用 adapter 操作并向失败玩家回包。 | 是：Railroader Enter/Exit 需要服务端授权与事务门禁。 |
-| `onlinePlayersSnapshot()` L72 | 无参数；安全读取在线列表、去重并转普通 Lua array；不可用/空时尝试单机 `getPlayer`。 | 是：所有 adapter 在线扫描使用一个安全快照。 |
-| `Adapter.onlinePlayersSnapshot()` L108 | 无参数；公开包装在线玩家快照。 | 是：utility/server 其他模块需要玩家列表而不触碰引擎 Java 容器。 |
-| `Adapter.syncUtilityMapping(player)` L112 | 输入玩家；重新解析当前 RV/identity/record，构造客户端 mapping hint 并发送；返回 send 是否成功与 identity。 | 是：客户端 affordance 重连恢复；hint 不授予服务端权限。 |
-| `resolveSavedPlayer(saved)` L142 | 输入保存过的 player descriptor；用 identityKey 与在线玩家匹配，成功时将当前 player 对象写回 `saved.player`；输出 bool。 | 是：群组 relocation 后可将保存身份重绑到替换的 player userdata。 |
-| `sentinelIdentity(player)` L160 | 输入玩家；取得 online ID/name；输出 `id:name,id,name`，任一缺失则三个值为 nil。 | 是：安全门以稳定玩家身份而非 userdata 追踪。 |
-| `queuedRoofRefreshClaims(identityKey)` L166 | 输入身份键；扫描待处理 roof refresh 与成员快照，输出是否占有此身份。 | 是：queued 事务尚未取得 relocation token 时也不能与新 Enter/Exit 竞争。 |
-| `sentinelClaimState(server,identityKey)` L183 | 输入 server facade 和身份键；queued roof claim 优先，否则调用公开 relocation claim；输出 bool 或 nil（不可判定）。 | 是：sentinel 必须证明身份未被别的事务占用。 |
-| `roofRefreshOwnsPlayer(player)` L196 | 输入玩家；先判断 queued claim，再核验 roof mutex 和 server claim；输出 roof 是否占有。 | 是：Enter/Exit 拒绝原因与 roof/generation 互斥状态需明确区分。 |
-| `serverTransactionMutexStatus()` L221 | 无参数；调用公开 generation 与全局 roof mutex 查询；输出两个 bool 和可选 reason，接口缺失/异常时 `nil,nil,reason`。 | 是：共同服务锁必须在移动/座位/mapping 变更前 fail-closed。 |
-| `roofRefreshTransactionBlocks(rvId)` L243 | 输入 rvId（当前实现未用此参数）；读取全局事务互斥，并检查所有 pending 和未过期 follow-up；输出 `true,reason` 或 false。 | 是：屋顶刷新按全服务世界范围互斥；不按 RV 过滤是当前规则。可删未用参数以减少误导，但行为门禁本身必要。 |
-| `currentGeometryGate(record)` L288 | 输入 mapping record；调用 `RV.Server.validateCurrentRVRecord`，缺失/异常/拒绝均返回 invalid RV；输出 bool/reason。 | 是：移动前证明 record 与当前 manifest geometry 一致。 |
-| `sentinelWarn(identityKey,reason)` L300 | 输入身份和原因；去重后输出临时 cell 安全拒绝日志。 | 是：防止反复 tick 刷屏，同时保留异常提示。 |
-| `sentinelRelationsConsistent(map,record)` L310 | 输入 mapping root 和 record；双向对照 map.players 与 record.players 的 inside、RV、onlineId 关系；输出 bool。 | 是：自动返还玩家前拒绝不一致的双份关系。 |
-| `sentinelBitmapAndCenter(record)` L348 | 输入 record；检查 gate、managed/boundary、缓存 bitmap、center/anchor 与 active cell；输出 `true,{bitmap,centerX,centerY,centerZ}` 或 false/reason。 | 是：从当前生成 geometry 计算 sentinel 返回位置，不能用客户端坐标。 |
-| `sentinelRecordManifestConsistent(record,manifest)` L389 | 输入 mapping record 与当前 manifest；调用公开 server 几何一致性接口；输出 bool。 | 是：同 identity 也可能携带不同 bitmap，需做完整比较。 |
-| `sentinelRecordCandidate(map,player,server)` L397 | 输入当前 mapping、玩家、server facade；只接受玩家位于唯一当前 generation/roof sentinel cell 的有效 record，校验 manifest 和关系；输出 candidate、identityKey、reason。 | 是：返还动作须先唯一定位并完整验证目标 RV。 |
-| `sentinelReturnToRV(candidate,player,map)` L488 | 输入候选、玩家、mapping；二次核验身份/位置/claim/manifest/bitmap/target，启动 ownership monitor 与 boundary transition，传送并完成 transition；输出 bool/reason，不修复 mapping。 | 是：唯一执行安全返还世界变更的路径。 |
-| `warnSentinelPlayersAtTemporaryCell(reason,knownSentinelPlayers)` L606 | 输入拒绝原因和可选已知玩家列表；对 sentinel cell 玩家按身份去重警告。 | 是：当 sentinel 自动返还条件未满足时避免玩家无反馈滞留。 |
+### 已有共用与可提取机会
 
-### `RV_DevSaveSchemaGate.lua` — 开发期存档 schema gate（59 个函数表达式）
+- **事件与时钟已有单一实现，不需要第二套**：`RV_Server_Core.lua` 是唯一持有逻辑 tick 与引擎事件订阅点的模块；本目录 8 个文件里没有任何一处直接 `Events.OnTick.Add`，只有 `RV_UtilityServer.lua:358-364` 直接订阅 `EveryTenMinutes`/`EveryHours`——因为它不是 tick 派生的周期事件，Core 也未提供对应注册口，这属于可接受的两条订阅路径之一。**建议**：若未来第二个模块需要按游戏时间调度，再在 Core 增加 `onEveryTenMinutes`/`onEveryHour` 注册口，把 L358-L364 收进去。
+- **在线玩家快照已单一实现**：`onlinePlayersSnapshot`（Sentinel L79/L115）是唯一的 Java 在线容器→Lua array 转换点，全树 23 处引用；不建议任何模块再写第二份。
+- **`playerKey` 与 Sentinel 的身份键规则可对齐但不应合并**：`RV_UtilityServer.playerKey`（L22-L30）允许 ID 或 name 任一存在，而 adapter 侧的身份键（`playerId`+`playerName`）语义更严格。抽取共同格式化函数收益很小，且会把两套准入策略混在一起——**不建议提取**。
+- **`stableReason` 与 `isInvalidRVData` 是同一判据的两种呈现**：前者（UtilityServer L32-L34）把 `C.INVALID_RV_DATA` 映射为协议常量，后者（Commands L159-L163）把它当布尔 marker。`text:find(marker, 1, true)` 的写法重复了两次（L33、L162），可提取为一个共享的 `containsInvalidRVData(text)`。**净收益小**（两行），但能防止日后一处改成 pattern 匹配而另一处保持 plain find。
+- **`loadModule` 的全局回退只服务调试器重载**：`RV_Server.lua:26-44` 的回退链（`RailroaderRV.Constants` / `RailroaderRV.Layout`）在正常加载时永不触发。**建议保留**（注释已说明这是 debugger reload 支持），但它是唯一"加载失败静默给空表"的位置，属隐藏失败模式，见接口边界问题。
+- **`M.number`（UtilityStore L13）、`Core.tickAdd`/`tickReached`/`tickElapsedAtLeast`（Core L36/L40/L44）在全树无调用点**：四处都是可安全删除的导出面。若保留，建议在代码注释里显式标注"未使用导出"，否则后续读者会以为存在第二套数值/tick 契约。
+- **`captureObjectClass`/`captureObjectName`/`captureObjectState`/`isTransientObject` 只服务开发期抓取**：四项共同构成 `DumpTemplateCapture` 的输出格式。它们与生产路径无耦合，适合整体打包成一个开发诊断子模块；当前放在命令文件里使该文件的上半部分与生产逻辑混杂。
 
-此文件的目的在源码 L1-L4 已标明：开发期间在 `OnInitGlobalModData` 后对当前存档做一次 gate，不迁移/创建旧数据；发行前需整体移除。这里的 validation helper 虽然数量多，但它们组合成“mapping、manifest、utility、record geometry 四项全部通过才开放”的 fail-closed 约束。
+### 是否进一步拆分
 
-| 函数 / 行 | 职责、参数与输出/副作用 | 当前功能必要性 |
-|---|---|---|
-| `fail(message)` L22 | 输入失败文本；首次失败固定状态、记录 reason 并提示删除测试存档重建。 | 是：gate 唯一 fail-closed 状态转换。 |
-| `Gate.configureMapping(dependencies)` L32 | 接入 mapping schema 依赖；启动扫描前、状态 pending 且输入 table 才成功，否则 fail。 | 是：mapping validator 需显式注入，不依赖加载时序猜测。 |
-| `Gate.configureManifest(dependencies)` L42 | 接入 manifest/boundary/layout 等依赖并写入局部配置；输出 bool。 | 是：验证 manifest 与 boundary 的当前契约。 |
-| `Gate.configureRecordGeometry(dependencies)` L59 | 接入 `ServerSchema`；输出 bool，晚于 startup 或无效输入则 fail。 | 是：geometry 对照依赖服务端 bounds 计算器。 |
-| `Gate.isReady()` L68 | 无参数；返回 status 是否 passed。 | 是：world/utility 调用方的 fail-closed 门禁。 |
-| `Gate.failureReason()` L72 | 无参数；返回缓存的失败文本。 | 当前项目内无调用点：仅诊断 API；对 gate fail-closed 行为本身非必要。 |
-| `Gate.isValidating()` L76 | 无参数；返回 startup 校验期间标志。 | 是：Boundary 在 startup 扫描 boundary 时允许读取已经逐条认证的缓存，避免循环拒绝。 |
-| `exactKeys(value,expected)` L80 | table 只能出现 expected 键，允许 expected 键缺省；输出 bool。 | 是：拒绝 schema 新旧字段混杂。 |
-| `boundaryInteger(value)` L88 | 接受整数 number/string 或能在保护下转整数的数值对象；输出整数或 nil。 | 是：兼容 ModData/Java numeric 表现，同时收敛到整数。 |
-| 数值 coercion 闭包 L97 | 无参数；对 `value + 0` 做 pcall 并取结果；输出 number 或 nil。 | 是：保护 userdata 数值转换异常。 |
-| `validShellEdges(edges,rvId,generation,bitmapVersion,managed,C,Template)` L105 | 校验固定数量 59 个边、精确字段、edge key/几何/身份与模板对象、索引数组；输出 bool。 | 是：拒绝损坏或旧 shell-edge ledger。 |
-| `validateBoundarySchema(boundary)` L212 | 输入 persisted boundary；检查精确 schema、bitmap 解码/验证、managed 范围、identity 与 shell edges；缓存解析结果，输出 bitmap/身份或 nil。 | 是：mapping/manifest 几何都以此作为 boundary 当前契约认证入口。 |
-| `Gate.validateBoundarySchema(boundary)` L259 | 公开转交 boundary validator；输出解码 bitmap/identity 或 nil。 | 当前项目内无调用点：私有 validator 在此文件内部使用；其他服务实际消费 `validatedBoundary`。仅在外部模块需要直接 decode 时保留公开 wrapper。 |
-| `Gate.validatedBoundary(boundary)` L263 | 输入 table；仅返回该对象此前缓存的已验 bitmap/身份，否则 nil。 | 是：Boundary 在启动验证阶段消费已检查对象，不重复解析未验证对象。 |
-| `validateMappingPosition(value,pose,dependencies)` L271 | 校验位置精确字段、数值、世界高度与 copyPosition；pose=true 时要求方向向量；输出 bool。 | 是：mapping relation/train pose 共用严格位置合同。 |
-| `validateMappingRegion(region,dependencies)` L286 | 校验 region 精确字段、尺寸、identity z 与世界高度；输出 bool。 | 是：slot/region 是 mapping identity 的空间契约。 |
-| `validateMappingRelation(relation,requireLocoId,dependencies)` L302 | 校验玩家关系 exact schema、版本、onlineId/inside/seat，并按 inside 选择 enter/exit 坐标；输出 bool。 | 是：拒绝半写入或旧版 player relation。 |
-| `validateMappingRecord(record,dependencies)` L322 | 校验完整 RV record 字段/identity/slot/region/anchor/geometry/boundary/玩家关系，并注册已验证 generation；输出 bool。 | 是：map root 中每个记录都必须通过当前 schema 与 boundary 注册。 |
-| `validateMappingRoot(map,dependencies)` L392 | 校验 root 字段、schemaVersion、每条记录与唯一 slot，且 inside relation 与 record.players 双向匹配；输出 bool。 | 是：启动时验证整个 mapping root，而不是只验被访问条目。 |
-| `validateMappingAtStartup()` L433 | 无参数；读 `RV_MAP_KEY`，缺失/空根通过，有效 table 经 root validator；返回 bool/reason。 | 是：四项 startup 扫描之一。 |
-| `currentBoundsValid(bounds,managed,bitmap,anchor)` L447 | 校验当前布局 bounds 精确字段、固定几何/墙数量、anchor/预期 layout、bounds bitmap 与 boundary bitmap 位层相同、wall coordinates/shellEdges 逐项一致；输出 bool。 | 是：防止单独合法但彼此冲突的旧 bounds/boundary 影响 world 操作。 |
-| `currentBoundsValid.onlyKeys(value,expected)` L448 | 输入 table 与允许字段；拒绝额外键，输出 bool。 | 是：bounds 内部每种结构的 exact shape 子检查。 |
-| `currentBoundsValid.sameTemplateIndices(left,right)` L457 | 校验两个稠密正整数数组长度与元素一致；输出 bool。 | 是：wall/shell 模板组合必须保持原顺序。 |
-| `currentBoundsValid.inside(minX,maxX,minY,maxY,z)` L647 | 检查矩形/楼层在 managed bounding volume 内；输出 bool。 | 是：约束 room/wall/roof 范围不越出 managed geometry。 |
-| `currentManifestValid(manifest,allowEmpty)` L798 | 校验 manifest exact field allowlist、schema/version/state/phase、identity、anchor、boundary、bounds/bitmap和生命周期时间；成功时注册 boundary；输出 bool。 | 是：拒绝过期/部分 manifest，并验证业务当前 manifest。 |
-| `validateManifestAtStartup()` L921 | 无参数；读 manifest root，nil/空 root 通过；验证并缓存已通过的 persisted root；输出 bool/reason。 | 是：四项 startup 扫描之一。 |
-| `integer(value)` L945 | utility schema 域严格接受整数 number，其他为 nil。 | 是：与 boundary 的宽容 numeric coercion 有意不同。 |
-| `number(value)` L949 | utility schema 域仅接受 number，否则 nil。 | 是：字段类型校验。 |
-| `exactKeys(value,keys)` L953 | utility 字段必须只包含列表键且每个键都存在；输出 bool。 | 是：严格拒绝多余/缺失字段。 |
-| `exactKeysWithOptional(value,allowedKeys,requiredKeys)` L962 | 允许字段集合中部分可选，但 requiredKeys 必须存在；输出 bool。 | 是：Power 记录允许少数 optional component/generator 字段。 |
-| `empty(value)` L971 | table 是否为空；输出 bool。 | 是：新空容器可按当前 schema 初始化，不把旧数据当空。 |
-| `copyTable(value)` L981 | 递归复制 table；输出 detached copy。 | 是：utility 消费者工作副本与 ModData 根隔离。 |
-| `finite(value)` L988 | 输入数值只接受有限 number；输出 bool。 | 是：排除 NaN/±inf ledger 值。 |
-| `validPlainData(value,depth,seen)` L993 | 递归验证 modData 的简单标量/table、键类型、深度和循环引用；输出 bool。 | 是：电池/组件 modData 只存可序列化 plain data。 |
-| `identityValid(identity)` L1013 | 校验 utility identity 的 rvId/generation/bitmapVersion；输出 bool。 | 是：各 utility record 对当前 identity 有一致结构要求。 |
-| `identityMatches(value,identity)` L1020 | 校验 value identity 与请求 identity 三项相同；输出 bool。 | 是：阻止记录/子对象身份串线。 |
-| `waterInteger(value)` L1030 | 有限整数 number 校验；输出原值或 nil。 | 是：sink 坐标及 sequence 的 schema 检查。 |
-| `waterSinkKey(x,y,z)` L1036 | 坐标转 canonical key；无效输入 nil。 | 是：与 Store/Water ledger 键语义完全一致。 |
-| `validWaterAnchor(anchor,slotIndex)` L1042 | 校验精确整数 anchor 是否等于该 slot 的预期 anchor；输出 bool。 | 是：sink 空间身份不能自行声明。 |
-| `validWaterSink(value,identity)` L1051 | 校验 sink 字段、identity、slot anchor、格点坐标和 sequence，要求坐标落在 slot managed z；输出 bool。 | 是：防止损坏 sink 指向 RV 外世界位置。 |
-| `validWater(value,identity)` L1071 | 校验 water 子 schema/state/sinks，并核对每项 key 与坐标一致；输出 bool。 | 是：utility root 完整校验的一部分。 |
-| `validGenerator(value,identity)` L1088 | nil 可接受；非 nil 时校验当前身份、坐标和 object token/fingerprint；输出 bool。 | 是：generator object identity 要防止过期/伪造引用。 |
-| `validBattery(value)` L1105 | 校验 battery item schema、允许 fullType、condition、usedDelta 和 plain modData；输出 bool。 | 是：电池 ledger 会影响持久容量与库存变更。 |
-| `validComponent(value,fullType)` L1116 | nil 可选；否则校验充电器/逆变器指定类型、condition 与 modData；输出 bool。 | 是：设备组件 ledger 需满足物品型别和状态合同。 |
-| `validPower(value,identity)` L1126 | 校验 power 字段/state/效率/功率/时间/设备，再聚合 battery 计算容量、最大充放电功率及 next id；输出 bool。 | 是：power 账本字段相互依赖，需交叉验证派生量。 |
-| `validRecord(value,identity)` L1191 | 校验 record 精确 schema/identity，并递归验证 power/water；输出 bool。 | 是：utility root 每条记录唯一顶层谓词。 |
-| `validateUtilityRoot(value)` L1198 | nil/空 root 可接受；否则校验 STORE schema 和所有记录，要求 generator 已绑定；输出 bool。 | 是：启动时不接受过期或半初始化的 utility 持久根。 |
-| `validateUtilityAtStartup()` L1220 | 无参数；读取 utility STORE_KEY 并运行 root validator；输出 bool/reason。 | 是：四项 startup 扫描之一。 |
+1. **`RV_RailroaderServer_Sentinel.lua` 当前不需要再拆（边界已收敛）**：212 行、10 个函数，职责只有"Enter/Exit 命令处理 + 在线玩家快照 + 互斥查询 + 安装器"四项，且都是同一 adapter 会话门禁的组成部分。旧报告建议拆出的 `SentinelRecovery`（候选识别/返还/告警）在当前源码中已不存在，本文件不再承载几何返还逻辑。**结论**：保持单文件。
+2. **`RV_Server_Commands.lua` 是唯一值得评估的拆分对象**：431 行、13 个函数，其中 L47-L157（`isTransientObject` + 4 个抓取 helper + `dumpTemplateCapture` + `captureHost`）是纯开发期诊断代码，与 L159-L384 的 generation 阶段机/命令分派没有共享状态。**成本**：需要把 `ctx.ServerUtil`、`ctx.ServerWorld`、`RoomTemplate`、`TemplateGeometry`、`Template`、`templateObjects` 六个输入显式传给新模块；收益是让生产命令路径少 110 行噪声。**建议**：若 `DumpTemplateCapture` 保留到发行，则拆出 `RV_Server_TemplateCapture.lua`；若该命令会被移除，则直接删这 110 行。
+3. **`RV_UtilityServer.lua` 不必拆**：366 行、24 个函数，分派段（L175-L268）与周期段（L302-L341）共享 `Store`/`Power`/`Devices`/`resolveRV`/`broadcast*` 六个私有依赖，拆开需要再造一个内部 ctx，收益低于成本。
+4. **`RV_UtilityStore.lua` 与 `RV_Server_Core.lua` 不应拆**：前者 167 行，是一条记录生命周期的顺序步骤（门禁→读→拷贝→提交→回滚）；后者 129 行，是"一个时钟 + 一个分发器 + 九条注册/查询 API"的不可分整体。
+5. **`RV_Server.lua` 作为组合根不应继续拆**：它只有 1 个函数，其余是常量、状态声明、ctx 组装与 require 链；继续拆会模糊初始化顺序（`ctx.safeErrorText`、`ctx.railroader*Hook`、`ctx.serverTick` 都依赖特定装配次序）。
 
-| 函数 / 行 | 职责、参数与输出/副作用 | 当前功能必要性 |
-|---|---|---|
-| `manifestViewForRecord(record)` L1229 | 输入 mapping record；检查关键字段并计算当前 layout bounds，构造临时 READY/COMMITTED manifest view；无效时 nil。 | 是：当当前 mapping 有记录而独立 manifest 缺失时，geometry cross-check 仍需比较同一当前布局。 |
-| `validateCurrentRVRecordGeometrySchema(record,manifest)` L1268 | 输入 mapping record 与 persisted/synthetic manifest；严格比较 identity、schema、boundary snapshots、bitmap 位层、shell edge、managed/anchor/position/region，并在通过后注册 boundary；输出 bool。 | 是：把 mapping 与 manifest 作为一组几何合同检查，避免各自字段分别合法但互相冲突。 |
-| 几何 `exactKeys(value,fields)` L1269 | table 必须恰有 fields 且不能缺字段；输出 bool。 | 是：geometry 子结构字段形状校验。 |
-| 几何 `integerFieldsEqual(left,right,fields)` L1282 | 两个 table 都需 exactKeys；比较每个字段的整数归一值；输出 bool。 | 是：比较 managed/region 等必须同形且同值的结构。 |
-| 几何 `integerFieldsMatch(left,right,fields)` L1294 | 两个 table 存在且指定整数值匹配，不强制无额外字段；输出 bool。 | 是：对解码 bitmap、managed 等字段作投影一致性检查。 |
-| 几何 `decodeCurrent(encoded)` L1367 | 输入 boundary table；转交 `validateBoundarySchema`；输出 bitmap/identity 或 nil。 | 是：record 与 manifest 两个快照都必须使用相同 decoder/gate。 |
-| 几何 `bitmapsEqual(left,right)` L1374 | 对比 managed 字段、bitmapVersion 及每层 walk/build bits；输出 bool。 | 是：直接发现 bitmap 内容分叉。 |
-| 几何 `integerArraysEqual(left,right)` L1406 | 对比两个稠密、有效整数数组；输出 bool。 | 是：模板索引序列必须严格一致。 |
-| 几何 `shellSetEqual(left,right)` L1435 | 对比两张 keyed shell-edge table 的严格字段与模板索引；输出 bool。 | 是：record 与 manifest 边界壳不能共享身份却有不同结构。 |
-| `validateRecordGeometryAtStartup()` L1563 | 无参数；读取 mapping/manifest roots；对每条 mapping 选 persisted manifest 或 synthetic view，执行 geometry gate；输出 bool/reason。 | 是：四项 startup 扫描之一，保证记录与 manifest 的跨根一致性。 |
-| `validateAtStartup()` L1604 | 无参数；只运行一次，依序 pcall mapping/manifest/utility/geometry validators；首个失败关闭 gate，全部通过后标记 passed。 | 是：总 gate 唯一 startup 控制流程。 |
+## 对外接口、跨模块数据访问与隐藏状态
 
-## 跨模块比较、复用与抽取建议
+### 公开合同
 
-### 已有的公共职责边界
+- **`RailroaderRV.Core`（RV_Server_Core.lua）**：L92-L99 导出 9 个函数——`getTick`、`tickAdd`、`tickReached`、`tickElapsedAtLeast`、`tickModulo`、`on`、`onTick`、`onCommand`。使用面：`getTick` 12 处、`tickModulo` 5 处、`on` 6 处、`onTick` 2 处、`onCommand` 3 处；`tickAdd`/`tickReached`/`tickElapsedAtLeast` 无调用点。
+- **`RV.Server`（RV_Server.lua + 各子模块追加）**：本目录贡献 `OnTick`（RV_Server_Commands.lua:266）、`OnClientCommand`（RV_Server_Commands.lua:298）、`initializeUtilityRecord`（RV_Server.lua:96）、`settleRVUtilityLoad`（:99）、`teleportToPosition`（:138）、`teleportToRVSpawn`（:139）、`resolveCurrentUtilityRV`（由 Commands:417-420 从 adapter 复制）；RVMapping 与 WallReloadProtection 另外追加 `setRailroader*Hook`、`currentRVManifestFor*`、`refreshRoofVisuals`、`armCurrentRoomOwnershipMonitor`、`isWallReloadTransactionActive` 等。
+- **`RailroaderRV.RailroaderServer`（adapter 表）**：本目录贡献 `OnClientCommand`、`onlinePlayersSnapshot`、`syncUtilityMapping`、`serverTransactionMutexStatus`、`wallReloadTransactionBlocks`、`installTransactionGate`、`OnTick`、`installTransactionHooks`、`currentMappingEpoch`、`advanceMappingEpoch`；同时它是**跨目录共享可变表**：RVMapping 写入 `invalidateBoundaryValidationCache`（`RV_RailroaderServer_Mapping.lua:311`）、BoundaryGuard 写入 `prewarmCurrentBoundaryPlayer(s)`（`RV_RailroaderServer_BoundaryValidation.lua:185/194`）、WallReloadProtection 写入 `rearmRoomOwnershipMonitors`（`RV_RailroaderServer_WallReload.lua:287`）、EntryExit 写入 `resolveCurrentUtilityRV`/`currentUtilityRecord`（`RV_RailroaderServer_EntryExit.lua:50/111`）。
+- **`RV_UtilityServer` 模块表**：`handleCommand`、`onTick`、`onEveryTenMinutes`、`onEveryHour`、`settleAndRefreshLoad`、`initializeRecord` 六个导出；前两个由 `RV_Server_Commands.lua:286/307` 调用，后两个经 `RV_Server.lua:96/99` 转出，`onEveryTenMinutes`/`onEveryHour` 只由 L360/L363 的引擎事件驱动。
+- **`RV_UtilityStore` 模块表**：`validateIdentity`、`getRecord`、`commit`、`allRecords`、`snapshot`、`waterSinkKey` 六个导出，被 Core 内（UtilityServer）以及 `Power/`、`Water/` 两个目录消费（`RV_UtilityPower.lua:6`、`RV_UtilityWater_Ledger.lua:4`、`RV_UtilityWater_Commands.lua:9`）。
 
-- **tick 与事件**：`RV_Server_Core.lua` 已把两段式逻辑 tick、tick 算术和事件注册集中起来。RV_Server、Railroader adapter、BoundaryGuard、屋顶刷新和生成事务都调用 `Core.tick*`；各模块不应自行转成大 Lua number 或注册平行 engine listener。无需再抽取同类工具。
-- **utility 持久访问**：Power 与 Water 代码通过 `RV_UtilityStore` 的 `getRecord`/`commit` 等函数访问 ledger；Store 的 detached copy 与显式 commit 是清楚的公共边界。生成前校验走 `UtilityServer.validateGenerationUtilityState`，也已有 facade。
-- **schema gate**：mapping、manifest、Boundary、utility ledger、record validation 都显式配置或查询 `DevSaveSchemaGate`。它是开发期统一开关；其全部存在价值会随发行前移除而结束。
-- **RV transaction ctx**：`RV_Server.lua` 装配 `ctx` 后按职责 require 子模块；这些模块共享权威 transaction state 和注入函数，形成内部 package contract。此 ctx 不是外部网络 API。
+### 直接读写其他模块的数据
 
-### 有复用收益的候选
+1. **`Adapter._ticks` —— 唯一被本目录之外直接读取的 adapter 下划线字段。**
+   - 写入：`RV_RailroaderServer_Sentinel.lua:184`、`RV_RailroaderServer_Tick.lua:16`、`RV_RailroaderServer_Tick.lua:41`。
+   - 读取（**本目录之外**）：`BoundaryGuard/RV_RailroaderServer_BoundaryValidation.lua:74`、`:149`、`:178`、`:197`，四处都是 `local now = Adapter._ticks or Core.getTick()`。
+   - 判断：**应改为接口**，但收益中等偏低。理由：BoundaryValidation 同时已拿到 `Adapter` 与 `Core`，完全可以直接用 `Core.getTick()`；`_ticks` 只表示"最后一次被接受的 adapter tick"，与 `Core.getTick()` 在同一 tick 内通常相等。建议 Core 侧补一个只读访问器（如 `Adapter.currentTick()`），或让 BoundaryValidation 统一改用 `Core.getTick()`，从而消除对 adapter 私有字段的依赖。
+2. **`Adapter._mappingEpoch` —— 已收口，不再有跨模块读。**
+   - 仅在 `RV_RailroaderServer.lua:81/82/88` 读写；外部消费者 `RV_UtilityServer.lua:279-280` 走的是 `adapter.currentMappingEpoch()`。这是相对旧报告的**接口改进**（旧报告称 UtilityServer 直接读 `adapter._mappingEpoch`）。
+3. **`Adapter._saveSchemaVersionChecked` / `Adapter._saveSchemaVersionCheckRegistered` / `Adapter._gateInstalled` / `Adapter._tickRegistered`**：均在 `RV_RailroaderServer.lua:43/44/66/72`、`Sentinel:198/205`、`Tick:92/93` 内自读自写，无跨模块访问。属一次性安装的幂等标志，**不需要接口**。
+4. **`ctx` 组合对象是显式的 package-private 可变契约。**
+   - `ctx.serverTick`：由 `RV_Server_Commands.lua:267` 每 tick 写入；读取点包括 `RV_Server_Commands.lua:196/286`、`RoomOwnership/RV_Server_RoomOwnership.lua:122/339/408/411/433`、`Construction/RV_Server_PlayerValidation.lua:230/277/296/301/305`、`Construction/RV_Server_GenerationAck.lua:45-46`、`Construction/RV_Server_GenerationFlow.lua:120/387/427`。
+   - `ctx.pendingSerial`：由 `Construction/RV_Server_GenerationFlow.lua:386` 自增并读取（:388）。
+   - `ctx.roomOwnershipGuards`：`RV_Server.lua:88` 建表、:131 注入，`RoomOwnership/RV_Server_RoomOwnership.lua:12` 按引用取用并增删条目——是 shared mutable container。
+   - `ctx.railroaderValidationHook`/`CommitHook`/`FailureHook`：`RVMapping/RV_Server_RecordValidation.lua:75/79/83` 写，`Construction/RV_Server_GenerationFlow.lua:151/154/156/305/309` 与 `GenerationAck.lua:131-132` 读。
+   - 判断：**不应为这些字段造 getter/setter**。它们是同一事务的多个阶段协作者之间的注入契约，抽象化会产生大量样板并让状态流转更难追踪；正确做法是保持 package-private 并禁止跨 package 暴露。
+   - **附带源码事实**：`ctx.pendingSerial = pendingSerial`（`RV_Server.lua:129`）与 `ctx.serverTick = serverTick`（:130）是**按值复制**的标量，写回只落在 `ctx` 上，因此 `local pendingSerial = 0`（:86）与 `local serverTick = Core.getTick()`（:87）在 ctx 构造之后即为死变量。同理 `local transitionSequence = 0`（`RV_RailroaderServer.lua:91`）与 `local recordForLoco`（:92）在写入 `ctx.transitionSequence`/`ctx.recordForLoco`（:106-107）后不再被本文件使用；`transitionSequence` 的真实自增发生在 `RVMapping/RV_RailroaderServer_Train.lua:95`。
+5. **ModData 仓库是两处直接跨模块共享的持久根。**
+   - `RV_RailroaderServer.lua:46-63` 直读直写 `C.RV_MAP_KEY = "RailroaderRVTest.TrainMap"`：空根时写入 `schemaVersion`、`locomotives = {}`、`players = {}`。同一 root 亦由 `RVMapping/RV_RailroaderServer_Mapping.lua:30`（`mapData`）与 `RVMapping/RV_RailroaderServer_EntryExit.lua:492`（读 `map.schemaVersion`）访问；`RV_RailroaderServer_Tick.lua:46-62` 直接写 `map.locomotives[*].locoPosition`。
+   - `RV_UtilityStore.lua:47-49/54-55/133-137` 读写 `U.STORE_KEY = "RailroaderRVTest.Utility"`，并直接改 `value.records[id]`（:132、:141）后 `ModData.transmit`。
+   - 判断：`RV_MAP_KEY` 一侧**应改为接口**——`schemaVersion`/`locomotives`/`players` 三个顶层字段的初始化责任分属 Core 与 RVMapping 两个模块，当前空根初始化只在 Core 的一处事件回调里发生；若 RVMapping 先创建根，Core 的 `checkSaveSchemaVersion` 会走 `map.schemaVersion ~= C.SAVE_SCHEMA_VERSION` 分支并打印误导性警告。收益明确：把"创建/初始化 TrainMap 根"收归 mapping owner（如 `RV.Server.ensureTrainMapRoot()`），Core 只负责版本比较。`STORE_KEY` 一侧**不建议改动**：UtilityStore 是唯一 owner，Water/Power 只经导出函数访问，边界已经清晰。
+6. **`RV_Server_Commands.lua:21-22` 在装配期读取共享模板**：`RoomTemplate.get(RoomTemplate.TEMPLATE_ID)` 与 `RoomTemplate.orderedObjects(Template)` 是 shared 模块的公开 API；随后 L131-L151 读取 `Template.misc.walkAabbs`、`Template.misc.buildCells`、`Template.metadata.anchor`。这些是模板数据合同（`shared/RailroaderRV/RoomTemplate/RV_RoomTemplate.lua:51-52` 定义 `walkAabbs`/`buildCells`），属消费公开数据，不是访问模板模块私有状态。
+7. **本目录不读写任何其他模块的局部闭包变量**：所有跨模块交互都经模块表、`ctx` 字段、`RailroaderRV.*` 全局命名空间或 ModData 进行。
 
-| 重复点 | 证据与建议 | 抽取价值判断 |
-|---|---|---|
-| water sink 整数校验和 key | Store `waterInteger`/`waterSinkKey` L39-L50 与 Gate L1030-L1040 实现相同；Gate 的结果要求和 Store key 必须一致。 | 若 gate 会长期保留，可提炼纯函数 canonical key；当前 Gate 标明开发期整体移除，立即抽取会增加临时依赖面，收益有限。保留两份时应持续用清单确认规则一致。 |
-| 深复制 | `RV_UtilityStore.copyTable` L25 与 Gate `copyTable` L981 都递归复制。 | 算法简单且职责绑定 ModData 隔离；因 Gate 临时、消费者不同，共用模块收益低，暂不建议。 |
-| 整数/有限数值 helper | Store L11/L39、Gate L88/L945/L988、UtilityServer 所用 `ServerUtil.integer` 各有不同接受范围。 | 不建议无参数地合并：gate 的 `boundaryInteger` 接受 string/Java numeric，utility integer 只接受整数 number，错误归一会放宽 schema。若未来集中，应分别命名严格与宽松契约。 |
-| player identity key | UtilityServer `playerKey` L25 允许 ID/name 任一存在；Sentinel `sentinelIdentity` L160 要求两者同时存在。 | 可共用 `id:name` 格式化的小函数，但输入准入政策不同，抽取收益很小；不应把准入也合并。 |
-| transaction busy 查询 | UtilityServer `serviceBusy` L73 与 Sentinel `serverTransactionMutexStatus` L221 都问 generation/roof；Sentinel 要求两个 API 均可用，UtilityServer 对缺少的单项 API不视为 busy。 | 可在 `RV.Server` 提供统一 fail-closed busy 接口并返回原因，避免两套口径分歧；收益中等，前提是先确定缺接口时的统一行为。 |
-| Core 注册失败检查 | Commands L278 与 adapter Tick L247 有相同的 `requireCoreRegistration`。 | 仅两处短 helper，作为每个组合模块的本地启动边界容易定位；抽成公共工具的维护收益低。 |
+### 接口边界问题
 
-## 拆分判断
+1. **【高优先级，源码事实 + 条件性推断】`RV.Server.isGenerationTransactionActive` 在当前源码树中没有任何生产者。**
+   - **源码事实**：对 `contents/mods/RailroaderRVTest/42/media/lua/**/*.lua` 检索字符串 `isGenerationTransactionActive`，命中 7 处，**全部是读取/类型探测**：`Core/RV_RailroaderServer_Sentinel.lua:153`、`:157`、`:201`、`Core/RV_UtilityServer.lua:73`、`:74`、`WallReloadProtection/RV_WallReloadProtection.lua:456`、`:460`。全树没有 `RV.Server.isGenerationTransactionActive = …` 或 `function RV.Server.isGenerationTransactionActive(…)`。对照：它的姊妹查询 `isWallReloadTransactionActive` 由 `WallReloadProtection/RV_RailroaderServer_WallReload.lua:256`（`publishMutexQueries`，经 `Adapter.installWallReload` 发布，`RV_Server_Commands.lua:407-410` 调用）正常发布，机制本身存在。generation 事务的真实状态在 `Construction/RV_Server_GenerationTransaction.lua` 的 `api.isActive()`（:37-39），经 `ctx.GenerationTransaction` 注入（`Core/RV_Server.lua:122`），但**没有**被转发到 `RV.Server` 上。
+   - **条件性推断（未做运行时验证）**：若该事实在运行时成立，则本目录受影响的行为是——
+     - `Adapter.serverTransactionMutexStatus`（Sentinel:150-163）首分支命中，恒返回 `nil, nil, "RV generation transaction state is unavailable"`；
+     - `Adapter.wallReloadTransactionBlocks`（Sentinel:168-182）因 `generationBusy == nil` 恒返回 `true, reason`，对 EntryExit 表现为永久 fail-closed 拒绝；
+     - `Adapter.installTransactionGate`（Sentinel:197-209）第二分支命中恒返回 `false`，于是 `Core.onCommand(C.COMMAND_RV_ENTER/EXIT, Adapter.OnClientCommand)`（Sentinel:206-207）**从不注册**；
+     - `RV_UtilityServer.serviceBusy`（:73-77）因类型检查不通过而跳过 generation 一半——与 Sentinel 的 fail-closed 口径相反（utility 侧视为"不忙"），是全树唯一的口径分歧；
+     - `WallReloadProtection/RV_WallReloadProtection.lua:456-458` 直接 `return false, "RV generation transaction state is unavailable"`，拆墙重载无法开始。
+   - **建议**：在 Core 侧消除这条悬空依赖——`RV_Server.lua` 已有 `GenerationTransaction`，可显式发布 `RV.Server.isGenerationTransactionActive = function() return GenerationTransaction.isActive() end`，或把 `serverTransactionMutexStatus` 改为经 `ctx.GenerationTransaction` 派生；同时统一 Sentinel（fail-closed）与 UtilityServer（当前 fail-open）在"查询不可用"时的口径。
+2. **【高优先级，源码事实 + 条件性推断】`Core.onCommand` 的 `"*"` 通配语义未实现。**
+   - **源码事实**：`Core/RV_Server_Core.lua:85-90` 的注册包装体是 `if received ~= command then return end`，**精确字符串比较，无通配分支**；L82-L84 的注释却声明 `RV_Server_Commands` 注册的 `"*"` 是 catch-all。`Core/RV_Server_Commands.lua:386` 以 `Core.onCommand("*", RV.Server.OnClientCommand)` 注册；全树检索确认 `RV.Server.OnClientCommand` 只有这一处注册，且没有任何地方把真实命令名注册成 `"*"`。
+   - **条件性推断（未做运行时验证）**：客户端实际发送的命令名（`C.COMMAND_GENERATE`、`C.COMMAND_RV_UTILITY`、`RelocateAck`、`FinalRelocateAck`、`C.COMMAND_DUMP_TEMPLATE_CAPTURE`）都不会等于 `"*"`，因此 Core 分发器不会把任何命令交给 `RV.Server.OnClientCommand`。受影响面是本文件 L298-L384 的全部分派（generation 请求、utility 命令、两种 ACK、模板抓取）。不受影响的是 `Core.onTick(RV.Server.OnTick)`（L387，独立注册）以及 `Core.on(...)` 的四个对象/动作事件注册（L389-L393）。Enter/Exit 走的是独立的具名注册（Sentinel:206-207），但如上一条所述当前也不会安装。
+   - **建议**：二选一——在 `onCommand` 中显式实现通配分支（`if command ~= "*" and received ~= command then return end`），或把 `RV_Server_Commands.lua:386` 改成 `Core.on("OnClientCommand", RV.Server.OnClientCommand)` 并删掉 Core 中这段误导性注释。后者更简单且不引入新语义。
+3. **【中优先级】Sentinel 向共享 ctx 发布回调的时序，对 `serverTransactionMutexStatus` 不可靠。**
+   - **源码事实**：`RV_RailroaderServer.lua` 用一个 `ctx` 表（L95）按序装配：Train（L112）→ Mapping（L113）→ EntryExit（L114）→ WallReload（L115）→ Sentinel（L116）→ Tick（L117）。Sentinel 在 `:189-191` 才把 `onlinePlayersSnapshot`、`serverTransactionMutexStatus`、`wallReloadTransactionBlocks` 写入该 ctx。Mapping 在 `RV_RailroaderServer_Mapping.lua:150-167` 装配 BoundaryValidation 时，`onlinePlayersSnapshot` 用的是**延迟闭包**（:162-166，每次调用现取 `ctx.onlinePlayersSnapshot`，正确），而 `serverTransactionMutexStatus = serverTransactionMutexStatus`（:158）是**直接值捕获，且捕获的是同名全局变量而非 `ctx.serverTransactionMutexStatus`**；全树检索确认不存在名为 `serverTransactionMutexStatus` 的全局赋值。EntryExit:11 与 Sentinel 自身:190 用的是延迟包装（正确）。
+   - **条件性推断（未做运行时验证）**：BoundaryValidation 的 `local serverTransactionMutexStatus = ctx.serverTransactionMutexStatus`（`RV_RailroaderServer_BoundaryValidation.lua:11`）会得到 nil，其 `:64` 与 `:195` 的调用会抛 "attempt to call a nil value"。该文件的语义修复属 BoundaryGuard 报告范围，但**根因在本目录的发布接口**：Sentinel 注释（:186-188）声称"模块稍后读取该共享上下文"，实际消费者之一并未这样读。
+   - **建议**：把 BoundaryValidation 的注入改为延迟闭包（与同表 `onlinePlayersSnapshot` 一致），或在 Sentinel 装配顺序前移。Core 侧能做的收敛是把 `serverTransactionMutexStatus` 提升为 adapter 表的公开字段并在 Mapping 装配时以 `Adapter.serverTransactionMutexStatus` 传递，避免依赖 ctx 的写入时刻。
+4. **【中优先级】`installTransactionHooks` 的失败被静默处理。** `RV_Server_Commands.lua:421-427` 在返回 `false` 时只打印 "Railroader RV transaction hooks unavailable."，不改变任何状态；`Adapter.OnTick`（Tick:94）与其一并注册。因此"adapter 完全没有 tick"这一状态在运行期只能靠日志发现。
+5. **【低优先级】`loadModule` 的静默降级。** `RV_Server.lua:43` 在 require 与全局回退都失败时返回空表 `{}`，于是 `Constants.WORLD_MIN_Z/WORLD_MAX_Z`（:134-135）变为 nil 而不报错。这与工作区"数据或接口错误由游戏正常抛出异常"的约定相反。**建议**：把"两者都失败"改为 `error(...)`，保留全局回退仅供 debugger reload。
+6. **【低优先级】`RV.Server.resolveCurrentUtilityRV` 是函数引用副本而非转发。** `RV_Server_Commands.lua:417-420` 把 `railroaderAdapterOrError.resolveCurrentUtilityRV` 复制到 `RV.Server`；若将来 EntryExit 重新赋值该字段，`RV.Server` 上的副本会变陈旧。当前 EntryExit:50 只赋值一次，无现实分歧。**建议**：改为 `RV.Server.resolveCurrentUtilityRV = function(...) return adapter.resolveCurrentUtilityRV(...) end` 以消除潜在分叉。
+7. **【低优先级】`wallReloadBusy(rvId)` 与 `wallReloadTransactionBlocks(rvId)` 的 `rvId` 参数未被使用。** 两处注释都说明这是刻意的服务级互斥（一个受管世界作用域不能同时跑第二个操作），但保留未用参数会误导调用方以为可以按 RV 收窄。**建议**：删除参数或改名为 `_`。
 
-1. **优先候选：`RV_RailroaderServer_Sentinel.lua`**。约 636 行/21 个函数，同时提供 Enter/Exit 命令处理、在线玩家与 utility mapping 同步、roof/generation mutex、geometry gate、sentinel 定位及返还。建议在继续扩展时拆成 `EntryExit`（命令、玩家快照与 mapping 同步、事务 gate）和 `SentinelRecovery`（候选识别、返还和告警）两个子模块；跨事务 mutex 和 geometry gate 应由同一个安全服务持有，避免拆开后出现不同门禁。它已有 `ctx` 组装模式可承接拆分。
-2. **体量最大但暂不宜投入：`RV_DevSaveSchemaGate.lua`**。1,644 行、59 个函数表达式，内部明显分成 boundary/mapping、manifest/bounds、utility ledger、record geometry 四组。若开发期继续长期依赖，可拆四个 validator 子模块，保留本文件负责 configure、状态和顺序执行；但源码明确要求 release 前删除整个 gate，因此短期拆分会扩张一份临时机制。
-3. **可观察而非当前必拆：`RV_UtilityServer.lua`**。492 行、37 个函数表达式，前半为命令协议/session/idempotency，后半为 tick 与每小时/十分钟维护。若 utility 服务增长，可分成 command/session 与 lifecycle 两个文件；现在两者共用私有 store、锁与广播函数，拆分需要再做一个内部 context。
-4. `RV_Server.lua` 虽然装配依赖多，但它是组合根；继续拆会模糊初始化顺序。`RV_Server_Core.lua` 的 tick 算术与 dispatcher 都属于单一“服务端事件时基”，不建议为了代码长度拆开。
+## 函数清单、覆盖和验证记录
 
-## 跨模块内部数据访问与接口
-
-| 位置 | 访问内容与分类 | 是否应提供接口 |
-|---|---|---|
-| `RV_UtilityServer.lua:L369` 读取 `adapter._mappingEpoch`；该字段在 `RV_RailroaderServer.lua:L47` 初始化、mapping 模块更新（符号搜索命中 `RVMapping/RV_RailroaderServer_Mapping.lua:L103`）。 | UtilityServer 直接读取 Railroader adapter 的下划线私有 epoch，这是明确的隐藏进程状态依赖。 | 建议 adapter 提供 `mappingEpoch()`/`currentMappingEpoch()` 只读接口，或直接提供“是否应重同步”接口。收益中等：既能去掉跨模块 `_` 访问，也能防止 epoch 表示方式改变时 utility 层失效。 |
-| `RV_RailroaderServer_Sentinel.lua:L275` 读取 `Adapter._ticks`；它由 Tick 模块 L31/L174 更新。 | Adapter 内部子模块之间共享最后一次已接受 tick 的隐藏状态。 | 可以提供返回副本的 `Adapter.currentTick()`；收益偏低到中等，因为同一 adapter 的拆分文件由一个 ctx 组装根加载，且 Core 已有 `getTick()`。若 `_ticks` 只代表已接受 callback tick，则显式 adapter accessor 能比直接 fallback 更清晰。 |
-| `RV_Server_Core.lua:L139-L140` 把注册表放在 `Core._state`，便于 require reload 后保留状态；本目录外部调用使用 `Core` 导出的 `register*`/`tick*` API。 | `_state` 是公开 table 上的模块私有 backing state。符号检索未发现其他 RailroaderRV 模块读取它。 | 无需给其它模块新增接口；保持局部 owner 访问即可。更稳妥的后续实现是弱化该字段可见性，但在 Lua require reload 下要保留 registry，因此目前接口隔离收益低。 |
-| `RV_Server.lua:L145-L194` 构造并传递 `ctx`；后续 RV_Server 子模块读写 `ctx.pendingGeneration`、`serverTick`、transaction flags/queues 并调用已注入服务。 | 组合根明确把 RV_Server 内部 mutable transaction state 作为 package-private ctx 合同。 | 不建议逐字段造 getter/setter：这些子模块共同推进同一事务，抽象会增加大量样板并让读写流程更难跟踪；应保持为内部注入契约，避免跨 package 暴露。 |
-| Sentinel `L310-L388`、`L397-L487` 读取 `map.players`、`map.locomotives`、`record.players/managed/boundary/rvPosition/anchor`。 | 读取 mapping/manifest 持久结构中的字段；这是当前 schema 的公开数据合同，并且函数只读这些字段后做关系/几何安全判断，不是访问 mapping 模块的局部闭包变量。 | 几何一致性已有 `RV.Server.validateCurrentRVRecord`/`currentRVRecordGeometryConsistent` 接口，但候选识别仍需检查具体玩家关系、anchor 和位置。再增加一个完整“sentinel candidate”API会把 adapter 逻辑移回 mapping owner，当前收益低于直接读已验 schema。 |
-| `RV_UtilityStore.lua:L82-L96`、UtilityServer L51-L88 通过 `RV.Server` 的命名函数取 current manifest、mapping 和 transaction status；Sentinel 多处也调 `RV.Server` 查询。 | 显式公开服务 API，没有直接读 `RV.Server` 局部事务变量。 | 现有 facade 边界明确，保留即可。 |
-
-## 清单与只读验证证据
-
-- 文件清单（来自 `rg --files media/lua/server/RailroaderRV/Core`）：`RV_UtilityStore.lua`、`RV_UtilityServer.lua`、`RV_Server_ManifestValidation.lua`、`RV_Server_Core.lua`、`RV_Server_Commands.lua`、`RV_Server.lua`、`RV_RailroaderServer_Tick.lua`、`RV_RailroaderServer_Sentinel.lua`、`RV_RailroaderServer.lua`、`RV_DevSaveSchemaGate.lua`，共 10 个。
-- 逐文件函数表达式扫描使用 `rg -n -P '\bfunction\s*(?:[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*\s*)?\('`；总计 187 处，包含具名、表字段、变量赋值、模块加载闭包、嵌套 helper 与匿名回调。文档按定义起始行逐项核对，合计 187 项：Store 20、UtilityServer 37、ManifestValidation 3、Server_Core 28、Server_Commands 6、Server 4、RailroaderServer_Tick 7、RailroaderServer_Sentinel 21、RailroaderServer 2、DevSaveSchemaGate 59。
-- 各文件行数为 241、492、32、382、327、220、271、636、147、1644，合计 4,392 行；函数明细均附对应 Lua 文件名和定义行号。
-- 对 `_state`、`Adapter._*`、`server._*` 做了目标目录与 RailroaderRV server Lua 符号检索，用于识别跨模块隐藏状态；对 Core 导出 API、Store、SchemaGate 的引用做了目标包引用搜索，用于区分公开函数和内部状态。
-- API 使用扫描额外发现：`RV_UtilityServer.M.onObjectRemoved`、`M.snapshotForPlayer`、`RV_Server_Core.sendToClient`、`DevSaveSchemaGate.failureReason` 和公开 wrapper `validateBoundarySchema` 在当前源码树无显式调用点；`RV_UtilityStore.number` 无本地调用点。动态/外部 require 用途未能通过静态树内搜索确认，因此报告将它们标为未证实或诊断/未来 API，而非断言全局不可达。
-- 文档仅在 `docs/module-analysis/server-Core.md` 新建。未修改 Lua/配置/测试，不运行 runtime 测试。
-- 覆盖限制：相邻目录只做符号级搜索；它们各自函数的逐项语义由对应模块报告覆盖。本报告不能替代运行时/联机验收。
-
-## 第二阶段组合更新
-
-Core 现在装配 `GenerationTransaction` 服务，并向 WorldObjects/GenerationBuild、TemplateRecovery、RoofRefresh、GenerationFlow 和 Ack 注入依赖。Boundary `onTick` 在 player update 后派发注册的 post-player-tick callbacks；TemplateRecovery 通过这个窄入口运行，不把 queue API 挂在 Boundary namespace。Railroader Adapter 的 mapping epoch 由 `RV_RailroaderServer.lua` 的 `currentMappingEpoch` / `advanceMappingEpoch` 管理，UtilityServer 与 Mapping 不再直接读写 epoch 字段。Roof process-local 状态只在 RoofRefresh 包使用，Core context 仅提供组合容器。见[第二阶段报告](phase2-structure-optimization.md)。
+- **扫描文件**：`contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/` 下 8 个 Lua 文件——RV_RailroaderServer.lua（119 行）、RV_RailroaderServer_Sentinel.lua（212 行）、RV_RailroaderServer_Tick.lua（109 行）、RV_Server.lua（152 行）、RV_Server_Commands.lua（431 行）、RV_Server_Core.lua（129 行）、RV_UtilityServer.lua（366 行）、RV_UtilityStore.lua（167 行）；合计 1,685 行。目录内无其他扩展名文件（`Get-ChildItem -File` 仅返回上述 8 个 .lua）。客户端/共享/其他服务端目录未纳入本报告。
+- **函数定义扫描**：正则扫描 `^\s*local function`、`^\s*function\s+[A-Za-z_][\w.:]*\s*\(`、`=\s*function\s*\(`、`\bfunction\s*\(` 四类模式并逐行核对定义起始行，得到 10、5、5、1、13、16、24、19，合计 **93**，与本报告表格逐文件数字一致。
+- **条目覆盖**：93 个函数条目全部列出，每条含起始行、参数含义、返回/副作用、本模块语义与必要性结论。14 个匿名函数表达式均单列：3 个模块加载闭包（Sentinel:9、Tick:2、Commands:2）、1 个命令过滤器（Core:86）、6 个引擎事件回调（Core:108/112/115/118/121/124）、3 个遍历回调（`RV_UtilityServer.lua:312/319/328`）、1 个 hook 回调（`RV_RailroaderServer_Tick.lua:86`）。
+- **跨模块调用扫描**：在 `contents/mods/RailroaderRVTest/42/media/lua` 全树检索了 `Core.getTick`（12 处）/`Core.tickModulo`（5 处）/`Core.on`（6 处）/`Core.onTick`（2 处）/`Core.onCommand`（3 处）、`onlinePlayersSnapshot`（23 处）、`serverTransactionMutexStatus`（8 处，含 1 处注释）、`isGenerationTransactionActive`（7 处）、`isWallReloadTransactionActive`（13 处）、`Adapter._ticks`（4 处外部读）、`Adapter._mappingEpoch`（仅本目录 3 处）、`Store.*`（16 处：Power 9、UtilityServer 5、Water 2）、`ModData.*` 与两个 ModData 键，用于确认公开 API 使用面与数据访问点。
+- **旧报告不一致复核**：旧 server-Core.md 描述的 10 个文件中有 2 个在当前目录中**已不存在**——`RV_DevSaveSchemaGate.lua`（旧报告计 59 个函数表达式、1,644 行）与 `RV_Server_ManifestValidation.lua`（旧报告计 3 个函数表达式）。当前 `Core/` 只有 8 个 .lua 文件；`RV_DevSaveSchemaGate.lua` 在本轮之前已随精简移除。旧报告的行数（241/492/32/382/327/220/271/636/147/1644）与当前实际行数（167/366/—/129/431/152/109/212/119/—）全部不一致，函数计数（Store 20、UtilityServer 37、Server_Core 28、Commands 6、Server 4、Tick 7、Sentinel 21、RailroaderServer 2）亦全部不再是当前值。
+- **`RV_DevSaveSchemaGate.lua` 残留引用检查**：在 `contents/mods/RailroaderRVTest/42/media/lua` 全树对 `RV_DevSaveSchemaGate`、`DevSaveSchemaGate`、`schemaGate`、`SaveSchemaGate`、`DevSave` 做检索，**命中 0 处**；对 `requireCurrentManifest`、`currentManifestValid`、`ManifestValidation` 检索同样命中 0 处。即：该文件与其公开符号（`DevSaveSchemaGate`、`schemaGate` 等）已无任何 require 或调用残留，不存在悬空引用。仅存的 schema 相关符号是 `RV_RailroaderServer.lua:42-79` 的 `checkSaveSchemaVersion`（版本比较）、`map.schemaVersion`（写入 `:53`、比较 `:58`、读取 `RVMapping/RV_RailroaderServer_EntryExit.lua:492`）与 `C.SAVE_SCHEMA_VERSION = 9`（`shared/RailroaderRV/Common/RV_Constants.lua:54`），这部分是当前有效代码，不是旧 gate 残留。
+- **未覆盖项**：没有穷举 Core 每个导出 API 的全部调用行；相邻目录的内部函数语义由各自模块报告覆盖。报告中标注为"条件性推断"的三项（`isGenerationTransactionActive` 缺失、`Core.onCommand("*")` 不通配、`serverTransactionMutexStatus` 注入为 nil）**均未经运行时验证**，只作为静态发现列出。
+- **修改范围**：仅新增/更新本分析文档；**未修改任何 Lua 源码、配置或测试文件；未运行游戏、服务器或任何测试脚本**。源码扫描不能替代运行时/联机验收。

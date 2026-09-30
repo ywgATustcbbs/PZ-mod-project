@@ -1,149 +1,163 @@
-# BoundaryGuard 模块分析
+# server/RailroaderRV/BoundaryGuard 模块分析
 
-## 分析前提、范围与完成条件
+## 假设、范围、成功条件与验证方式
 
-- **范围**：只读分析 `contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/BoundaryGuard/` 中全部 4 个 Lua 文件。对目录外代码只做定向调用点搜索和少量上下文读取，用来辨认接口与内部状态耦合；没有把目录外文件纳入逐函数审阅。
-- **假设**：目录边界代表一次子模块分析单元；`BoundaryServer.lua` 是服务入口，Geometry、Sweep、BoundaryValidation 是互相协作的组件。函数输入和输出按源码路径说明，不推断运行时环境一定提供的 API。
-- **成功条件**：列齐 4 个文件及扫描到的具名、赋值、嵌套、匿名回调函数；逐项说明参数、返回值/副作用、本模块语义和当前是否必需；给出跨模块复用、拆分、数据访问和接口收益判断，并附可复核的源码行号。
-- **验证方法**：递归文件清单；`rg` 函数定义扫描；对每个文件按行号通读并交叉检查函数调用、上下文注入和边界状态字段；完成后核对报告章节和文件/函数清单。未运行游戏、服务器或一键运行时测试，未修改任何源码。
+- **假设**：`contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/BoundaryGuard/` 是权威 AABB 边界守卫的分析单元；`RV_BoundaryServer.lua` 是装配门面，Geometry 提供记录派生/几何缓存/玩家状态，Sweep 是每 tick 调度器，BoundaryValidation 是挂到 RailroaderServer adapter 上的映射准入缓存。行号以本次读取的工作区版本为准。
+- **范围**：只审阅本目录 4 个 Lua 文件及其全部具名函数、`local function`、表方法和匿名函数表达式。对目录外代码只做定向调用点搜索与上下文读取（`Boundary.*` 消费者、`_states`/`_tick`/`builderActionLedger` 读写者、`Adapter.*` 提供者），不纳入逐函数审阅。唯一写入目标是本报告。
+- **成功条件**：每个函数都有精确起始行、参数含义、返回值/副作用、本模块语义和必要性判断；回答内部状态的所有权与跨模块访问（含文件:行证据）、旧报告遗留问题的现状、可提取的通用功能与拆分建议；给出可机械核对的函数索引。
+- **验证方式**：列目录文件；按行号通读 4 个文件全文；用过滤式函数定义扫描（区分 `local function`、`function 表.名`、匿名表达式）与逐行读取交叉核对；在 `media/lua` 全树搜索 `_states`、`_builders`、`Boundary.`、`updatePlayer`、`builderActionLedger`、`transitionActivitySnapshot` 等符号确定消费者与提供者；完成后核对文件/函数条目数与行号引用。静态分析不替代运行时验证；本轮未运行游戏、服务器或测试脚本，未修改任何源码。
 
-## 文件与模块职责
+## 目录职责与清单
 
-| 文件 | 模块职责 | 结构判断 |
+本目录 4 个文件构成一层门面加三个职责组件：门面拒绝纯客户端装载、建立共享 `Boundary` 表与 `ctx`，并按 Geometry → Objects（DemolitionProtection）→ Sweep 的顺序装配；Geometry 负责记录→管理区几何的派生与槽位记忆化、玩家身份/状态/租约；Sweep 是唯一的每 tick 扫描与纠正调度器；BoundaryValidation 通过 RVMapping 注入的 `Adapter` 提供映射准入缓存与三类预热事件。
+
+| 文件 | 函数定义数 | 主要职责 |
+|---|---:|---|
+| [RV_BoundaryServer.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/BoundaryGuard/RV_BoundaryServer.lua:1) | 2 | 服务门面：进程门控、创建 `Boundary._states`/`_tick`、构造 5 字段 `ctx`、按序装载几何/对象保护/扫描组件并返回 `Boundary` |
+| [RV_BoundaryServer_Geometry.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/BoundaryGuard/RV_BoundaryServer_Geometry.lua:1) | 25 | 通用保护调用与数值/身份 helper；`managed`+`shellEdges` 边界派生与按槽位记忆化；`boundaryForPlayer` 映射准入串联；玩家状态/转场租约/纠正前置校验 |
+| [RV_BoundaryServer_Sweep.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/BoundaryGuard/RV_BoundaryServer_Sweep.lua:1) | 7 | 每 tick 在线玩家快照、租约跳过、管理区可行走判定、越界纠正（服务端传送+客户端命令）与活跃 RV 汇总，并把结果交给恢复队列 |
+| [RV_RailroaderServer_BoundaryValidation.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/BoundaryGuard/RV_RailroaderServer_BoundaryValidation.lua:1) | 11 | RailroaderServer adapter 上的准入验证缓存（60 tick TTL）、generation/wall-reload 事务互斥、manifest 与几何校验、批量/单玩家预热与三个事件回调 |
+| **总计** | **45** | 31 个 `local function` + 10 个表方法 + 4 个匿名函数表达式（3 个模块工厂 + 1 个 `pcall` 保护闭包） |
+
+计数口径：计入具名函数、`local function`、`M.foo = function` / `function M:foo()` 形式的方法、以及作为参数或返回值的匿名函数表达式；`Boundary.boundaryFor = boundaryFor`（Geometry L234）这类导出别名赋值不重复计数。三个文件顶部的 `return function(ctx)`（Geometry L2、Sweep L2、Validation L2）是模块工厂匿名函数，单独计入；Geometry L17 的 `pcall(function() ... end)` 是唯一作为参数传入的匿名闭包。
+
+## 逐文件、逐函数分析
+
+### RV_BoundaryServer.lua
+
+模块不注册事件、不写存档，只做装配。它在 `processIsClient() and not processIsServer()` 时直接 `return {}`（L21-L23），否则 require 常量与 Core（L25-L26），建立 `RailroaderRV.BoundaryServer` 共享表（L28-L33），创建本模块仅有的两个内部状态字段 `Boundary._states`（L35）与 `Boundary._tick`（L36），构造只含 `processIsServer/Boundary/C/Core/OWNER` 的 `ctx`（L39-L45），依次装载 Geometry、DemolitionProtection Objects、Sweep（L47-L49），最后 `return Boundary`（L51）。行号参见 [RV_BoundaryServer.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/BoundaryGuard/RV_BoundaryServer.lua:9)。
+
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
 |---|---|---|
-| `RV_BoundaryServer.lua` | 服务门面：拒绝纯客户端装载、建立共享 `Boundary` 表、建立组件上下文并装配几何、对象保护和 tick 扫描组件。 | 很薄的装配层，边界明确。源码第 54 行装配的 Objects 实现在 `DemolitionProtection/`，不属于本次逐函数分析范围。 |
-| `RV_BoundaryServer_Geometry.lua` | 编码/验证边界记录、持有已登记几何缓存、与 RailroaderServer 的当前映射验证衔接，并提供玩家状态、转场租约和纠正位置上下文。 | 最大文件，承载记录/缓存与玩家状态/纠正两条相邻但可区分的职责。 |
-| `RV_BoundaryServer_Sweep.lua` | 每 tick 采样在线玩家，处理正常跟踪和受限的未跟踪玩家探测，再把活跃 RV 范围交给修复队列。 | 调度层单一、独立性较好。 |
-| `RV_RailroaderServer_BoundaryValidation.lua` | RailroaderServer 适配器里的玩家关系、当前 schema、manifest、几何一致性验证缓存及预热事件。 | 从 Boundary 几何服务中分离合理；当前通过 `Adapter`、`Boundary` 多个下划线字段共享状态。 |
+| processIsClient（L9） | 无参数。`pcall` 调用全局 `isClient`，只有严格 `true` 返回 `true`；API 缺失或报错返回 `false`。无副作用。 | **必须**：纯客户端进程必须在此之前退出，否则会在客户端建立服务端权威状态表。 |
+| processIsServer（L15） | 无参数。`pcall` 调用全局 `isServer`，只有严格 `true` 返回 `true`；**API 缺失时返回 `true`**。无副作用，但作为 `ctx.processIsServer` 被 Geometry 的 `playerOnlineId`（L66）复用。 | **必须**：既是客户端门控条件，也是 SP/COOP 主机识别 onlineId 回退路径的判据；缺 API 默认服务端是显式 fail-open 选择，依赖游戏装载环境保证。 |
 
-### 装载与数据流
+### RV_BoundaryServer_Geometry.lua
 
-`RV_BoundaryServer.lua:21-23` 在纯客户端进程返回空表；服务侧建立 `ctx` 后依次装载 Geometry、DemolitionProtection Objects、Sweep（第 43-55 行）。Geometry 将安全调用、身份、边界键、状态和 bitmap 处理函数放入该局部 `ctx`，供 Objects 和 Sweep 复用（`RV_BoundaryServer_Geometry.lua:773-786`）。BoundaryValidation 则由 RVMapping 的 `RV_RailroaderServer_Mapping.lua:227-244` 用另一份 adapter 上下文装载；它不是 `BoundaryServer.lua` 的 Geometry `ctx`。
+模块由门面调用工厂后向内安装 6 个 `Boundary` 方法（`diagnoseGuardState`、`boundaryForPlayer`、`beginTransition`、`completeTransition`、`extendTransition`、`clearPlayer`），并把 10 个 helper 写回 `ctx`（L378-L387）供同目录 Sweep 与目录外 Objects 复用。它 require `RV_TemplateGeometry`、`RV_RoomTemplate`、`RV_Layout`、`RV_RegionSlots`（L7-L10），因此几何事实全部来自编译期模板而不是持久副本。私有状态只有 `Boundary._states`（由 `stateFor`/`clearPlayer` 独占写入）与 `boundariesBySlot` 槽位记忆化表（L210）。行号参见 [RV_BoundaryServer_Geometry.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/BoundaryGuard/RV_BoundaryServer_Geometry.lua:2)。
 
-常规路径是 GenerationFlow 以 `Boundary.makeBoundary` 形成持久记录（`Construction/RV_Server_GenerationFlow.lua:249-257`），DevSaveSchemaGate/映射流程再用 `Boundary.registerGeneration` 登记。玩家 guard 通过 `boundaryForPlayer` 调用 Mapping 注入的验证器；Sweep 的 `onTick` 以 `updatePlayer` 取得活跃边界，并调用 repair tick 钩子。服务 tick 调度见 `Core/RV_Server_Commands.lua:49-60`。
-
-### 装配断点：Sweep 所需 `ctx.updatePlayer` 无源码提供者
-
-- **静态可证事实**：门面创建 `ctx` 时只含 `processIsServer`、`Bitmap`、`Boundary`、`C`、`Core`、`OWNER`、`exactKeys`（`RV_BoundaryServer.lua:43-51`），装配顺序为 Geometry → DemolitionProtection Objects → Sweep（`L53-L55`）。Geometry 最后对 `ctx` 的赋值清单位于 `RV_BoundaryServer_Geometry.lua:773-786`，不包含 `updatePlayer`。对整个 `media/lua` 搜索 `updatePlayer`，唯一命中是 Sweep `L10` 读取 `ctx.updatePlayer` 和 `L75/L103` 两处调用；目录外已装载的 Objects 文件也没有 `ctx.updatePlayer` 赋值或导出。因此在当前可见源码装配路径中，Sweep 装载时 `local updatePlayer = ctx.updatePlayer` 捕获到 `nil`。
-- **条件性运行时推断**：若一次 `Boundary.onTick` 进入已跟踪/区域内玩家分支，或冷态区域外候选探测分支，分别会在 Sweep `L75` 或 `L103` 调用这个 `nil`，Lua 将抛出调用错误；入口在 `Core/RV_Server_Commands.lua:58-59` 由 `pcall(Boundary.onTick)` 包裹，推测会截断本轮 Boundary sweep 并由外层吞掉错误，其他 server tick 后续步骤仍可能继续。此处没有进行运行时复现，故为静态调用链推断，不是实测结论。
-- **分析状态**：这是影响 Boundary tick 主路径的高优先级未解决集成问题。需要负责实现的工作者确认 `updatePlayer` 预期提供者/接口后修复；本报告任务只读，不在此补实现。
-
-## 函数逐项说明
-
-以下每项都给出定义起始行及所在函数范围；`return function(ctx)` 是被 `require` 后调用的工厂，不是游戏事件回调。这里的“必要”表示对当前目录声明的功能是否有静态调用/职责依据，不等于运行时验证结论。
-
-### `RV_BoundaryServer.lua`
-
-- **`processIsClient()`（L9-L13）**：无参数。安全调用全局 `isClient`；返回布尔值，仅严格 `true` 视为客户端，缺 API 或报错时为 `false`。用于决定是否提前退出；对避免客户端建立 server authority 状态必需。
-- **`processIsServer()`（L15-L19）**：无参数。安全调用全局 `isServer`；API 缺失时按服务端处理，异常/非真值为 `false`。用于客户端门控和注入 Geometry；必需，但缺 API 默认服务端是显式的 fail-open 选择，需依赖游戏装载环境保证。
-
-### `RV_BoundaryServer_Geometry.lua`
-
-- **工厂 `function(ctx)`（L2-L787）**：输入门面准备的依赖对象；副作用是向 `Boundary` 安装边界、缓存、身份、转场方法，并把通用 helper 放回 `ctx`；没有显式返回值。必需的组件装配入口。
-- **`number(value)`（L17-L25）**：把数字、数字字符串或可用 `+ 0` 转成 number；转换失败返回 `nil`。供几何字段标准化，且导出给 Objects；必需。
-- **匿名转换回调 `function()`（L21）**：无参数，返回 `value + 0`，由 `pcall` 隔离 Lua/Java 转换异常；仅是 `number` 的保护壳，不应独立提取。
-- **`integer(value)`（L27-L31）**：复用 `number`，只接受整数，失败返回 `nil`。跨记录、坐标、generation 校验的基础 helper；必需且导出给 Objects 和 Sweep。
-- **`finiteNumber(value)`（L33-L40）**：将 number 结果限制为有限值，拒绝 NaN 和正负无穷；返回有限数或 `nil`。玩家坐标验证必需。
-- **`call(target, method, ...)`（L53-L60）**：输入对象、方法名和方法参数；保护调用对象方法，返回 `false, nil/错误` 或 `true, 最多四个返回值`。适配 Java 对象/API，是 Geometry 与 Objects 共用的基础 helper；必需并经 `ctx` 导出。
-- **`callGlobal(name, ...)`（L62-L68）**：输入全局函数名与参数；通过 `_G` 找函数并以 `pcall` 调用，返回与 `call` 相同形态。用于玩家/格子/网络 API；必需并导出。
-- **`succeeded(target, method, ...)`（L70-L73）**：包装 `call`，返回调用成功且第一结果不为 `false` 的布尔值。全目录搜索未发现调用，且未导出；当前不是必需代码，可能是遗留 helper。
-- **`playerName(player)`（L75-L80）**：输入玩家；读取并转成非空用户名，缺失返回 `nil`。身份组成部分；必需。
-- **`playerOnlineId(player)`（L82-L91）**：输入玩家；优先读非负 `getOnlineID()`，非服务进程才尝试 `getPlayerNum()`；服务侧无可靠 online ID 则返回 `nil`。避免在服务端将客户端编号当身份；必需。
-- **`identity(player)`（L93-L99）**：输入玩家；返回 `{username, onlineId, key}`，key 为 `onlineId:username`，身份不完整则 `nil`。跨转场、缓存、build attribution 的稳定进程内身份；必需并导出。
-- **`playerPosition(player)`（L101-L119）**：输入玩家；安全读取 x/y/z 并要求有限数；返回位置表及 `inRVRegion` 布尔值。region 按 Constants 的偏移、宽高槽数和 Z 范围计算；Sweep 用它筛选玩家，必需并导出。
-- **`Boundary.diagnoseGuardState(player, knownIdentity, position, relation, record, reason)`（L121-L156）**：输入玩家、已校验身份（可选）、位置、映射 relation、RV record、拒绝原因；只对服务端、位置表和指定无效数据原因处理。每身份最多发一次 `INVALID_RV_DATA` 命令并打印服务端诊断，返回是否发送成功。用于将 schema/manifest/几何拒绝反馈给用户；当前验证提示必需。函数体未读取 `relation`、`record` 的内容，它们目前只是透传形参。
-- **`playerCell(player)`（L158-L163）**：输入玩家；优先取玩家 cell，失败后尝试全局 cell；返回 cell 或 `nil`。纠正玩家前用于目标格加载验证；必需，当前通过 `ctx` 暴露但两个已装载子组件没有引用。
-- **`square(cell, x, y, z)`（L165-L169）**：输入 cell 和格坐标；安全调用 `getGridSquare`，返回格对象或 `nil`。阻止向未加载位置发纠正；必需，供 Objects 和 Geometry 使用并导出。
-- **`encodeShellEdges(source, rvId, generation, bitmapVersion)`（L171-L198）**：输入布局 shell-edge 表和记录身份；复制已知字段，规范化坐标/索引，并为每条边写入完整 RV 身份。返回新边表（坏输入返回空表）；避免持久数据保留共享布局引用，构建新记录必需。
-- **`Boundary.makeBoundary(layout, rvId, generation)`（L202-L252）**：输入 layout、RV ID、generation；验证 bitmap、managed bounds 一致和当前 bitmap 版本，编码 bitmap/shellEdges，生成含 schema/identity/bounds 的持久边界记录；成功返回 record，失败返回 `nil, reason`。将运行时 layout 转成当前 schema 必需。
-- **`decodeBoundary(boundary)`（L254-L271）**：输入持久/新建 boundary；依次尝试原表快照缓存、新建对象的 decoded bitmap，以及只在 `DevSaveSchemaGate.isValidating()` 阶段允许的 schema gate 解码。返回 bitmap、rvId、generation、bitmapVersion 或 `nil`。拒绝 runtime cache miss 重新解释旧数据，符合开发期 fail-closed 门；必需并导出给 Objects。
-- **`boundaryKey(boundary)`（L272-L275）**：输入至少含身份字段的边界；返回 `rvId:generation:bitmapVersion` 字符串。作为缓存/登记键必需并导出。
-- **`sameBoundaryManaged(left, right)`（L277-L289）**：输入两组 managed bounds；要求精确字段集合及整数值相同，返回布尔值。防止边界 bounds 与几何身份不一致，登记缓存比较必需。
-- **`sameBoundaryBitmap(left, right)`（L291-L307）**：输入两个 decoded bitmap；比对 bounds 和每层 walk/build bit 编码，返回布尔值。发现同身份不同几何，阻断旧 cache 复用；必需。
-- **`sameBoundaryShellEdges(left, right)`（L309-L338）**：输入两个 edge map；要求 edge schema keys、字段、templateIndices 序列和条目数一致，返回布尔值。记录同身份几何变更的完整比较；必需。
-- **`sameBoundaryGeometry(cached, boundary, bitmap)`（L344-L350）**：输入已登记缓存、当前记录和 decoded bitmap；合并调用 bounds、bitmap、shellEdges 比较，返回几何一致布尔值。防止缓存键复用到不同 geometry；必需。
-- **`sameBoundary(left, right)`（L352-L355）**：输入两边界；只比较 `boundaryKey` 身份三元组，不比较实际 bitmap/edge 内容；返回布尔值。Objects 用它确认短时 build action 仍对应同一 generation（`DemolitionProtection/RV_BoundaryServer_Objects.lua:642-645`）；可用，但名称容易被误读为几何相等，应在接口文档明确身份相等语义。
-- **赋值函数 `sourceCacheHit(boundary)`（L357-L391）**：输入 source boundary；命中弱键缓存后验证原始字段/子表引用和值仍一致，并要求注册表仍指向缓存对象；返回缓存注册对象或 `nil`。降低每 tick 的 schema/geometry 重验成本，同时拒绝原记录被原地改写；必需。
-- **`rememberSourceBoundary(boundary, loaded)`（L393-L413）**：输入持久 source 记录和 decoded 注册对象；把其关键身份、边界、bitmap 子表引用和值保存到 weak-key source cache；无返回值。供上一个缓存校验使用，必需。
-- **`geometryChanged()`（L415-L417）**：无参数；递增 `Boundary._geometryEpoch`，无显式返回。使 BoundaryValidation 的玩家 cache 感知登记几何变化；必需，但 epoch 是跨组件内部耦合点。
-- **`loadedBoundary(boundary)`（L419-L459）**：输入记录；查 source/generated 缓存或在 schema validating 阶段 decode；检查当前 bitmap 版本，按身份键复用一致的登记对象，或清掉同键旧 geometry 并登记新对象；返回规范化 `{rvId,generation,bitmapVersion,bitmap,encoded,shellEdges}` 或 `nil`。这是所有 guard 消费几何前的统一准入点，必需。
-- **`Boundary.registerGeneration(rvId, generation, boundary, record)`（L461-L479）**：输入身份、boundary、可选 record；要求已 load、调用身份匹配，若给 record 则其身份/version/边界引用也精确匹配；登记并返回 `true/false`。Generation 和 schema gate 建立 boundary 当前身份必需。
-- **`Boundary.boundaryForPlayer(player, knownIdentity, deferValidationMiss, forceValidationRefresh, roofRefreshContextRead, roofRefreshGuardRead)`（L481-L518）**：输入玩家、可选预校验身份、缓存 miss 是否延后、是否强制 refresh、两种 RoofRefresh 授权读标记；调用 Adapter 验证器，然后核验 relation/identity/manifest 与 record 身份，最后经 `loadedBoundary` 取规范几何。成功返回 boundary、record、relation、identity、manifest；可返回 `nil, "validation-deferred"` 或 `nil`。guard、entry/roof 等从服务端映射取得唯一可信边界的核心接口；必需。
-- **`stateFor(player, knownIdentity)`（L520-L531）**：输入玩家和可选身份；按 identity key 读取或建立 `Boundary._states` 状态，更新 `state.identity`；返回 state 或 `nil`。转场租约与纠正序号的创建点；必需。
-- **`Boundary.addTransitionLifecycleListener(name, listener)`（L543-L550）**：输入唯一 listener 名及函数；校验后登记/覆盖监听函数，返回布尔值。为独立组件提供 transition 生命周期信号；当前 TemplateProtectionRepair 使用的扩展点，必需。
-- **`notifyTransitionLifecycle(eventName, player, state)`（L552-L564）**：输入事件名、玩家、状态；逐 listener 安全调用并记录失败，不传播回调错误；无返回值。保证辅助 listener 不阻断 authoritative 转场；必需。
-- **`Boundary.beginTransition(player, rvId, generation, token, kind, bitmapVersion)`（L566-L585）**：输入玩家、generation identity、token、可选类别/version；校验身份/version 后创建/更新状态、写入 token/kind/超时 tick、清除 refresh tick并发 `begin`；返回布尔值。Entry、RoofRefresh、Sentinel、Generation relocation 暂停普通 guard 的公开接口；必需。
-- **`Boundary.completeTransition(player, token)`（L587-L596）**：输入玩家及可选 token；token 不匹配拒绝，否则清除 token/kind、写入两 tick 完成戳并通知 `complete`；返回布尔值。完成 relocation 的公开接口；必需。
-- **`Boundary.extendTransition(player, token, untilTick)`（L604-L617）**：输入玩家、有效 token、新到期 tick；只允许相同活动 token，按 tick 顺序只延长不缩短租约；返回布尔值。RoofRefresh/长交易保留 guard 暂停状态所需；必需。
-- **`Boundary.clearPlayer(player)`（L619-L627）**：输入玩家；删除 identity 对应状态并通知 `clear`，身份无法读取时仍返回 `true`。清理异常/失败转场状态的公开接口；必需。
-- **`transitionActive(state)`（L629-L638）**：输入状态；token 存在且到期 tick 未过期则 `true`；过期/失效则清空租约、发 timeout 并返回 `false`。Sweep 与 guard 共用的 lease 解释；必需并导出给 Sweep。
-- **`prepareCorrection(player, boundary, state, target)`（L640-L662）**：输入玩家、边界、状态和目标位置；要求目标 bitmap active、权威 cell 中精确目标格已加载且身份可靠；递增 correction sequence 后返回带 rvId/generation/version/onlineId/坐标的 payload，否则 `false`。不向未知格传送的关键防护；必需。
-- **`notifyCorrection(player, payload)`（L664-L667）**：输入玩家和 correction payload；发送 `COMMAND_RV_BOUNDARY_CORRECTION`，当前忽略发送结果。把服务端纠正意图发给客户端表现层；必需。
-- **`currentSquareMatches(player, position)`（L669-L684）**：输入玩家和刚读取的位置；验证 `getCurrentSquare()` 已加载且格坐标与 floor(position) 相同，返回布尔值。只对新鲜、格状态一致的位置作 guard 决策；必需。
-- **`guardContextForPlayer(player, position, knownIdentity, deferValidationMiss)`（L686-L761）**：输入玩家、位置、可选身份和 miss defer 标记；读取当前 boundary，复验 relation 与 record rider、维护玩家快照、阻止活动转场/未加载 current square；返回供对象 guard 使用的 position/bitmap/AABB/boundary/spawn identity/expected spawn 与两个回调，失败为 `nil`。职责上是 player guard context 组装核心；本目录当前没有从 Geometry `ctx` 导出的已装载子组件调用它，需确认是否保留为预留钩子。
-- **匿名 `preparePullback()`（L754-L756）**：无参数；捕获玩家、boundary、state、record spawn，委托 `prepareCorrection` 并返回 payload/false。惰性创建纠正 payload，避免 guard 需要纠正时重复拼字段；依赖 `guardContextForPlayer`，目前随父函数无可见消费者。
-- **匿名 `notifyPullback(payload)`（L757-L759）**：输入 correction payload；捕获玩家并委托 `notifyCorrection`，无显式返回。与上述回调同样当前无可见消费者。
-- **`Boundary.cachedBitmap(record)`（L763-L770）**：输入 record；按其身份键查注册对象，并要求编码记录引用匹配；返回已验证 decoded bitmap 或 `nil`。Sentinel/RoofRefresh 复用启动 gate 已校验的 bitmap，避免重解持久 schema；必需。
-
-### `RV_BoundaryServer_Sweep.lua`
-
-- **工厂 `function(ctx)`（L2-L121）**：接收服务门面/Geometry 提供的 state、identity、position、tick、queue helpers，并安装 `Boundary.onTick`；无显式返回值。组件装配入口，必需。
-- **`untrackedOutsideProbeDue(identityKey)`（L17-L21）**：输入身份 key；检查私有 retry deadline 是否缺失/无效/已到期，返回布尔值。限制重启后未跟踪玩家的 map 验证频率；必需。
-- **`deferUntrackedOutsideProbe(identityKey)`（L23-L29）**：输入身份 key；将该玩家的下一次探测安排在 300 tick 后（Core tick 相加成功时才保存）；无返回值。配合上一函数作逐身份限频；必需。
-- **`onlinePlayersSnapshot()`（L31-L53）**：无参数；优先复制 `getOnlinePlayers()` 集合，兼容 Java size/get 和 Lua table；若结果为空，回退到 `getPlayer()`；返回玩家数组。让一轮 sweep 遍历稳定列表，必需。
-- **`Boundary.onTick(tick)`（L55-L119）**：输入可选游戏 tick；更新 `_tick`，取在线玩家位置和 identity；更新已跟踪/区域内玩家，跳过有活动 transition lease 的玩家；每 tick 最多处理一个冷态区域外候选；构造 activePlayers/activeBoundaries 并调用 TemplateProtectionRepair tick hook；无显式返回值。是区域内玩家 guard 与队列工作的调度入口，必需。注意其 `updatePlayer` 依赖在当前源码未注入，详见上方装配断点。
-
-### `RV_RailroaderServer_BoundaryValidation.lua`
-
-- **工厂 `function(ctx)`（L2-L309）**：输入 RVMapping 传入的 Boundary、Adapter、map/region/record 检查器、mutex、身份 helper、在线玩家快照；创建本地 cache/pending 与预热节流状态，安装三个 `Adapter` 方法和三个事件回调，并返回 `{invalidate=...}`。该分层入口必需。
-- **`invalidate()`（L24-L29）**：无参数；清空私有验证 cache/pending、重置 prewarm tick，并写 `Adapter._boundaryValidationWarmPending=true`；无返回值。映射变化时作 cache 失效必需；warm pending 在当前代码搜索中是写入而未读取的标志。
-- **`roofRefreshBoundaryReadAllowed(server, record, identityKey)`（L31-L40）**：输入 server API、record、玩家身份 key；安全调用 RoofRefresh 的只读授权 hook，只有严格 `true` 返回 `true`。允许 guard cache 在 RoofRefresh transaction 中作特许读取；保持 fail-closed 必需。
-- **`roofRefreshBoundaryContextReadAllowed(server, record, identityKey)`（L42-L53）**：同上，但调用更窄的 boundary-context read 授权 hook；返回严格布尔值。区分 RoofRefresh 构造事务上下文所需的授权与普通 guard 读取；安全策略不同，不建议为减少几行而抹平成同一种授权。
-- **`validatePlayer(player, suppliedIdentity, knownMap, forceRefresh, deferCacheMiss, roofRefreshContextRead, roofRefreshGuardRead)`（L55-L216）**：输入玩家、可复用的 identity/map、是否强制刷新/延迟 cache miss、两种 RoofRefresh read mode；拒绝不一致身份、generation mutex、活动转场非法读、无效 map/relation/rider/record/manifest/geometry 和未获准 RoofRefresh 状态。通过时返回 boundary、record、relation、validatedIdentity、manifest；普通成功结果入带 mapping/geometry epoch 和 60-tick TTL 的 cache，失败清对应 cache，延迟路径标 pending。唯一的当前数据准入点，必需。
-- **嵌套 `diagnose(reason)`（L141-L147）**：输入拒绝原因；将当前玩家、validated identity、玩家是否在 RV 区、relation/record 和原因交给 `Boundary.diagnoseGuardState`（若存在）；无显式返回。把验证失败接入用户提示和 server log，必需。
-- **`Adapter.validateCurrentBoundaryPlayer(player, suppliedIdentity, deferCacheMiss, forceRefresh, roofRefreshContextRead, roofRefreshGuardRead)`（L218-L224）**：输入 guard 调用者参数；把 bool 严格规范为 `true` 后委托 `validatePlayer`，输出沿用 validator 的多返回值。Geometry 调用的 adapter 合同，必需。
-- **`needsRefresh(identityKey, forceRefresh)`（L226-L237）**：输入身份 key 和强制标记；对比本地 cache、mapping/geometry epoch、tick 有效性及 30-tick refresh 周期，返回布尔值。让批预热周期性重验；必需。
-- **`Adapter.prewarmCurrentBoundaryPlayer(player, knownMap, forceRefresh)`（L239-L246）**：输入玩家、可选共享 map、强制 refresh 标记；建立稳定 identity 并委托 `validatePlayer`，输出验证多返回值或 `nil`。单玩家缓存预热入口；必需。
-- **`Adapter.prewarmCurrentBoundaryPlayers(knownMap, knownPlayers)`（L248-L282）**：输入可选 map 与已筛选玩家列表；generation 事务不忙且达到节流 tick 后，选定或生成 RV 区候选，取 map 并逐玩家预热；清 pending/warm 标志并返回成功布尔值。批预热，必需。
-- **`prewarmAfterWorldLoad()`（L284-L286）**：无参数；委托批预热当前玩家；作为 OnGameStart/OnServerStarted 回调，必需。
-- **`prewarmCreatedPlayer(playerIndex, player)`（L288-L294）**：接收 OnCreatePlayer 的 index/player 参数；优先实际 player，确认在 RV 区、取得 map 后预热该玩家；无显式返回。新建玩家进入范围时准备 cache，必需。
-
-## 跨模块复用与抽取判断
-
-1. **安全对象/全局调用和数值身份 helper**：`number`、`integer`、`call`、`callGlobal`、`identity` 在 Geometry 中集中，并由同一个 `ctx` 给 Objects 复用（Geometry `L773-L786`，Objects `L8-L16`）；比各自复制错误处理更一致，当前归属合理。若未来更多 server 模块要用，应提取到 Core/Shared 的小型 server utility；现在继续保留在 `Boundary` 包内的收益高于新增全局 API。
-2. **边界三种相等比较**：managed bounds、bitmap bits、shell edge 内容（Geometry `L277-L350`）是不同深度的相等概念。可以共用字段表/规范化 helper，但不应混成一个宽泛 `sameBoundary`；当前 `sameBoundary` 只比较身份 key（`L352-L355`），命名需要把“身份相同”写进合同。
-3. **验证器中的 RoofRefresh 授权包装**：`roofRefreshBoundaryReadAllowed` 和 `roofRefreshBoundaryContextReadAllowed` 形状近似（Validation `L31-L53`），但分别代表 guard 读取和事务上下文读取两种不同权限。少量调用重复低于安全语义分离的价值，保持具名双接口更清晰。
-4. **关系复核逻辑**：BoundaryValidation `validatePlayer`（`L135-L165`）验证 map relation 与 record rider；Geometry `guardContextForPlayer`（`L701-L715`）又核验 relation、locoId、rider 和 onlineId。可抽为同一目录私有校验器或让后者信任明确的 validator 输出，但须保留后者对 record/relation 当前身份的额外保护。抽取收益中等，首先应明确哪一层是最终权威，避免重构时削弱第二次 guard。
-5. **回调/预热**：`prewarmAfterWorldLoad` 和 `prewarmCreatedPlayer` 不能合并成同一个无参 callback，事件参数形状和处理范围不同；二者共享批量/单人预热 API 已足够。
-
-## 是否需要进一步拆分
-
-- **建议评估将 Geometry 拆为两个内聚组件**：`makeBoundary`/`encodeShellEdges`、`decodeBoundary`、相等比较、source/generated cache、`loadedBoundary`、`registerGeneration`、`cachedBitmap` 是“持久记录与几何登记”；`identity`、`stateFor`、transition lifecycle/租约、`prepareCorrection`、`guardContextForPlayer` 是“玩家 guard/转场”。它们集中在一个 787 行文件，且前一类由 `Boundary._registered`/`_geometryEpoch` 管理，后一类由 `Boundary._states` 管理。按这个状态所有权拆，能让同身份几何缓存和玩家状态接口更清楚。
-- **拆分不是立即强制项**：`boundaryForPlayer` 同时串接 Adapter 验证和 geometry cache；拆分需通过工厂依赖注入一个清晰的验证结果接口，避免跨文件直接读取另一组件的私有缓存。若拆分后只搬函数并暴露全部 helper，收益会被耦合抵消。
-- **Sweep 和 BoundaryValidation 暂无进一步拆分必要**：Sweep 的小型限频、候选选择和 onTick 调度为单一流程；Validation 虽有缓存和预热两部分，但预热正是验证 cache 生命周期的触发方式，尚无足够独立的数据所有权来拆成更多文件。
-
-## 直接访问模块内部数据与接口建议
-
-| 访问方 → 数据所有者 | 直接访问位置 | 判断与接口收益 |
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
 |---|---|---|
-| Sweep → Geometry/Boundary 状态 | Sweep `L55-L57` 写 `Boundary._tick`；`L66-L68` 读 `Boundary._states[id.key]` 与 identity。 | 同一门面下的组件协作，tick 必须和同轮 `transitionActive`/队列一致。tick 是单个同步标量，getter/setter 包装收益很低；可增加私有 `trackedState(identity)` 查询避免直接取整张 `_states`，但无需返回完整状态。 |
-| BoundaryValidation → Geometry 玩家状态 | Validation `L81-L88` 读 `_states[key].transitionToken/transitionUntil`、`Boundary._tick`、`Boundary._geometryEpoch`；`L200-L202` 与 `L231-L232` 再读 epoch。 | 属于两个不同服务模块之间的内部 schema 访问。`transitionToken/transitionUntil` 是状态实现细节，宜由 Boundary 提供 `canValidateCachedBoundary(identity, roofMode)` 一类只读判定；几何 epoch 可用只读 revision hook。收益明显，减少字段改名造成静默误判；验证 cache 仍应保留 mapping/geometry revision 语义。 |
-| BoundaryValidation ↔ Adapter/Mapping | Validation `L28,L87-L89,L115,L121,L200-L202,L229-L232,L251,L267,L280` 读写 `Adapter._boundaryValidationWarmPending`、`_boundaryValidationEpoch`、`_ticks`；Mapping `L102-L108,L227-L244` 改 epoch、调用 validator invalidate 并注入 helpers。 | `_boundaryValidationEpoch` 可由现有 `boundaryValidation.invalidate()` 的缓存清空承担，或由 validation 私有 revision 管理；不必暴露在 Adapter。`_ticks` 是全 Adapter 多模块共享的当前 tick，抽象收益较低，允许只读快照接口即可。`_boundaryValidationWarmPending` 在全源码扫描里只被写未读；若无外部非 Lua 读取，应删除状态或补上真实消费者，当前没有行为收益。 |
-| TemplateRecovery → Boundary transition 状态 | `TemplateRecovery/RV_Server_TemplateProtectionRepair.lua:L204-L221,L275-L288` 遍历 `_states` 并读 RV identity、token、kind、until；`L295` 读 `_tick`。 | 这是目录外消费者访问 Boundary 私有状态。已有 lifecycle listener 注册点（Geometry `L533-L550`），但 repair 还做定期扫描以观察超时/完成窗口和重建状态；不能简单删掉扫描。可提供窄的 `transitionSnapshot()`/`forEachTransition`，隐藏其它玩家状态字段；收益中高，需维持恢复与两 tick stamp 的语义。只读 `_tick` 为同步时间值，接口收益低于重建多余的时间副本。 |
-| TemplateRecovery → DemolitionProtection build-action 队列 | Objects `DemolitionProtection/RV_BoundaryServer_Objects.lua:L580-L609,L629-L647` 创建和消费 `Boundary._builders`；TemplateRecovery `L1722-L1726` 扫描并删除过期 action。 | `_builders` 是以 `_` 标识的模块内部异步队列，却由另一个目录清理，所有权不清。建议让 Objects 暴露 `pruneExpiredBuilderActions(tick)` 或在对象队列自己的 tick 接口中清理；这样有明确收益，防止队列字段/过期规则分叉。 |
-| 其他服务 → Boundary 公共行为 | Construction 调用 `makeBoundary`（`Construction/RV_Server_GenerationFlow.lua:249-L257`）；Mapping/schema gate 调用 `registerGeneration`；EntryExit、RoofRefresh、Sentinel 使用 `begin/complete/extend/clearTransition`；RoofRefresh/Sentinel 使用 `cachedBitmap`；服务 tick 调 `onTick`。 | 这些是方法调用合同，没有发现调用者直接改 `_registered`。应保留为公开行为接口，并写清 token、identity 和 fail-closed 返回含义。 |
-| BoundaryValidation → RailroaderServer/RoofRefresh 接口 | Validation `L166-L198` 调 `currentRVManifestForBoundary`、`currentRVRecordGeometryConsistent`、两个 `isRoofRefreshBoundary*ReadAllowed`。定义/提供分别见 `RVMapping/RV_Server_RecordValidation.lua:L160-L206` 与 `RoofRefresh/RV_Server_RoofApi.lua:L151-L195`。 | 这是服务方法合同，不是直接读取其他模块数据；调用用 `pcall` 且需严格 `true`，边界清晰。保留窄接口优于读取 RoofRefresh 的 relocation group 内部状态。 |
+| 工厂匿名函数 function(ctx)（L2） | ctx 门面上下文（`processIsServer/Boundary/Core/C/OWNER`）。require 四个共享模块与模板；定义本文件全部函数；副作用是向 `Boundary` 写 6 个方法、向 `ctx` 写 10 个 helper（L378-L387）；无返回值。 | **必须**：组件的唯一装配入口；门面 L47 与它构成 require 契约。 |
+| number（L13） | value 任意值。number 直接返回，string 走 `tonumber`，其他非 nil 走 `pcall(value + 0)`；失败返回 `nil`。 | **必须**：Java/Kahlua 数值代理不总是 Lua number，是全部几何字段标准化的基础。 |
+| number 中匿名函数（L17） | 无参数，返回 `value + 0`，异常由外层 `pcall` 转成 `nil`。 | **实现必需**：数值代理转换本身可能抛错，必须隔离在 `pcall` 内。 |
+| integer（L23） | value 任意值。经 `number` 后要求 `math.floor(v) == v`，返回整数或 `nil`。 | **必须**：坐标、generation、slotIndex、templateIndices 全部依赖统一整数化；注意它不额外排除 NaN/无穷（与 `Common.integer` 不同）。 |
+| finiteNumber（L29） | value 任意值。经 `number` 后排除 NaN 与正负无穷，返回有限数或 `nil`。 | **必须**：玩家坐标必须排除 NaN/Inf，否则管理区比较与传送会得到无意义结果。 |
+| call（L38） | target 对象、method 方法名、可变参数。target 为 nil 或 `target[method]` 非函数返回 `false,nil`；否则 `pcall(target[method], target, ...)`，成功返回 `true` 加最多 4 个返回值，失败返回 `false,error`。 | **必须**：本文件与 Objects 统一经它访问 Java 对象；当前实现直接索引 `target[method]`，属性读取异常不被单独保护（与 `Common.invoke` 的差异见复用章节）。 |
+| callGlobal（L47） | name 全局函数名、可变参数。`rawget(_G, name)` 非函数返回 `false,nil`；否则 `pcall` 调用并返回 `true` 加最多 4 个返回值。 | **必须**：Sweep 的 `getOnlinePlayers`/`getPlayer`/`sendServerCommand` 与诊断命令都经它调用；`rawget` 规避全局元表。 |
+| playerName（L55） | player 玩家对象。经 `call(player,"getUsername")`，返回值转 string 且非空才算成功，否则 `nil`。 | **必须**：身份三元组的一半，也是 `record.players[username]` 查表键。 |
+| playerOnlineId（L62） | player 玩家对象。优先取非负整数 `getOnlineID()`；**只有非服务进程**才回退 `getPlayerNum()`（缺失记 0）；服务进程无可靠 ID 时返回 `nil`。 | **必须**：防止在专用服务器把客户端槽位号当稳定身份；这是身份 fail-closed 的关键分支。 |
+| identity（L73） | player 玩家对象。用户名与 onlineId 都有效时返回 `{username, onlineId, key = tostring(onlineId)..":"..name}`，否则 `nil`。 | **必须**：`_states` 键、租约、纠正命令 onlineId、adapter 校验身份全部使用同一三元组；导出给 Objects。 |
+| playerPosition（L81） | player 玩家对象。安全读 x/y/z 并要求有限数；返回 `{x,y,z}, inRVRegion`；任一读取失败返回 `nil`（此时第二返回值仍会是布尔）。区域判定用 `TELEPORT_X/Y/Z + RV_REGION_MIN_OFFSET_*`、`RV_REGION_SIZE * RV_REGION_SLOT_COLUMNS/ROWS` 与 `RV_MANAGED_MIN/MAX_Z_OFFSET`。 | **必须**：Sweep 用它一次性取得位置与区域标记；两值语义耦合，不可只用其一。 |
+| Boundary.diagnoseGuardState（L104） | player 玩家、knownIdentity 可选已校验身份、position 位置表、relation 映射关系、record RV 记录、reason 拒绝原因字符串。要求服务进程、position 是表、`id.key` 与当前身份一致且 onlineId 非负；随后 `sendServerCommand(player, MOD_ID, COMMAND_RV_TELEPORT, {ok=false, onlineId, reason=INVALID_RV_DATA})`，并打印成功/失败日志。成功返回 `true`，其余路径 `false`。 | **必须**：schema/manifest/几何/墙体事务拒绝的唯一用户可见反馈通道（GUI 已消费该稳定失败码）。参数 `relation`、`record` 目前只做签名占位、函数体从未读取，属**保留理由**：调用点按固定 6 参传递，删除会造成签名分叉而当前无行为收益。 |
+| playerCell（L135） | player 玩家对象。先 `player:getCell()`，失败后尝试全局 `getCell()`；返回 cell 或 `nil`。 | **必须**：`square` 与纠正前加载校验的输入；经 ctx 导出，Sweep 在 L68、L84 使用。 |
+| square（L142） | cell、x、y、z。cell 为空返回 `nil`；否则 `pcall(cell.getGridSquare, cell, x, y, z)`，返回格或 `nil`。 | **必须**：禁止向未加载格发纠正的唯一判据；Sweep 与 Objects 共用。 |
+| encodeShellEdges（L148） | source 布局壳边表、rvId、generation。非表返回空表；否则逐 edge 复制 `hostX/hostY/z/axis/side/objectX/objectY/objectZ/role/corner/replacementAllowed/templateIndex/sprite/north`，整数化坐标索引，写入 `edgeKey`、本代 `rvId/generation`，并逐项复制 `templateIndices`。返回新表。 | **必须**：派生边界不得保留布局共享子表引用，否则调用方原地改写会污染模板派生数据。 |
+| makeBoundary（L178） | layout 布局、rvId、generation。要求 `layout.managed`、`layout.shellEdges` 是表、rvId 非空、generation 为 ≥1 整数；构造 `managed = {originX,originY,width,height,minZ,maxZ}`，要求 `TemplateGeometry.anchorFromManaged(managed, Template)` 成立且 `maxZ > minZ`；成功返回 `{rvId=tostring(rvId), generation, managed, shellEdges=encodeShellEdges(...)}`，失败返回 `nil, reason`。 | **必须**：管理区边界的唯一派生点；其结果被记录校验、构造、哨兵与屋顶刷新共同消费。 |
+| boundaryFor（L211，L234 导出） | record RV 记录。要求 `locoId` 非空 string、`generation` ≥1 整数、`slotIndex` 整数，且 `RegionSlots.indexToAnchor(slotIndex)` 有效；命中 `boundariesBySlot[slotIndex]` 且 rvId/generation 一致时直接返回缓存对象，否则 `Layout.make` + `makeBoundary` 后写入记忆化表；无效输入或派生失败返回 `nil`。 | **必须**：记录校验（[RV_Server_RecordValidation.lua:42](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_Server_RecordValidation.lua:42)）、构造（[RV_Server_WorldObjects.lua:719](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Construction/RV_Server_WorldObjects.lua:719)）、EntryExit（[RV_RailroaderServer_EntryExit.lua:473](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_RailroaderServer_EntryExit.lua:473)）与准入缓存（Validation L150）共用同一几何事实。记忆化同时决定返回表的引用同一性，见接口章节。 |
+| Boundary.boundaryForPlayer（L236） | player、knownIdentity 可选身份、deferValidationMiss 布尔、forceValidationRefresh 布尔。从 `rawget(_G,"RailroaderRV").RailroaderServer.validateCurrentBoundaryPlayer` 取验证器（非函数直接 `nil`），`pcall` 调用后：若 `boundary == nil and record == "validation-deferred"` 返回 `nil, "validation-deferred"`；否则用 `TemplateGeometry.anchorFromManaged(current.managed, Template)` 复算锚点，并交叉核对 identity.key、`manifest.rvId/generation` 与 `record.locoId/generation`、`current.rvId/generation` 与 record 一致。成功返回 `current, record, relation, validatedIdentity, manifest`，任一不一致返回 `nil`。 | **必须**：guard、EntryExit、RoofRefresh、RoomOwnership 重启重挂、TemplateRecovery 修复共同依赖的“当前可信边界”唯一入口；跨模块身份一致性在此收口。 |
+| stateFor（L271） | player、knownIdentity 可选身份。身份无效返回 `nil`；否则按 `id.key` 在 `Boundary._states` 中取状态，缺失时建立 `{identity=id, inside=false, corrections=0}`，已存在时刷新 `state.identity`；返回 state。 | **必须**：转场租约、纠正计数与 `lastValid` 的创建点；经 ctx 导出给 Sweep（L12）。 |
+| Boundary.beginTransition（L284） | player、rvId、generation、token 可选 string、kind 未使用。rvId 非空、generation ≥1 整数才继续；写入 `state.rvId/generation/leaseToken`，`leaseUntil = Boundary._tick + (C.BOUNDARY_TRANSITION_TIMEOUT_TICKS or 120)`；返回布尔值。 | **必须**：EntryExit/GenerationFlow/WallReloadProtection 暂停普通 guard 的公开接口。第 5 参数 `kind` 在当前源码中既未存储也未读取，属**保留理由**的调用点兼容参数（入口/生成/墙体三类调用方按位置传递）。 |
+| Boundary.completeTransition（L299） | player、token 可选。身份无效返回 `false`；`token ~= nil` 且与 `state.leaseToken` 不等返回 `false`；否则清空 `leaseToken`，写入 `leaseUntil = Boundary._tick + 2`，返回 `true`。 | **必须**：完成 relocations 的公开接口。`+2` 是“完成后 2 tick 内仍视为活跃租约”的沉降戳，同时被 Sweep 的 `leaseLive` 与 Validation 的 transitionActive 判定读取，属有意行为而非残留。 |
+| Boundary.extendTransition（L314） | player、token、untilTick 数字。要求 state 存在、`state.leaseToken` 是 string 且与 token 严格相等，否则 `false`；`untilTick` 非 number 返回 `false`；仅当 `untilTick > state.leaseUntil` 或旧值非 number 时才上调，返回 `true`。 | **必须**：长事务（生成重定位重发、墙体重载）在不重发预测快照的前提下续租；`WallReloadProtection` 的每个成员续租都依赖它。fail-closed 语义（旧 token 不能延长新租约）不能简化。 |
+| Boundary.clearPlayer（L328） | player。读身份成功则删除 `Boundary._states[id.key]`；无论身份是否可读都返回 `true`。 | **必须**：失败/退出路径的状态清理入口。返回值不区分“已清理”与“身份不可读”，调用方无法据此判错，属已知接口弱点（见接口章节）。 |
+| currentSquareMatches（L338） | player、position 刚读取的位置。要求 `getCurrentSquare()` 可读且其整数 x/y/z 与 `floor(position.x/y/z)` 完全相等，返回布尔值。 | **必须**：只对“新鲜且与服务端格状态一致”的位置做纠正决策，避免用滞后的坐标把玩家传送回去。 |
+| guardContextForPlayer（L352） | player、position、knownIdentity 可选身份、deferValidationMiss 布尔。调用 `Boundary.boundaryForPlayer` 并要求 boundary/record/identity 均为表；再核对 identity.onlineId 与 `relation.onlineId`、`relation.inside == true`、`relation.locoId == record.locoId`、`record.players[username].inside == true` 且其 onlineId 一致；最后要求 `currentSquareMatches`。成功返回 `boundary, record, relationOnlineId`，任一不满足返回 `nil`。 | **必须**：Sweep 每 tick 的 guard 资格判定核心（Sweep L128 调用）。它比 Validation 多一层“当轮再验”，用于抵消缓存 TTL 内的关系变化；旧报告曾判定它无消费者，现已由 Sweep 实际使用。 |
 
-**接口总评**：Boundary 门面方法是合适的跨模块合同；`Boundary._states`、`Boundary._builders`、`Adapter._boundaryValidationEpoch` 更像被跨目录共享的实现字段。优先收口 transition 判定与 builder queue 清理；tick scalar 和同文件夹组件间的短期状态访问收益较低，可暂留但应记录所有者。`Boundary._geometryEpoch` 有实际 cache invalidation 用途，应改成显式只读 revision 合同而非外部猜字段。
+### RV_BoundaryServer_Sweep.lua
 
-## 文件/函数清单与验证记录
+模块只承载一条流程：取在线玩家 → 跳过活跃租约 → 取 guard 上下文 → 维护 `inside/lastValid` → 必要时纠正 → 汇总活跃 RV → 交给恢复队列。它 require `RV_TemplateGeometry` 与 `RV_RoomTemplate`（L15-L17），并从 ctx 复用 Geometry 的 11 个 helper（L3-L14）。行号参见 [RV_BoundaryServer_Sweep.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/BoundaryGuard/RV_BoundaryServer_Sweep.lua:2)。
 
-- **文件清单**：`RV_BoundaryServer.lua`（57 行）、`RV_BoundaryServer_Geometry.lua`（787 行）、`RV_BoundaryServer_Sweep.lua`（121 行）、`RV_RailroaderServer_BoundaryValidation.lua`（309 行）。目录扫描无其他文件。
-- **函数清单复核**：定义扫描共 64 项，含 3 个 `return function(ctx)` 工厂、Geometry 数值转换中的 1 个匿名保护回调、Validation 的嵌套 `diagnose`、Geometry 返回给 context 的 2 个匿名纠正回调，以及所有具名/赋值函数。逐项与报告函数条目核对；事件 Add 的回调是具名 `prewarmAfterWorldLoad` / `prewarmCreatedPlayer`。
-- **调用/状态交叉核对**：检查 Geometry 注入的 helper 在本目录 Sweep 和目录外 Objects 的接收点；检查 Adapter 注入位置、边界方法调用、`Boundary._states/_builders/_tick/_geometryEpoch` 与 `Adapter._boundaryValidation*` 引用。另在整个 `media/lua` 扫描 `updatePlayer`：仅得到 Sweep L10/L75/L103 三处，无字段赋值或函数导出；逐行核对门面装配顺序和 Geometry ctx 导出末尾。
-- **文档验证**：本文件各章节覆盖四个目标源码文件、逐函数说明、复用/拆分/内部数据接口分析和清单。行号以本次只读扫描时的工作区版本为准。
-- **未覆盖项**：没有对 `DemolitionProtection`、`TemplateRecovery`、Mapping、RoofRefresh 等目录逐函数审计；只核对本报告引用的交互点。没有动态验证 bitmap、事件顺序、服务器 API 或游戏运行行为。装配断点的静态结果明确，实际 tick 影响仍未运行时复现。未发现需要因文件所有权冲突而跳过的内容。
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
+|---|---|---|
+| 工厂匿名函数 function(ctx)（L2） | ctx 门面上下文。绑定 11 个 helper 局部变量，require 模板几何，定义本文件函数并向 `Boundary` 安装 `onTick`（L109）；无返回值。 | **必须**：装配入口；它是 Geometry 与 Objects 之后运行的最后一个组件。 |
+| boundaryKey（L19） | boundary 边界表。返回 `tostring(rvId)..":"..tostring(generation)`。 | **必须**：`activeBoundaries` 去重键；同一 RV 多玩家只上报一次。 |
+| onlinePlayersSnapshot（L23） | 无参数。`getOnlinePlayers()` 可读时按 Java `size/get` 复制数组，`size` 不可用且为 Lua table 时按 `pairs` 复制；结果为空时回退 `getPlayer()`；返回玩家数组。 | **保留理由**：功能正确，但这是全树第三份同义实现（[Sentinel:79](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_RailroaderServer_Sentinel.lua:79) 已导出 `Adapter.onlinePlayersSnapshot`，[RoomOwnership:147](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RoomOwnership/RV_Server_RoomOwnership.lua:147) 另有一份）。可改为与 RecoveryQueue 相同的运行时查找以删除 23 行重复，但需保持 `pcall` 保护；当前自持实现的可靠性与依赖顺序都更简单，故暂留。 |
+| leaseLive（L48） | state 玩家状态。`leaseToken` 非 string 返回 `false`；`leaseUntil` 是 number 且 `>= Boundary._tick` 返回 `true`；否则**清空** `leaseToken/leaseUntil` 并返回 `false`。 | **必须**：过期租约的唯一回收点；跳过 guard 的判据与 Validation 的 transitionActive 必须同源，否则会出现“缓存认为在转场、扫描认为没有”的分叉。 |
+| rvSpawnTarget（L61） | player、record RV 记录。要求 `record.rvPosition` 的 x/y/z 都是 number，且该整数格在玩家 cell 中已加载（`square(playerCell(player), ...)`）；返回 `{x,y,z}` 或 `nil`。 | **必须**：纠正的权威兜底目标；`square` 检查保证不会向未加载格传送（客户端会卡在空区块）。 |
+| correctOutside（L78） | state、player、boundary、record、onlineId。`state.lastValid` 非表直接 `false`；优先用 `lastValid`（需 `isWalkableInManagedRegion` 且格已加载），否则回退 `rvSpawnTarget`；两个候选都不满足可行走即 `false`；否则经 `RailroaderRV.Server.teleportToPosition` 传送，`state.corrections` 递增，写回 `state.lastValid`，并 `sendServerCommand(player, MOD_ID, COMMAND_RV_BOUNDARY_CORRECTION, {rvId, generation, sequence, onlineId, x, y, z})`；返回 `true`。 | **必须**：唯一的越界纠正执行点；每玩家每 tick 最多一次、不排队、不重试的设计避免了传送风暴。 |
+| Boundary.onTick（L109） | tick 可选游戏 tick。写 `Boundary._tick = tick or Core.getTick()`；`Boundary.builderActionLedger` 是表时调用其 `prune(_tick)`；快照在线玩家后逐人：取位置与身份，若存在活跃租约则**不**做 guard 上下文验证，否则 `guardContextForPlayer(player, position, id, true)`；仅当取得 boundary 时 `stateFor` 建状态，把 `state.inside` 置 `true`，位置可行走则刷新 `state.lastValid`，否则在 `state.lastValid` 非 nil 时 `correctOutside`；仅当本轮进入前已 `inside` 且 `inRVRegion` 才登记 `activePlayers`/`activeBoundaries`；最后若 `RailroaderRV.RecoveryQueue` 存在则调用 `onPostPlayerTick(_tick, activePlayers, activeBoundaries)`。无显式返回值。 | **必须**：本模块的调度入口与跨模块数据出口。唯一调用方是 [`pcall(Boundary.onTick)`](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_Server_Commands.lua:282)，**不传参数**，因此 `tick` 实参恒为 `nil`、`_tick` 实际总是取 `Core.getTick()`；参数与回退分支属**保留理由**（保留显式 tick 的可能性），当前行为等价。 |
 
-## 第二阶段状态边界更新
+### RV_RailroaderServer_BoundaryValidation.lua
 
-BoundaryGuard 仍拥有自身 `_states` 与 geometry registry；同目录 Geometry/Sweep/BoundaryValidation 的私有访问保留。目录外 TemplateRecovery 现在只取 `transitionActivitySnapshot(tick)` 的 identity-level 活跃/近期完成事实，并注册 transition lifecycle 与 post-player-tick callback。transition token、timeout 和短 completion stamp 仍由 Boundary 管理，TemplateRecovery 的 100-tick grace 仍由 Queue 管理。`_builders` 已删除；build ledger 的 prune/invalidate 由 DemolitionProtection owner 实现，Boundary tick/registration 只调用语义 wrapper。见[第二阶段报告](phase2-structure-optimization.md)。
+模块不向 `Boundary` 写任何字段，而是把自己安装到 RVMapping 传入的 `Adapter`（即 `RailroaderRV.RailroaderServer`）上：三个方法（`validateCurrentBoundaryPlayer`、`prewarmCurrentBoundaryPlayer`、`prewarmCurrentBoundaryPlayers`）与三个事件注册（`OnGameStart`/`OnServerStarted`/`OnCreatePlayer`，L234-L244），并返回 `{invalidate = invalidate}` 供 Mapping 的 `Adapter.invalidateBoundaryValidationCache`（[Mapping:22](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_RailroaderServer_Mapping.lua:22)）在映射变化或生成失败时清缓存。私有状态是闭包内的 `cache`、`pending`、`prewarmAfterTick` 与三个周期常量（L17-L22）。行号参见 [RV_RailroaderServer_BoundaryValidation.lua](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/BoundaryGuard/RV_RailroaderServer_BoundaryValidation.lua:2)。
+
+| 函数（起始行） | 参数、返回/副作用、本模块语义 | 当前功能是否必须及原因 |
+|---|---|---|
+| 工厂匿名函数 function(ctx)（L2） | ctx 由 Mapping L150-L167 提供：`Boundary`、`Adapter`、`mapData`、`rvRegion`、`playerPositionInRegion`、`recordForLoco`、`validRecord`、`serverTransactionMutexStatus`、`integer`、`playerId`、`playerName`、`onlinePlayersSnapshot`；文件自身 require `RV_Server_Core`（L3）。副作用是安装三个 Adapter 方法与三个事件回调；返回 `{invalidate=...}`。 | **必须**：该组件不是门面 ctx 的成员，只能经 Mapping 注入装载；这也是它必须自持 Core 依赖的原因（ctx 未提供 `Core`）。 |
+| invalidate（L24，作为返回值导出） | 无参数。`cache = {}`、`pending = {}`、`prewarmAfterTick = 0`；无显式返回。 | **必须**：映射变更与生成失败后必须丢弃全部准入结果，否则 guard 会继续使用旧 rvId/generation 的 boundary。 |
+| wallReloadActive（L33） | server 服务表、rvId。server 非表或 `isWallReloadTransactionActive` 非函数返回 `true`；否则 `pcall` 调用，调用失败或返回值非布尔也返回 `true`。 | **必须**：墙体重载期间禁止把玩家判为越界并与该事务争夺位置，“缺 API 即视为忙碌”是 fail-closed 选择。 |
+| validatePlayer（L42） | player、suppliedIdentity 可选身份、knownMap 可选映射快照、forceRefresh 布尔、deferCacheMiss 布尔。校验/重建身份并要求 `identityKey == tostring(onlineId)..":"..name`（L58-L61）；读 `serverTransactionMutexStatus()` 与 `Boundary._states[identityKey]`+`Boundary._tick` 判断 `transitionActive`；非 forceRefresh 且事务状态有效、`generationBusy == false`、无活跃转场、缓存未超 60 tick 时直接返回缓存的 5 个值；generation 忙/事务状态无效/转场活跃时清缓存并按 `deferCacheMiss`/`forceRefresh` 返回 `nil` 或 `nil,"validation-deferred"`；随后依次校验 relation.inside/onlineId、`validRecord(record)`、`record.players[name]` 骑手身份、`currentRVManifestForBoundary`、`wallReloadActive`，最后 `Boundary.boundaryFor(record)` 派生几何；全部通过且当前无活跃转场时写入 `{boundary,record,relation,validatedIdentity,manifest,validatedAtTick}`，并返回 `boundary, record, relation, validatedIdentity, manifest`；每个拒绝分支先 `diagnose(...)` 再清缓存。 | **必须**：本模块唯一的数据准入点，也是“守卫只在暖缓存上工作”的实现基础——`deferCacheMiss` 为真时冷缓存只返回 deferred，实际验证由预热路径完成。副作用（缓存写入、诊断命令、pending 标记）与返回值共同构成合同，不可只保留其一。 |
+| validatePlayer 中嵌套 diagnose（L105） | reason 拒绝原因字符串。`Boundary.diagnoseGuardState` 是函数时以 `(player, validatedIdentity, playerPositionInRegion(player, rvRegion()), relation, record, reason)` 调用；无显式返回。 | **必须**：把缓存准入的每一类拒绝（mapping-record/rider/manifest/roof-refresh/geometry）接到用户提示与服务端日志；缺它则拒绝静默。 |
+| Adapter.validateCurrentBoundaryPlayer（L169） | player、suppliedIdentity、deferCacheMiss、forceRefresh。把布尔严格规范为 `forceRefresh == true`、`deferCacheMiss == true` 后委托 `validatePlayer`，参数顺序被有意重排（forceRefresh 在前）；输出沿用验证器的多返回值。 | **必须**：Geometry L244 通过全局 adapter 查找调用的正是这个函数名；名称与参数顺序是跨模块合同。 |
+| needsRefresh（L175） | identityKey、forceRefresh 布尔。forceRefresh 直接 `true`；缓存非表、`validatedAtTick` 非 number、时钟回退或已过 30 tick 时返回 `true`。 | **必须**：把预热做成周期复验而不是一次性；30 tick 周期与 `Adapter.OnTick` 的 30 tick 节拍（[Tick:45](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_RailroaderServer_Tick.lua:45)）一致。 |
+| Adapter.prewarmCurrentBoundaryPlayer（L185） | player、knownMap 可选、forceRefresh 布尔。取 `playerId/playerName` 失败返回 `nil`；构造身份后委托 `validatePlayer(player, identity, knownMap, needsRefresh(key, forceRefresh==true), false, false, true)`；返回验证多返回值。 | **必须**：单玩家暖缓存入口，是事件回调与批量预热的公共实现。**静态发现**：调用点（L190-L191）传了 7 个实参，而 `validatePlayer` 只声明 5 个形参，末尾 `false, true` 被 Lua 丢弃——行为等于当前意图（`deferCacheMiss=false`），属已移除 roof-refresh 读模式参数后的签名残留，应清理或恢复形参。 |
+| Adapter.prewarmCurrentBoundaryPlayers（L194） | knownMap 可选、knownPlayers 可选玩家列表。要求 `serverTransactionMutexStatus()` 的 generationBusy 严格为 `false` 且 wallBusy 为布尔；`now < prewarmAfterTick` 时返回 `false`（30 tick 节流，L199）；候选来自 `knownPlayers` 或按 `playerPositionInRegion` 过滤的 `onlinePlayersSnapshot()`；候选为空时清 `pending` 返回 `true`；否则取映射并逐个 `prewarmCurrentBoundaryPlayer`，清 `pending` 后返回 `true`。 | **必须**：让处于 RV 范围内的玩家缓存保持热态，使 Sweep 的 `deferValidationMiss=true` 路径总能命中缓存而不是永远 deferred；唯一周期调用方是 [Tick:37](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_RailroaderServer_Tick.lua:37)（30 tick 一次）。 |
+| prewarmAfterWorldLoad（L223） | 无参数。委托 `Adapter.prewarmCurrentBoundaryPlayers()`（不带 map/候选，由内部自行枚举）。 | **必须**：注册在 `Events.OnGameStart`（L236）与 `Events.OnServerStarted`（L239），是存档载入后第一批缓存的来源。 |
+| prewarmCreatedPlayer（L227） | playerIndex、player（OnCreatePlayer 的两个参数）。`candidate = player or playerIndex`；不在 RV 区域内直接返回；否则用当轮 `mapData()` 预热该玩家。 | **必须**：新玩家进入范围内即可用；缺失时该玩家要等到下一次 30 tick 批量预热才被准入。 |
+
+## 模块间复用、提取和职责拆分
+
+### 已有共用与可提取机会
+
+- **通用调用与数值 helper 与 Common 重复，且保护强度不一致**：Geometry 的 `number`/`integer`/`finiteNumber`/`call`/`callGlobal`（L13-L53）与 [`RV_Common.toNumber/isFiniteNumber/integer/invoke/callGlobal`](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Common/RV_Common.lua:7) 规则等价但实现分离。三处语义差异是真实差异，不是笔误：`Common.invoke` 用 `pcall` 保护 `target[name]` 读取（RV_Common.lua:9-11），Geometry `call` 直接索引 `target[method]`（L39）；`Common.callGlobal` 返回最多 3 个值（RV_Common.lua:40-42），Geometry `callGlobal` 返回 4 个（L50-52）；`Common.integer` 额外要求 `isFiniteNumber`（RV_Common.lua:74），Geometry `integer` 只查 `math.floor`（L25）。**净收益**：换成 ServerUtil 门面可删掉约 40 行重复并顺带获得属性读取保护；**代价与风险**：返回值上限从 4 降到 3（当前调用点最多用 1-2 个返回值，经检查无影响）、新增 Common/ServerUtil 依赖、`ctx.call`/`ctx.callGlobal` 的名字可保留以免改动 Objects/Sweep 的调用点。建议优先只收敛数值三件套，调用保护按需保留。
+- **玩家身份三元组重复三处，key 格式是事实上的跨模块契约**：Geometry `playerName/playerOnlineId/identity`（L55-L79）、[Train:48-68](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_RailroaderServer_Train.lua:48)、[PlayerValidation:103-118](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Construction/RV_Server_PlayerValidation.lua:103)。三处都构造 `key = tostring(onlineId)..":"..username`，而 BoundaryValidation 在 L53-L61 会**重新构造并断言相等**。语义差异：PlayerValidation 版本失败返回 `false, reason`（严格、要求 username 是 string），Geometry 版本返回 `nil`（宽松、接受任意非空 `tostring` 结果），Train 版本接受任意非 nil 整数 onlineId（包括负数）。**净收益**：抽成一个 `playerIdentity(player) -> ok, identityOrReason` 可消除 key 格式漂移这一静默失效源（漂移的后果是 `_states` 查不到转场、缓存被误用）。**成本**：需要统一失败语义并改 3 个目录的调用点；建议至少把失败语义统一为 `ok, reason`。
+- **在线玩家快照重复三处，Sentinel 版本已是共享入口**：Sweep L23-L45、Sentinel L79-L109（导出 `Adapter.onlinePlayersSnapshot` L115，并注入 `ctx.onlinePlayersSnapshot` L189，Mapping L162-L166 已在包装使用）、RoomOwnership L147。语义差异：Sentinel 版本用 `seen` 去重并要求 `count >= 0`（L84-L88），Sweep 版本无去重且 `size` 为负时得到空列表后依赖 `getPlayer()` 兜底（L28-L43）。**净收益**：Sweep 改成运行时查找 `RailroaderRV.RailroaderServer.onlinePlayersSnapshot`（与它已有的 `RecoveryQueue` 查找同一模式）可删除 23 行并统一去重语义。**风险**：装载顺序——`Adapter` 在 [RV_Server.lua:63](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_Server.lua:63) 才创建，必须保留运行时查找与 nil 回退。
+- **relation/骑手复验重复但时机不同，不建议合并**：BoundaryValidation L112-L129 与 Geometry L359-L371 都核对 `relation.inside/onlineId` 与 `record.players[name].inside/onlineId`。前者是缓存准入时的判据（可能已过 60 tick），后者是每 tick 纠正前的再验（抵消缓存 TTL 窗口）。可以抽公共谓词，但两层调用时机都必须保留，**净收益中等**：减少一份字段列表，代价是把“何时验证”的语义藏进共享函数。
+- **`playerPosition` 不应与 Train L75 的版本合并**：Geometry 版本额外计算 `inRVRegion`（L92-L98）并与区域常量耦合，Train 版本是纯坐标读取；合并会把区域判定引入 Train 的职责。
+- **`boundaryFor` 已是唯一几何派生入口，无重复实现**：全树搜 `Boundary.boundaryFor` 只有 RecordValidation L42/L172、WorldObjects L719、EntryExit L473、Validation L150 四处消费，没有旁路重建 `managed` 的代码，这是本模块最成功的一处收口。
+
+### 是否进一步拆分
+
+- **Geometry（388 行）建议暂不拆分，但可做一次抽取**：文件内有三类内容——(a) 通用调用/数值/身份 helper（L13-L99）、(b) 记录→几何派生与槽位记忆化（L148-L234、L236-L269）、(c) 玩家状态/租约/纠正前置校验（L271-L376）。相较旧报告的 787 行版本，几何登记/bitmap/schema gate 部分已经移出，`Boundary._states` 与 `boundariesBySlot` 各自只有一个所有者函数族，拆分收益已明显下降。**建议顺序**：先把 (a) 抽到 Common/ServerUtil（这是去重不是拆文件，收益最大）；若文件继续增长，再按 (b)/(c) 拆成 `RV_BoundaryServer_Records.lua` 与 `RV_BoundaryServer_PlayerState.lua`。
+- **不建议按“几何缓存 / transition lease / 扫描 dispatcher”一分为三**：现状下 slot 记忆化只服务 `boundaryFor` 一个函数，lease 只服务 5 个 `Boundary` 方法，dispatcher 只有 `onTick`。拆分需要把 `number/integer/call/identity/stateFor/playerPosition/square/playerCell` 这些 helper 反复经 ctx 传递，边界变多而内聚度不变，**净收益为负**。真正的拆分触发条件应是“第二份几何缓存需求”或“第二份租约状态”，当前都不存在。
+- **Sweep（180 行）不需要拆分**：`leaseLive`、`rvSpawnTarget`、`correctOutside` 与 `onTick` 是同一条判定-纠正流水线，拆开后要用更多 ctx 参数重建同一组局部变量。
+- **BoundaryValidation（247 行）不需要拆分**：缓存与预热共享同一生命周期——`invalidate`（L24-L28）同时清 `cache`、`pending` 与 `prewarmAfterTick`，`prewarm*` 是缓存的唯一填充者，`needsRefresh`（L175-L183）只描述缓存年龄。按“缓存/预热”拆分反而会把一对互斥状态切开。
+- **需要处理的不是行数而是目录归属**：`RV_BoundaryServer_Objects.lua` 位于 `DemolitionProtection/`，却由本模块门面装配（[RV_BoundaryServer.lua:48](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/BoundaryGuard/RV_BoundaryServer.lua:48)）并向 `Boundary` 写字段（Objects L411）。这是职责边界问题（构建归属逻辑借用 Boundary 命名空间），建议把该字段的暴露改为运行时查找（同 `RecoveryQueue` 模式）或显式 install 调用，使 BoundaryGuard 门面不再硬编码另一个包的实现文件路径。
+
+## 对外接口、跨模块数据访问与隐藏状态
+
+### 公开合同
+
+- **`Boundary`（`RailroaderRV.BoundaryServer`）方法，共 9 个 + 1 个字段槽**：
+  - `boundaryFor(record)`：唯一几何派生/记忆化入口；返回 `{rvId, generation, managed, shellEdges}` 或 `nil`。消费者：[RecordValidation:42/172](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_Server_RecordValidation.lua:42)、[WorldObjects:719](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Construction/RV_Server_WorldObjects.lua:719)、[EntryExit:473](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_RailroaderServer_EntryExit.lua:473)、本目录 Validation L150。
+  - `boundaryForPlayer(player, knownIdentity, deferValidationMiss, forceValidationRefresh)`：返回 5 值或 `nil` / `nil,"validation-deferred"`。消费者：[RecordValidation:110](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_Server_RecordValidation.lua:110)、[WallReload:291/296](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/WallReloadProtection/RV_RailroaderServer_WallReload.lua:291)、[WallReloadProtection:93](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/WallReloadProtection/RV_WallReloadProtection.lua:93)、[Objects:380/425](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/DemolitionProtection/RV_BoundaryServer_Objects.lua:380)、[TemplateProtectionRepair:393](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/TemplateRecovery/RV_Server_TemplateProtectionRepair.lua:393)、本目录 Sweep L128。
+  - `beginTransition(player, rvId, generation, token, kind)` / `completeTransition(player, token)` / `extendTransition(player, token, untilTick)` / `clearPlayer(player)`：转场租约生命周期的四个公开操作。消费者：[GenerationFlow:296/433/450](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Construction/RV_Server_GenerationFlow.lua:433)、[EntryExit:280-341/601-706](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_RailroaderServer_EntryExit.lua:280)、[GenerationAck:127](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Construction/RV_Server_GenerationAck.lua:127)、[PlayerValidation:291-302](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Construction/RV_Server_PlayerValidation.lua:291)、[WallReloadProtection:161-174/360](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/WallReloadProtection/RV_WallReloadProtection.lua:161)。
+  - `onTick(tick)`：唯一 tick 入口，由 [`RV_Server_Commands.lua:281-283`](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_Server_Commands.lua:281) 以 `pcall(Boundary.onTick)` 调用（不传参数）。
+  - `diagnoseGuardState(...)`：唯一拒绝反馈通道，仅本目录 Validation L107 调用。
+  - `builderActionLedger`：字段槽，由 Objects L411 写入；读 `prune` 的是本目录 Sweep L111-L113，读 `invalidateForGeneration` 的是 [EntryExit:527-533](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_RailroaderServer_EntryExit.lua:527)。
+- **`Adapter`（`RailroaderRV.RailroaderServer`）方法，本模块新增 3 个**：`validateCurrentBoundaryPlayer`（Geometry L244 消费、[EntryExit:96](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_RailroaderServer_EntryExit.lua:96) 直接消费）、`prewarmCurrentBoundaryPlayer`、`prewarmCurrentBoundaryPlayers`（[Tick:37](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_RailroaderServer_Tick.lua:37) 消费）。返回值：`invalidate` 经 Mapping 的 `Adapter.invalidateBoundaryValidationCache`（[Mapping:22-27/311](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_RailroaderServer_Mapping.lua:22)）间接调用。
+- **旧报告提到的 identity 级 API 均不存在**：在 `media/lua` 全树搜索 `transitionActivitySnapshot`、`addTransitionLifecycleListener`、`addPostPlayerTickHandler`、`pruneBuilderActionLedger`、`invalidateBuilderActionsForGeneration`，命中数为 0。当前实际存在的是：`RailroaderRV.RecoveryQueue.onPostPlayerTick(tick, activePlayers, activeBoundaries)`（[RV_TemplateRecovery.lua:154-173](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/TemplateRecovery/RV_TemplateRecovery.lua:154)，由 Sweep L172-L177 运行时查找调用）与 `Boundary.builderActionLedger.prune/invalidateForGeneration`。
+
+### 直接读写其他模块的数据
+
+1. **DemolitionProtection → Boundary 的 tick 与命名空间字段（跨包写）**：[RV_BoundaryServer_Objects.lua:411](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/DemolitionProtection/RV_BoundaryServer_Objects.lua:411) `Boundary.builderActionLedger = BuilderActionLedger` 是外部包向本模块命名空间安装字段；同文件 L414、L436、L482、L493 直接读 `Boundary._tick`。判断：ledger 的数据与过期规则现在完全由 DemolitionProtection 拥有（定义 L335，`prune` L337，`invalidateForGeneration` L348），Boundary 只触发 prune，**旧报告指出的“`_builders` 被外部清理、所有权不清”问题已消除**。仍建议把 L411 的安装改为运行时查找或显式 install API（`RecoveryQueue` 已是这种模式的先例），避免门面硬编码 `DemolitionProtection/` 路径。
+2. **本目录 Validation → Geometry 的玩家状态**：[L67-L68](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/BoundaryGuard/RV_RailroaderServer_BoundaryValidation.lua:67) 读 `Boundary._states[identityKey]`、L71/L73 读 `Boundary._tick` 以计算 `transitionActive`。判断：这两个文件由**不同 ctx** 装载（Geometry 走门面，Validation 走 Mapping），因此这是真正的跨组件内部字段访问，字段改名会静默改变准入判定。**应改为接口**：在 Geometry 暴露只读 `Boundary.transitionActive(identityKey)`（或 `transitionLease(identityKey) -> token, untilTick`），收益明显且改动局部。
+3. **Sweep → Geometry/Boundary 内部**：L110 写 `Boundary._tick`，L51 读 `Boundary._tick`，L126 读 `Boundary._states[id.key]`，L111 读 `Boundary.builderActionLedger`。判断：同一门面下的同轮协作，且 tick 是单个同步标量；包一层 getter 收益低于成本。可接受保留，但应在文件头注明“tick 与 `_states` 的所有者仍是 Geometry/Boundary 表”。
+4. **Geometry → 自身状态**：L274/L277/L331 读写 `Boundary._states`，L294/L304 读 `Boundary._tick`。它是 `_states` 的写入所有者，除 L126 的租约探测与第 2 条的准入判定外没有第三方写入。
+5. **Validation → Adapter（Core 拥有）的 `Adapter._ticks`**：L74、L149、L178、L197 读；写入者是 [Tick:16/41](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_RailroaderServer_Tick.lua:16) 与 [Sentinel:184](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/Core/RV_RailroaderServer_Sentinel.lua:184)。判断：全 adapter 共享的当前 tick 数值，读起来无转换、无结构，加 getter 的收益很低；保留但应记录所有者是 Core tick 安装流程。注意它与 `Boundary._tick` 是**两个不同的 tick 源**（前者由 `Adapter.OnTick` 驱动，后者由 Sweep 驱动），若两者在同一 tick 内不同步，`needsRefresh` 与缓存 TTL 的判断基准会和 `leaseLive` 不一致——当前两者都源于 `Core.getTick()`，属条件性风险而非现有缺陷。
+6. **Geometry → RVMapping adapter 的方法查找**：L242-L248 用 `rawget(_G,"RailroaderRV").RailroaderServer.validateCurrentBoundaryPlayer` 运行时取验证器，形成“门面 → 映射 adapter → 本目录 Validation”的环状装载顺序。判断：这是有意的延迟绑定（`pcall` + 类型检查 + fail-closed 返回 `nil`），保留；但它是隐式 5 值合同，任何返回值增删都会波及 Geometry 的交叉核对。
+7. **Sweep → TemplateRecovery 的方法调用**：L172-L177 运行时取 `RailroaderRV.RecoveryQueue.onPostPlayerTick`。判断：单向、可选、失败即静默跳过（不阻断 sweep），可接受；若将来出现第二个 post-player-tick 消费者，应改成正式的 handler 注册列表而不是再加一次 `rawget`。
+8. **Validation → RailroaderServer 的服务方法**：L130-L136 调 `currentRVManifestForBoundary`（定义于 [RecordValidation:102](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/RVMapping/RV_Server_RecordValidation.lua:102)），L143/L38 调 `isWallReloadTransactionActive`（定义于 [WallReload:246](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/WallReloadProtection/RV_RailroaderServer_WallReload.lua:246)）。这是服务方法合同而非数据读取，`pcall` + 严格 `true` 判定，边界清晰。
+
+### 接口边界问题
+
+- **槽位记忆化 + 缓存把“表引用同一性”变成了事实合同**：`boundariesBySlot`（Geometry L210，命中判断 L224-L232）保证同一 `slotIndex`+`rvId:generation` 返回**同一个表**，Validation 又把该表存进缓存（L157-L164）。跨模块消费者据此做引用比较：[TemplateProtectionRepair.lua:394](../../contents/mods/RailroaderRVTest/42/media/lua/server/RailroaderRV/TemplateRecovery/RV_Server_TemplateProtectionRepair.lua:394) `boundary ~= expectedBoundary` 直接判定“排队中的 RV 代际已过期”。若把记忆化改成每次新建表，该判定会退化为“永远 stale”，修复队列静默停摆。应把“同一身份返回同一对象”写成 `boundaryFor` 的显式合同，或让该消费者改比 `rvId/generation`。
+- **`_states` 键的构造散落在两个模块里**：Geometry L78 与 Validation L55 各自拼 `tostring(onlineId)..":"..username`，Validation 只在自身内部断言一致性（L59）。任何一侧格式变化都会让 Validation 读不到转场状态，从而**fail-open**（把转场中的玩家当成普通玩家准入缓存）。建议把键的构造收敛到 `identity()` 一处。
+- **`completeTransition` 的 `+2` 沉降戳是隐性行为**：完成后 2 tick 内 `leaseLive`（Sweep L48-L56）与 transitionActive（Validation L69-L73）仍判为活跃，因此 guard 纠正与缓存写入会额外延后 2 tick。这是有意的（等引擎完成传送/房间刷新），但应写入合同，避免被当成可清理的魔法数。
+- **`beginTransition` 的 `kind` 参数是死参数**：L284 接收但函数体从未存储或读取；调用方仍按位置传递。删除会改动 3 个目录的调用点，恢复语义（存入 state 并供诊断/日志使用）成本更低。
+- **`clearPlayer` 的返回值不可区分**：L328-L334 在身份不可读时也返回 `true`，调用方（EntryExit L336/L449/L646/L706、GenerationFlow L451）无法据此判断是否真的清理了状态；清理失败会留下一个 `inside` 状态供下一轮使用。
+- **`prewarmCurrentBoundaryPlayer` 的实参与形参数量不符**：L190-L191 传 7 个实参给 5 形参函数（末尾 `false, true` 被丢弃）。当前行为正确，但会让读者误以为存在 roof-refresh 读模式参数；应删除多余实参或恢复形参。
+- **`onTick` 的 `tick` 形参当前恒为 nil**：唯一调用方不传参（RV_Server_Commands.lua:282），`_tick` 实际总是 `Core.getTick()`。参数与 `or` 回退保留无害，但“显式 tick 驱动扫描”的说法当前不成立。
+- **fail-open 与 fail-closed 混用需要文档化**：`processIsServer` 缺 API 时按服务端处理（L16，fail-open），`wallReloadActive` 缺 API 时按忙碌处理（Validation L36，fail-closed），`boundaryForPlayer` 缺验证器时返回 `nil` 停止守卫（Geometry L245，fail-closed）。三者都是有意选择，但只有写进合同才能避免后续“统一风格”时被改错。
+
+## 函数清单、覆盖和验证记录
+
+- **文件清单与行数**（本次 `Get-Content` 统计）：`RV_BoundaryServer.lua` 51 行、`RV_BoundaryServer_Geometry.lua` 388 行、`RV_BoundaryServer_Sweep.lua` 180 行、`RV_RailroaderServer_BoundaryValidation.lua` 247 行；目录内无其他文件、无子目录。
+- **函数定义扫描（机械核对 A/B）**：过滤式扫描（排除 `type(x) == "function"` 之类的比较行与含 `function` 字样的注释行）得到定义数 2 / 25 / 7 / 11，合计 **45**，与上表一致；构成是 31 个 `local function`、10 个表方法、4 个匿名函数表达式（Geometry L2、Sweep L2、Validation L2 三个模块工厂 + Geometry L17 的 `pcall` 闭包）。逐文件的关键字命中数为 4 / 29 / 8 / 17：Geometry 的 29 处 = 25 个定义 + 3 处类型比较（L39、L49、L245）+ 1 行注释（L205 `pure functions of the compiled template`，不是定义）；Sweep 的 8 处 = 7 个定义 + 1 处比较（L95）；Boundary 的 4 处 = 2 个定义 + 2 处比较（L10、L16）；Validation 的 17 处 = 11 个定义 + 6 处比较（L35、L106、L131、L235、L238、L241）。导出别名赋值 `Boundary.boundaryFor = boundaryFor`（L234）按口径不重复计数。函数索引见交付回复的 B 清单。
+- **逐行交叉核对**：4 个文件全部按编号读取；表中行号为定义语句起始行；跨行签名以首行为准。报告内所有源码链接的行号均来自本轮读取，未沿用旧报告。
+- **跨模块调用与状态扫描**：在 `contents/mods/RailroaderRVTest/42/media/lua` 全树检索 `Boundary.`、`_states`、`_builders`、`builderActionLedger`、`updatePlayer`、`transitionActivitySnapshot`、`addTransitionLifecycleListener`、`addPostPlayerTickHandler`、`pruneBuilderActionLedger`、`invalidateBuilderActionsForGeneration`、`Adapter._ticks`、`RecoveryQueue`、`onPostPlayerTick`、`BoundaryValidation`，用于确定公开 API 使用面、内部状态读写者与 ctx 提供者（Mapping L150-L167）。
+- **旧报告结论复核（源码事实）**：`ctx.updatePlayer` 在当前源码中**已不存在**——全树 `updatePlayer` 命中数为 0，Sweep 改由 `guardContextForPlayer`（Sweep L128）+ `RailroaderRV.RecoveryQueue.onPostPlayerTick`（Sweep L175）完成原 `updatePlayer` 的两个用途，因此旧报告的“装配断点”已修复；`Boundary._builders` 命中数为 0，已由 DemolitionProtection 的 `BuilderActionLedger`（Objects L335-L409，经 L411 暴露）取代；`Boundary._registered`、`Boundary._geometryEpoch`、`Adapter._boundaryValidationWarmPending`、`_boundaryValidationEpoch`、公开的 `Boundary.makeBoundary`/`registerGeneration`/`cachedBitmap`/`decodeBoundary`/`addTransitionLifecycleListener`/`transitionActivitySnapshot` 等旧报告条目在当前源码中均无命中：`makeBoundary` 仍在但已降为 Geometry 的私有 local（L178，只被 `boundaryFor` 调用），其余属已删除或改名。
+- **条件性推断（非实测）**：`onTick` 每 tick 只纠正一次、租约过期回收、预热 30 tick 节流与 `Adapter.OnTick` 的 30 tick 节拍是否会错开一帧，都属调度时序推断；本报告未做运行时复现。Sweep 依赖 `Boundary.builderActionLedger` 存在才 prune（L112-L113 有类型判断），装载顺序（门面 L48 在 L49 之前）保证它已安装，这也是静态结论。
+- **未覆盖项**：未对 DemolitionProtection、RVMapping、TemplateRecovery、WallReloadProtection、Core 等目录逐函数审计，只核对本报告引用的交互点；未动态验证 Java API 可用性、事件顺序或游戏行为。未运行游戏、服务器或一键运行时测试。
+- **修改范围**：仅整体替换本分析文档 `docs/module-analysis/server-BoundaryGuard.md`；未修改任何 `.lua` 源码、配置或测试文件。

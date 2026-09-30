@@ -16,6 +16,7 @@ local UtilityServer = ctx.UtilityServer
 local GenerationTransaction = ctx.GenerationTransaction
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
+local WallReload = require("RailroaderRV/WallReloadProtection/RV_WallReloadProtection")
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
 local function safeErrorText(...) return ctx.safeErrorText(...) end
@@ -28,8 +29,6 @@ local validateAuthoritativePlayer = ctx.validateAuthoritativePlayer
 local validateGenerationPermission = ctx.validateGenerationPermission
 local resolvePendingPlayer = ctx.resolvePendingPlayer
 local playerIsAtStagingDestination = ctx.playerIsAtStagingDestination
-local processRoofRefreshGroupFinalReturn = ctx.processRoofRefreshGroupFinalReturn
-local keepRoofRefreshTransitionAlive = ctx.keepRoofRefreshTransitionAlive
 local validateRequest = ctx.validateRequest
 local generateForPlayer = ctx.generateForPlayer
 local finalizeGenerationAfterRelocate = ctx.finalizeGenerationAfterRelocate
@@ -37,7 +36,6 @@ local queueGeneration = ctx.queueGeneration
 local acknowledgeRelocation = ctx.acknowledgeRelocation
 local acknowledgeFinalRelocation = ctx.acknowledgeFinalRelocation
 local abortGeneration = ctx.abortGeneration
-local processRoofRefreshRelocationGroup = ctx.processRoofRefreshRelocationGroup
 
 local stateReaders = {
     { "open", "isOpen" }, { "locked", "isLocked" },
@@ -267,11 +265,15 @@ end
 
 function RV.Server.OnTick(tick)
     ctx.serverTick = tick or Core.getTick()
-    -- Extend the token-scoped boundary lease before Boundary.onTick runs.  The
-    -- roof transaction may temporarily place the player outside the active
-    -- template geometry while the engine settles room state; correction must stay paused
-    -- for that bounded transaction only.
-    if not keepRoofRefreshTransitionAlive() then return end
+    -- The wall reload operation advances every tick.  A failure inside it is
+    -- reported and the rest of the generic tick still runs: one stalled RV
+    -- operation must never stop the boundary sweep, the utility tick, the
+    -- generation tick or the room-ownership sweep.
+    local wallOk, wallError = pcall(WallReload.onTick)
+    if not wallOk then
+        print("[RailroaderRVTest] wall reload tick error: "
+            .. safeErrorText(wallError))
+    end
     local generationRecord = GenerationTransaction.current()
     if generationRecord ~= nil then
         keepGenerationTransitionAlive(generationRecord)
@@ -280,8 +282,6 @@ function RV.Server.OnTick(tick)
         pcall(Boundary.onTick)
     end
     processServerRoomOwnershipGuards()
-    processRoofRefreshRelocationGroup()
-    processRoofRefreshGroupFinalReturn()
     if UtilityServer and type(UtilityServer.onTick) == "function" then
         local utilityOk, utilityError = pcall(UtilityServer.onTick, ctx.serverTick)
         if not utilityOk then
@@ -392,26 +392,38 @@ end
 Core.on("OnObjectAboutToBeRemoved", requestRoomOwnershipRemovalScan)
 Core.on("OnObjectAdded", requestRoomOwnershipScan)
 
--- Load after RV.Server has been fully constructed.  The adapter is intentionally
--- a separate file so the generic generation transaction remains readable and
--- the Railroader dependency stays optional for the technical test button.
+-- Load after RV.Server has been fully constructed.  The Railroader adapter is
+-- intentionally a separate module so the generic generation transaction remains
+-- readable and the Railroader dependency stays optional for the technical test
+-- button.  It was already evaluated before RV.Server existed, so its event and
+-- command registrations are installed now, once the public facade and its
+-- transaction queries are available.
 local railroaderAdapterOk, railroaderAdapterOrError = pcall(require,
     "RailroaderRV/Core/RV_RailroaderServer")
 if not railroaderAdapterOk then
     print("[RailroaderRVTest] Railroader RV adapter unavailable: "
         .. safeErrorText(railroaderAdapterOrError))
-elseif type(railroaderAdapterOrError) == "table"
-    and type(railroaderAdapterOrError.installTransactionHooks) == "function" then
+elseif type(railroaderAdapterOrError) == "table" then
+    if type(railroaderAdapterOrError.installWallReload) == "function"
+        and railroaderAdapterOrError.installWallReload() then
+        print("[RailroaderRVTest] wall reload protection installed.")
+    end
+    if type(railroaderAdapterOrError.installTransactionGate) == "function"
+        and railroaderAdapterOrError.installTransactionGate() then
+        print("[RailroaderRVTest] Railroader RV transaction gate installed.")
+    end
     -- The optional adapter is loaded in its own module table, so expose its
     -- current utility resolver on the server facade.
     if type(railroaderAdapterOrError.resolveCurrentUtilityRV) == "function" then
         RV.Server.resolveCurrentUtilityRV =
             railroaderAdapterOrError.resolveCurrentUtilityRV
     end
-    if railroaderAdapterOrError.installTransactionHooks() then
-        print("[RailroaderRVTest] Railroader RV transaction hooks installed.")
-    else
-        print("[RailroaderRVTest] Railroader RV transaction hooks unavailable.")
+    if type(railroaderAdapterOrError.installTransactionHooks) == "function" then
+        if railroaderAdapterOrError.installTransactionHooks() then
+            print("[RailroaderRVTest] Railroader RV transaction hooks installed.")
+        else
+            print("[RailroaderRVTest] Railroader RV transaction hooks unavailable.")
+        end
     end
 end
 

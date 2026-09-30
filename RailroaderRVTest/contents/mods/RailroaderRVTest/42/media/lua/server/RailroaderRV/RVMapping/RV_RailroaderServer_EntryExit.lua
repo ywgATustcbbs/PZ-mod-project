@@ -8,7 +8,7 @@ local Boundary = ctx.Boundary
 local Adapter = ctx.Adapter
 local C = ctx.C
 local function recordForLoco(...) return ctx.recordForLoco(...) end
-local function roofRefreshTransactionBlocks(...) return ctx.roofRefreshTransactionBlocks(...) end
+local function transactionBlocks(...) return ctx.wallReloadTransactionBlocks(...) end
 local sourceWithinRange
 local number = ctx.number
 local integer = ctx.integer
@@ -273,9 +273,9 @@ end
 
 local function enterExisting(player, train, record, key, sourceRole,
     sourceSeat, sourcePosition, map)
-    local roofBlocked, roofReason = roofRefreshTransactionBlocks(record.locoId)
-    if roofBlocked then
-        return false, roofReason
+    local blocked, blockReason = transactionBlocks(record.locoId)
+    if blocked then
+        return false, blockReason
     end
     if not Boundary or type(Boundary.beginTransition) ~= "function"
         or type(Boundary.completeTransition) ~= "function" then
@@ -360,9 +360,9 @@ local function enterPlayer(player, locoId)
     -- Check before removing a Railroader seat or changing mapping state.  The
     -- generation service repeats the global check authoritatively, but this
     -- early RV-specific gate avoids a temporary seat mutation on rejection.
-    local roofBlocked, roofReason = roofRefreshTransactionBlocks(locoId)
-    if roofBlocked then
-        return false, roofReason
+    local blocked, blockReason = transactionBlocks(locoId)
+    if blocked then
+        return false, blockReason
     end
     local map = mapData()
     local existingRecord, existingKey, _, lookupState =
@@ -610,9 +610,9 @@ local function exitPlayer(player)
     if not record then
         return false, C.INVALID_RV_DATA
     end
-    local roofBlocked, roofReason = roofRefreshTransactionBlocks(record.locoId)
-    if roofBlocked then
-        return false, roofReason
+    local blocked, blockReason = transactionBlocks(record.locoId)
+    if blocked then
+        return false, blockReason
     end
     if not train then
         local target = persistedBesidePosition(record)

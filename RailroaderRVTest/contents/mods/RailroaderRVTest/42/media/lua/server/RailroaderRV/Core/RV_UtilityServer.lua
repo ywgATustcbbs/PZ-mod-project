@@ -75,8 +75,8 @@ local function serviceBusy()
         if not ok then return true end
         if active == true then return true end
     end
-    if type(server.isRoofRefreshTransactionActive) == "function" then
-        local ok, active = pcall(server.isRoofRefreshTransactionActive)
+    if type(server.isWallReloadTransactionActive) == "function" then
+        local ok, active = pcall(server.isWallReloadTransactionActive)
         if not ok then return true end
         if active == true then return true end
     end

@@ -15,6 +15,19 @@ local roomOwnershipGuards = ctx.roomOwnershipGuards
 -- supplements that with a lower-frequency 3x3 neighborhood probe.
 local ROOM_OWNERSHIP_3X3_INTERVAL_TICKS = 120
 
+-- The wall reload service owns the boundary lease while it holds the RV's
+-- players outside their room geometry.  The query is authoritative and covers
+-- the whole process, so a missing or failing service pauses this cleanup.
+local function wallReloadActive()
+    local server = type(RV) == "table" and RV.Server or nil
+    if type(server) ~= "table"
+        or type(server.isWallReloadTransactionActive) ~= "function" then
+        return true
+    end
+    local callOk, active = pcall(server.isWallReloadTransactionActive)
+    return not callOk or type(active) ~= "boolean" or active
+end
+
 local function notifyFailure(player, reason)
     if not player then return end
     local idOk, onlineId = ServerUtil.invoke(player, "getOnlineID")
@@ -408,22 +421,14 @@ local function processServerRoomOwnershipGuards()
         break
     end
     if not hasGuards then return end
-    -- A roof-refresh relocation deliberately moves the authoritative player
-    -- far outside the RV scope.  The guard's bounds are still the RV's
-    -- current geometry, so running the normal scan through that player's
-    -- remote cell can make IsoCell resolve repeated cross-chunk lookups on
-    -- the same tick that must advance the relocation.  The roof service
-    -- already owns the boundary lease and keeps the player out of the room;
-    -- pause only this non-transactional cleanup until the member returns.
-    local server = type(RV) == "table" and RV.Server or nil
-    if type(server) ~= "table"
-        or type(server.isRoofRefreshTransactionActive) ~= "function" then
-        return
-    end
-    local roofStateOk, roofActive = pcall(server.isRoofRefreshTransactionActive)
-    if not roofStateOk or type(roofActive) ~= "boolean" or roofActive then
-        return
-    end
+    -- A wall reload operation deliberately moves the authoritative player far
+    -- outside the RV scope.  The guard's bounds are still the RV's current
+    -- geometry, so running the normal scan through that player's remote cell can
+    -- make IsoCell resolve repeated cross-chunk lookups on the same tick that
+    -- must advance the move.  The wall reload service already owns the boundary
+    -- lease and keeps the player out of the room; pause only this
+    -- non-transactional cleanup until every member is back.
+    if wallReloadActive() then return end
     -- Positions are read once per tick. Share each local square probe across
     -- all active generations so overlapping guards do not repeat engine calls.
     local playerStates, snapshotOk = authoritativePlayerStatesSnapshot()

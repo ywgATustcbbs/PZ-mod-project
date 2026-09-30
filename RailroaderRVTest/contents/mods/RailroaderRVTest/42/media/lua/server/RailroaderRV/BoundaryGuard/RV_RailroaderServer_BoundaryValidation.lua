@@ -27,33 +27,20 @@ local function invalidate()
     prewarmAfterTick = 0
 end
 
-local function roofRefreshBoundaryReadAllowed(server, record, identityKey)
+-- One question, one answer: is a wall reload operation active for this rvId?
+-- The boundary service does not care which phase it is in, only that the scope
+-- it must not fight over is owned by somebody else.
+local function wallReloadActive(server, rvId)
     if type(server) ~= "table"
-        or type(server.isRoofRefreshBoundaryReadAllowed) ~= "function"
-        or type(record) ~= "table" then
-        return false
+        or type(server.isWallReloadTransactionActive) ~= "function" then
+        return true
     end
-    local callOk, allowed = pcall(server.isRoofRefreshBoundaryReadAllowed,
-        record.locoId, record.generation, identityKey)
-    return callOk and allowed == true
-end
-
-local function roofRefreshBoundaryContextReadAllowed(server, record,
-    identityKey)
-    if type(server) ~= "table"
-        or type(server.isRoofRefreshBoundaryContextReadAllowed) ~= "function"
-        or type(record) ~= "table" then
-        return false
-    end
-    local callOk, allowed = pcall(
-        server.isRoofRefreshBoundaryContextReadAllowed, record.locoId,
-        record.generation, identityKey)
-    return callOk and allowed == true
+    local callOk, active = pcall(server.isWallReloadTransactionActive, rvId)
+    return not callOk or type(active) ~= "boolean" or active
 end
 
 local function validatePlayer(player, suppliedIdentity, knownMap,
-    forceRefresh, deferCacheMiss, roofRefreshContextRead,
-    roofRefreshGuardRead)
+    forceRefresh, deferCacheMiss)
     local identityId, name, identityKey
     if type(suppliedIdentity) == "table"
         and type(suppliedIdentity.key) == "string"
@@ -74,9 +61,9 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
     end
 
     local server = RailroaderRV and RailroaderRV.Server
-    local generationBusy, roofBusy = serverTransactionMutexStatus()
+    local generationBusy, wallBusy = serverTransactionMutexStatus()
     local transactionStateValid = type(generationBusy) == "boolean"
-        and type(roofBusy) == "boolean"
+        and type(wallBusy) == "boolean"
     local state = Boundary and Boundary._states
         and Boundary._states[identityKey]
     local transitionActive = state ~= nil
@@ -86,30 +73,23 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
         and state.leaseUntil >= Boundary._tick
     local now = Adapter._ticks or Core.getTick()
     local cached = cache[identityKey]
-    if not forceRefresh and not roofRefreshContextRead
+    if not forceRefresh
         and transactionStateValid
         and generationBusy == false and not transitionActive
         and type(cached) == "table"
         and type(cached.validatedAtTick) == "number"
         and now >= cached.validatedAtTick
-        and (now - cached.validatedAtTick) < CACHE_TTL_TICKS
-        and (roofBusy == false
-            or roofRefreshGuardRead
-                and roofRefreshBoundaryReadAllowed(server, cached.record,
-                    identityKey)) then
+        and (now - cached.validatedAtTick) < CACHE_TTL_TICKS then
         return cached.boundary, cached.record, cached.relation,
             cached.validatedIdentity, cached.manifest
     end
-    local transitionReadBlocked = transitionActive
-        and (not roofRefreshContextRead or roofBusy ~= true)
-    if generationBusy ~= false or not transactionStateValid
-        or transitionReadBlocked then
+    if generationBusy ~= false or not transactionStateValid or transitionActive then
         cache[identityKey] = nil
         if forceRefresh or not deferCacheMiss then return nil end
         pending[identityKey] = true
         return nil, "validation-deferred"
     end
-    if deferCacheMiss and not forceRefresh and not roofRefreshContextRead then
+    if deferCacheMiss and not forceRefresh then
         cache[identityKey] = nil
         pending[identityKey] = true
         return nil, "validation-deferred"
@@ -160,16 +140,10 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
         cache[identityKey] = nil
         return nil
     end
-    if roofBusy == true then
-        local roofReadAllowed = roofRefreshContextRead
-            and roofRefreshBoundaryContextReadAllowed(server, record, identityKey)
-            or roofRefreshGuardRead and not roofRefreshContextRead
-                and roofRefreshBoundaryReadAllowed(server, record, identityKey)
-        if not roofReadAllowed then
-            diagnose("roof-refresh-transaction-rejected")
-            cache[identityKey] = nil
-            return nil
-        end
+    if wallBusy == true and wallReloadActive(server, record.locoId) then
+        diagnose("roof-refresh-transaction-rejected")
+        cache[identityKey] = nil
+        return nil
     end
     pending[identityKey] = nil
     now = Adapter._ticks or Core.getTick()
@@ -179,7 +153,7 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
         cache[identityKey] = nil
         return nil
     end
-    if not transitionActive and not roofRefreshContextRead then
+    if not transitionActive then
         cache[identityKey] = {
             boundary = boundary,
             record = record,
@@ -193,11 +167,9 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
 end
 
 function Adapter.validateCurrentBoundaryPlayer(player, suppliedIdentity,
-    deferCacheMiss, forceRefresh, roofRefreshContextRead,
-    roofRefreshGuardRead)
+    deferCacheMiss, forceRefresh)
     return validatePlayer(player, suppliedIdentity, nil, forceRefresh == true,
-        deferCacheMiss == true, roofRefreshContextRead == true,
-        roofRefreshGuardRead == true)
+        deferCacheMiss == true)
 end
 
 local function needsRefresh(identityKey, forceRefresh)

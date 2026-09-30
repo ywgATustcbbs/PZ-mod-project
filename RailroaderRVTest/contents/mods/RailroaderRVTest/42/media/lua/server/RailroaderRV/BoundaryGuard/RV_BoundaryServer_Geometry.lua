@@ -234,7 +234,7 @@ end
 Boundary.boundaryFor = boundaryFor
 
 function Boundary.boundaryForPlayer(player, knownIdentity, deferValidationMiss,
-    forceValidationRefresh, roofRefreshContextRead, roofRefreshGuardRead)
+    forceValidationRefresh)
     local id = knownIdentity or identity(player)
     if not id then return nil end
     -- The Railroader adapter checks the player's current mapping and manifest
@@ -245,8 +245,7 @@ function Boundary.boundaryForPlayer(player, knownIdentity, deferValidationMiss,
     if type(validator) ~= "function" then return nil end
     local hookOk, boundary, record, relation, validatedIdentity, manifest = pcall(
         validator, player, id, deferValidationMiss == true,
-        forceValidationRefresh == true, roofRefreshContextRead == true,
-        roofRefreshGuardRead == true)
+        forceValidationRefresh == true)
     if hookOk and boundary == nil and record == "validation-deferred" then
         return nil, record
     end
@@ -377,7 +376,7 @@ end
 local function guardContextForPlayer(player, position, knownIdentity,
     deferValidationMiss)
     local boundary, record, relation, id = Boundary.boundaryForPlayer(player,
-        knownIdentity, deferValidationMiss, false, false, true)
+        knownIdentity, deferValidationMiss, false)
     if not boundary or type(record) ~= "table" or type(id) ~= "table" then
         return nil
     end

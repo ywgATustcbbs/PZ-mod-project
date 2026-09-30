@@ -55,10 +55,18 @@ if not boundaryLoaded or type(Boundary) ~= "table" then
     Boundary = nil
     print("[RailroaderRVTest] RV boundary service unavailable; boundary hooks disabled")
 end
-local roofRefreshOk, RoofRefresh = pcall(require, "RailroaderRV/RoofRefresh/RV_RoofRefresh")
-if not roofRefreshOk or type(RoofRefresh) ~= "table"
-    or type(RoofRefresh.run) ~= "function" then
-    RoofRefresh = nil
+
+-- The Railroader adapter owns the mapping, the entry/exit gate and the wall
+-- reload operation service.  It is loaded here, before the internal modules are
+-- assembled, because RoomOwnership asks it whether a wall reload is holding the
+-- RV's players outside their room geometry.
+local railroaderOk, RailroaderServer = pcall(require,
+    "RailroaderRV/Core/RV_RailroaderServer")
+if not railroaderOk or type(RailroaderServer) ~= "table" then
+    RailroaderServer = nil
+    print("[RailroaderRVTest] Railroader RV adapter unavailable: "
+        .. tostring(railroaderOk and "module did not return a table"
+            or RailroaderServer))
 end
 
 local RV = rawget(_G, "RailroaderRV") or {}
@@ -77,18 +85,14 @@ local UtilityServer = require("RailroaderRV/Core/RV_UtilityServer")
 local Common = require("RailroaderRV/Common/RV_Common")
 local playerPositionCache = Common.newPlayerPositionCache()
 
--- A wall-removal refresh relocates every authoritative player in the current
--- RV scope as one transaction.  The target is derived from the current
--- template/layout center and offset by the current contract vector; it is not a
--- persisted coordinate or a client-provided destination.
-local roofRefreshRelocationGroup = nil
-local roofRefreshGroupFailure = nil
-local roofRefreshGroupFinalReturn = nil
-local roofRefreshGroupSerial = 0
 local pendingSerial = 0
 local serverTick = Core.getTick()
 local roomOwnershipGuards = {}
 local safeErrorText
+
+-- The one budget the generation transaction uses for a staging wait, a final
+-- wait and its single abort path.
+local RELOCATION_TIMEOUT_TICKS = 600
 
 if UtilityServer and type(UtilityServer.initializeRecord) == "function" then
     RV.Server.initializeUtilityRecord = UtilityServer.initializeRecord
@@ -96,21 +100,6 @@ end
 if UtilityServer and type(UtilityServer.settleAndRefreshLoad) == "function" then
     RV.Server.settleRVUtilityLoad = UtilityServer.settleAndRefreshLoad
 end
-
--- The client acknowledgement requires a full server -> client -> server
--- round trip.  Keep an additional cross-tick guard before touching the old
--- player-built room so the client cannot still be evaluating its stale
--- IsoRoom while WorldRegionToMetaGrid rebuilds the room definitions.
-local RELOCATION_MIN_TICKS = 3
-local RELOCATION_POST_ACK_TICKS = 2
-local RELOCATION_TIMEOUT_TICKS = 600
-local ROOF_REFRESH_RETURN_RETRY_TICKS = 5
-local ROOF_RELOCATION_RETRY_TICKS = 5
-local ROOF_REFRESH_REMOTE_OFFSET_X = Constants.ROOF_REFRESH_REMOTE_OFFSET_X
-local ROOF_REFRESH_REMOTE_OFFSET_Y = Constants.ROOF_REFRESH_REMOTE_OFFSET_Y
-local ROOF_REFRESH_REMOTE_OFFSET_Z = Constants.ROOF_REFRESH_REMOTE_OFFSET_Z
-local ROOF_REFRESH_TEMP_Z = Constants.RELOCATION_SENTINEL_Z
-local GENERATION_STAGING_Z = Constants.RELOCATION_SENTINEL_Z
 
 -- IsoRegions does not expose a Lua callback for completion of its asynchronous
 -- dynamic-room rebuild. Room ownership guards use nearby-player probes and
@@ -142,7 +131,6 @@ local ctx = {
     Core = Core,
     GenerationTransaction = GenerationTransaction,
     Boundary = Boundary,
-    RoofRefresh = RoofRefresh,
     RV = RV,
     ServerUtil = ServerUtil,
     ServerWorld = ServerWorld,
@@ -157,24 +145,11 @@ local ctx = {
     invalidatePlayerPosition = function(player)
         return playerPositionCache:invalidatePlayer(player)
     end,
-    roofRefreshRelocationGroup = roofRefreshRelocationGroup,
-    roofRefreshGroupFailure = roofRefreshGroupFailure,
-    roofRefreshGroupFinalReturn = roofRefreshGroupFinalReturn,
-    roofRefreshGroupSerial = roofRefreshGroupSerial,
     pendingSerial = pendingSerial,
     serverTick = serverTick,
     roomOwnershipGuards = roomOwnershipGuards,
     safeErrorText = safeErrorText,
-    RELOCATION_MIN_TICKS = RELOCATION_MIN_TICKS,
-    RELOCATION_POST_ACK_TICKS = RELOCATION_POST_ACK_TICKS,
     RELOCATION_TIMEOUT_TICKS = RELOCATION_TIMEOUT_TICKS,
-    ROOF_REFRESH_RETURN_RETRY_TICKS = ROOF_REFRESH_RETURN_RETRY_TICKS,
-    ROOF_RELOCATION_RETRY_TICKS = ROOF_RELOCATION_RETRY_TICKS,
-    ROOF_REFRESH_REMOTE_OFFSET_X = ROOF_REFRESH_REMOTE_OFFSET_X,
-    ROOF_REFRESH_REMOTE_OFFSET_Y = ROOF_REFRESH_REMOTE_OFFSET_Y,
-    ROOF_REFRESH_REMOTE_OFFSET_Z = ROOF_REFRESH_REMOTE_OFFSET_Z,
-    ROOF_REFRESH_TEMP_Z = ROOF_REFRESH_TEMP_Z,
-    GENERATION_STAGING_Z = GENERATION_STAGING_Z,
     ROOM_OWNERSHIP_MIN_TICKS = ROOM_OWNERSHIP_MIN_TICKS,
     ROOM_OWNERSHIP_STABLE_TICKS = ROOM_OWNERSHIP_STABLE_TICKS,
     ROOM_OWNERSHIP_MAX_TICKS = ROOM_OWNERSHIP_MAX_TICKS,
@@ -188,15 +163,12 @@ RV.Server.invalidatePlayerPosition = ctx.invalidatePlayerPosition
 RV.Server.teleportToPosition = ServerTeleport.teleportToPosition
 RV.Server.teleportToRVSpawn = ServerTeleport.teleportToRVSpawn
 
-require("RailroaderRV/RoofRefresh/RV_Server_RoomOwnership")(ctx)
+require("RailroaderRV/RoomOwnership/RV_Server_RoomOwnership")(ctx)
 require("RailroaderRV/Construction/RV_Server_WorldObjects")(ctx)
 require("RailroaderRV/Construction/RV_Server_GenerationBuild")(ctx)
 require("RailroaderRV/Construction/RV_Server_PlayerValidation")(ctx)
 require("RailroaderRV/TemplateRecovery/RV_Server_TemplateProtectionRepair")(ctx)
 require("RailroaderRV/TemplateRecovery/RV_TemplateRecovery")(ctx)
-require("RailroaderRV/RoofRefresh/RV_Server_RoofDestinations")(ctx)
-require("RailroaderRV/RoofRefresh/RV_Server_RoofRelocation")(ctx)
-require("RailroaderRV/RoofRefresh/RV_Server_RoofApi")(ctx)
 require("RailroaderRV/Construction/RV_Server_GenerationFlow")(ctx)
 require("RailroaderRV/RVMapping/RV_Server_RecordValidation")(ctx)
 require("RailroaderRV/Construction/RV_Server_GenerationAck")(ctx)

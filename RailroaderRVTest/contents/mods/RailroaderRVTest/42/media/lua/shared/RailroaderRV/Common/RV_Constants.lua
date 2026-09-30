@@ -88,15 +88,13 @@ C.BOUNDARY_TRANSITION_TIMEOUT_TICKS = 120
 C.BOUNDARY_SNAPSHOT_TIMEOUT_TICKS = 120
 C.BOUNDARY_SNAPSHOT_REFRESH_TICKS = 60
 
--- Process-local relocation sentinel contract.  Both temporary destinations are
--- derived from the current RV managed-region center; these values describe only
--- the staging layer and the roof refresh center-offset vector.
-C.RELOCATION_SENTINEL_Z = -15
+-- The wall reload operation derives one temporary destination per RV from the
+-- current managed region: the region origin minus this vector.  The vector is
+-- large enough that the RV chunk leaves the loaded set, and nothing here is
+-- persisted or accepted from a client.
 C.ROOF_REFRESH_REMOTE_OFFSET_X = 18000
 C.ROOF_REFRESH_REMOTE_OFFSET_Y = 0
 C.ROOF_REFRESH_REMOTE_OFFSET_Z = 15
-C.RELOCATION_SENTINEL_INTERVAL_TICKS = 5
-C.RELOCATION_SENTINEL_RETRY_COOLDOWN_TICKS = 10
 
 C.TEMPLATE_PROTECTION_REPAIR_SAMPLE_INTERVAL_TICKS = 10
 

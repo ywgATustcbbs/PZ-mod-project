@@ -9,7 +9,6 @@ local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local ServerSchema = ctx.ServerSchema
 local GenerationTransaction = ctx.GenerationTransaction
-local GENERATION_STAGING_Z = ctx.GENERATION_STAGING_Z
 local function allocateRVRegion(...)
     local rv = rawget(_G, "RailroaderRV")
     local adapter = type(rv) == "table" and rv.RailroaderServer or nil
@@ -36,6 +35,10 @@ local sendFinalRelocation = ctx.sendFinalRelocation
 
 -- Generation staging belongs to this flow: roof refresh has a separate
 -- remote relocation contract and must not publish these generation helpers.
+-- The staging layer is this flow's own contract point; it is not derivable from
+-- the layout, which only describes the managed base and roof layers.
+local GENERATION_STAGING_Z = -15
+
 local function selectGenerationStagingDestination(layout, bounds)
     local originX, originY = bounds.managedOriginX, bounds.managedOriginY
     local width, height = bounds.managedWidth, bounds.managedHeight

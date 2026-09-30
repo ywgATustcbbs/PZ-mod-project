@@ -7,15 +7,7 @@ local C = ctx.C
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local WORLD_MIN_Z = ctx.WORLD_MIN_Z
 local WORLD_MAX_Z = ctx.WORLD_MAX_Z
-local roofRefreshRooms = ctx.roofRefreshRooms
-local ROOF_REFRESH_CACHE_TTL_TICKS = ctx.ROOF_REFRESH_CACHE_TTL_TICKS
-local roofRefreshPlayers = ctx.roofRefreshPlayers
-local followUpWallRemovalEvents = ctx.followUpWallRemovalEvents
-local suppressedRoomTransitions = ctx.suppressedRoomTransitions
-local seenWallRemovalEvents = ctx.seenWallRemovalEvents
-local ROOF_REFRESH_TRANSITION_SUPPRESSION_TICKS = ctx.ROOF_REFRESH_TRANSITION_SUPPRESSION_TICKS
 local recordForLoco
-local function serverTransactionMutexStatus(...) return ctx.serverTransactionMutexStatus(...) end
 local number = ctx.number
 local integer = ctx.integer
 local call = ctx.call
@@ -181,206 +173,32 @@ boundaryValidation = require("RailroaderRV/BoundaryGuard/RV_RailroaderServer_Bou
         return {}
     end,
 })
-local function roofRefreshRoomKey(record)
-    if type(record) ~= "table" or type(record.locoId) ~= "string"
-        or record.locoId == ""
-        or integer(record.generation) == nil or integer(record.generation) < 1 then
-        return nil
-    end
-    return tostring(record.locoId) .. ":" .. tostring(record.generation)
-end
-
-local function isWallRemovalSource(source)
-    return source == "object-about-to-be-removed"
-        or source == "destroy-iso-thumpable"
-        or source == "follow-up-wall-removal"
-end
-
-local function markSuppressedRoomTransition(pending)
-    if type(pending) ~= "table" or not isWallRemovalSource(pending.source)
-        or type(pending.roomKey) ~= "string" then
-        return
-    end
-    suppressedRoomTransitions[pending.roomKey] = {
-        roomKey = pending.roomKey,
-        token = pending.relocationToken or pending.returnToken,
-        expiresAtTick = (Adapter._ticks or Core.getTick())
-            + ROOF_REFRESH_TRANSITION_SUPPRESSION_TICKS,
-    }
-end
-
-local function consumeSuppressedRoomTransition(roomKey)
-    local suppression = suppressedRoomTransitions[roomKey]
-    if type(suppression) ~= "table" then return false end
-    if type(suppression.expiresAtTick) ~= "number"
-        or (Adapter._ticks or Core.getTick()) > suppression.expiresAtTick then
-        suppressedRoomTransitions[roomKey] = nil
-        return false
-    end
-    suppressedRoomTransitions[roomKey] = nil
-    print("[RailroaderRVTest] room transition suppressed room="
-        .. tostring(roomKey) .. " token=" .. tostring(suppression.token)
-        .. " reason=wall-removal-relocation")
-    return true
-end
-
--- The two removal hooks use only the stable coordinate/object-index event key
--- for the short duplicate-callback window.  Never retain userdata; the current
--- RV identity/room key owns the actual transaction below.
-local function pruneRoofRefreshDedupeState(now)
-    now = now or Adapter._ticks or Core.getTick()
-    -- Follow-up expiry is paused while generation owns the shared scope.  If
-    -- the mutex query is temporarily unavailable, fail closed by preserving
-    -- the bounded queue until a later tick can classify it.
-    local generationBusy = true
-    if serverTransactionMutexStatus then
-        local mutexCallOk, active = pcall(function()
-            return select(1, serverTransactionMutexStatus())
-        end)
-        if mutexCallOk and type(active) == "boolean" then
-            generationBusy = active
-        end
-    end
-    for eventKey, seen in pairs(seenWallRemovalEvents) do
-        if type(seen) ~= "table"
-            or type(seen.expiresAtTick) ~= "number"
-            or now > seen.expiresAtTick then
-            seenWallRemovalEvents[eventKey] = nil
-        end
-    end
-    for roomKey, suppression in pairs(suppressedRoomTransitions) do
-        if type(suppression) ~= "table"
-            or type(suppression.expiresAtTick) ~= "number"
-            or now > suppression.expiresAtTick then
-            suppressedRoomTransitions[roomKey] = nil
-        end
-    end
-    for roomKey, events in pairs(followUpWallRemovalEvents) do
-        if type(events) ~= "table" then
-            followUpWallRemovalEvents[roomKey] = nil
-        else
-            for eventKey, event in pairs(events) do
-                local expiresAt = type(event) == "table"
-                    and event.expiresAtTick or nil
-                if type(event) ~= "table"
-                    or type(expiresAt) ~= "number" then
-                    print("[RailroaderRVTest] wall removal follow-up cancelled room="
-                        .. tostring(roomKey) .. " event=" .. tostring(eventKey)
-                        .. " reason=malformed-follow-up")
-                    events[eventKey] = nil
-                elseif event.waitingForGeneration == true then
-                    -- This event already entered the generation wait.  Its
-                    -- old absolute expiry is deliberately inert until the
-                    -- post-generation current-identity revalidation.
-                elseif now > expiresAt then
-                    -- Do not resurrect an event whose ordinary lease expired
-                    -- before generation became active on this tick.
-                    events[eventKey] = nil
-                elseif generationBusy and type(event) == "table" then
-                    event.waitingForGeneration = true
-                end
-            end
-            local empty = true
-            for _ in pairs(events) do empty = false; break end
-            if empty then followUpWallRemovalEvents[roomKey] = nil end
-        end
-    end
-end
-
-local function wallRemovalEventKey(object, roomKey)
-    if object == nil or type(roomKey) ~= "string" then return nil end
-    local indexOk, index = call(object, "getObjectIndex")
-    index = indexOk and integer(index) or nil
-    if index ~= nil and index < 0 then index = nil end
-    local squareOk, square = call(object, "getSquare")
-    local x, y, z
-    if squareOk and square then
-        local xOk, squareX = call(square, "getX")
-        local yOk, squareY = call(square, "getY")
-        local zOk, squareZ = call(square, "getZ")
-        if xOk and yOk and zOk then
-            x, y, z = integer(squareX), integer(squareY), integer(squareZ)
-        end
-    end
-    if x == nil or y == nil or z == nil then
-        local xOk, objectX = call(object, "getX")
-        local yOk, objectY = call(object, "getY")
-        local zOk, objectZ = call(object, "getZ")
-        if xOk and yOk and zOk then
-            x, y, z = integer(objectX), integer(objectY), integer(objectZ)
-        end
-    end
-    if x == nil or y == nil or z == nil then return nil end
-    local coordinateKey = roomKey .. ":" .. tostring(x) .. ":" .. tostring(y)
-        .. ":" .. tostring(z)
-    if index ~= nil then
-        -- Return both the object-index key and its coordinate alias.  The
-        -- alias closes the common callback gap where the object index exists
-        -- before removal but is unavailable in the later destroy callback.
-        return coordinateKey .. ":" .. tostring(index), coordinateKey
-    end
-    -- Some direct destruction paths do not expose an object index.  A stable
-    -- coordinate fallback keeps the same callback pair deduped while retaining
-    -- distinct wall cells as independent follow-up events.  If even the
-    -- authoritative coordinate is unavailable, the caller fails closed.
-    return coordinateKey .. ":fallback-wall", coordinateKey
-end
-
--- The roof refresh is deliberately best-effort: a missing target chunk must not
--- reject an otherwise valid RV entry.  OnTick retries it after the player has
--- streamed the persisted room into the authoritative server cell.
-local function refreshRoofForPlayer(player, record, force, reason)
+-- The roof/room refresh is deliberately best-effort: a missing target chunk must
+-- not reject an otherwise valid RV entry.  The state machine behind a wall
+-- removal belongs to WallReloadProtection; this is only the entry/reconnect
+-- refresh, so the caller's own retry is the recovery path.
+local function refreshRoofForPlayer(player, record, _force, reason)
     local server = RailroaderRV and RailroaderRV.Server
     if not server or type(server.refreshRoofVisuals) ~= "function" then
         return false, "roof refresh service is unavailable"
     end
-    local roomKey = roofRefreshRoomKey(record)
-    if not roomKey then return false, "RV generation key is unavailable" end
-    local cached = roofRefreshRooms[roomKey]
-    local cacheMatches = type(cached) == "table"
-        and tostring(cached.rvId) == tostring(record.locoId)
-        and integer(cached.generation) == integer(record.generation)
-    if not force and cacheMatches then return true, "already refreshed" end
     local ok, refreshed, detail = pcall(server.refreshRoofVisuals, player, record)
     if not ok then
         print("[RailroaderRVTest] roof refresh error: " .. tostring(refreshed))
         return false, tostring(refreshed)
     end
     if refreshed == true then
-        roofRefreshRooms[roomKey] = {
-            roomKey = roomKey,
-            rvId = tostring(record.locoId),
-            generation = integer(record.generation),
-            updatedAtTick = Adapter._ticks or Core.getTick(),
-        }
-        local name = playerName(player)
-        if name then roofRefreshPlayers[name .. ":" .. roomKey] = true end
         -- This confirms the server-side room/roof neighbour synchronization;
         -- it cannot prove that every client's rendered cache updated.
-        print("[RailroaderRVTest] roof room synchronization applied room=" .. roomKey
-            .. " reason=" .. tostring(reason or "entry")
+        print("[RailroaderRVTest] roof room synchronization applied rvId="
+            .. tostring(record.locoId) .. " reason=" .. tostring(reason or "entry")
             .. " detail=" .. tostring(detail or "ok"))
         return true, detail
     end
-    print("[RailroaderRVTest] roof refresh deferred room=" .. roomKey
-        .. " reason=" .. tostring(reason or "entry")
+    print("[RailroaderRVTest] roof refresh deferred rvId="
+        .. tostring(record.locoId) .. " reason=" .. tostring(reason or "entry")
         .. ": " .. tostring(detail or "unknown"))
     return false, detail
-end
-
-local function pruneRoofRefreshRooms(now)
-    now = now or Adapter._ticks or Core.getTick()
-    for roomKey, cached in pairs(roofRefreshRooms) do
-        local updatedAt = cached and cached.updatedAtTick
-        if type(cached) ~= "table"
-            or type(cached.roomKey) ~= "string"
-            or cached.roomKey ~= roomKey
-            or type(updatedAt) ~= "number"
-            or now < updatedAt
-            or (now - updatedAt) >= ROOF_REFRESH_CACHE_TTL_TICKS + 1 then
-            roofRefreshRooms[roomKey] = nil
-        end
-    end
 end
 
 -- The generation transaction broadcasts a room guard, but an existing RV entry
@@ -493,14 +311,7 @@ ctx.validRegion = validRegion
 ctx.validMapRelation = validMapRelation
 ctx.validMappingRecord = validMappingRecord
 ctx.validRecord = validRecord
-ctx.roofRefreshRoomKey = roofRefreshRoomKey
-ctx.isWallRemovalSource = isWallRemovalSource
-ctx.markSuppressedRoomTransition = markSuppressedRoomTransition
-ctx.consumeSuppressedRoomTransition = consumeSuppressedRoomTransition
-ctx.pruneRoofRefreshDedupeState = pruneRoofRefreshDedupeState
-ctx.wallRemovalEventKey = wallRemovalEventKey
 ctx.refreshRoofForPlayer = refreshRoofForPlayer
-ctx.pruneRoofRefreshRooms = pruneRoofRefreshRooms
 ctx.armRoomOwnershipMonitor = armRoomOwnershipMonitor
 ctx.recordAtPlayerCoordinate = recordAtPlayerCoordinate
 ctx.recordForLoco = recordForLoco

@@ -3,7 +3,6 @@ return function(ctx)
 local Constants = ctx.Constants
 local Boundary = ctx.Boundary
 local ServerSchema = ctx.ServerSchema
-local RoofRefresh = ctx.RoofRefresh
 local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
 local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
@@ -11,7 +10,6 @@ local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local armTargetedClientRoomOwnershipGuard = ctx.armTargetedClientRoomOwnershipGuard
 local playerIdentity = ctx.playerIdentity
-local currentRoofRefreshContext = ctx.currentRoofRefreshContext
 local queueGeneration = ctx.queueGeneration
 
 local function currentMappingRecord(rvId, generation)
@@ -96,7 +94,7 @@ function RV.Server.requestRailroaderGeneration(player, railroaderData)
     return queueGeneration(player, nil, railroaderData)
 end
 
--- Read-only current identity for the stateless -15 sentinel.
+-- Read-only current identity for the relocation destination service.
 function RV.Server.currentRVManifestForRelocation(rvId, generation)
     return manifestForIdentity(rvId, generation)
 end
@@ -105,10 +103,35 @@ function RV.Server.currentRVManifestForBoundary(rvId, generation)
     return manifestForIdentity(rvId, generation)
 end
 
+-- Re-read the live boundary/mapping identity of an authoritative player before a
+-- refresh mutates the world.  The expected rvId/generation come from the server's
+-- own current manifest, never from a client payload or a stored copy.
+local function currentRoofRefreshContext(player, expected)
+    local boundary, _, relation = Boundary.boundaryForPlayer(player)
+    if type(boundary) ~= "table" or type(relation) ~= "table" then
+        return false, Constants.INVALID_RV_DATA
+    end
+    if tostring(boundary.rvId) ~= tostring(expected.rvId)
+        or ServerUtil.integer(boundary.generation)
+            ~= ServerUtil.integer(expected.generation) then
+        return false, Constants.INVALID_RV_DATA
+    end
+    local identityOk, identityOrReason = playerIdentity(player)
+    if not identityOk then return false, identityOrReason end
+    return true, {
+        boundary = boundary,
+        relation = relation,
+        identity = identityOrReason,
+    }
+end
+
 -- Rebuild the captured south-window floor's room/roof neighbours after an
 -- existing RV entry or reconnect.
 function RV.Server.refreshRoofVisuals(player, record)
-    if not RoofRefresh then
+    local loaded, RoofRefresh = pcall(require,
+        "RailroaderRV/RoofRefresh/RV_RoofRefresh")
+    if not loaded or type(RoofRefresh) ~= "table"
+        or type(RoofRefresh.run) ~= "function" then
         return false, "roof refresh module is unavailable"
     end
     if type(record) ~= "table" then return false, Constants.INVALID_RV_DATA end
@@ -117,12 +140,9 @@ function RV.Server.refreshRoofVisuals(player, record)
     if not manifestOk or type(manifest) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
-    local identityOk, identityOrReason = playerIdentity(player)
-    if not identityOk then return false, identityOrReason end
     local contextOk, contextOrReason = currentRoofRefreshContext(player, {
         rvId = manifest.rvId,
         generation = manifest.generation,
-        identityKey = identityOrReason.key,
     })
     if not contextOk then return false, contextOrReason end
     local bounds = manifest.bounds

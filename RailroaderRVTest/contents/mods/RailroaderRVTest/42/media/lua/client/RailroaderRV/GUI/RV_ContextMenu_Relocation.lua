@@ -176,13 +176,13 @@ function Client.onServerCommand(module, command, args)
     end
     if command ~= COMMAND_RELOCATE then return end
     print("[RailroaderRVTest] client relocation command received phase="
-        .. tostring(args.roofRepairPhase or args.generationPhase or "none")
+        .. tostring(args.wallReloadPhase or args.generationPhase or "none")
         .. " onlineId=" .. tostring(args.onlineId)
         .. " target=" .. tostring(args.x) .. "," .. tostring(args.y)
         .. "," .. tostring(args.z))
     local token = args.token
     local onlineId = finiteInteger(args.onlineId)
-    -- Staging targets are integer contract points, but a grouped return must
+    -- Staging targets are integer contract points, but a wall reload return must
     -- preserve the server-captured fractional x/y/z exactly.  Validate all
     -- coordinates as finite numbers and use the phase to choose the engine
     -- call below; never round a return coordinate on the client.
@@ -191,8 +191,8 @@ function Client.onServerCommand(module, command, args)
     local z = finiteNumber(args.z)
     local rvId = args.rvId
     local generation = finiteInteger(args.generation)
-    local roofRefreshTransition = args.roofRepairTransition == true
-    local roofRefreshPhase = args.roofRepairPhase
+    local wallReloadTransition = args.wallReloadTransition == true
+    local wallReloadPhase = args.wallReloadPhase
     local generationTransition = args.generationTransition == true
     local generationPhase = args.generationPhase
     if type(token) ~= "string" or token == "" or onlineId == nil
@@ -201,16 +201,16 @@ function Client.onServerCommand(module, command, args)
         or x == nil or y == nil or z == nil or z < -32 or z > 31 then
         return
     end
-    if roofRefreshTransition
-        and roofRefreshPhase ~= "temporary" and roofRefreshPhase ~= "return" then
+    if wallReloadTransition
+        and wallReloadPhase ~= "temporary" and wallReloadPhase ~= "return" then
         return
     end
-    if not roofRefreshTransition and roofRefreshPhase ~= nil then
+    if not wallReloadTransition and wallReloadPhase ~= nil then
         return
     end
     if generationTransition
         and (generationPhase ~= "temporary" and generationPhase ~= "return"
-            or roofRefreshTransition) then
+            or wallReloadTransition) then
         return
     end
     if not generationTransition and generationPhase ~= nil then
@@ -221,7 +221,7 @@ function Client.onServerCommand(module, command, args)
         print("[RailroaderRVTest] client relocation command ignored: local player unavailable")
         return
     end
-    if roofRefreshTransition and roofRefreshPhase == "temporary"
+    if wallReloadTransition and wallReloadPhase == "temporary"
         and type(playerObj.setHaloNote) == "function" then
         pcall(function()
             playerObj:setHaloNote(ROOF_REFRESH_HALO_TEXT, 255, 255, 255, 1500)
@@ -255,13 +255,13 @@ function Client.onServerCommand(module, command, args)
             return
         end
     end
-    -- The roofRepair* names below are existing relocation wire fields for
-    -- RoofRefresh; keep their wire spelling synchronized with the server.
-    -- This is a targeted server instruction, not a client-selected build
-    -- coordinate.  Do not inspect the target square here: teleportTo is the
-    -- streaming trigger for a remote destination, and the server waits for
+    -- The wallReload* names below are the existing Relocate wire fields for the
+    -- wall reload operation; keep their wire spelling synchronized with the
+    -- server.  This is a targeted server instruction, not a client-selected
+    -- build coordinate.  Do not inspect the target square here: teleportTo is
+    -- the streaming trigger for a remote destination, and the server waits for
     -- its complete footprint before mutating the world.
-    local exactReturn = (roofRefreshTransition and roofRefreshPhase == "return")
+    local exactReturn = (wallReloadTransition and wallReloadPhase == "return")
         or (generationTransition and generationPhase == "return")
     local teleportX = exactReturn and x or x + 0.5
     local teleportY = exactReturn and y or y + 0.5
@@ -270,13 +270,13 @@ function Client.onServerCommand(module, command, args)
     end)
     if not relocated then
         print("[RailroaderRVTest] client relocation teleport failed phase="
-            .. tostring(roofRefreshPhase or generationPhase or "none"))
+            .. tostring(wallReloadPhase or generationPhase or "none"))
         return
     end
     -- teleportTo updates coordinates immediately, while IsoMovingObject's
-    -- current square is refreshed by a later game update.  Delay the ack
-    -- until OnTick observes that refresh; an immediate getCurrentSquare()
-    -- check would still see stale room metadata before the roof refresh.
+    -- current square is refreshed by a later game update.  Delay the single
+    -- applied acknowledgement until OnTick observes that refresh; an immediate
+    -- getCurrentSquare() check would still see stale room metadata.
     ctx.pendingRelocation = {
         token = token,
         onlineId = onlineId,
@@ -285,16 +285,14 @@ function Client.onServerCommand(module, command, args)
         x = x,
         y = y,
         z = z,
-        -- These two names are the existing relocation wire fields.
-        roofRepairTransition = roofRefreshTransition,
-        roofRepairPhase = roofRefreshPhase,
+        wallReloadTransition = wallReloadTransition,
+        wallReloadPhase = wallReloadPhase,
         generationTransition = generationTransition,
         generationPhase = generationPhase,
         ticks = 0,
-        ackAttemptLogged = false,
     }
     print("[RailroaderRVTest] client relocation staged phase="
-        .. tostring(roofRefreshPhase or generationPhase or "none")
+        .. tostring(wallReloadPhase or generationPhase or "none")
         .. " target=" .. tostring(x) .. "," .. tostring(y) .. "," .. tostring(z))
 end
 
@@ -354,9 +352,9 @@ function Client.onTick()
         and current:getY() == math.floor(pending.y)
         and current:getZ() == math.floor(pending.z)
     if not currentMatches
-        and (pending.roofRepairTransition or pending.generationTransition)
-        and (pending.roofRepairPhase == "temporary"
-            or pending.roofRepairPhase == "return"
+        and (pending.wallReloadTransition or pending.generationTransition)
+        and (pending.wallReloadPhase == "temporary"
+            or pending.wallReloadPhase == "return"
             or pending.generationPhase == "temporary"
             or pending.generationPhase == "return")
         and pending.ticks >= 3 then
@@ -382,21 +380,15 @@ function Client.onTick()
     end
     -- The destination is intentionally cleaned of floors by the server, so a
     -- missing floor is not a client-side reason to discard the relocation ack.
-    if pending.ackAttemptLogged ~= true then
-        print("[RailroaderRVTest] client relocation ACK sending phase="
-            .. tostring(pending.roofRepairPhase or pending.generationPhase or "none")
-            .. " target=" .. tostring(pending.x) .. "," .. tostring(pending.y)
-            .. "," .. tostring(pending.z) .. " coordinateProof="
-            .. tostring(currentMatches))
-        pending.ackAttemptLogged = true
-    end
+    -- This is the one applied signal the server waits for; the operation has a
+    -- single deadline and no client-side retry.
     local ackOk = pcall(function()
         sendClientCommand(playerObj, C.MOD_ID, COMMAND_RELOCATE_ACK,
             { token = pending.token })
     end)
     if ackOk then
         print("[RailroaderRVTest] client relocation ACK sent phase="
-            .. tostring(pending.roofRepairPhase or pending.generationPhase or "none"))
+            .. tostring(pending.wallReloadPhase or pending.generationPhase or "none"))
         ctx.pendingRelocation = nil
     end
 end

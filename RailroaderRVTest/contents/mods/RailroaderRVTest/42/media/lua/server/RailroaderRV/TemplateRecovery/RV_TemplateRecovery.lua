@@ -130,8 +130,17 @@ local function processQueuedCells(activePlayers)
         local player, boundary = findQueuedPlayer(activePlayers, entry)
         if player then
             local x, y = entry.x, entry.y
-            local repaired, reason = Repair.repairCell(player, boundary, x, y)
-            if repaired == false and reason ~= nil then
+            -- The repair module raises by design on states it treats as
+            -- impossible or on a failed world edit. Catching that here reports
+            -- the cell and lets the rest of the sweep run; the periodic sample
+            -- queues the cell again, so nothing is retried or remembered.
+            local checkOk, repaired, reason = pcall(Repair.repairCell, player,
+                boundary, x, y)
+            if not checkOk then
+                print("[RailroaderRVTest] template-protection-repair failed "
+                    .. "cell " .. tostring(x) .. "," .. tostring(y) .. ": "
+                    .. tostring(repaired))
+            elseif repaired == false and reason ~= nil then
                 print("[RailroaderRVTest] template-protection-repair skipped "
                     .. "cell " .. tostring(x) .. "," .. tostring(y) .. ": "
                     .. tostring(reason))

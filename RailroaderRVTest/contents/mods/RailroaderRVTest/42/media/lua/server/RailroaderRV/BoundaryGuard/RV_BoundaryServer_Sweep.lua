@@ -3,11 +3,12 @@ return function(ctx)
 local Boundary = ctx.Boundary
 local Core = ctx.Core
 local integer = ctx.integer
+local call = ctx.call
 local callGlobal = ctx.callGlobal
 local identity = ctx.identity
 local boundaryKey = ctx.boundaryKey
 local transitionActive = ctx.transitionActive
-local updatePlayer = ctx.updatePlayer
+local guardContextForPlayer = ctx.guardContextForPlayer
 local playerPosition = ctx.playerPosition
 local postPlayerTickHandlers = {}
 
@@ -108,7 +109,9 @@ function Boundary.onTick(tick)
                     if state and transitionActive(state) then
                         -- The transition lease owns this player's position.
                     else
-                        local boundary = updatePlayer(player, position, id, true)
+                        local guard = guardContextForPlayer(player, position,
+                            id, true)
+                        local boundary = guard and guard.boundary
                         if boundary then
                             activePlayers[#activePlayers + 1] = {
                                 boundary = boundary, player = player,
@@ -136,8 +139,9 @@ function Boundary.onTick(tick)
             % #coldOutsideCandidates + 1
         local candidate = coldOutsideCandidates[untrackedOutsideProbeCursor]
         deferUntrackedOutsideProbe(candidate.identity.key)
-        local boundary = updatePlayer(candidate.player, candidate.position,
-            candidate.identity, false)
+        local guard = guardContextForPlayer(candidate.player,
+            candidate.position, candidate.identity, false)
+        local boundary = guard and guard.boundary
         if boundary then
             activePlayers[#activePlayers + 1] = {
                 boundary = boundary, player = candidate.player,

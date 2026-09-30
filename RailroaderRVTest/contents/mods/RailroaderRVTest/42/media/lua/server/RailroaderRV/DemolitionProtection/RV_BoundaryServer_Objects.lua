@@ -331,9 +331,7 @@ local function commandCoordinate(args, key)
     return integer(commandArgument(args, key))
 end
 
--- The short-lived async action ledger belongs to DemolitionProtection. The
--- Boundary facade exposes only the tick-prune and generation-invalidation
--- operations needed by its sibling components.
+-- The short-lived async action ledger belongs to DemolitionProtection.
 local BuilderActionLedger = { actions = {} }
 
 function BuilderActionLedger.prune(tick)
@@ -410,13 +408,7 @@ function BuilderActionLedger.consumeObjectMatch(action, object)
     return true
 end
 
-function Boundary.pruneBuilderActionLedger(tick)
-    return BuilderActionLedger.prune(tick)
-end
-
-function Boundary.invalidateBuilderActionsForGeneration(rvId, generation)
-    return BuilderActionLedger.invalidateForGeneration(rvId, generation)
-end
+Boundary.builderActionLedger = BuilderActionLedger
 
 function Boundary.onProcessAction(actionName, player, args)
     BuilderActionLedger.prune(Boundary._tick)

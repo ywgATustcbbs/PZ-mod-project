@@ -51,9 +51,7 @@ C.COMMAND_RV_UTILITY_ACK = "RVUtilityAck"
 C.COMMAND_RV_UTILITY_SNAPSHOT = "RVUtilitySnapshot"
 C.COMMAND_RV_UTILITY_MAPPING = "RVUtilityMapping"
 C.RV_MAP_KEY = "RailroaderRVTest.TrainMap"
-C.TECH_VERSION = "0.4.0-tech"
 C.SAVE_SCHEMA_VERSION = 9
-C.CAPTURED_TEMPLATE_VERSION = 11
 C.INVALID_RV_DATA = "RailroaderRVTest: RV data is invalid; delete this development test save and rebuild it"
 
 -- The current test button always targets this server-selected destination.
@@ -73,6 +71,9 @@ C.RV_REGION_SLOT_COUNT = C.RV_REGION_SLOT_ROWS * C.RV_REGION_SLOT_COLUMNS
 -- selected clear/managed bounds remain independently limited by the layout.
 C.RV_IDENTITY_MIN_Z = -32
 C.RV_IDENTITY_MAX_Z = 32
+-- Inclusive world-height limit used by every server-side z validation.
+C.WORLD_MIN_Z = -32
+C.WORLD_MAX_Z = 31
 C.RV_REGION_MIN_OFFSET_X = -50
 C.RV_REGION_MIN_OFFSET_Y = -50
 C.RV_MANAGED_MIN_Z_OFFSET = 0
@@ -85,8 +86,6 @@ C.RV_MAX_PASSENGERS = 5
 
 -- The generation/management footprint uses the allocated half-open RV region.
 C.BOUNDARY_TRANSITION_TIMEOUT_TICKS = 120
-C.BOUNDARY_SNAPSHOT_TIMEOUT_TICKS = 120
-C.BOUNDARY_SNAPSHOT_REFRESH_TICKS = 60
 
 -- The wall reload operation derives one temporary destination per RV from the
 -- current managed region: the region origin minus this vector.  The vector is

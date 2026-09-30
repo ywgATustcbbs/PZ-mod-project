@@ -333,30 +333,6 @@ function Boundary.clearPlayer(player)
     return true
 end
 
--- Single read-only transition query. TemplateRecovery asks it per queue
--- identity; the state table stays private and no listener is notified.
-function Boundary.transitionActive(identityKey)
-    if type(identityKey) ~= "string" then return false end
-    local separator = string.find(identityKey, ":", 1, true)
-    if not separator then return false end
-    local rvId = string.sub(identityKey, 1, separator - 1)
-    local generation = integer(string.sub(identityKey, separator + 1))
-    if rvId == "" or not generation or generation < 1 then return false end
-    for _, state in pairs(Boundary._states) do
-        if type(state) == "table" and tostring(state.rvId) == rvId
-            and integer(state.generation) == generation then
-            if type(state.leaseToken) ~= "string" then return false end
-            if type(state.leaseUntil) == "number"
-                and state.leaseUntil >= Boundary._tick then
-                return true
-            end
-            state.leaseToken, state.leaseUntil = nil, nil
-            return false
-        end
-    end
-    return false
-end
-
 -- A correction must use a fresh position that agrees with the server's loaded
 -- current square. Missing or stale square state leaves the player untouched.
 local function currentSquareMatches(player, position)

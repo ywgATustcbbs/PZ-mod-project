@@ -2,11 +2,12 @@
 --
 -- This module builds runtime bounds and reports world-coordinate/loading state.
 
+local Constants = require("RailroaderRV/Common/RV_Constants")
 local ServerUtil = require("RailroaderRV/Common/RV_ServerUtil")
 local ServerWorld = require("RailroaderRV/Common/RV_ServerWorld")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
-local WORLD_MIN_Z = -32
-local WORLD_MAX_Z = 31
+local WORLD_MIN_Z = Constants.WORLD_MIN_Z
+local WORLD_MAX_Z = Constants.WORLD_MAX_Z
 local M = {}
 
 local function boundsFor(layout)

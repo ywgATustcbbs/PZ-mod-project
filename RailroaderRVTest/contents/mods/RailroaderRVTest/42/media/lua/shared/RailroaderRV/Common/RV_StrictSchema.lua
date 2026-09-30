@@ -10,18 +10,4 @@ function M.integer(value)
     return value
 end
 
-function M.exactKeys(value, expected)
-    if type(value) ~= "table" or getmetatable(value) ~= nil then
-        return false
-    end
-    local allowed = {}
-    for i = 1, #expected do allowed[expected[i]] = true end
-    local count = 0
-    for key in pairs(value) do
-        if not allowed[key] then return false end
-        count = count + 1
-    end
-    return count == #expected
-end
-
 return M

@@ -119,14 +119,6 @@ local function validRegion(region)
         and minZ >= WORLD_MIN_Z and maxZ <= WORLD_MAX_Z + 1
 end
 
-local function validMapRelation(relation, requireLocoId)
-    return type(relation) == "table"
-        and type(relation.inside) == "boolean"
-        and integer(relation.onlineId) ~= nil and integer(relation.onlineId) >= 0
-        and (requireLocoId ~= true
-            or type(relation.locoId) == "string" and relation.locoId ~= "")
-end
-
 local function recordRegion(record)
     return RegionSlots.indexToRegion(integer(record and record.slotIndex))
 end
@@ -308,15 +300,12 @@ ctx.markMappingChanged = markMappingChanged
 ctx.rvRegion = rvRegion
 ctx.inRegion = inRegion
 ctx.validRegion = validRegion
-ctx.validMapRelation = validMapRelation
 ctx.validMappingRecord = validMappingRecord
 ctx.validRecord = validRecord
 ctx.refreshRoofForPlayer = refreshRoofForPlayer
 ctx.armRoomOwnershipMonitor = armRoomOwnershipMonitor
 ctx.recordAtPlayerCoordinate = recordAtPlayerCoordinate
 ctx.recordForLoco = recordForLoco
-ctx.allocateRVRegion = allocateRVRegion
-ctx.currentMappingRecord = currentMappingRecord
 Adapter.allocateRVRegion = allocateRVRegion
 Adapter.currentMappingRecord = currentMappingRecord
 Adapter.invalidateBoundaryValidationCache = invalidateBoundaryValidationCache

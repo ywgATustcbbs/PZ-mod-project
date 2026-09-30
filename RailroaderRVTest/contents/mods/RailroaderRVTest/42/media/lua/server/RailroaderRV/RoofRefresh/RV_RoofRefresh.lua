@@ -130,22 +130,4 @@ function Refresh.run(player, bounds, identity)
     return true, reason
 end
 
--- Readiness gate: every template refresh point must have its square streamed
--- into the server cell.
-local function refreshSquaresLoaded(player, bounds)
-    local cell = ServerWorld.getCellForPlayer(player)
-    for index = 1, #refreshPoints do
-        local x, y, z = pointCell(bounds, refreshPoints[index])
-        local square, reason = loadedSquare(cell, x, y, z)
-        if not square then return false, reason end
-    end
-    return true
-end
-
-function Refresh.isLoaded(player, bounds)
-    local ok, loaded, reason = pcall(refreshSquaresLoaded, player, bounds)
-    if not ok then return false, tostring(loaded) end
-    return loaded == true, reason
-end
-
 return Refresh

@@ -167,17 +167,6 @@ local function generationPositionProof(player, target)
     return false, position, true
 end
 
--- pcall prepends its own success flag to every return value.  Normalize the
--- two-result authoritative position helper once so relocation paths never
--- mistake the pcall flag for the helper's `{ x, y, z }` position table.
-local function tryAuthoritativePlayerPosition(player)
-    local callOk, positionOk, positionOrReason = pcall(
-        authoritativePlayerPosition, player)
-    if not callOk then return false, positionOk end
-    if positionOk ~= true then return false, positionOrReason end
-    return true, positionOrReason
-end
-
 local function earlierTick(left, right)
     return left <= right and left or right
 end
@@ -326,12 +315,10 @@ end
 ctx.keepGenerationTransitionAlive = keepGenerationTransitionAlive
 ctx.sendStagingRelocation = sendStagingRelocation
 ctx.sendFinalRelocation = sendFinalRelocation
-ctx.tryAuthoritativePlayerPosition = tryAuthoritativePlayerPosition
 ctx.validateAuthoritativePlayer = validateAuthoritativePlayer
 ctx.authoritativePlayerPosition = authoritativePlayerPosition
 ctx.validateGenerationPermission = validateGenerationPermission
 ctx.playerIdentity = playerIdentity
 ctx.resolvePendingPlayer = resolvePendingPlayer
-ctx.relocationPositionsEqual = relocationPositionsEqual
 ctx.generationPositionProof = generationPositionProof
 end

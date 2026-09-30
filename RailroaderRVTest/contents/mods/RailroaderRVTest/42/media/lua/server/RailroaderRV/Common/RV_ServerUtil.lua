@@ -49,7 +49,6 @@ M.toNumber = toNumber
 M.isFiniteNumber = isFiniteNumber
 M.integer = integer
 M.identityKey = Common.identityKey
-M.getPlayerPosition = Common.getPlayerPosition
 M.requiredNumber = requiredNumber
 M.requiredInteger = requiredInteger
 M.makeLayout = makeLayout

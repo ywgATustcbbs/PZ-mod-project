@@ -78,11 +78,6 @@ if not Adapter._saveSchemaVersionCheckRegistered then
     end
 end
 
--- Keep persisted map poses inside the same B42 world-height contract used by
--- RV_Server's authoritative relocation validator.  X/Y remain finite server
--- coordinates; the engine's square probe validates their loaded-world use.
-local WORLD_MIN_Z = -32
-local WORLD_MAX_Z = 31
 Adapter._mappingEpoch = Adapter._mappingEpoch or 0
 local mappingEpoch = Adapter._mappingEpoch
 function Adapter.currentMappingEpoch()
@@ -103,8 +98,11 @@ local ctx = {
     Adapter = Adapter,
     C = C,
     unpackFn = unpackFn,
-    WORLD_MIN_Z = WORLD_MIN_Z,
-    WORLD_MAX_Z = WORLD_MAX_Z,
+    -- Keep persisted map poses inside the same B42 world-height contract used
+    -- by RV_Server's authoritative relocation validator.  X/Y remain finite
+    -- server coordinates; the engine's square probe validates their use.
+    WORLD_MIN_Z = C.WORLD_MIN_Z,
+    WORLD_MAX_Z = C.WORLD_MAX_Z,
     transitionSequence = transitionSequence,
     recordForLoco = recordForLoco,
 }

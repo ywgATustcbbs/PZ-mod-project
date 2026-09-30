@@ -172,19 +172,6 @@ function Common.newPlayerPositionCache()
         return key ~= nil
     end
 
-    function cache:invalidateIdentity(identity)
-        local scopeKey = playerScopeKey(identity)
-        if scopeKey == nil then return false end
-        local changed = false
-        for key, entry in pairs(entries) do
-            if entry.scopeKey == scopeKey then
-                entries[key] = nil
-                changed = true
-            end
-        end
-        return changed
-    end
-
     function cache:samplePlayerPosition(player, tick, interval, identity)
         local key = playerIdentity(player)
         local sampleInterval = Common.integer(interval)
@@ -229,10 +216,6 @@ function Common.newPlayerPositionCache()
         return true, {
             x = entry.position.x, y = entry.position.y, z = entry.position.z,
         }
-    end
-
-    function cache.clear()
-        entries = {}
     end
 
     return cache

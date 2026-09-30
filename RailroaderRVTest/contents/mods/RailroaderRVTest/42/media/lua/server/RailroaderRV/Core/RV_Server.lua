@@ -104,14 +104,6 @@ end
 -- IsoRegions does not expose a Lua callback for completion of its asynchronous
 -- dynamic-room rebuild. Room ownership guards use nearby-player probes and
 -- bounded, event-triggered rechecks instead of periodic full-footprint scans.
-local ROOM_OWNERSHIP_MIN_TICKS = 1800
-local ROOM_OWNERSHIP_STABLE_TICKS = 120
-local ROOM_OWNERSHIP_MAX_TICKS = 7200
-
-local WORLD_MIN_Z = -32
-local WORLD_MAX_Z = 31
-
-
 local ctx = {
     OWNER = OWNER,
     COMMAND_MODULE = COMMAND_MODULE,
@@ -150,11 +142,8 @@ local ctx = {
     roomOwnershipGuards = roomOwnershipGuards,
     safeErrorText = safeErrorText,
     RELOCATION_TIMEOUT_TICKS = RELOCATION_TIMEOUT_TICKS,
-    ROOM_OWNERSHIP_MIN_TICKS = ROOM_OWNERSHIP_MIN_TICKS,
-    ROOM_OWNERSHIP_STABLE_TICKS = ROOM_OWNERSHIP_STABLE_TICKS,
-    ROOM_OWNERSHIP_MAX_TICKS = ROOM_OWNERSHIP_MAX_TICKS,
-    WORLD_MIN_Z = WORLD_MIN_Z,
-    WORLD_MAX_Z = WORLD_MAX_Z,
+    WORLD_MIN_Z = Constants.WORLD_MIN_Z,
+    WORLD_MAX_Z = Constants.WORLD_MAX_Z,
 }
 
 RV.Server.samplePlayerPosition = ctx.samplePlayerPosition

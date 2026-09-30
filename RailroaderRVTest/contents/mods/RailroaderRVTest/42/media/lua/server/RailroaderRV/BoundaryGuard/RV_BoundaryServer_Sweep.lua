@@ -108,8 +108,9 @@ end
 
 function Boundary.onTick(tick)
     Boundary._tick = tick or Core.getTick()
-    if type(Boundary.pruneBuilderActionLedger) == "function" then
-        Boundary.pruneBuilderActionLedger(Boundary._tick)
+    local actionLedger = Boundary.builderActionLedger
+    if type(actionLedger) == "table" then
+        actionLedger.prune(Boundary._tick)
     end
     local players = onlinePlayersSnapshot()
     local activePlayers, activeBoundaries = {}, {}

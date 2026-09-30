@@ -439,28 +439,6 @@ local function addSpecialObject(square, object)
     ServerWorld.recalcSquare(square)
 end
 
-local function createWall(cell, square, sprite, north, generation, role, extraData,
-    tagContext)
-    local cls = rawget(_G, "IsoThumpable")
-    local ok, wall = ServerUtil.invokeClass(cls, {
-        -- B42.20: IsoThumpable(IsoCell, IsoGridSquare, String, boolean,
-        -- KahluaTable).  nil is the ordinary no-build-info table.
-        { cell, square, sprite, north, nil },
-    })
-    if not ok then
-        error("RailroaderRVTest: IsoThumpable construction failed")
-    end
-    if not ServerUtil.callSucceeded(wall, "setIsThumpable", true) then
-        error("RailroaderRVTest: wall initial state failed")
-    end
-    ServerWorld.tagObject(wall, generation, role, tagContext, extraData)
-    addSpecialObject(square, wall)
-    if not ServerUtil.callSucceeded(wall, "transmitCompleteItemToClients") then
-        error("RailroaderRVTest: wall client transmission failed")
-    end
-    return wall
-end
-
 local function createGenerator(cell, square, sprite, generation, tagContext)
     local cls = rawget(_G, "IsoGenerator")
     -- The cell-only constructor does not attach or transmit. Configure the
@@ -831,8 +809,6 @@ end
 -- escape the transaction's protected/finalize path.
 
 ctx.ensureRoofSquare = ensureRoofSquare
-ctx.createFloor = createFloor
-ctx.createWall = createWall
 ctx.createGenerator = createGenerator
 ctx.createCapturedTemplateObject = createCapturedTemplateObject
 ctx.configureCapturedDoorFrame = configureCapturedDoorFrame

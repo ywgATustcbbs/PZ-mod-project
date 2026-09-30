@@ -96,7 +96,6 @@ function Adapter.installTransactionHooks()
     return true
 end
 
-Adapter._installed = true
 Adapter.installTransactionHooks()
 
 if type(Adapter.onObjectAboutToBeRemoved) == "function" then

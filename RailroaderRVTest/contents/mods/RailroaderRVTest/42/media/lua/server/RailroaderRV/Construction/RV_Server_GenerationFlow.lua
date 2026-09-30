@@ -9,6 +9,7 @@ local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local ServerSchema = ctx.ServerSchema
 local GenerationTransaction = ctx.GenerationTransaction
+local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
 local function allocateRVRegion(...)
     local rv = rawget(_G, "RailroaderRV")
     local adapter = type(rv) == "table" and rv.RailroaderServer or nil
@@ -370,7 +371,7 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     if railroaderData then
         railroaderData.slotIndex = slotIndex
     end
-    local layout = ServerUtil.makeLayout(targetX, targetY, targetZ)
+    local layout = Layout.make(targetX, targetY, targetZ)
     local bounds = ServerSchema.boundsFor(layout)
     local anchorPosition = { x = targetX, y = targetY, z = targetZ }
     local finalDestination = {

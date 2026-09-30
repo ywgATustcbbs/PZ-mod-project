@@ -20,8 +20,6 @@ local M = {}
 -- adopt an operation, and the single managed world scope never runs two.
 local operations = {}
 
-local WORLD_MIN_Z = -32
-local WORLD_MAX_Z = 31
 -- The whole-operation budget.  Every deadline and every boundary lease in this
 -- module is derived from this one value.
 local OPERATION_TIMEOUT_TICKS = 600
@@ -60,10 +58,6 @@ function M.isWallReloadActive(rvId)
     return false
 end
 
-function M.activeOperation()
-    return next(operations)
-end
-
 -- The temporary destination is a pure function of the CURRENT validated managed
 -- region: the region origin pushed far enough away that the RV chunk unloads.
 -- It is never a persisted coordinate, a client value or a stored copy.
@@ -78,7 +72,7 @@ local function temporaryDestination(boundary)
     local x = originX - Constants.ROOF_REFRESH_REMOTE_OFFSET_X
     local y = originY - Constants.ROOF_REFRESH_REMOTE_OFFSET_Y
     local z = minZ - Constants.ROOF_REFRESH_REMOTE_OFFSET_Z
-    if z < WORLD_MIN_Z or z > WORLD_MAX_Z then
+    if z < Constants.WORLD_MIN_Z or z > Constants.WORLD_MAX_Z then
         return false, Constants.INVALID_RV_DATA
     end
     local worldOk, world = ServerUtil.callGlobal("getWorld")

@@ -146,10 +146,7 @@ function RV.Server.refreshRoofVisuals(player, record)
     })
     if not contextOk then return false, contextOrReason end
     local bounds = manifest.bounds
-    local ok, result, reason = pcall(RoofRefresh.run, player, bounds, {
-        rvId = manifest.rvId,
-        generation = manifest.generation,
-    })
+    local ok, result, reason = pcall(RoofRefresh.run, player, bounds)
     if not ok then return false, safeErrorText(result) end
     return result == true, reason
 end

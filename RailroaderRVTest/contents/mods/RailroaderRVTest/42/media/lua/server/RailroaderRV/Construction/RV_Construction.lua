@@ -4,10 +4,6 @@
 -- manifests and persisted fields are consumed according to their current contract.
 local Construction = {}
 
-local function samePoint(left, right)
-    return left.x == right.x and left.y == right.y and left.z == right.z
-end
-
 function Construction.new(context, operations)
     local service = {}
     local generationTransaction = context.GenerationTransaction

@@ -46,7 +46,6 @@ local GENERATION_HALO_REFRESH_TICKS = 10
 -- region packet to retire the same IsoRoom; releasing the guard after a quiet
 -- tail leaves that packet unchecked and exposes ParameterFirearmRoomSize to a
 -- RoomDef=nil reference on the next player update.
-local ROOM_OWNERSHIP_MIN_TICKS = 1800
 local clientTick = 0
 
 
@@ -65,7 +64,6 @@ local ctx = {
     pendingRelocation = pendingRelocation,
     RELOCATION_TIMEOUT_TICKS = RELOCATION_TIMEOUT_TICKS,
     GENERATION_HALO_REFRESH_TICKS = GENERATION_HALO_REFRESH_TICKS,
-    ROOM_OWNERSHIP_MIN_TICKS = ROOM_OWNERSHIP_MIN_TICKS,
     clientTick = clientTick,
 }
 

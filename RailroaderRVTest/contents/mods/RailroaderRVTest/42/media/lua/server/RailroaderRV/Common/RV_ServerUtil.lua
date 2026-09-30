@@ -4,7 +4,6 @@
 -- touch the world.  Keeping the generic call/validation helpers in their own
 -- require chunk leaves RV_Server.lua below Kahlua's 200 active-local limit.
 
-local LayoutContract = require("RailroaderRV/RoomTemplate/RV_Layout")
 local Common = require("RailroaderRV/Common/RV_Common")
 
 local M = {}
@@ -35,10 +34,6 @@ local function requiredInteger(value, label)
     return integerValue
 end
 
-local function makeLayout(x, y, z)
-    return LayoutContract.make(x, y, z)
-end
-
 M.invoke = invoke
 M.callSucceeded = callSucceeded
 M.invokeClass = invokeClass
@@ -51,6 +46,5 @@ M.integer = integer
 M.identityKey = Common.identityKey
 M.requiredNumber = requiredNumber
 M.requiredInteger = requiredInteger
-M.makeLayout = makeLayout
 
 return M

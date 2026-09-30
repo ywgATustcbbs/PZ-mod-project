@@ -310,7 +310,7 @@ function M.onTick(tick)
         or lastScanTick == tick then return end
     lastScanTick = tick
     forCurrentRecords(function(identity, record, mappingRecord)
-        local started = Power.beginRuntime(identity, record)
+        local started = Power.ensureRuntime(identity, record)
         if started then Devices.scanTick(identity, mappingRecord, nil) end
     end)
 end

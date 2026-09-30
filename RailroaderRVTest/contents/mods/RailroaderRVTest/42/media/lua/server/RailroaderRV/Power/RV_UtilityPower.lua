@@ -314,9 +314,7 @@ local function ensureRuntime(identity, record)
     return commit(record, identity)
 end
 
-function M.beginRuntime(identity, record)
-    return ensureRuntime(identity, record)
-end
+M.ensureRuntime = ensureRuntime
 
 function M.settleAndRefreshLoad(identity, player, providedRecord)
     local record = providedRecord

@@ -134,9 +134,6 @@ local ctx = {
     getPlayerPosition = function(player, options)
         return playerPositionCache:getPlayerPosition(player, options)
     end,
-    invalidatePlayerPosition = function(player)
-        return playerPositionCache:invalidatePlayer(player)
-    end,
     pendingSerial = pendingSerial,
     serverTick = serverTick,
     roomOwnershipGuards = roomOwnershipGuards,
@@ -148,7 +145,6 @@ local ctx = {
 
 RV.Server.samplePlayerPosition = ctx.samplePlayerPosition
 RV.Server.getPlayerPosition = ctx.getPlayerPosition
-RV.Server.invalidatePlayerPosition = ctx.invalidatePlayerPosition
 RV.Server.teleportToPosition = ServerTeleport.teleportToPosition
 RV.Server.teleportToRVSpawn = ServerTeleport.teleportToRVSpawn
 

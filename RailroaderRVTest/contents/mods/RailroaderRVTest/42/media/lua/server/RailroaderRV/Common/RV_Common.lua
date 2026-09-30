@@ -166,12 +166,6 @@ function Common.newPlayerPositionCache()
     local entries = {}
     local cache = {}
 
-    function cache:invalidatePlayer(player, reason)
-        local key = playerIdentity(player)
-        if key ~= nil then entries[key] = nil end
-        return key ~= nil
-    end
-
     function cache:samplePlayerPosition(player, tick, interval, identity)
         local key = playerIdentity(player)
         local sampleInterval = Common.integer(interval)

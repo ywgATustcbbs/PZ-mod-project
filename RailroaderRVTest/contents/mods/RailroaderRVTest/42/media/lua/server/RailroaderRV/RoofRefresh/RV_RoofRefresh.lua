@@ -121,9 +121,7 @@ local function refreshAllPoints(player, bounds)
     return true, reason
 end
 
--- The caller's identity argument is part of the unchanged public signature; this
--- refresh is template-driven and never reads object or generation identity.
-function Refresh.run(player, bounds, identity)
+function Refresh.run(player, bounds)
     local ok, refreshed, reason = pcall(refreshAllPoints, player, bounds)
     if not ok then return fail(refreshed) end
     if refreshed ~= true then return fail(reason) end

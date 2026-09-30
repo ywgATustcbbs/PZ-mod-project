@@ -330,12 +330,6 @@ local function prepareRideTransition(args)
     local rr = rawget(_G, "RR")
     local ride = rr and rr.Ride
     local record = localTrainRecord(args.locoId)
-    Menu._rvTransition = {
-        action = action, locoId = args.locoId, role = args.role,
-        seat = finiteInteger(args.seat), expires = nowMs() + 2500,
-        rvId = args.rvId and tostring(args.rvId) or nil,
-        generation = finiteInteger(args.generation),
-    }
     if action == "generation-failed" then
         -- A failed generation ends the one-shot staging transition.  The
         -- server snapshot that follows is then allowed to restore the seat.

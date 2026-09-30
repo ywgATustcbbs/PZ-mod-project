@@ -101,13 +101,12 @@ end
 -- Runs after every member is physically back inside the RV.  The temporary
 -- occupant list is deliberately empty: the members are already home, so the
 -- refresh must not refuse its own target square.
-local function runRoofRefresh(player, bounds, identity)
+local function runRoofRefresh(player, bounds)
     if not player then
         print("[RailroaderRVTest] wall reload completion has no representative player")
         return
     end
-    local refreshOk, refreshed, detail = pcall(RoofRefresh.run, player, bounds,
-        identity)
+    local refreshOk, refreshed, detail = pcall(RoofRefresh.run, player, bounds)
     if not refreshOk then
         print("[RailroaderRVTest] roof refresh error after wall reload: "
             .. surfaceError(refreshed))
@@ -251,8 +250,6 @@ local function isWallReloadTransactionActive(rvId)
     return false
 end
 
-Adapter.isWallReloadTransactionActive = isWallReloadTransactionActive
-
 local function publishMutexQueries()
     local api = RailroaderRV and RailroaderRV.Server
     if type(api) ~= "table" then return false end
@@ -311,7 +308,4 @@ function Adapter.rearmRoomOwnershipMonitors(tick)
     end
 end
 
-ctx.insidePlayersForRecord = insidePlayersForRecord
-ctx.wallReloadForObject = wallReloadForObject
-ctx.isWallReloadTransactionActive = isWallReloadTransactionActive
 end

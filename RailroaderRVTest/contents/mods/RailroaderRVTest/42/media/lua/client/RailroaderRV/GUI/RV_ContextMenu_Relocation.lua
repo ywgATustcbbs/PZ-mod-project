@@ -14,45 +14,12 @@ local RELOCATION_TIMEOUT_TICKS = ctx.RELOCATION_TIMEOUT_TICKS
 local GENERATION_HALO_REFRESH_TICKS = ctx.GENERATION_HALO_REFRESH_TICKS
 local validRailroaderFinalHint = ctx.validRailroaderFinalHint
 local localPlayerByOnlineId = ctx.localPlayerByOnlineId
-local roomOwnershipGuardStatus = ctx.roomOwnershipGuardStatus
-local refreshRoomOwnershipByIdentity = ctx.refreshRoomOwnershipByIdentity
 local requestRoomOwnershipScan = ctx.requestRoomOwnershipScan
 local beginRoomOwnershipRefresh = ctx.beginRoomOwnershipRefresh
-local finalTargetSquareIsLoaded = ctx.finalTargetSquareIsLoaded
-local finalTargetRoomIsValid = ctx.finalTargetRoomIsValid
 local updateRoomOwnershipGuards = ctx.updateRoomOwnershipGuards
 local finiteNumber = ctx.finiteNumber
 local finiteInteger = ctx.finiteInteger
-local FINAL_RELOCATION_SCAN_RETRY_TICKS = 10
-local FINAL_RELOCATION_SCAN_MAX_ATTEMPTS = 4
 local pendingFinalRelocation = nil
-
-local function reopenFinalRelocationScan(rvId, generation)
-    local pending = pendingFinalRelocation
-    local args = type(pending) == "table" and pending.args
-    local exactGeneration = finiteInteger(generation)
-    if type(args) ~= "table" or pending.failed ~= true
-        or rvId == nil or tostring(rvId) == ""
-        or exactGeneration == nil then
-        return false
-    end
-    local phase = pending.teleported and "post" or "pre"
-    local triggerRetryKey = phase .. "TriggerRetryUsed"
-    if pending.failedPhase ~= phase
-        or pending[triggerRetryKey] == true
-        or tostring(args.rvId) ~= tostring(rvId)
-        or finiteInteger(args.generation) ~= exactGeneration then
-        return false
-    end
-    pending.failed = false
-    pending.failedPhase = nil
-    pending[triggerRetryKey] = true
-    pending[phase .. "ScanAttempts"] = 0
-    pending[phase .. "NextScanTick"] = ctx.clientTick
-    print("[RailroaderRVTest] final relocation " .. phase
-        .. " room scan resumed after a matching repair trigger")
-    return true
-end
 
 function Client.requestGenerate(playerObj)
     if not playerObj then return end
@@ -92,70 +59,16 @@ function Client.onFillWorldObjectContextMenu(playerNum, context, worldObjects, t
         Client.requestTemplateCapture)
 end
 
-local function tryFinalRelocationGuardScan(
-    rvId, generation, pending, phase)
-    local completeKey = phase .. "ScanComplete"
-    if pending[completeKey] then return true end
-    if pending.failed then return false end
-
-    local attemptsKey = phase .. "ScanAttempts"
-    local nextTickKey = phase .. "NextScanTick"
-    if ctx.clientTick < (pending[nextTickKey] or 0) then
-        return false
-    end
-
-    pending[attemptsKey] = (pending[attemptsKey] or 0) + 1
-    local scanCallOk, scanOk = pcall(refreshRoomOwnershipByIdentity,
-        rvId, generation)
-    if scanCallOk and scanOk == true then
-        pending[completeKey] = true
-        return true
-    end
-
-    if pending[attemptsKey] >= FINAL_RELOCATION_SCAN_MAX_ATTEMPTS then
-        -- Never teleport or acknowledge a transaction whose footprint was
-        -- only partially loaded. A later matching object/local repair trigger
-        -- can open one new bounded window; otherwise the server token deadline
-        -- owns rollback.
-        pending.failed = true
-        pending.failedPhase = phase
-        print("[RailroaderRVTest] final relocation " .. phase
-            .. " room scan incomplete after " .. tostring(pending[attemptsKey])
-            .. " attempts; final ACK blocked until a matching repair trigger")
-    else
-        pending[nextTickKey] = ctx.clientTick
-            + FINAL_RELOCATION_SCAN_RETRY_TICKS
-    end
-    return false
-end
-
 local function tryApplyFinalRelocation(args, pending)
     if type(args) ~= "table" then return false end
     if type(pending) ~= "table" or pending.failed then return false end
     local token = args.token
-    local rvId = args.rvId
-    local generation = finiteInteger(args.generation)
     local onlineId = finiteInteger(args.onlineId)
     local x = finiteNumber(args.x)
     local y = finiteNumber(args.y)
     local z = finiteNumber(args.z)
-    if type(token) ~= "string" or token == "" or rvId == nil
-        or tostring(rvId) == "" or generation == nil or generation < 1
-        or onlineId == nil
+    if type(token) ~= "string" or token == "" or onlineId == nil
         or x == nil or y == nil or z == nil or z < -32 or z > 31 then
-        return false
-    end
-    if type(roomOwnershipGuardStatus) ~= "function"
-        or type(refreshRoomOwnershipByIdentity) ~= "function" then
-        return false
-    end
-    local guardFound, currentCheckReady = roomOwnershipGuardStatus(
-        rvId, generation)
-    if guardFound ~= true then return false end
-    -- A persistent current-square API failure is latched by the guard monitor.
-    -- Do not complete a final relocation transaction until a later local check
-    -- succeeds and clears that uncertainty.
-    if currentCheckReady ~= true then
         return false
     end
     local playerObj = localPlayerByOnlineId(onlineId)
@@ -163,21 +76,7 @@ local function tryApplyFinalRelocation(args, pending)
         return false
     end
 
-    -- Wait for the selected destination square before the transaction scan.
-    -- While streaming is incomplete, OnTick performs only this O(1) lookup.
     if not pending.teleported then
-        if not finalTargetSquareIsLoaded(x, y, z) then
-            return false
-        end
-        -- Full pre-scan happens only after the destination is ready. If any
-        -- footprint square is still unloaded, retry at a bounded interval.
-        if not tryFinalRelocationGuardScan(
-                rvId, generation, pending, "pre") then
-            return false
-        end
-        if not finalTargetRoomIsValid(x, y, z) then
-            return false
-        end
         local teleported, teleportResult = pcall(function()
             return playerObj:teleportTo(x, y, z)
         end)
@@ -217,19 +116,6 @@ local function tryApplyFinalRelocation(args, pending)
         return false
     end
 
-    -- The post-scan is a separate transaction stage and is never repeated on
-    -- every wait tick. Incomplete coverage retries at a bounded interval; no
-    -- final ACK is sent until the full footprint and target room both verify.
-    if not pending.postScanComplete then
-        if not finalTargetSquareIsLoaded(x, y, z)
-            or not tryFinalRelocationGuardScan(
-                rvId, generation, pending, "post") then
-            return false
-        end
-    end
-    if not finalTargetRoomIsValid(x, y, z) then
-        return false
-    end
     return true
 end
 
@@ -253,7 +139,7 @@ local function applyFinalRelocation(args)
         applied = false,
     }
     -- Try in the command callback itself, before the player can enter the
-    -- engine update/audio path. If the guard packet has not been installed yet,
+    -- engine update/audio path. If the local player is not available yet,
     -- OnTick retries while the player remains at staging.
     if tryApplyFinalRelocation(args, pendingFinalRelocation) then
         pendingFinalRelocation.applied = true
@@ -514,8 +400,6 @@ function Client.onTick()
         ctx.pendingRelocation = nil
     end
 end
-
-ctx.reopenFinalRelocationScan = reopenFinalRelocationScan
 
 Events.OnServerCommand.Add(Client.onServerCommand)
 Events.OnTick.Add(Client.onTick)

@@ -1,12 +1,6 @@
 -- RV_Server: RoomOwnership responsibilities.
 return function(ctx)
-local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
-local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
-local templateObjects = RoomTemplate.orderedObjects(Template)
-local roofZOffset = -math.huge
-for i = 1, #(templateObjects or {}) do
-    roofZOffset = math.max(roofZOffset, templateObjects[i].z)
-end
+local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
 local COMMAND_MODULE = ctx.COMMAND_MODULE
 local COMMAND_REFRESH_ROOM_OWNERSHIP = ctx.COMMAND_REFRESH_ROOM_OWNERSHIP
 local COMMAND_RV_TELEPORT = ctx.COMMAND_RV_TELEPORT
@@ -16,14 +10,7 @@ local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local ServerSchema = ctx.ServerSchema
 local roomOwnershipGuards = ctx.roomOwnershipGuards
-local function safeErrorText(...) return ctx.safeErrorText(...) end
-local ROOM_OWNERSHIP_MIN_TICKS = ctx.ROOM_OWNERSHIP_MIN_TICKS
-local ROOM_OWNERSHIP_STABLE_TICKS = ctx.ROOM_OWNERSHIP_STABLE_TICKS
-local ROOM_OWNERSHIP_MAX_TICKS = ctx.ROOM_OWNERSHIP_MAX_TICKS
 
--- Object hooks can run before IsoRegions finishes rebuilding dynamic rooms.
--- Merge an event burst into one scan series, then make a finite delayed tail.
-local ROOM_OWNERSHIP_RECHECK_DELAYS = { 1, 5, 15, 30 }
 -- The server checks authoritative players' current squares each tick and
 -- supplements that with a lower-frequency 3x3 neighborhood probe.
 local ROOM_OWNERSHIP_3X3_INTERVAL_TICKS = 120
@@ -46,55 +33,6 @@ local function notifyFailure(player, reason)
         COMMAND_MODULE, COMMAND_RV_TELEPORT, {
             ok = false, onlineId = onlineId, reason = reasonText,
         })
-end
-
-local function removeOldGeneration(cell, manifest)
-    error("RailroaderRVTest: old-generation cleanup is refused because "
-        .. "the current schema has no complete undo snapshot", 0)
-end
-
-local function structureCoordinates(bounds, callback, materializedRoofCoordinates)
-    if bounds == nil then return end
-    -- These bounds are the current compiled-layout geometry, produced by
-    -- ServerSchema for the in-flight transaction.  They are read directly: a
-    -- malformed value is a programming error and must raise, not be converted
-    -- into a data-validation result.
-    local wallMinX, wallMaxX = bounds.wallMinX, bounds.wallMaxX
-    local wallMinY, wallMaxY = bounds.wallMinY, bounds.wallMaxY
-    local z, roofZ = bounds.z, bounds.roofZ
-    local roofMinX, roofMaxX = bounds.roofMinX, bounds.roofMaxX
-    local roofMinY, roofMaxY = bounds.roofMinY, bounds.roofMaxY
-    for x = wallMinX, wallMaxX do
-        for y = wallMinY, wallMaxY do callback(x, y, z) end
-    end
-    local emittedRoof = {}
-    local function emitRoof(x, y, z)
-        local key = tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
-        if not emittedRoof[key] then
-            emittedRoof[key] = true
-            callback(x, y, z)
-        end
-    end
-    if materializedRoofCoordinates == nil then
-        -- The captured roof is sparse: inspect hosts inside the primary shell
-        -- bounds, not every cell in its rectangular outline.
-        local anchorX, anchorY = bounds.anchor.x, bounds.anchor.y
-        for i = 1, #templateObjects do
-            local captured = templateObjects[i]
-            if captured.z == roofZOffset then
-                local x, y = anchorX + captured.x, anchorY + captured.y
-                if x >= roofMinX and x <= roofMaxX
-                    and y >= roofMinY and y <= roofMaxY then
-                    emitRoof(x, y, roofZ)
-                end
-            end
-        end
-    else
-        for i = 1, #materializedRoofCoordinates do
-            local coordinate = materializedRoofCoordinates[i]
-            emitRoof(coordinate.x, coordinate.y, coordinate.z)
-        end
-    end
 end
 
 local function clearInvalidRoomOwnershipSquare(square)
@@ -122,46 +60,17 @@ local function clearInvalidRoomOwnershipSquare(square)
     return true
 end
 
-local function clearInvalidRoomOwnershipReferences(cell, oldBounds, newBounds,
-    materializedNewRoofCoordinates)
-    if cell == nil or type(newBounds) ~= "table" then
-        error("RailroaderRVTest: room ownership full scan inputs are incomplete")
-    end
-    local expected, visited = {}, {}
-    local expectedCoordinates = {}
-    local function markExpected(x, y, z)
-        local key = tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
-        if not expected[key] then
-            expected[key] = true
-            expectedCoordinates[#expectedCoordinates + 1] = { x = x, y = y, z = z }
-        end
-    end
-    structureCoordinates(oldBounds, markExpected)
-    structureCoordinates(newBounds, markExpected, materializedNewRoofCoordinates)
-
+-- The shared layout enumerator is the single template-derived source for the
+-- wall shell and the roof host coordinates of one bounds set.
+local function clearInvalidRoomOwnershipBounds(cell, bounds)
+    if type(bounds) ~= "table" then return 0 end
     local cleared = 0
-    local function inspect(square, x, y, z)
-        local key = tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
-        if visited[key] then return end
-        visited[key] = true
-        if clearInvalidRoomOwnershipSquare(square) then
+    Layout.eachStructureCoordinate(bounds, function(x, y, z)
+        local square = ServerWorld.getSquare(cell, x, y, z)
+        if square and clearInvalidRoomOwnershipSquare(square) then
             cleared = cleared + 1
         end
-    end
-    for i = 1, #expectedCoordinates do
-        local coordinate = expectedCoordinates[i]
-        local square = ServerWorld.getSquare(cell, coordinate.x, coordinate.y,
-            coordinate.z)
-        if square then
-            inspect(square, coordinate.x, coordinate.y, coordinate.z)
-        end
-    end
-    local expectedCount, visitedCount = 0, 0
-    for _ in pairs(expected) do expectedCount = expectedCount + 1 end
-    for _ in pairs(visited) do visitedCount = visitedCount + 1 end
-    if visitedCount ~= expectedCount then
-        error("RailroaderRVTest: room ownership scan skipped required structure squares")
-    end
+    end)
     return cleared
 end
 
@@ -189,15 +98,16 @@ local function objectCoordinates(object)
     return x, y, z, cellOk and cell or nil
 end
 
+-- Object hooks can run before IsoRegions finishes rebuilding dynamic rooms, so
+-- an event only marks its cell for one scan on the next tick; every event of
+-- that tick merges into the same scan.
 local function scheduleRoomOwnershipScan(guard, cell)
-    guard.stableSinceTick = nil
     if cell ~= nil then
         guard.pendingCells[cell] = true
     end
-    if guard.scanSeriesActive then return end
-    guard.scanSeriesActive = true
-    guard.scanSeriesStep = 1
-    guard.scanDueTick = ctx.serverTick + ROOM_OWNERSHIP_RECHECK_DELAYS[1]
+    if guard.scanDueTick == nil then
+        guard.scanDueTick = ctx.serverTick + 1
+    end
 end
 
 local function requestRoomOwnershipScan(object, includeOutcome)
@@ -426,18 +336,6 @@ local function roomOwnershipGuardKey(rvId, generation)
     return tostring(rvId) .. ":" .. tostring(generation)
 end
 
-local function collectMaterializedRoofCoordinates(cell, bounds)
-    local coordinates = {}
-    local roofZ = ServerUtil.requiredInteger(bounds.roofZ,
-        "room ownership roofZ")
-    structureCoordinates(bounds, function(x, y, z)
-        if z == roofZ and ServerWorld.getSquare(cell, x, y, z) then
-            coordinates[#coordinates + 1] = { x = x, y = y, z = z }
-        end
-    end)
-    return coordinates
-end
-
 local function registerServerRoomOwnershipGuard(generation, player, oldBounds,
     newBounds, rvId)
     if rvId == nil or tostring(rvId) == "" then
@@ -454,50 +352,35 @@ local function registerServerRoomOwnershipGuard(generation, player, oldBounds,
         player = player,
         oldBounds = oldBounds,
         newBounds = newBounds,
-        -- Before the generation roof is proven complete, refreshes require
-        -- every lower structure square and only upper squares actually
-        -- materialized in the transaction cell.  Old bounds stay full-scope.
-        newRoofCoordinates = {},
-        newRoofComplete = false,
-        ticks = 0,
-        totalCleared = 0,
-        stableSinceTick = nil,
         pendingCells = {},
-        scanSeriesActive = false,
-        scanSeriesStep = 0,
         scanDueTick = nil,
         nextNeighborhoodProbeTick = ctx.serverTick
             + ROOM_OWNERSHIP_3X3_INTERVAL_TICKS,
     }
     guard.key = roomOwnershipGuardKey(guard.rvId, guard.generation)
+    -- One guard per RV identity, kept for that identity's lifetime: a later
+    -- wall or floor removal must still be repaired after generation is READY.
+    for key, existing in pairs(roomOwnershipGuards) do
+        if existing.rvId == guard.rvId then
+            roomOwnershipGuards[key] = nil
+        end
+    end
     roomOwnershipGuards[guard.key] = guard
     return guard
 end
 
-local function refreshServerRoomOwnershipGuard(guard, phase, requireFullNewRoof)
+local function refreshServerRoomOwnershipGuard(guard, phase)
     local cells = relevantRoomOwnershipCells(guard, phase)
     local cleared = 0
-    local materializedRoofCoordinates
-    if requireFullNewRoof == true or guard.newRoofComplete == true then
-        materializedRoofCoordinates = nil
-    else
-        materializedRoofCoordinates = guard.newRoofCoordinates or {}
-    end
     for i = 1, #cells do
-        cleared = cleared + clearInvalidRoomOwnershipReferences(cells[i],
-            guard.oldBounds, guard.newBounds, materializedRoofCoordinates)
+        cleared = cleared + clearInvalidRoomOwnershipBounds(cells[i],
+            guard.oldBounds)
+        cleared = cleared + clearInvalidRoomOwnershipBounds(cells[i],
+            guard.newBounds)
     end
-    if requireFullNewRoof == true then
-        guard.newRoofCoordinates = nil
-        guard.newRoofComplete = true
-    end
-    guard.totalCleared = guard.totalCleared + cleared
-    if cleared == 0 then
-        guard.stableSinceTick = ctx.serverTick
-    else
-        guard.stableSinceTick = nil
-    end
-    if cleared > 0 or phase ~= nil then
+    guard.pendingCells = {}
+    guard.scanDueTick = nil
+    if cleared > 0 then
         print("[RailroaderRVTest] room ownership refresh generation="
             .. tostring(guard.generation) .. " phase=" .. tostring(phase or "tick")
             .. " cleared=" .. tostring(cleared))
@@ -545,8 +428,7 @@ local function processServerRoomOwnershipGuards()
     -- all active generations so overlapping guards do not repeat engine calls.
     local playerStates, snapshotOk = authoritativePlayerStatesSnapshot()
     local neighborhoodDue = {}
-    for generation, guard in pairs(roomOwnershipGuards) do
-        guard.ticks = guard.ticks + 1
+    for _, guard in pairs(roomOwnershipGuards) do
         local nextNeighborhoodProbeTick = guard.nextNeighborhoodProbeTick
         local due = type(nextNeighborhoodProbeTick) ~= "number"
             or ctx.serverTick >= nextNeighborhoodProbeTick
@@ -556,64 +438,15 @@ local function processServerRoomOwnershipGuards()
                 + ROOM_OWNERSHIP_3X3_INTERVAL_TICKS
         end
     end
-    if not snapshotOk then
-        for _, guard in pairs(roomOwnershipGuards) do
-            guard.stableSinceTick = nil
-            guard.lastError = "online player snapshot or position unavailable"
-        end
-    elseif #playerStates > 0 then
-        local probeOk, probeError = pcall(clearInvalidRoomOwnershipNearPlayers,
-            roomOwnershipGuards, playerStates, true, neighborhoodDue)
-        if not probeOk then
-            -- An inconclusive local probe neither asserts stability nor
-            -- justifies an expensive full-scope scan.
-            for _, guard in pairs(roomOwnershipGuards) do
-                guard.stableSinceTick = nil
-                guard.lastError = safeErrorText(probeError)
-            end
-        end
+    if snapshotOk and #playerStates > 0 then
+        clearInvalidRoomOwnershipNearPlayers(roomOwnershipGuards, playerStates,
+            true, neighborhoodDue)
     end
-    local finished = {}
-    for generation, guard in pairs(roomOwnershipGuards) do
-        if guard.scanSeriesActive
-            and (type(guard.scanDueTick) ~= "number"
-                or ctx.serverTick >= guard.scanDueTick) then
-            local ok, clearedOrError = pcall(refreshServerRoomOwnershipGuard, guard, nil)
-            if not ok then
-                guard.stableSinceTick = nil
-                guard.lastError = safeErrorText(clearedOrError)
-            elseif clearedOrError > 0 then
-                guard.lastError = nil
-            else
-                guard.lastError = nil
-            end
-            guard.scanSeriesStep = guard.scanSeriesStep + 1
-            local nextDelay = ROOM_OWNERSHIP_RECHECK_DELAYS[guard.scanSeriesStep]
-            if nextDelay ~= nil then
-                guard.scanDueTick = ctx.serverTick + nextDelay
-            else
-                guard.scanSeriesActive = false
-                guard.scanSeriesStep = 0
-                guard.scanDueTick = nil
-                guard.pendingCells = {}
-            end
+    -- Event-triggered structure scans, merged per tick by scheduleRoomOwnershipScan.
+    for _, guard in pairs(roomOwnershipGuards) do
+        if guard.scanDueTick ~= nil and ctx.serverTick >= guard.scanDueTick then
+            refreshServerRoomOwnershipGuard(guard, nil)
         end
-        if guard.ticks >= ROOM_OWNERSHIP_MAX_TICKS and not guard.scanSeriesActive then
-            print("[RailroaderRVTest] room ownership guard expired generation="
-                .. tostring(generation) .. " cleared=" .. tostring(guard.totalCleared)
-                .. (guard.lastError and " error=" .. guard.lastError or ""))
-            finished[#finished + 1] = generation
-        elseif guard.ticks >= ROOM_OWNERSHIP_MIN_TICKS
-            and not guard.scanSeriesActive and guard.stableSinceTick ~= nil
-            and (ctx.serverTick - guard.stableSinceTick)
-                >= ROOM_OWNERSHIP_STABLE_TICKS then
-            print("[RailroaderRVTest] room ownership guard complete generation="
-                .. tostring(generation) .. " cleared=" .. tostring(guard.totalCleared))
-            finished[#finished + 1] = generation
-        end
-    end
-    for i = 1, #finished do
-        roomOwnershipGuards[finished[i]] = nil
     end
 end
 
@@ -649,7 +482,7 @@ local function armClientRoomOwnershipGuard(generation, oldBounds, newBounds,
     end
 end
 
-local function removeGeneration(cell, bounds, generation, rvId, buildStage)
+local function removeGeneration(cell, bounds, generation, rvId)
     if not cell or type(bounds) ~= "table"
         or ServerUtil.requiredInteger(generation, "rollback generation") < 1
         or type(rvId) ~= "string" or rvId == "" then
@@ -687,30 +520,9 @@ local function removeGeneration(cell, bounds, generation, rvId, buildStage)
         error("RailroaderRVTest: rollback verification found " .. tostring(remaining)
             .. " tagged objects still present")
     end
-    -- Before CAPTURED_TEMPLATE has completed, some upper squares may not exist by
-    -- design. ensureRoofSquare connects each successful square to this cell,
-    -- so the remaining existing upper squares are the authoritative set that
-    -- rollback must inspect. Old bounds remain a strict full scan. After the
-    -- build has passed the captured-object loop, rollback requires every
-    -- captured roof-object host.
-    local roofBuildComplete = guard.newRoofComplete == true
-        or buildStage == "building"
-    if roofBuildComplete then
-        guard.newRoofCoordinates = nil
-        guard.newRoofComplete = true
-    else
-        guard.newRoofCoordinates = collectMaterializedRoofCoordinates(cell,
-            bounds)
-        guard.newRoofComplete = false
-    end
-    local guardCallOk, guardRefreshed, guardReason = pcall(
-        refreshServerRoomOwnershipGuard, guard, "after-rollback",
-        roofBuildComplete)
-    local clearedCount = guardCallOk and ServerUtil.integer(guardRefreshed) or nil
-    if not guardCallOk or clearedCount == nil or clearedCount < 0 then
-        error("RailroaderRVTest: rollback room ownership verification failed: "
-            .. tostring(guardCallOk and guardReason or guardRefreshed))
-    end
+    -- Rollback removes walls and floors, so the whole structure footprint is
+    -- inspected again for a square that kept a retired room ID.
+    refreshServerRoomOwnershipGuard(guard, "after-rollback")
 end
 
 -- Existing-RV entry/reconnects do not run the generation broadcast below.  Arm
@@ -745,7 +557,6 @@ end
 
 
 ctx.notifyFailure = notifyFailure
-ctx.removeOldGeneration = removeOldGeneration
 ctx.removeGeneration = removeGeneration
 ctx.requestRoomOwnershipScan = requestRoomOwnershipScan
 ctx.requestRoomOwnershipRemovalScan = requestRoomOwnershipRemovalScan

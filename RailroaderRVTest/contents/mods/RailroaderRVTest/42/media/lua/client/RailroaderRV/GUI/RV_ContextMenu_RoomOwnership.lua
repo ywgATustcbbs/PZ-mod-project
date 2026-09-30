@@ -3,12 +3,6 @@ return function(ctx)
 local C = ctx.C
 local Layout = ctx.Layout
 local roomOwnershipGuards = {}
-local ROOM_OWNERSHIP_MIN_TICKS = ctx.ROOM_OWNERSHIP_MIN_TICKS
-local ROOM_OWNERSHIP_REACTIVE_SCAN_INTERVAL_TICKS = 5
-local ROOM_OWNERSHIP_EVENT_RESCAN_COUNT = 3
-local ROOM_OWNERSHIP_EVENT_SCAN_COOLDOWN_TICKS =
-    (ROOM_OWNERSHIP_EVENT_RESCAN_COUNT + 1)
-        * ROOM_OWNERSHIP_REACTIVE_SCAN_INTERVAL_TICKS
 
 local function roomOwnershipGuardKey(rvId, generation)
     return tostring(rvId) .. ":" .. tostring(generation)
@@ -16,28 +10,6 @@ end
 
 local finiteNumber = C.finiteNumber
 local finiteInteger = C.finiteInteger
-
-local function findRoomOwnershipGuard(rvId, generation)
-    local exactGeneration = finiteInteger(generation)
-    if rvId == nil or tostring(rvId) == "" or exactGeneration == nil then
-        return nil
-    end
-    local guard = roomOwnershipGuards[roomOwnershipGuardKey(
-        rvId, exactGeneration)]
-    if type(guard) ~= "table" or tostring(guard.rvId) ~= tostring(rvId)
-        or guard.generation ~= exactGeneration then
-        return nil
-    end
-    return guard
-end
-
-local function roomOwnershipGuardStatus(rvId, generation)
-    local guard = findRoomOwnershipGuard(rvId, generation)
-    if guard == nil then
-        return false, false
-    end
-    return true, guard.currentCheckErrorLatched ~= true
-end
 
 local function validRailroaderFinalHint(args)
     local generation = type(args) == "table" and finiteInteger(args.generation)
@@ -138,30 +110,23 @@ end
 local function refreshInvalidRoomOwnership(guard)
     local cell = getCell()
     if not cell then
-        return false, 0
+        return 0
     end
-    local scanOk = true
-    local coverageComplete = true
     local cleared = 0
     local seen = {}
     local function inspect(square, x, y, z)
         local key = tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
-        if seen[key] then return end
+        if seen[key] or not square then return end
         seen[key] = true
-        if not square then
-            coverageComplete = false
-            return
-        end
         local inspected, reset = inspectRoomOwnershipSquare(square)
         if not inspected then
-            scanOk = false
-            return
+            error("RailroaderRVTest: client room ownership inspection failed")
         end
         cleared = cleared + reset
     end
     eachStructureSquare(cell, guard.oldBounds, inspect)
     eachStructureSquare(cell, guard.newBounds, inspect)
-    return scanOk and coverageComplete, cleared
+    return cleared
 end
 
 local function refreshCurrentPlayerRoomOwnership(guard)
@@ -202,14 +167,6 @@ local function refreshCurrentPlayerRoomOwnership(guard)
     return scanOk, cleared
 end
 
-local function refreshRoomOwnershipByIdentity(rvId, generation)
-    local guard = findRoomOwnershipGuard(rvId, generation)
-    if guard == nil then
-        return false, 0
-    end
-    return refreshInvalidRoomOwnership(guard)
-end
-
 local function objectCoordinates(object)
     if not object then return nil end
     local target = object
@@ -220,50 +177,12 @@ local function objectCoordinates(object)
     return squareCoordinates(target)
 end
 
-local function scheduleRoomOwnershipScan(guard, delayedRetries)
-    local delayedRetryCount = delayedRetries or 0
-    local allowGuardScan = true
-    if delayedRetryCount > 0 then
-        local cooldownUntil = guard.eventScanCooldownUntil or -1
-        if ctx.clientTick <= cooldownUntil then
-            allowGuardScan = false
-        else
-            -- Object callbacks in this fixed window merge into one bounded
-            -- delayed-recheck batch; later callbacks cannot refill its budget.
-            guard.eventScanCooldownUntil = ctx.clientTick
-                + ROOM_OWNERSHIP_EVENT_SCAN_COOLDOWN_TICKS
-        end
-    end
-
-    if allowGuardScan then
-        local nextTick = ctx.clientTick + 1
-        if guard.lastReactiveScanTick ~= nil then
-            nextTick = math.max(nextTick,
-                guard.lastReactiveScanTick
-                    + ROOM_OWNERSHIP_REACTIVE_SCAN_INTERVAL_TICKS)
-        end
-
-        local retries = guard.scanRetryRemaining or 0
-        local scanPending = guard.scanRequested == true or retries > 0
-        if not scanPending then
-            guard.scanRetryRemaining = delayedRetryCount
-        elseif retries == 0 and delayedRetryCount > 0 then
-            guard.scanRetryRemaining = delayedRetryCount
-        end
-
-        guard.scanRequested = true
-        if guard.nextScanTick == nil or nextTick < guard.nextScanTick then
-            guard.nextScanTick = nextTick
-        end
-    end
-
-    -- If the bounded transaction scan window was exhausted while client
-    -- chunks were still arriving, a later matching world/local trigger opens
-    -- one fresh bounded window. Unloaded data alone never counts as success.
-    local reopenFinalRelocationScan = ctx.reopenFinalRelocationScan
-    if type(reopenFinalRelocationScan) == "function" then
-        reopenFinalRelocationScan(
-            guard.rvId, guard.generation)
+-- Object callbacks can fire before the local cell and IsoRegions are ready, so
+-- a trigger only schedules one structure scan on the next tick; every trigger
+-- of that tick merges into the same scan.
+local function scheduleRoomOwnershipScan(guard)
+    if guard.nextScanTick == nil then
+        guard.nextScanTick = ctx.clientTick + 1
     end
 end
 
@@ -273,7 +192,7 @@ local function requestRoomOwnershipScan(object)
     for _, guard in pairs(roomOwnershipGuards) do
         if coordinatesInBounds(x, y, z, guard.oldBounds)
             or coordinatesInBounds(x, y, z, guard.newBounds) then
-            scheduleRoomOwnershipScan(guard, ROOM_OWNERSHIP_EVENT_RESCAN_COUNT)
+            scheduleRoomOwnershipScan(guard)
         end
     end
 end
@@ -309,96 +228,25 @@ local function beginRoomOwnershipRefresh(args)
         generation = generation,
         oldBounds = oldBounds,
         newBounds = newBounds,
-        ticks = 0,
-        totalCleared = 0,
-        monitorReady = false,
-        scanRequested = false,
-        scanRetryRemaining = 0,
         currentCheckErrorLatched = false,
-        eventScanCooldownUntil = -1,
+        nextScanTick = nil,
     }
     -- Arm immediately, before any ordered removal/rebuild packets that follow
-    -- this broadcast server command are applied.
+    -- this broadcast server command are applied, and repeat once on the next
+    -- tick in case this packet arrived before the local chunks or IsoRegions
+    -- were ready.
     local guard = roomOwnershipGuards[key]
-    local scanOk, cleared = refreshInvalidRoomOwnership(guard)
-    guard.totalCleared = cleared
-    guard.lastFullScanComplete = scanOk
-    guard.lastReactiveScanTick = ctx.clientTick
-    if not scanOk then
-        -- This packet can arrive before client chunks or IsoRegions are ready.
-        -- Retry only this incomplete setup a bounded number of times; there is
-        -- no recurring whole-footprint timer.
-        guard.scanRequested = true
-        guard.scanRetryRemaining = 2
-        guard.nextScanTick = ctx.clientTick
-            + ROOM_OWNERSHIP_REACTIVE_SCAN_INTERVAL_TICKS
-    end
-end
-
-local function finalTargetSquare(x, y, z)
-    local cell = getCell()
-    if not cell then
-        return nil
-    end
-    local squareCallOk, square = pcall(function()
-        return cell:getGridSquare(math.floor(x), math.floor(y), z)
-    end)
-    if not squareCallOk then
-        return nil
-    end
-    return square
-end
-
-local function finalTargetSquareIsLoaded(x, y, z)
-    return finalTargetSquare(x, y, z) ~= nil
-end
-
-local function finalTargetRoomIsValid(x, y, z)
-    local square = finalTargetSquare(x, y, z)
-    if not square then
-        -- The server waits for the complete footprint, but the client may
-        -- still be streaming its local cell. Keep the player at staging and
-        -- retry the synchronous check on a later command/tick.
-        return false
-    end
-    local roomCallOk, room = pcall(function()
-        return square:getRoom()
-    end)
-    if not roomCallOk then
-        return false
-    end
-    if room == nil then
-        return true
-    end
-    local roomDefCallOk, roomDef = pcall(function()
-        return square:getRoomDef()
-    end)
-    if not roomDefCallOk then
-        return false
-    end
-    if roomDef ~= nil then
-        return true
-    end
-    local resetCallOk = pcall(function()
-        square:setRoomID(-1)
-    end)
-    if not resetCallOk then
-        return false
-    end
-    local verifyCallOk, remainingRoom = pcall(function()
-        return square:getRoom()
-    end)
-    return verifyCallOk and remainingRoom == nil
+    refreshInvalidRoomOwnership(guard)
+    scheduleRoomOwnershipScan(guard)
 end
 
 local function updateRoomOwnershipGuards()
     for generation, guard in pairs(roomOwnershipGuards) do
-        guard.ticks = guard.ticks + 1
         local currentScanOk, currentCleared = refreshCurrentPlayerRoomOwnership(guard)
         if not currentScanOk then
             if not guard.currentCheckErrorLatched then
                 guard.currentCheckErrorLatched = true
-                scheduleRoomOwnershipScan(guard, 0)
+                scheduleRoomOwnershipScan(guard)
                 print("[RailroaderRVTest] client current-square room check failed; "
                     .. "queued one full scan generation="
                     .. tostring(generation))
@@ -410,33 +258,21 @@ local function updateRoomOwnershipGuards()
             guard.currentCheckErrorLatched = false
         end
         if currentScanOk and currentCleared > 0 then
-            scheduleRoomOwnershipScan(guard, 0)
-        end
-        if guard.scanRequested
-            and ctx.clientTick >= (guard.nextScanTick or 0) then
-            guard.scanRequested = false
-            local scanOk, cleared = refreshInvalidRoomOwnership(guard)
-            guard.totalCleared = guard.totalCleared + cleared
-            guard.lastFullScanComplete = scanOk
-            guard.lastReactiveScanTick = ctx.clientTick
-            if (guard.scanRetryRemaining or 0) > 0 then
-                guard.scanRetryRemaining = guard.scanRetryRemaining - 1
-                guard.scanRequested = true
-                guard.nextScanTick = ctx.clientTick
-                    + ROOM_OWNERSHIP_REACTIVE_SCAN_INTERVAL_TICKS
-            else
-                guard.nextScanTick = nil
-            end
+            scheduleRoomOwnershipScan(guard)
         end
         -- Keep the guard for the lifetime of this identity: a later wall or
         -- floor change can invalidate a room after generation has been READY.
-        -- The current-square check runs each tick; full scans are scheduled
-        -- only by a local repair/error or a relevant object event.
-        if not guard.monitorReady
-            and guard.ticks >= ROOM_OWNERSHIP_MIN_TICKS then
-            guard.monitorReady = true
-            print("[RailroaderRVTest] client room ownership guard active generation="
-                .. tostring(generation) .. " cleared=" .. tostring(guard.totalCleared))
+        -- The current-square check runs each tick; a structure scan is
+        -- scheduled only by a repair, an API failure, an object event or the
+        -- arming packet.
+        local dueTick = guard.nextScanTick
+        if dueTick ~= nil and ctx.clientTick >= dueTick then
+            guard.nextScanTick = nil
+            local cleared = refreshInvalidRoomOwnership(guard)
+            if cleared > 0 then
+                print("[RailroaderRVTest] client room ownership refresh generation="
+                    .. tostring(generation) .. " cleared=" .. tostring(cleared))
+            end
         end
     end
 end
@@ -444,12 +280,8 @@ end
 
 ctx.validRailroaderFinalHint = validRailroaderFinalHint
 ctx.localPlayerByOnlineId = localPlayerByOnlineId
-ctx.roomOwnershipGuardStatus = roomOwnershipGuardStatus
-ctx.refreshRoomOwnershipByIdentity = refreshRoomOwnershipByIdentity
 ctx.requestRoomOwnershipScan = requestRoomOwnershipScan
 ctx.beginRoomOwnershipRefresh = beginRoomOwnershipRefresh
-ctx.finalTargetSquareIsLoaded = finalTargetSquareIsLoaded
-ctx.finalTargetRoomIsValid = finalTargetRoomIsValid
 ctx.updateRoomOwnershipGuards = updateRoomOwnershipGuards
 ctx.finiteNumber = finiteNumber
 ctx.finiteInteger = finiteInteger

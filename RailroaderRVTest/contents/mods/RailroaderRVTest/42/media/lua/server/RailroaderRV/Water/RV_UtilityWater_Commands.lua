@@ -248,12 +248,6 @@ function M.setConnection(identity, context, hint, record)
     if not hasPipeWrench(context and context.player) then
         return false, U.REASONS.MISSING_TOOL
     end
-    local mappingOk, mappingReason = Ledger.validateMapping(record.water,
-        identity, context and context.record)
-    if not mappingOk then
-        markNeedsReconcile(identity, record)
-        return false, mappingReason
-    end
     local resolved, sinkOrReason = Objects.resolveSink(identity, context, hint)
     if not resolved then return false, sinkOrReason end
     local sink = sinkOrReason

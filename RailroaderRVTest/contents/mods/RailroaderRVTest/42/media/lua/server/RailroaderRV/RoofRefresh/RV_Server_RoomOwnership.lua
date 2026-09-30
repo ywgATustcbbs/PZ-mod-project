@@ -64,32 +64,15 @@ end
 
 local function structureCoordinates(bounds, callback, materializedRoofCoordinates)
     if bounds == nil then return end
-    if type(bounds) ~= "table" then
-        error("RailroaderRVTest: room ownership bounds are not a table")
-    end
-    local wallMinX = ServerUtil.requiredInteger(bounds.wallMinX,
-        "room ownership wallMinX")
-    local wallMaxX = ServerUtil.requiredInteger(bounds.wallMaxX,
-        "room ownership wallMaxX")
-    local wallMinY = ServerUtil.requiredInteger(bounds.wallMinY,
-        "room ownership wallMinY")
-    local wallMaxY = ServerUtil.requiredInteger(bounds.wallMaxY,
-        "room ownership wallMaxY")
-    local z = ServerUtil.requiredInteger(bounds.z, "room ownership z")
-    local roofMinX = ServerUtil.requiredInteger(bounds.roofMinX,
-        "room ownership roofMinX")
-    local roofMaxX = ServerUtil.requiredInteger(bounds.roofMaxX,
-        "room ownership roofMaxX")
-    local roofMinY = ServerUtil.requiredInteger(bounds.roofMinY,
-        "room ownership roofMinY")
-    local roofMaxY = ServerUtil.requiredInteger(bounds.roofMaxY,
-        "room ownership roofMaxY")
-    local roofZ = ServerUtil.requiredInteger(bounds.roofZ,
-        "room ownership roofZ")
-    if wallMinX > wallMaxX or wallMinY > wallMaxY
-        or roofMinX > roofMaxX or roofMinY > roofMaxY then
-        error("RailroaderRVTest: room ownership bounds are invalid")
-    end
+    -- These bounds are the current compiled-layout geometry, produced by
+    -- ServerSchema for the in-flight transaction.  They are read directly: a
+    -- malformed value is a programming error and must raise, not be converted
+    -- into a data-validation result.
+    local wallMinX, wallMaxX = bounds.wallMinX, bounds.wallMaxX
+    local wallMinY, wallMaxY = bounds.wallMinY, bounds.wallMaxY
+    local z, roofZ = bounds.z, bounds.roofZ
+    local roofMinX, roofMaxX = bounds.roofMinX, bounds.roofMaxX
+    local roofMinY, roofMaxY = bounds.roofMinY, bounds.roofMaxY
     for x = wallMinX, wallMaxX do
         for y = wallMinY, wallMaxY do callback(x, y, z) end
     end
@@ -104,10 +87,7 @@ local function structureCoordinates(bounds, callback, materializedRoofCoordinate
     if materializedRoofCoordinates == nil then
         -- The captured roof is sparse: inspect hosts inside the primary shell
         -- bounds, not every cell in its rectangular outline.
-        local anchorX = ServerUtil.requiredInteger(bounds.anchor.x,
-            "room ownership anchor.x")
-        local anchorY = ServerUtil.requiredInteger(bounds.anchor.y,
-            "room ownership anchor.y")
+        local anchorX, anchorY = bounds.anchor.x, bounds.anchor.y
         for i = 1, #templateObjects do
             local captured = templateObjects[i]
             if captured.z == roofZOffset then
@@ -121,20 +101,7 @@ local function structureCoordinates(bounds, callback, materializedRoofCoordinate
     else
         for i = 1, #materializedRoofCoordinates do
             local coordinate = materializedRoofCoordinates[i]
-            if type(coordinate) ~= "table" then
-                error("RailroaderRVTest: materialized roof coordinate is invalid")
-            end
-            local x = ServerUtil.requiredInteger(coordinate.x,
-                "materialized roof x")
-            local y = ServerUtil.requiredInteger(coordinate.y,
-                "materialized roof y")
-            local z = ServerUtil.requiredInteger(coordinate.z,
-                "materialized roof z")
-            if x < roofMinX or x > roofMaxX or y < roofMinY or y > roofMaxY
-                or z ~= roofZ then
-                error("RailroaderRVTest: materialized roof coordinate is outside bounds")
-            end
-            emitRoof(x, y, z)
+            emitRoof(coordinate.x, coordinate.y, coordinate.z)
         end
     end
 end

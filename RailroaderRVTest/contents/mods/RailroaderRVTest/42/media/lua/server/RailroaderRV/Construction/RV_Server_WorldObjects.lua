@@ -259,39 +259,19 @@ local function applyCapturedIdentityAndState(object, entry, deferHealth)
 end
 
 local function capturedTagData(entry, edge, tagContext)
-    local templateObject =
-        TemplateGeometry.lookupObjectByIndex(entry.templateIndex)
-    local anchorX = tagContext.anchorX
-    local anchorY = tagContext.anchorY
-    local anchorZ = tagContext.anchorZ
+    -- Identity only: `templateIndex` names the template entry, and the world
+    -- transform is derived from the object's own square at read time.
     local result = {
         templateIndex = entry.templateIndex,
-        templateX = templateObject.x,
-        templateY = templateObject.y,
-        templateZ = templateObject.z,
-        templateAnchorX = anchorX,
-        templateAnchorY = anchorY,
-        templateAnchorZ = anchorZ,
-        templateWorldX = entry.x,
-        templateWorldY = entry.y,
-        templateWorldZ = entry.z,
         templateClass = entry.class,
         templateName = entry.name,
         templateSprite = entry.sprite,
         templateNorth = entry.north,
-        protected = templateObject.protected,
         templateDirection = entry.direction,
     }
     if edge then
         result.edgeKey = edge.edgeKey
         result.axis = edge.axis
-    end
-    if type(entry.state) == "table" and entry.class == "IsoThumpable"
-        and entry.name == "Wooden Wall" and entry.state.doRender == false
-        and type(edge) == "table"
-        and (edge.role == "wall-north" or edge.role == "wall-west"
-            or edge.role == "corner-nw") then
-        result.templateBoundarySupportWall = true
     end
     return result
 end
@@ -893,7 +873,7 @@ local function generatorObjectTag(object)
     return nested
 end
 
-local function isWhitelistedGenerator(object, boundary, manifest)
+local function isWhitelistedGenerator(object, boundary)
     local tag = generatorObjectTag(object)
     if not tag or not sameIdentity(tag, boundary) or tag.role ~= "generator"
         or not ServerUtil.classInstance(object, "IsoGenerator") then
@@ -951,33 +931,25 @@ local function ensureGeneratorForEntry(player, record)
     if not server or type(server.currentRVManifestForRelocation) ~= "function" then
         return false, Constants.INVALID_RV_DATA
     end
-    local manifestOk, accepted, manifest = pcall(
-        server.currentRVManifestForRelocation, record.locoId,
-        record.generation)
-    -- The manifest view derives the anchor and managed bounds from the
-    -- compiled template for the record's slot; nothing geometry-shaped is
-    -- stored beside the record, so only the identity is compared here.
+    -- The published mapping identity is the whole gate for this entry path; the
+    -- view derives the anchor and managed bounds from the compiled template, so
+    -- nothing here re-verifies this process's own arithmetic.
+    local viewOk, accepted = pcall(server.currentRVManifestForRelocation,
+        record.locoId, record.generation)
+    if not viewOk or accepted ~= true then
+        return false, Constants.INVALID_RV_DATA
+    end
     local boundary = Boundary and Boundary.boundaryFor(record) or nil
-    if not manifestOk or accepted ~= true or type(manifest) ~= "table"
-        or manifest.state ~= "READY"
-        or not sameIdentity(record, manifest)
-        or type(boundary) ~= "table"
-        or type(boundary.managed) ~= "table" then
+    if type(boundary) ~= "table" or type(boundary.managed) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
     local anchor = TemplateGeometry.anchorFromManaged(boundary.managed)
-    local anchorX, anchorY, anchorZ = integer(anchor and anchor.x),
-        integer(anchor and anchor.y), integer(anchor and anchor.z)
-    if not anchorX or not anchorY or not anchorZ then
+    if type(anchor) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
-    local x = anchorX + Constants.GENERATOR_OFFSET.x
-    local y = anchorY + Constants.GENERATOR_OFFSET.y
-    local z = anchorZ + Constants.GENERATOR_OFFSET.z
-    if not TemplateGeometry.inManagedRegion({ x = x, y = y, z = z },
-        boundary.managed) then
-        return false, Constants.INVALID_RV_DATA
-    end
+    local x = anchor.x + Constants.GENERATOR_OFFSET.x
+    local y = anchor.y + Constants.GENERATOR_OFFSET.y
+    local z = anchor.z + Constants.GENERATOR_OFFSET.z
 
     local cellOk, cell = pcall(ServerWorld.getCellForPlayer, player)
     if not cellOk or not cell then
@@ -1013,7 +985,7 @@ local function ensureGeneratorForEntry(player, record)
     for i = 1, #objects do
         local object = objects[i]
         before[object] = true
-        if isWhitelistedGenerator(object, boundary, manifest) then
+        if isWhitelistedGenerator(object, boundary) then
             present = true
         elseif ServerUtil.classInstance(object, "IsoGenerator") then
             ambiguous = true
@@ -1040,7 +1012,7 @@ local function ensureGeneratorForEntry(player, record)
         local containsOk, attached = ServerWorld.squareContainsObject(square,
             created)
         return containsOk and attached == true
-            and isWhitelistedGenerator(created, boundary, manifest)
+            and isWhitelistedGenerator(created, boundary)
     end)
     if not verifyOk or attachedAndCurrent ~= true then
         local rollbackCallOk, rollbackOk, rollbackReason = pcall(

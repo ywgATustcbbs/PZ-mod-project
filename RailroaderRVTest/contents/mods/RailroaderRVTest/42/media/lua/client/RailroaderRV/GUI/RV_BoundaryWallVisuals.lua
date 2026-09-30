@@ -6,6 +6,7 @@ local C = require "RailroaderRV/Common/RV_Constants"
 local RoomTemplate = require "RailroaderRV/RoomTemplate/RV_RoomTemplate"
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
+local TemplateGeometry = require "RailroaderRV/RoomTemplate/RV_TemplateGeometry"
 
 local boundaryRoles = {
     ["wall-north"] = true,
@@ -43,39 +44,49 @@ local function isTaggedBoundarySupportWall(object)
     local tag = data.RailroaderRVTest
     local templateIndex = type(tag) == "table" and C.finiteInteger(tag.templateIndex) or nil
     local expected = templateIndex and templateObjects[templateIndex] or nil
-    local anchorX = type(tag) == "table" and C.finiteInteger(tag.templateAnchorX) or nil
-    local anchorY = type(tag) == "table" and C.finiteInteger(tag.templateAnchorY) or nil
-    local anchorZ = type(tag) == "table" and C.finiteInteger(tag.templateAnchorZ) or nil
-    if type(tag) ~= "table" or tag.templateBoundarySupportWall ~= true
+    if type(tag) ~= "table"
         or data.owner ~= C.MOD_ID or tag.owner ~= C.MOD_ID
         or type(data.rvId) ~= "string" or data.rvId == ""
         or data.rvId ~= tag.rvId
         or C.finiteInteger(data.generation) == nil or C.finiteInteger(data.generation) < 1
         or C.finiteInteger(data.generation) ~= C.finiteInteger(tag.generation)
         or data.role ~= tag.role or not boundaryRoles[tag.role]
-        or not expected or expected.protected ~= true
-        or tag.protected ~= expected.protected
-        or C.finiteInteger(tag.templateX) ~= expected.x
-        or C.finiteInteger(tag.templateY) ~= expected.y
-        or C.finiteInteger(tag.templateZ) ~= expected.z
-        or anchorX == nil or anchorY == nil or anchorZ == nil
-        or C.finiteInteger(tag.templateWorldX) ~= anchorX + expected.x
-        or C.finiteInteger(tag.templateWorldY) ~= anchorY + expected.y
-        or C.finiteInteger(tag.templateWorldZ) ~= anchorZ + expected.z
-        or tag.templateClass ~= "IsoThumpable"
-        or expected.class ~= "IsoThumpable"
-        or expected.name ~= "Wooden Wall"
-        or tag.templateName ~= expected.name
-        or not supportWallSprites[expected.sprite]
-        or tag.templateSprite ~= expected.sprite
-        or tag.templateDirection ~= expected.direction then
+        or not expected then
         return false
     end
-    if tag.templateNorth ~= expected.north then return false end
-    if tag.role == "wall-north" or tag.role == "corner-nw" then
-        return expected.north == true
+    -- The boundary role is exactly the set the server assigns to captured shell
+    -- edges; the rest of the entry is re-read from the template and the live
+    -- object, because the tag stores no geometry and no support-wall marker.
+    if expected.class ~= "IsoThumpable"
+        or expected.name ~= "Wooden Wall"
+        or not supportWallSprites[expected.sprite]
+        or type(expected.state) ~= "table"
+        or expected.state.doRender ~= false
+        or tag.templateClass ~= expected.class
+        or tag.templateName ~= expected.name
+        or tag.templateSprite ~= expected.sprite
+        or tag.templateDirection ~= expected.direction
+        or tag.templateNorth ~= expected.north then
+        return false
     end
-    return expected.north == false
+    if tag.role == "wall-north" or tag.role == "corner-nw" then
+        if expected.north ~= true then return false end
+    elseif expected.north ~= false then
+        return false
+    end
+
+    local xOk, x = call(object, "getX")
+    local yOk, y = call(object, "getY")
+    local zOk, z = call(object, "getZ")
+    if not xOk or not yOk or not zOk then return false end
+    x, y, z = C.finiteInteger(x), C.finiteInteger(y), C.finiteInteger(z)
+    if x == nil or y == nil or z == nil then return false end
+    -- The live square derives both anchor and offset; see RV_WardrobeVisuals.
+    local anchor = TemplateGeometry.templateAnchorForWorld(x, y, z)
+    local offset = type(anchor) == "table" and TemplateGeometry.worldToTemplate(
+        { x = x, y = y, z = z }, anchor) or nil
+    return type(offset) == "table" and offset.x == expected.x
+        and offset.y == expected.y and offset.z == expected.z
 end
 
 local function hideBoundarySupportWall(object)

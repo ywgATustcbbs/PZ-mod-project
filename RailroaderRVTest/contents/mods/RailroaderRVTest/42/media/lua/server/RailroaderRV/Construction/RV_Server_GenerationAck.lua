@@ -20,8 +20,6 @@ local function isInvalidRVData(reason)
         and string.find(tostring(reason), marker, 1, true) ~= nil
 end
 local removeGeneration = ctx.removeGeneration
-local manifestTable = ctx.manifestTable
-local markGenerationFailed = ctx.markGenerationFailed
 local tryAuthoritativePlayerPosition = ctx.tryAuthoritativePlayerPosition
 local generationDisconnected = ctx.generationDisconnected
 local pauseGenerationForDisconnect = ctx.pauseGenerationForDisconnect
@@ -89,7 +87,7 @@ end
 
 -- FinalRelocate has its own ACK namespace.  The payload is deliberately only
 -- the opaque token; all RV identity, destination and room/guard evidence is
--- re-read from the server-owned pending plan and current manifest.
+-- re-read from the server-owned in-memory pending plan.
 local function acknowledgeFinalRelocation(player, args)
     local pending = GenerationTransaction.current()
     local token = ackPayloadToken(args)
@@ -200,16 +198,6 @@ local function rollbackPendingGenerationWorld(pending, reason)
         pending.rollbackWorldRetryAtTick or { hi32 = 0, lo32 = 0 }) then
         return false
     end
-    local manifest = pending.manifest
-    if type(manifest) ~= "table" then
-        local manifestOk, manifestOrReason = pcall(manifestTable)
-        if not manifestOk or type(manifestOrReason) ~= "table" then
-            print("[RailroaderRVTest] final relocation rollback deferred reason="
-                .. safeErrorText(manifestOrReason))
-            return false
-        end
-        manifest = manifestOrReason
-    end
     local cell = pending.generationCell
     if not cell then
         local cellOk, cellOrReason = pcall(ServerWorld.getCellForPlayer, pending.player)
@@ -220,6 +208,11 @@ local function rollbackPendingGenerationWorld(pending, reason)
         end
         cell = cellOrReason
     end
+    -- The world rollback is the only durable consequence of a failed final
+    -- relocation; the in-memory transaction records that it completed.
+    print("[RailroaderRVTest] final relocation rollback generation="
+        .. tostring(pending.generation) .. " reason="
+        .. safeErrorText(reason or "unspecified"))
     local rollbackOk, rollbackReason = pcall(removeGeneration, cell,
         pending.bounds, pending.generation, pending.rvId)
     if not rollbackOk then
@@ -227,15 +220,6 @@ local function rollbackPendingGenerationWorld(pending, reason)
             Core.tickAdd(ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS))
         print("[RailroaderRVTest] final relocation rollback failed: "
             .. safeErrorText(rollbackReason))
-        return false
-    end
-    local markedOk, marked, markedReason = pcall(markGenerationFailed, manifest,
-        safeErrorText(reason or "final relocation acknowledgement failed"))
-    if not markedOk or marked ~= true then
-        GenerationTransaction.rollback("world-retry",
-            Core.tickAdd(ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS))
-        print("[RailroaderRVTest] final relocation failure marker deferred: "
-            .. safeErrorText(markedOk and markedReason or marked))
         return false
     end
     GenerationTransaction.rollback("world-complete")

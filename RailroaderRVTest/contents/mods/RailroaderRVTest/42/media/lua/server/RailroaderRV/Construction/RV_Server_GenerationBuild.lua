@@ -1,7 +1,5 @@
 -- RV_Server: GenerationBuild responsibilities.
 return function(ctx)
-local C = ctx.Constants
-local MANIFEST_KEY = C.MANIFEST_KEY
 local Constants = ctx.Constants
 local Boundary = ctx.Boundary
 local ServerUtil = ctx.ServerUtil
@@ -33,17 +31,10 @@ safeErrorText = function(err)
     return text
 end
 
--- The durable manifest holds only slot allocation and mutation state.  Every
--- geometric or schema fact is derived from the compiled template at read time.
-local function manifestTable()
-    return ModData.getOrCreate(MANIFEST_KEY)
-end
-
-local function setManifestState(manifest, state)
-    manifest.state = state
-end
-
-local function setGenerationPhase(manifest, generation, phase)
+-- Generation has no durable mutation record.  Concurrency, phase and failure
+-- state live in the process-local transaction (RV_Server_GenerationTransaction);
+-- every geometric or schema fact is derived from the compiled template.
+local function setGenerationPhase(generation, phase)
     print("[RailroaderRVTest] generation=" .. tostring(generation)
         .. " phase=" .. tostring(phase))
 end
@@ -98,8 +89,8 @@ local function recalcAndCheckStructure(cell, bounds, layout)
     return checked
 end
 
-local function clearGenerationArea(cell, bounds, generation, manifest)
-    setGenerationPhase(manifest, generation, "CLEARING")
+local function clearGenerationArea(cell, bounds, generation)
+    setGenerationPhase(generation, "CLEARING")
     -- Scan the full managed bounds and clean only squares the cell currently
     -- has. Construction preflight rejects occupants that lack a complete undo
     -- path before this phase can mutate the world.
@@ -108,22 +99,15 @@ local function clearGenerationArea(cell, bounds, generation, manifest)
     end)
 end
 
-local function buildGeneration(player, layout, bounds, generation, manifest)
+local function buildGeneration(player, layout, bounds, generation)
     local cell = ServerWorld.getCellForPlayer(player)
     local sprites = Constants.SPRITES
     local generatorSprite = sprites.generator.sprite
 
-    -- Every feature point is part of the current shared layout contract.
-    local anchor = layout.anchor
-    local anchorX, anchorY, anchorZ = anchor.x, anchor.y, anchor.z
-    -- The object tags carry the current generation identity.  It comes from the
-    -- in-flight transaction, not from the durable manifest record.
+    -- Tags carry identity only; geometry is derived from the live square.
     local pending = GenerationTransaction.current()
     local tagContext = {
         rvId = pending and pending.rvId,
-        anchorX = anchorX,
-        anchorY = anchorY,
-        anchorZ = anchorZ,
     }
     local templateObjects = layout.templateObjects
     local shellByTemplateIndex = {}
@@ -137,7 +121,7 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
 
     local generatorPoint = layout.generator
 
-    setGenerationPhase(manifest, generation, "CAPTURED_TEMPLATE")
+    setGenerationPhase(generation, "CAPTURED_TEMPLATE")
     for i = 1, #templateObjects do
         local entry = templateObjects[i]
         local square
@@ -152,10 +136,10 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
             shellByTemplateIndex[i])
     end
 
-    setGenerationPhase(manifest, generation, "STRUCTURE_RECALC")
+    setGenerationPhase(generation, "STRUCTURE_RECALC")
     recalcAndCheckStructure(cell, bounds, layout)
 
-    setGenerationPhase(manifest, generation, "GENERATOR")
+    setGenerationPhase(generation, "GENERATOR")
     local generatorSquare = ServerWorld.getSquare(cell, generatorPoint.x,
         generatorPoint.y, generatorPoint.z)
     if not generatorSquare then
@@ -164,30 +148,11 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
     createGenerator(cell, generatorSquare, generatorSprite, generation, tagContext)
 end
 
--- The generation failure marker is durable: it stops the same RV slot from
--- being rebuilt silently after a rollback that did not complete.
-local function markGenerationFailed(manifest, errorText)
-    if type(manifest) == "table" then manifest.state = "FAILED" end
-    return true, nil
-end
-
-local function finalizeGeneration(manifest, ok, resultOrError,
-    preserveManifestOnFailure)
+-- Failure is reported to the caller; the in-memory transaction owns the
+-- retry/rollback outcome, so generation keeps no durable failure marker.
+local function finalizeGeneration(ok, resultOrError)
     local finalized, finalResult, finalReason = pcall(function()
-        local finalizationFailure
-        if not ok and preserveManifestOnFailure ~= true then
-            local errorText = safeErrorText(resultOrError)
-            local marked, markerFailure = markGenerationFailed(manifest, errorText)
-            if not marked then
-                finalizationFailure = markerFailure
-            end
-        end
         if not ok then
-            local message = safeErrorText(resultOrError)
-            if finalizationFailure then
-                message = message .. " (manifest finalization failed: "
-                    .. safeErrorText(finalizationFailure) .. ")"
-            end
             if Boundary and type(Boundary.clearPlayer) == "function" then
                 local pending = GenerationTransaction.current()
                 if pending then
@@ -195,7 +160,7 @@ local function finalizeGeneration(manifest, ok, resultOrError,
                     pcall(Boundary.clearPlayer, pending.player)
                 end
             end
-            return false, message
+            return false, safeErrorText(resultOrError)
         end
         return true, resultOrError
     end)
@@ -225,8 +190,6 @@ buildGeneration = construction.buildCurrentGeneration
 -- coordinates and stable identities only while this process is alive; no
 -- intermediate relocation record is read from or written to ModData.
 
-ctx.setManifestState = setManifestState
-ctx.manifestTable = manifestTable
 ctx.setGenerationPhase = setGenerationPhase
 ctx.clearGenerationArea = clearGenerationArea
 ctx.buildGeneration = buildGeneration
@@ -234,7 +197,6 @@ ctx.constructionService = construction
 if type(ctx.RV) == "table" and type(ctx.RV.Server) == "table" then
     ctx.RV.Server.Construction = construction
 end
-ctx.markGenerationFailed = markGenerationFailed
 ctx.finalizeGeneration = finalizeGeneration
 ctx.safeErrorText = safeErrorText
 end

@@ -405,7 +405,6 @@ local function ensureRuntime(identity, record)
     record.power.lastUpdateTime = now
     record.power.lastSettlementTime = now
     record.power.generationPowerW = 0
-    record.power.currentLoadW = 0
     record.power.state = U.POWER_STATE_READY
     local proxyOk, proxyReason = syncCircuitProxy(identity, record.power, nil)
     if not proxyOk then return false, proxyReason end
@@ -446,11 +445,9 @@ function M.settleAndRefreshLoad(identity, player, providedRecord)
     power.generationPowerW = settleGeneration(power, elapsedHours)
     power.batteryWh = math.max(0, math.min(power.batteryCapacityWh,
         power.batteryWh - batteryOutputWh))
-    power.currentLoadW = loadW
     local proxyOk, proxyReason = syncCircuitProxy(identity, power, player)
     if not proxyOk then return false, proxyReason end
     Devices.refreshStates(identity, player, power.circuitState == U.CIRCUIT_ON)
-    power.currentLoadW = Devices.currentLoadW(identity)
     power.lastUpdateTime = now
     power.lastSettlementTime = now
     bump(power)
@@ -565,10 +562,11 @@ function M.addBattery(identity, context, hint)
     local values = P.batteryParameters(condition, maxCondition)
     if not values or values.capacityWh <= 0 then return false, U.REASONS.SOURCE_INVALID end
     local power = recordOrReason.power
-    local battery = { id = power.nextBatteryId, fullType = fullType,
+    -- The identifier only labels a slot in this list; it is derived here instead
+    -- of being stored, so it can never drift from the battery array.
+    local battery = { id = #power.batteries + 1, fullType = fullType,
         condition = condition, maxCondition = maxCondition, usedDelta = usedDelta,
         modData = itemModData(found.item) }
-    power.nextBatteryId = power.nextBatteryId + 1
     power.batteries[#power.batteries + 1] = battery
     -- Item charge contributes proportionally; condition independently shapes pack capacity.
     power.batteryWh = power.batteryWh + values.capacityWh * usedDelta
@@ -813,6 +811,9 @@ end
 
 function M.snapshot(record, identity, context)
     local result = Store.snapshot(record).power
+    -- The load is a live reading of the resolved device cache, not ledger state;
+    -- compute it here so the client never reads a stale persisted copy.
+    result.currentLoadW = Devices.currentLoadW(identity)
     result.deviceCount = Devices.count(identity)
     result.proxyActive = false
     local object, native = boundProxy(identity, record.power,

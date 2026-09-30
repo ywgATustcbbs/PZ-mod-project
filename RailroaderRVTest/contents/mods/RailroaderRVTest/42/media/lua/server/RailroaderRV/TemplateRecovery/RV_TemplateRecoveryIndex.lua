@@ -7,7 +7,6 @@ local Boundary = ctx.Boundary
 local Constants = ctx.Constants
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
-local manifestTable = ctx.manifestTable
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
@@ -87,38 +86,14 @@ local function validCurrentContext(player, expectedBoundary)
         or (expectedBoundary and boundary ~= expectedBoundary) then
         return false, "player is not mapped to the current RV generation"
     end
-    local manifestOk, manifest = pcall(manifestTable)
-    if not manifestOk or type(manifest) ~= "table" then
+    -- Boundary and record are the authorities for this context.  Both were
+    -- rebuilt from the published mapping record by the boundary service, so
+    -- re-deriving the region geometry here would only re-check this process's
+    -- own arithmetic; the coordinate transform below consumes them directly.
+    if not sameIdentity(record, boundary) then
         return false, Constants.INVALID_RV_DATA
     end
-    -- The manifest carries identity and mutation state only.  The template and
-    -- slot matrix are the authority for every geometric fact below.
-    if manifest.state ~= "READY"
-        or not sameIdentity(manifest, boundary)
-        or not sameIdentity(record, boundary) then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local region = RegionSlots.indexToRegion(record.slotIndex)
-    local managed = boundary.managed
-    if type(region) ~= "table" or type(managed) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local regionMinX, regionMinY = integer(region.minX), integer(region.minY)
-    local regionMaxX, regionMaxY = integer(region.maxX), integer(region.maxY)
-    local originX, originY = integer(managed.originX), integer(managed.originY)
-    local width, height = integer(managed.width), integer(managed.height)
-    local managedMinZ, managedMaxZ = integer(managed.minZ), integer(managed.maxZ)
-    local anchor = TemplateGeometry.anchorFromManaged(managed, Template)
-    if not regionMinX or not regionMinY or not regionMaxX or not regionMaxY
-        or not originX or not originY
-        or not width or not height or not managedMinZ or not managedMaxZ
-        or not anchor
-        or RegionSlots.indexForAnchor(anchor) ~= integer(record.slotIndex)
-        or originX < regionMinX or originY < regionMinY
-        or originX + width > regionMaxX or originY + height > regionMaxY then
-        return false, Constants.INVALID_RV_DATA
-    end
-    return true, boundary, record, manifest, identity
+    return true, boundary, record, identity
 end
 
 local function isCabCoordinate(x, y, z, anchor)

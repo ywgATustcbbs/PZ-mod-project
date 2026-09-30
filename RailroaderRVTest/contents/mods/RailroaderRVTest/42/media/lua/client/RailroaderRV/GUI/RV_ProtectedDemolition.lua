@@ -25,24 +25,17 @@ local function call(target, method, ...)
 end
 
 local objectCoordinates
-local function tagMatchesStaticIdentity(tag, expected, templateIndex,
-    protected)
-    if type(tag) ~= "table" or type(expected) ~= "table"
-        or C.finiteInteger(tag.templateIndex) ~= templateIndex
-        or C.finiteInteger(tag.templateX) ~= expected.x
-        or C.finiteInteger(tag.templateY) ~= expected.y
-        or C.finiteInteger(tag.templateZ) ~= expected.z
-        or tag.templateClass ~= expected.class
-        or tag.templateName ~= expected.name
-        or tag.templateSprite ~= expected.sprite
-        or tag.templateDirection ~= expected.direction
-        or tag.protected ~= protected then
-        return false
-    end
-    if expected.north == "none" then
-        return tag.templateNorth == nil
-    end
-    return tag.templateNorth == expected.north
+-- The tag names the current template entry and role and stores no geometry; the
+-- entry identity is re-read from the compiled template below.
+local function tagMatchesStaticIdentity(tag, expected, templateIndex)
+    return type(tag) == "table" and type(expected) == "table"
+        and C.finiteInteger(tag.templateIndex) == templateIndex
+        and tag.templateClass == expected.class
+        and tag.templateName == expected.name
+        and tag.templateSprite == expected.sprite
+        and tag.templateDirection == expected.direction
+        and (expected.north == "none" and tag.templateNorth == nil
+            or tag.templateNorth == expected.north)
 end
 
 objectCoordinates = function(object)
@@ -130,12 +123,11 @@ local function rejectInvalidRVData(character, reason)
 end
 
 local function objectMatchesStaticIdentity(object, tag, expected,
-    templateIndex, protected)
+    templateIndex)
     local function fail(reason, detail)
         return false
     end
-    if not tagMatchesStaticIdentity(tag, expected, templateIndex,
-        protected) then
+    if not tagMatchesStaticIdentity(tag, expected, templateIndex) then
         return fail("template-tag-static-fields-mismatch")
     end
     local indexOk, objectIndex = call(object, "getObjectIndex")
@@ -195,16 +187,10 @@ local function resolveTemplateObject(object, tag)
 
     local x, y, z = objectCoordinates(object)
     if x == nil then return nil, "object-world-coordinate-unavailable" end
-    local anchorX, anchorY, anchorZ = C.finiteInteger(tag.templateAnchorX),
-        C.finiteInteger(tag.templateAnchorY), C.finiteInteger(tag.templateAnchorZ)
-    if anchorX == nil or anchorY == nil or anchorZ == nil then
-        return nil, "template-anchor-unavailable"
-    end
-    local anchor = TemplateGeometry.templateAnchorForWorld(x, y, anchorZ)
+    -- The tag stores no anchor; the live square derives both anchor and offset,
+    -- and a square from a neighbouring region fails the lookup below.
+    local anchor = TemplateGeometry.templateAnchorForWorld(x, y, z)
     if type(anchor) ~= "table" then return nil, "template-anchor-unavailable" end
-    if anchor.x ~= anchorX or anchor.y ~= anchorY then
-        return nil, "template-anchor-does-not-match-world-region"
-    end
     local world = { x = x, y = y, z = z }
     local offset = TemplateGeometry.worldToTemplate(world, anchor)
     if type(offset) ~= "table" then return nil, "world-to-template-failed" end
@@ -238,8 +224,7 @@ local function isCurrentProhibitedObject(object, character)
     end
 
     local hasTemplateMarker = type(tag) == "table"
-        and (tag.templateIndex ~= nil or tag.protected ~= nil
-            or templateRoles[tag.role] == true)
+        and (tag.templateIndex ~= nil or templateRoles[tag.role] == true)
         or templateRoles[data.role] == true
     if not hasTemplateMarker then
         -- The native generator and other feature-owned objects have their own
@@ -261,10 +246,7 @@ local function isCurrentProhibitedObject(object, character)
         return rejectInvalidRVData(character,
             index or "template-object-unrecognized")
     end
-    if not tagMatchesStaticIdentity(tag, expected, index,
-        expected.protected)
-        or not objectMatchesStaticIdentity(object, tag, expected, index,
-            expected.protected) then
+    if not objectMatchesStaticIdentity(object, tag, expected, index) then
         return rejectInvalidRVData(character, "template-static-identity-mismatch")
     end
     if TemplateGeometry.cabContainsWorld(world, anchor, Template) then

@@ -23,7 +23,6 @@ local playerId = ctx.playerId
 local playerName = ctx.playerName
 local findTrain = ctx.findTrain
 local trainPosition = ctx.trainPosition
-local copyPosition = ctx.copyPosition
 
 local validatedMapCache
 local boundaryValidation
@@ -466,47 +465,9 @@ local function allocateRVRegion(locoId)
             minY = integer(region.minY), maxX = integer(region.maxX),
             maxY = integer(region.maxY) }
     end
-    -- A current technical generation has no locomotive entry to reserve its
-    -- slot in TrainMap. Keep its exact current manifest slot occupied so a
-    -- different RV cannot reuse or silently overwrite that technical identity.
-    if ModData and type(ModData.get) == "function" then
-        local manifestOk, manifest = pcall(ModData.get, C.MANIFEST_KEY)
-        if not manifestOk then return false, C.INVALID_RV_DATA end
-        if type(manifest) == "table" then
-            local empty = true
-            for _ in pairs(manifest) do
-                empty = false
-                break
-            end
-            if not empty then
-                local manifestSlot = integer(manifest.slotIndex)
-                local manifestRvId = type(manifest.rvId) == "string"
-                    and manifest.rvId or nil
-                local state = manifest.state
-                if not manifestSlot or manifestSlot < 1
-                    or manifestSlot > RegionSlots.COUNT
-                    or not manifestRvId or manifestRvId == "" then
-                    return false, C.INVALID_RV_DATA
-                end
-                local mappedRvId = occupiedSlots[manifestSlot]
-                if mappedRvId ~= nil and mappedRvId ~= manifestRvId then
-                    return false, C.INVALID_RV_DATA
-                end
-                local rollbackComplete = state == "FAILED"
-                    and manifest.rollback == "COMPLETE"
-                if not mappedRvId and not rollbackComplete then
-                    local region = RegionSlots.indexToRegion(manifestSlot)
-                    if type(region) ~= "table" then
-                        return false, C.INVALID_RV_DATA
-                    end
-                    occupiedSlots[manifestSlot] = manifestRvId
-                    occupied[#occupied + 1] = region
-                end
-            end
-        elseif manifest ~= nil then
-            return false, C.INVALID_RV_DATA
-        end
-    end
+    -- The published train map is the only persistent slot allocation.  An
+    -- unmapped technical generation reserves nothing across a restart; its
+    -- concurrency is owned by the in-memory generation transaction.
     local slotIndex, anchor = RegionSlots.findFirstFree(occupied)
     if not slotIndex or type(anchor) ~= "table" then
         return false, slotIndex == nil and "no free RV region slot" or C.INVALID_RV_DATA

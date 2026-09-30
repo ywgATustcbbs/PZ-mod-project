@@ -15,7 +15,6 @@ local COMMAND_REFRESH_ROOM_OWNERSHIP = "RefreshRoomOwnership"
 local COMMAND_RV_ENTER = "EnterRV"
 local COMMAND_RV_EXIT = "ExitRV"
 local COMMAND_RV_TELEPORT = "RVTeleport"
-local MANIFEST_KEY = "RailroaderRVTest.Manifest"
 
 -- Railroader entry/exit is implemented by RV_RailroaderServer.lua.  These
 -- callbacks keep the long-running generation transaction authoritative without
@@ -137,7 +136,6 @@ local ctx = {
     COMMAND_RV_ENTER = COMMAND_RV_ENTER,
     COMMAND_RV_EXIT = COMMAND_RV_EXIT,
     COMMAND_RV_TELEPORT = COMMAND_RV_TELEPORT,
-    MANIFEST_KEY = MANIFEST_KEY,
     railroaderValidationHook = railroaderValidationHook,
     railroaderCommitHook = railroaderCommitHook,
     railroaderFailureHook = railroaderFailureHook,

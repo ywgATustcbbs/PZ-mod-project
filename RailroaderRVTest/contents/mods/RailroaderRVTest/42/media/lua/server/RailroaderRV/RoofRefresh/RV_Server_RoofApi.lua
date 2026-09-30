@@ -9,7 +9,6 @@ local ServerUtil = ctx.ServerUtil
 local GenerationTransaction = ctx.GenerationTransaction
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local ROOF_REFRESH_TEMP_Z = ctx.ROOF_REFRESH_TEMP_Z
-local manifestTable = ctx.manifestTable
 local resolveRoofRefreshGroupPlayer = ctx.resolveRoofRefreshGroupPlayer
 local authoritativePlayerPosition = ctx.authoritativePlayerPosition
 local playerIdentity = ctx.playerIdentity

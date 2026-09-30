@@ -10,7 +10,6 @@ local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local armTargetedClientRoomOwnershipGuard = ctx.armTargetedClientRoomOwnershipGuard
-local manifestTable = ctx.manifestTable
 local playerIdentity = ctx.playerIdentity
 local currentRoofRefreshContext = ctx.currentRoofRefreshContext
 local queueGeneration = ctx.queueGeneration
@@ -63,36 +62,12 @@ local function manifestViewForRecord(record)
     return true, manifest
 end
 
-local function manifestForIdentity(rvId, generation, allowRunning)
+local function manifestForIdentity(rvId, generation)
     local recordOk, record = currentMappingRecord(rvId, generation)
     if not recordOk then return false, record end
-    local manifestOk, persisted = pcall(manifestTable)
-    if not manifestOk or type(persisted) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    if tostring(persisted.rvId) == tostring(rvId) then
-        if ServerUtil.integer(persisted.generation) ~= ServerUtil.integer(generation) then
-            return false, Constants.INVALID_RV_DATA
-        end
-        if persisted.state == "RUNNING" then
-            local transaction = ctx.GenerationTransaction
-            local transactionOk, pending = false, nil
-            if type(transaction) == "table"
-                and type(transaction.current) == "function" then
-                transactionOk, pending = pcall(transaction.current)
-            end
-            local activeRunning = allowRunning == true
-                and transactionOk == true
-                and type(pending) == "table"
-                and tostring(pending.rvId) == tostring(rvId)
-                and ServerUtil.integer(pending.generation)
-                    == ServerUtil.integer(generation)
-            if activeRunning then return true, persisted end
-            return false, Constants.INVALID_RV_DATA
-        end
-        if persisted.state == "READY" then return true, persisted end
-        return false, Constants.INVALID_RV_DATA
-    end
+    -- The published mapping record is the whole authority: it carries the slot
+    -- index and identity, and every geometric fact is derived from the template
+    -- for that slot.  Nothing is persisted outside this map.
     local viewOk, view = manifestViewForRecord(record)
     if not viewOk then return false, view end
     return true, view
@@ -123,13 +98,11 @@ end
 
 -- Read-only current identity for the stateless -15 sentinel.
 function RV.Server.currentRVManifestForRelocation(rvId, generation)
-    return manifestForIdentity(rvId, generation, false)
+    return manifestForIdentity(rvId, generation)
 end
 
--- BoundaryServer may inspect the current identity while generation is still
--- RUNNING; ordinary relocation reads require READY.
 function RV.Server.currentRVManifestForBoundary(rvId, generation)
-    return manifestForIdentity(rvId, generation, true)
+    return manifestForIdentity(rvId, generation)
 end
 
 -- Rebuild the captured south-window floor's room/roof neighbours after an
@@ -187,13 +160,23 @@ function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
 
     local identityOk, identityOrReason = playerIdentity(player)
     if not identityOk then return false, identityOrReason end
+    -- The mapping record comparison already proves the published identity.
+    -- An in-flight generation is the only other owner of this scope; its
+    -- process-local transaction is the gate, not a durable record.
+    local transaction = ctx.GenerationTransaction
+    if type(transaction) == "table"
+        and type(transaction.current) == "function" then
+        local pendingOk, pending = pcall(transaction.current)
+        if pendingOk and type(pending) == "table"
+            and tostring(pending.rvId) == tostring(record.locoId)
+            and ServerUtil.integer(pending.generation) == recordGeneration then
+            return false, "RV generation is still in progress"
+        end
+    end
     local manifestAccepted, manifest = RV.Server.currentRVManifestForBoundary(
         record.locoId, recordGeneration)
     if manifestAccepted ~= true or type(manifest) ~= "table" then
         return false, Constants.INVALID_RV_DATA
-    end
-    if manifest.state ~= "READY" then
-        return false, "RV manifest is not READY"
     end
     local manifestGeneration = ServerUtil.toNumber(manifest.generation)
     if tostring(manifest.rvId) ~= tostring(record.locoId)

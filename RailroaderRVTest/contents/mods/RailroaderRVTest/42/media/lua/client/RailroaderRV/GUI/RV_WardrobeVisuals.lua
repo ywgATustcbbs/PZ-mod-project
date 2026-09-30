@@ -6,6 +6,7 @@ local C = require "RailroaderRV/Common/RV_Constants"
 local RoomTemplate = require "RailroaderRV/RoomTemplate/RV_RoomTemplate"
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
+local TemplateGeometry = require "RailroaderRV/RoomTemplate/RV_TemplateGeometry"
 
 local wardrobeSpritesByY = {
     [-2] = "furniture_storage_01_25",
@@ -62,22 +63,12 @@ local function isTaggedWardrobe(object)
     local templateIndex = C.finiteInteger(tag.templateIndex)
     if templateIndex == nil or templateIndex < 1 then return false end
     local entry = templateObjects[templateIndex]
-    local anchorX, anchorY, anchorZ = C.finiteInteger(tag.templateAnchorX),
-        C.finiteInteger(tag.templateAnchorY), C.finiteInteger(tag.templateAnchorZ)
     if not isWardrobeTemplateEntry(entry)
         or tag.templateClass ~= entry.class
         or tag.templateName ~= entry.name
         or tag.templateSprite ~= entry.sprite
         or tag.templateNorth ~= entry.north
         or tag.templateDirection ~= entry.direction
-        or tag.protected ~= entry.protected
-        or C.finiteInteger(tag.templateX) ~= entry.x
-        or C.finiteInteger(tag.templateY) ~= entry.y
-        or C.finiteInteger(tag.templateZ) ~= entry.z
-        or anchorX == nil or anchorY == nil or anchorZ == nil
-        or C.finiteInteger(tag.templateWorldX) ~= anchorX + entry.x
-        or C.finiteInteger(tag.templateWorldY) ~= anchorY + entry.y
-        or C.finiteInteger(tag.templateWorldZ) ~= anchorZ + entry.z
         or tag.edgeKey ~= nil or tag.axis ~= nil then
         return false
     end
@@ -89,12 +80,21 @@ local function isTaggedWardrobe(object)
     local xOk, x = call(object, "getX")
     local yOk, y = call(object, "getY")
     local zOk, z = call(object, "getZ")
+    if not spriteOk or not xOk or not yOk or not zOk then return false end
+    x, y, z = C.finiteInteger(x), C.finiteInteger(y), C.finiteInteger(z)
+    if x == nil or y == nil or z == nil then return false end
+    -- The tag stores no geometry: the 100x100 RV region is centred on its
+    -- template anchor, so the live square derives both anchor and offset.
+    local anchor = TemplateGeometry.templateAnchorForWorld(x, y, z)
+    local offset = type(anchor) == "table" and TemplateGeometry.worldToTemplate(
+        { x = x, y = y, z = z }, anchor) or nil
+    if type(offset) ~= "table" or offset.x ~= entry.x or offset.y ~= entry.y
+        or offset.z ~= entry.z then
+        return false
+    end
     return nameOk and name == entry.name
         and spriteNameOk and tostring(spriteName) == entry.sprite
         and northOk and north == entry.north
-        and xOk and C.finiteInteger(x) == C.finiteInteger(tag.templateWorldX)
-        and yOk and C.finiteInteger(y) == C.finiteInteger(tag.templateWorldY)
-        and zOk and C.finiteInteger(z) == C.finiteInteger(tag.templateWorldZ)
 end
 
 local function hideWardrobe(object)

@@ -423,13 +423,14 @@ local function isProtectedBuildingCandidate(object, x, y, z, boundary,
     return true, "candidate"
 end
 
-local function isWhitelistedTemplateObject(object, boundary, manifest, edges,
+local function isWhitelistedTemplateObject(object, boundary, edges,
     objectIsFloor)
     local tag = objectTag(object)
     if not tag or not sameIdentity(tag, boundary) then return false end
     local index = integer(tag.templateIndex)
     -- The anchor is the template transform of the already validated managed
-    -- region; no geometry is stored beside the current identity.
+    -- region; the world transform of the captured entry and the object's own
+    -- square are both derived, so nothing geometric is stored on the tag.
     local anchor = TemplateGeometry.anchorFromManaged(boundary.managed)
     if not index or type(anchor) ~= "table" then return false end
     local expected = templateEntry(index, anchor)
@@ -437,17 +438,7 @@ local function isWhitelistedTemplateObject(object, boundary, manifest, edges,
         or tag.templateName ~= expected.name
         or tag.templateSprite ~= expected.sprite
         or tag.templateDirection ~= expected.direction
-        or tag.templateNorth ~= expected.north
-        or tag.protected ~= expected.protected
-        or integer(tag.templateX) ~= expected.x - anchor.x
-        or integer(tag.templateY) ~= expected.y - anchor.y
-        or integer(tag.templateZ) ~= expected.z - anchor.z
-        or integer(tag.templateAnchorX) ~= integer(anchor.x)
-        or integer(tag.templateAnchorY) ~= integer(anchor.y)
-        or integer(tag.templateAnchorZ) ~= integer(anchor.z)
-        or integer(tag.templateWorldX) ~= expected.x
-        or integer(tag.templateWorldY) ~= expected.y
-        or integer(tag.templateWorldZ) ~= expected.z then
+        or tag.templateNorth ~= expected.north then
         return false
     end
     if expected.class == "IsoObject"
@@ -484,7 +475,7 @@ local function isWhitelistedTemplateObject(object, boundary, manifest, edges,
     return TemplateGeometry.contains({ x = x, y = y, z = z }, anchor) == true
 end
 
-local function isWhitelistedGenerator(object, boundary, manifest)
+local function isWhitelistedGenerator(object, boundary)
     local tag = objectTag(object)
     if not tag or not sameIdentity(tag, boundary) or tag.role ~= "generator"
         or not ServerUtil.classInstance(object, "IsoGenerator") then
@@ -501,7 +492,8 @@ local function isWhitelistedGenerator(object, boundary, manifest)
 end
 
 local function currentTemplateTagMismatch(object, expected, edge, boundary)
-    if not expected or type(boundary.anchor) ~= "table" then
+    if not expected or type(boundary) ~= "table"
+        or type(boundary.managed) ~= "table" then
         return "current template entry is missing"
     end
     local tag = objectTag(object)
@@ -511,24 +503,11 @@ local function currentTemplateTagMismatch(object, expected, edge, boundary)
     end
     local checks = {
         { "templateIndex", expected.templateIndex, integer(tag.templateIndex) },
-        { "templateX", expected.x - boundary.anchor.x, integer(tag.templateX) },
-        { "templateY", expected.y - boundary.anchor.y, integer(tag.templateY) },
-        { "templateZ", expected.z - boundary.anchor.z, integer(tag.templateZ) },
         { "templateClass", expected.class, tag.templateClass },
         { "templateName", expected.name, tag.templateName },
         { "templateSprite", expected.sprite, tag.templateSprite },
         { "templateDirection", expected.direction, tag.templateDirection },
         { "templateNorth", expected.north, tag.templateNorth },
-        { "templateWorldX", expected.x, integer(tag.templateWorldX) },
-        { "templateWorldY", expected.y, integer(tag.templateWorldY) },
-        { "templateWorldZ", expected.z, integer(tag.templateWorldZ) },
-        { "templateAnchorX", boundary.anchor.x,
-            integer(tag.templateAnchorX) },
-        { "templateAnchorY", boundary.anchor.y,
-            integer(tag.templateAnchorY) },
-        { "templateAnchorZ", boundary.anchor.z,
-            integer(tag.templateAnchorZ) },
-        { "protected", expected.protected, tag.protected },
     }
     for i = 1, #checks do
         local check = checks[i]
@@ -628,7 +607,7 @@ local function markMatchingTargetsBlocked(object, targets, blocked, objectIsFloo
     end
 end
 
-local function collectCoordinate(cell, x, y, z, boundary, manifest, index)
+local function collectCoordinate(cell, x, y, z, boundary, index)
     local removals, removalSeen, blocked = {}, {}, {}
     local targets = index.byCoordinate[coordinateKey(x, y, z)] or {}
     local squareOk, square = pcall(ServerWorld.getSquare, cell, x, y, z)
@@ -649,9 +628,9 @@ local function collectCoordinate(cell, x, y, z, boundary, manifest, index)
         for i = 1, #objects do
             local object = objects[i]
             if not isCabSideDoorOrWindow(object, x, y, z, index)
-                and not isWhitelistedGenerator(object, boundary, manifest)
+                and not isWhitelistedGenerator(object, boundary)
                 and not isWhitelistedTemplateObject(object, boundary,
-                    manifest, index.edges, floor == object) then
+                    index.edges, floor == object) then
                 local objectIsFloor = floor == object
                 local floorTarget = objectIsFloor
                     and hasTemplateFloorTarget(targets)
@@ -760,18 +739,13 @@ local function removeDuplicateTemplate(square, object)
 end
 
 local function repairTemplateProtectionCoordinate(cell, x, y, z, squareInfo,
-    removed, inPlace, blocked, index, boundary, manifest)
+    removed, inPlace, blocked, index, boundary)
     local targets = index.byCoordinate[coordinateKey(x, y, z)] or {}
     if #targets == 0 then return true end
     local updatedFloors = {}
     local anchor = TemplateGeometry.anchorFromManaged(boundary.managed)
     if not anchor then return false, Constants.INVALID_RV_DATA end
-    local tagContext = {
-        rvId = boundary.rvId,
-        anchorX = anchor.x,
-        anchorY = anchor.y,
-        anchorZ = anchor.z,
-    }
+    local tagContext = { rvId = boundary.rvId }
     for i = 1, #targets do
         local target = targets[i]
         local expected, edge = target.expected, target.edge
@@ -828,11 +802,11 @@ local function repairTemplateProtectionCoordinate(cell, x, y, z, squareInfo,
                         end
                     elseif updatedFloors[object] == templateIndex then
                         present = true
-                    elseif isWhitelistedGenerator(object, boundary, manifest) then
+                    elseif isWhitelistedGenerator(object, boundary) then
                         -- The retained generator can share a floor tile with
                         -- a captured template object.
                     elseif isWhitelistedTemplateObject(object, boundary,
-                            manifest, index.edges,
+                            index.edges,
                             squareInfo.floor == object) then
                         local tag = objectTag(object)
                         if integer(tag.templateIndex) == templateIndex then
@@ -887,7 +861,7 @@ local function repairTemplateProtectionCoordinate(cell, x, y, z, squareInfo,
     return true
 end
 
-local function repairTemplateProtectionLayer(cell, x, y, z, boundary, manifest,
+local function repairTemplateProtectionLayer(cell, x, y, z, boundary,
     repairIndex)
     if not TemplateGeometry.inManagedRegion({ x = x, y = y, z = z },
         boundary.managed)
@@ -899,13 +873,13 @@ local function repairTemplateProtectionLayer(cell, x, y, z, boundary, manifest,
         return true
     end
     local scanOk, squareInfo, removals, blocked = collectCoordinate(cell,
-        x, y, z, boundary, manifest, repairIndex)
+        x, y, z, boundary, repairIndex)
     if not scanOk then return false, squareInfo end
     local removeOk, removed, inPlace = removeCandidates(removals)
     if not removeOk then return false, removed end
     local repairOk, repairReason = repairTemplateProtectionCoordinate(cell,
         x, y, z, squareInfo, removed, inPlace, blocked, repairIndex,
-        boundary, manifest)
+        boundary)
     if not repairOk then return false, repairReason end
     if (squareInfo and #squareInfo.objects > 0)
         or #removals > 0
@@ -917,15 +891,14 @@ end
 
 local function repairQueuedTemplateProtectionXY(player, boundary, expectedKey,
     x, y)
-    local contextOk, currentBoundary, record, manifest =
-        validCurrentContext(player, boundary)
+    local contextOk, currentBoundary, record = validCurrentContext(player, boundary)
     local currentKey = contextOk and queueKey(currentBoundary, record) or nil
     if not contextOk or currentKey ~= expectedKey then
         return false, contextOk and "queued RV generation is stale"
             or currentBoundary
     end
     local indexCallOk, repairIndex = pcall(Index.getOrBuildRepairIndex,
-        currentBoundary, manifest)
+        currentBoundary)
     if not indexCallOk or type(repairIndex) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
@@ -938,7 +911,7 @@ local function repairQueuedTemplateProtectionXY(player, boundary, expectedKey,
     end
     for z = boundary.managed.minZ, boundary.managed.maxZ - 1 do
         pcall(repairTemplateProtectionLayer, cell, x, y, z, boundary,
-            manifest, repairIndex)
+            repairIndex)
     end
     return true
 end

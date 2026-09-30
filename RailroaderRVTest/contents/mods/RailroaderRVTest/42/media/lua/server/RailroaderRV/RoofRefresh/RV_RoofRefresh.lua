@@ -233,11 +233,6 @@ local function capturedFloorMismatch(floor, target, identity)
         { "owner", C.MOD_ID, tag.owner },
         { "role", "captured-template", tag.role },
         { "templateIndex", target.templateIndex, toNumber(tag.templateIndex) },
-        { "templateClass", entry.class, tag.templateClass },
-        { "templateName", entry.name, tag.templateName },
-        { "templateSprite", entry.sprite, tag.templateSprite },
-        { "templateNorth", entry.north, tag.templateNorth },
-        { "templateDirection", entry.direction, tag.templateDirection },
     }
     for i = 1, #checks do
         local check = checks[i]
@@ -247,6 +242,9 @@ local function capturedFloorMismatch(floor, target, identity)
                 .. diagnosticValue(check[3])
         end
     end
+    -- The entry identity was already proven against this live object above, so
+    -- the tag only has to name the same template entry; no per-field copy of the
+    -- entry is stored or compared.
     return nil
 end
 

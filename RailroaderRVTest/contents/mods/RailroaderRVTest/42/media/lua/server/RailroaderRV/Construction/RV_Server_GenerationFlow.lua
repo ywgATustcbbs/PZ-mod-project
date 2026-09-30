@@ -30,8 +30,6 @@ local refreshServerRoomOwnershipGuard = ctx.refreshServerRoomOwnershipGuard
 local refreshGenerationRoomOwnershipGuard = ctx.refreshGenerationRoomOwnershipGuard
 local armClientRoomOwnershipGuard = ctx.armClientRoomOwnershipGuard
 local removeGeneration = ctx.removeGeneration
-local setManifestState = ctx.setManifestState
-local manifestTable = ctx.manifestTable
 local setGenerationPhase = ctx.setGenerationPhase
 local clearGenerationArea = ctx.clearGenerationArea
 local buildGeneration = ctx.buildGeneration
@@ -182,19 +180,8 @@ local function generateForPlayer(player, prepared)
         return false, "RailroaderRVTest: same-slot rebuild is refused because "
             .. "the previous generation has no complete undo snapshot"
     end
-    local manifest = manifestTable()
-    if manifest.state == "RUNNING" then
-        if Boundary and type(Boundary.clearPlayer) == "function" then
-            Boundary.clearPlayer(player)
-        end
-        return false, "generation already in progress"
-    end
-    -- Until the managed clear scope passes its read-only occupancy proof or
-    -- the old generation starts removal, failures must leave the prior
-    -- persistent manifest untouched.
-    local preserveManifestOnFailure = true
     -- B42 Kahlua exposes pcall; the protected body returns
-    -- the raw error; finalizeGeneration formats it safely and records FAILED.
+    -- the raw error; finalizeGeneration formats it safely.
     local ok, resultOrError = pcall(function()
         local playerOk, positionOrReason = validateAuthoritativePlayer(player)
         if not playerOk then
@@ -256,7 +243,7 @@ local function generateForPlayer(player, prepared)
                 generation = generation,
                 slotIndex = prepared.slotIndex,
                 anchor = anchor,
-            }, manifest)
+            })
         if preflightAccepted ~= true then
             error(preflightReason
                 or "RailroaderRVTest: Construction target preflight was rejected")
@@ -270,26 +257,15 @@ local function generateForPlayer(player, prepared)
             prepared.rvId)
         local roomOwnershipGuard = registerServerRoomOwnershipGuard(generation,
             player, oldBounds, bounds, prepared.rvId)
-        -- Keep the player at staging while the build pass creates and verifies
-        -- each captured-object host square and the room-ownership scan checks
-        -- the captured roof.
-        preserveManifestOnFailure = false
-        -- Only slot allocation and mutation state are durable here.  Anchor,
-        -- managed bounds, shell edges, template and schema identity are all
-        -- derived from the compiled template at read time.
-        manifest.generation = generation
-        manifest.slotIndex = prepared.slotIndex
-        manifest.rvId = prepared.rvId
-        manifest.rollback = nil
-        setManifestState(manifest, "RUNNING")
+        -- No durable mutation record: the in-memory transaction is the gate.
         local buildOk, buildError = pcall(clearGenerationArea, cell, bounds,
-            generation, manifest)
+            generation)
         -- Generation is allowed to start only after the complete cleanup pass
         -- succeeds.  Keep this explicit gate: pcall reports a cleanup error in
         -- buildOk, and a failed cleanup must never enter buildGeneration.
         if buildOk then
             buildOk, buildError = pcall(buildGeneration, player, layout, bounds,
-                generation, manifest)
+                generation)
         end
         if buildOk then
             -- Scan once more on the server immediately before the final
@@ -306,7 +282,7 @@ local function generateForPlayer(player, prepared)
                 prepared.generation = generation
             end
             if buildOk then
-                setGenerationPhase(manifest, generation, "FINAL_RELOCATE")
+                setGenerationPhase(generation, "FINAL_RELOCATE")
                 local finalRelocationOk, finalRelocationError = pcall(
                     relocatePlayerIntoHouse, player, prepared)
                 if not finalRelocationOk then
@@ -332,18 +308,13 @@ local function generateForPlayer(player, prepared)
         end
         if not buildOk then
             -- The generator is intentionally last, but any phase can fail. Remove
-            -- every object tagged by this generation before exposing FAILED;
-            -- otherwise a failed generator/API call would leave a partial
-            -- captured model or powered generator in the world.
+            -- every object tagged by this generation before reporting the
+            -- failure; otherwise a failed generator/API call would leave a
+            -- partial captured model or powered generator in the world.
             local rollbackOk, rollbackError = pcall(function()
-                removeGeneration(cell, bounds, generation, manifest.rvId)
+                removeGeneration(cell, bounds, generation, prepared.rvId)
             end)
-            if rollbackOk then
-                print("[RailroaderRVTest] generation=" .. tostring(generation)
-                    .. " rollback=COMPLETE")
-            else
-                print("[RailroaderRVTest] generation=" .. tostring(generation)
-                    .. " rollback=FAILED: " .. safeErrorText(rollbackError))
+            if not rollbackOk then
                 error(safeErrorText(buildError) .. " (rollback failed: "
                     .. safeErrorText(rollbackError) .. ")")
             end
@@ -351,8 +322,7 @@ local function generateForPlayer(player, prepared)
         end
         error("RailroaderRVTest: generation did not enter final relocation")
     end)
-    return finalizeGeneration(manifest, ok, resultOrError,
-        preserveManifestOnFailure)
+    return finalizeGeneration(ok, resultOrError)
 end
 
 -- Continue generation only after the client has sent the strict
@@ -421,19 +391,8 @@ local function finalizeGenerationAfterRelocate(player, prepared)
                 .. " reasserted=" .. tostring(reasserted))
             error("final relocation authoritative target is still synchronizing")
         end
-        -- The in-flight transaction is the authority for "this request is the
-        -- one being finalised"; the durable record only holds slot allocation.
+        -- The in-flight transaction is the commit authority.
         if prepared.transactionStage ~= "committing" then
-            error(Constants.INVALID_RV_DATA)
-        end
-        local manifest = manifestTable()
-        local anchor = prepared.anchor
-        local anchorX = ServerUtil.requiredInteger(anchor.x, "final manifest anchor x")
-        local anchorY = ServerUtil.requiredInteger(anchor.y, "final manifest anchor y")
-        local anchorZ = ServerUtil.requiredInteger(anchor.z, "final manifest anchor z")
-        if prepared.finalDestination.x ~= anchorX + 0.5
-            or prepared.finalDestination.y ~= anchorY + 0.5
-            or prepared.finalDestination.z ~= anchorZ then
             error(Constants.INVALID_RV_DATA)
         end
         if type(refreshGenerationRoomOwnershipGuard) ~= "function" then
@@ -448,17 +407,12 @@ local function finalizeGenerationAfterRelocate(player, prepared)
             or Boundary.completeTransition(player, prepared.token) ~= true then
             error("generation boundary transition could not be completed")
         end
-        setGenerationPhase(manifest, prepared.generation, "COMMITTED")
-        setManifestState(manifest, "READY")
         refreshGenerationRoomOwnershipGuard(prepared.rvId,
             prepared.generation, "pre-mapping-commit")
-        if manifest.state ~= "READY" then
-            error(Constants.INVALID_RV_DATA)
-        end
         -- The mapping is the persistent publication point. It runs only after
-        -- the READY manifest and all room/transition checks pass; failure is
-        -- handled by cancelPending, which marks this READY record FAILED and
-        -- removes/verifies this generation before releasing the transaction.
+        -- all room/transition checks pass; failure is handled by cancelPending,
+        -- which removes and verifies this generation before releasing the
+        -- in-memory transaction.
         if prepared.railroader ~= nil and not prepared.commitApplied then
             local commitOk, commitResult, commitReason = pcall(
                 ctx.railroaderCommitHook, player, prepared.railroader, prepared)

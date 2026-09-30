@@ -1,62 +1,23 @@
--- RV_BoundaryServer: player tracking and bounded proximity-queue work.
+-- RV_BoundaryServer: player tracking and boundary correction.
 return function(ctx)
 local Boundary = ctx.Boundary
 local Core = ctx.Core
+local C = ctx.C
 local integer = ctx.integer
 local call = ctx.call
 local callGlobal = ctx.callGlobal
 local identity = ctx.identity
-local boundaryKey = ctx.boundaryKey
-local transitionActive = ctx.transitionActive
+local square = ctx.square
+local playerCell = ctx.playerCell
+local stateFor = ctx.stateFor
 local guardContextForPlayer = ctx.guardContextForPlayer
 local playerPosition = ctx.playerPosition
-local postPlayerTickHandlers = {}
+local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
+local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
+local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 
-function Boundary.addPostPlayerTickHandler(name, callback)
-    if type(name) ~= "string" or name == "" or type(callback) ~= "function" then
-        return false, "invalid post-player tick handler"
-    end
-    local current = postPlayerTickHandlers[name]
-    if current then
-        if current == callback then return true end
-        return false, "post-player tick handler name is already registered"
-    end
-    postPlayerTickHandlers[name] = callback
-    return true
-end
-
-local function dispatchPostPlayerTickHandlers(tick, activePlayers,
-    activeBoundaries)
-    local names = {}
-    for name in pairs(postPlayerTickHandlers) do
-        names[#names + 1] = name
-    end
-    table.sort(names)
-    for i = 1, #names do
-        local callback = postPlayerTickHandlers[names[i]]
-        local callOk, accepted, reason = pcall(callback, tick, activePlayers,
-            activeBoundaries)
-        if not callOk or accepted == false then
-            print("[RailroaderRVTest] post-player tick handler "
-                .. tostring(names[i]) .. " failed: "
-                .. tostring(callOk and reason or accepted))
-        end
-    end
-end
-
-local UNTRACKED_OUTSIDE_PROBE_RETRY_TICKS = 300
-local untrackedOutsideProbeDeadlines = {}
-local untrackedOutsideProbeCursor = 0
-
-local function untrackedOutsideProbeDue(identityKey)
-    local retryAt = untrackedOutsideProbeDeadlines[identityKey]
-    return type(retryAt) ~= "number"
-        or Boundary._tick >= retryAt
-end
-
-local function deferUntrackedOutsideProbe(identityKey)
-    untrackedOutsideProbeDeadlines[identityKey] = Boundary._tick
-        + UNTRACKED_OUTSIDE_PROBE_RETRY_TICKS
+local function boundaryKey(boundary)
+    return tostring(boundary.rvId) .. ":" .. tostring(boundary.generation)
 end
 
 local function onlinePlayersSnapshot()
@@ -83,6 +44,68 @@ local function onlinePlayersSnapshot()
     return result
 end
 
+-- True while a relocation lease is live; an expired lease is cleared here.
+local function leaseLive(state)
+    if type(state.leaseToken) ~= "string" then return false end
+    if type(state.leaseUntil) == "number"
+        and state.leaseUntil >= Boundary._tick then
+        return true
+    end
+    state.leaseToken, state.leaseUntil = nil, nil
+    return false
+end
+
+-- The authoritative RV spawn from the current mapping record, but only while
+-- that exact square is loaded in the player's cell.  Recovery must not
+-- fabricate a teleport into an unloaded target square.
+local function rvSpawnTarget(player, record)
+    local position = type(record) == "table" and record.rvPosition or nil
+    if type(position) ~= "table" then return nil end
+    local x, y, z = position.x, position.y, position.z
+    if type(x) ~= "number" or type(y) ~= "number" or type(z) ~= "number" then
+        return nil
+    end
+    if not square(playerCell(player), math.floor(x), math.floor(y),
+        math.floor(z)) then
+        return nil
+    end
+    return { x = x, y = y, z = z }
+end
+
+-- One correction per player per tick: teleport the authoritative server object
+-- and hand the same target to the owning client.  There is no queue and no
+-- retry; a target that cannot be proven this tick waits for the next one.
+local function correctOutside(state, player, boundary, record, onlineId)
+    if type(state.lastValid) ~= "table" then return false end
+    local target = state.lastValid
+    if type(target) ~= "table"
+        or not TemplateGeometry.isWalkableInManagedRegion(target,
+            boundary.managed, Template)
+        or not square(playerCell(player), math.floor(target.x),
+            math.floor(target.y), math.floor(target.z)) then
+        target = rvSpawnTarget(player, record)
+    end
+    if type(target) ~= "table"
+        or not TemplateGeometry.isWalkableInManagedRegion(target,
+            boundary.managed, Template) then
+        return false
+    end
+    local rv = rawget(_G, "RailroaderRV")
+    local server = rv and rv.Server
+    if server and type(server.teleportToPosition) == "function" then
+        server.teleportToPosition(player, target)
+    end
+    state.corrections = (integer(state.corrections) or 0) + 1
+    state.lastValid = { x = target.x, y = target.y, z = target.z }
+    callGlobal("sendServerCommand", player, C.MOD_ID,
+        C.COMMAND_RV_BOUNDARY_CORRECTION, {
+            rvId = boundary.rvId, generation = boundary.generation,
+            sequence = state.corrections, onlineId = onlineId,
+            x = target.x, y = target.y, z = target.z,
+        })
+    return true
+end
+
 function Boundary.onTick(tick)
     Boundary._tick = tick or Core.getTick()
     if type(Boundary.pruneBuilderActionLedger) == "function" then
@@ -90,67 +113,67 @@ function Boundary.onTick(tick)
     end
     local players = onlinePlayersSnapshot()
     local activePlayers, activeBoundaries = {}, {}
-    local coldOutsideCandidates = {}
     for i = 1, #players do
         local player = players[i]
         local position, inRVRegion = playerPosition(player)
         if position then
             local id = identity(player)
+            local boundary, record, onlineId
             if id then
-                local state = Boundary._states[id.key]
-                if state then state.identity = id end
-                -- Roof relocation owns the boundary lease while the player is
-                -- temporarily outside the RV chunk. Normal position, queue,
-                -- and guard work resumes only after transition completion.
-                if state or inRVRegion then
-                    if state and transitionActive(state) then
-                        -- The transition lease owns this player's position.
-                    else
-                        local guard = guardContextForPlayer(player, position,
-                            id, true)
-                        local boundary = guard and guard.boundary
-                        if boundary then
-                            activePlayers[#activePlayers + 1] = {
-                                boundary = boundary, player = player,
-                            }
-                            activeBoundaries[boundaryKey(boundary)] = {
-                                boundary = boundary, player = player,
-                            }
-                        end
-                    end
-                elseif untrackedOutsideProbeDue(id.key) then
-                    coldOutsideCandidates[#coldOutsideCandidates + 1] = {
-                        identity = id, player = player, position = position,
+                -- A live relocation lease owns this player's position.  Normal
+                -- walkability work resumes after the lease expires.
+                local tracked = Boundary._states[id.key]
+                if not (type(tracked) == "table" and leaseLive(tracked)) then
+                    boundary, record, onlineId = guardContextForPlayer(player,
+                        position, id, true)
+                end
+            end
+            -- Only a validated current mapping relation is tracked.  A player
+            -- with no validated context is not guarded and is not corrected;
+            -- the mapping re-seeds the state after a restart, and entry arms it.
+            local state = boundary and stateFor(player, id) or nil
+            -- `inside` is the gate for all normal per-player work, so the repair
+            -- queue only ever sees an identity that a previous validated tick
+            -- already confirmed inside; an entry-frame player is never sampled.
+            local inside = state and state.inside == true or false
+            if state then
+                -- The mapping relation is the authority: this identity is
+                -- inside the RV, whether or not the current position is
+                -- walkable (managed-region membership lives in the template).
+                state.inside = true
+                if TemplateGeometry.isWalkableInManagedRegion(position,
+                    boundary.managed, Template) then
+                    state.lastValid = {
+                        x = position.x, y = position.y, z = position.z,
+                    }
+                elseif state.lastValid ~= nil then
+                    -- Only a player already observed walkable inside may be
+                    -- corrected, so the engine's entry/exit teleport settles
+                    -- first and a cleared state can never be dragged back.
+                    correctOutside(state, player, boundary, record, onlineId)
+                end
+                if inside and inRVRegion then
+                    activePlayers[#activePlayers + 1] = {
+                        boundary = boundary, player = player,
+                    }
+                    activeBoundaries[boundaryKey(boundary)] = {
+                        boundary = boundary, player = player,
                     }
                 end
             end
         end
     end
 
-    -- A restart loses process-local states and validation caches. Probe at
-    -- most one untracked outside identity per tick, with a per-identity retry
-    -- deadline, so unrelated world players do not trigger a full map check
-    -- every tick while a persisted inside relation can still be recovered.
-    if #coldOutsideCandidates > 0 then
-        untrackedOutsideProbeCursor = untrackedOutsideProbeCursor
-            % #coldOutsideCandidates + 1
-        local candidate = coldOutsideCandidates[untrackedOutsideProbeCursor]
-        deferUntrackedOutsideProbe(candidate.identity.key)
-        local guard = guardContextForPlayer(candidate.player,
-            candidate.position, candidate.identity, false)
-        local boundary = guard and guard.boundary
-        if boundary then
-            activePlayers[#activePlayers + 1] = {
-                boundary = boundary, player = candidate.player,
-            }
-            activeBoundaries[boundaryKey(boundary)] = {
-                boundary = boundary, player = candidate.player,
-            }
-        end
+    -- TemplateRecovery runs directly after the sweep with the players and
+    -- boundaries this sweep validated.  It is looked up at runtime because the
+    -- recovery queue is created by RV_Server, after this module loads; there is
+    -- no registry and no handler wrapper.
+    local rv = rawget(_G, "RailroaderRV")
+    local Recovery = rv and rv.RecoveryQueue or nil
+    if Recovery then
+        Recovery.onPostPlayerTick(Boundary._tick, activePlayers,
+            activeBoundaries)
     end
-
-    dispatchPostPlayerTickHandlers(Boundary._tick, activePlayers,
-        activeBoundaries)
 end
 
 end

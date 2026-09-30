@@ -524,10 +524,10 @@ local function commitGeneration(player, data, prepared)
     local relationOk = pcall(markPlayerInside, candidateMap, candidateRecord,
         key, player, data.entryPosition, data.sourceRole, data.sourceSeat)
     if not relationOk then return false, C.INVALID_RV_DATA end
-    if not Boundary or type(Boundary.registerGeneration) ~= "function"
-        or Boundary.registerGeneration(candidateRecord.locoId,
-            candidateRecord.generation, boundary,
-            candidateRecord) ~= true then
+    if not Boundary
+        or type(Boundary.invalidateBuilderActionsForGeneration) ~= "function"
+        or Boundary.invalidateBuilderActionsForGeneration(
+            candidateRecord.locoId, candidateRecord.generation) ~= true then
         return false, C.INVALID_RV_DATA
     end
     local server = RailroaderRV and RailroaderRV.Server

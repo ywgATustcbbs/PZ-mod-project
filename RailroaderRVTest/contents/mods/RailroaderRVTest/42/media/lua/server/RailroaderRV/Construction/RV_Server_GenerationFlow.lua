@@ -179,7 +179,6 @@ local function generateForPlayer(player, prepared)
             error("RailroaderRVTest: RV boundary service is unavailable")
         end
         local rvId = prepared.rvId
-        Boundary.makeBoundary(layout, rvId, generation)
         prepared.rvId = tostring(rvId)
         local construction = ctx.constructionService
         local preflightAccepted, preflightReason =

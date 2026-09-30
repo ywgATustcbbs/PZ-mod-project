@@ -35,17 +35,6 @@ local function finiteNumber(value)
     return result
 end
 
-Boundary._geometryEpoch = integer(Boundary._geometryEpoch) or 0
-
-local INVALID_RV_DATA_NOTICE_REASONS = {
-    ["mapping-relation-rejected"] = true,
-    ["mapping-record-rejected"] = true,
-    ["record-rider-rejected"] = true,
-    ["manifest-rejected"] = true,
-    ["geometry-rejected"] = true,
-}
-local invalidRVDataNoticeAttempted = {}
-
 local function call(target, method, ...)
     if target == nil or type(target[method]) ~= "function" then
         return false, nil
@@ -61,11 +50,6 @@ local function callGlobal(name, ...)
     local ok, a, b, c, d = pcall(fn, ...)
     if not ok then return false, a end
     return true, a, b, c, d
-end
-
-local function succeeded(target, method, ...)
-    local ok, result = call(target, method, ...)
-    return ok and result ~= false
 end
 
 local function playerName(player)
@@ -114,10 +98,12 @@ local function playerPosition(player)
     return { x = x, y = y, z = z }, inRVRegion
 end
 
-function Boundary.diagnoseGuardState(player, knownIdentity, position,
-    relation, record, reason)
-    if not processIsServer() or type(position) ~= "table"
-        or INVALID_RV_DATA_NOTICE_REASONS[reason] ~= true then
+-- One-shot server-side notice for rejected RV data. The GUI already consumes
+-- this stable failure code and shows the delete-and-rebuild instruction, so the
+-- diagnostic reason stays server-side.
+function Boundary.diagnoseGuardState(player, knownIdentity, position, relation,
+    record, reason)
+    if not processIsServer() or type(position) ~= "table" then
         return false
     end
     local id = knownIdentity or identity(player)
@@ -129,11 +115,6 @@ function Boundary.diagnoseGuardState(player, knownIdentity, position,
         or onlineId == nil or onlineId < 0 then
         return false
     end
-    if invalidRVDataNoticeAttempted[id.key] then return false end
-    invalidRVDataNoticeAttempted[id.key] = true
-
-    -- The GUI already consumes this stable failure code and shows the
-    -- delete-and-rebuild instruction. Keep diagnostic detail server-side.
     local sentCallOk, sentResult = callGlobal("sendServerCommand", player,
         C.MOD_ID, C.COMMAND_RV_TELEPORT, {
             ok = false, onlineId = onlineId,
@@ -192,9 +173,9 @@ local function encodeShellEdges(source, rvId, generation)
     return result
 end
 
--- Persist only the managed region bounds and the authored shell edge ledger.
+-- Derive only the managed region bounds and the authored shell edge ledger.
 -- Walkability and buildability are queried from the captured template.
-function Boundary.makeBoundary(layout, rvId, generation)
+local function makeBoundary(layout, rvId, generation)
     if type(layout) ~= "table" or type(layout.managed) ~= "table"
         or type(layout.shellEdges) ~= "table" then
         return nil, "layout geometry is unavailable"
@@ -223,8 +204,10 @@ end
 
 -- Managed bounds and shell edges are pure functions of the compiled template
 -- and the record's slot index.  Nothing in this file persists them; readers
--- query the current template here instead of trusting a stored copy.
-local derivedBoundaries = {}
+-- query the current template here instead of trusting a stored copy.  One
+-- memoized boundary per slot keeps record validation, construction, the
+-- sentinel and roof refresh from rebuilding the layout on every call.
+local boundariesBySlot = {}
 local function boundaryFor(record)
     if type(record) ~= "table" then return nil end
     local rvId = type(record.locoId) == "string" and record.locoId or nil
@@ -238,66 +221,17 @@ local function boundaryFor(record)
     if not anchor then return nil end
     -- One template layout per anchor; the compiled template never changes at
     -- runtime, so the derived boundary may be reused for this identity.
-    local cached = derivedBoundaries[slotIndex]
+    local cached = boundariesBySlot[slotIndex]
     if cached and cached.rvId == rvId and cached.generation == generation then
         return cached
     end
     local layout = Layout.make(anchor.x, anchor.y, anchor.z)
     local derived = makeBoundary(layout, rvId, generation)
     if type(derived) ~= "table" then return nil end
-    derivedBoundaries[slotIndex] = derived
+    boundariesBySlot[slotIndex] = derived
     return derived
 end
-
-local function currentBoundary(boundary)
-    if type(boundary) ~= "table" or type(boundary.managed) ~= "table"
-        or type(boundary.shellEdges) ~= "table" then
-        return nil
-    end
-    local rvId = type(boundary.rvId) == "string" and boundary.rvId or nil
-    local generation = integer(boundary.generation)
-    if not rvId or rvId == "" or not generation or generation < 1
-        or not TemplateGeometry.anchorFromManaged(boundary.managed, Template) then
-        return nil
-    end
-    return boundary
-end
-
-local function boundaryKey(boundary)
-    return tostring(boundary.rvId) .. ":" .. tostring(boundary.generation)
-end
-
-local function sameBoundary(left, right)
-    return type(left) == "table" and type(right) == "table"
-        and boundaryKey(left) == boundaryKey(right)
-end
-
-local function geometryChanged()
-    Boundary._geometryEpoch = (integer(Boundary._geometryEpoch) or 0) + 1
-end
-
-local function loadedBoundary(boundary)
-    return currentBoundary(boundary)
-end
-
-function Boundary.registerGeneration(rvId, generation, boundary, record)
-    local loaded = loadedBoundary(boundary)
-    if not loaded then return false end
-    if rvId == nil or tostring(rvId) ~= loaded.rvId
-        or integer(generation) ~= loaded.generation then
-        return false
-    end
-    if record and (tostring(record.locoId) ~= tostring(rvId)
-        or integer(record.generation) ~= loaded.generation) then
-        return false
-    end
-    geometryChanged()
-    if type(Boundary.invalidateBuilderActionsForGeneration) == "function" then
-        Boundary.invalidateBuilderActionsForGeneration(loaded.rvId,
-            loaded.generation)
-    end
-    return true
-end
+Boundary.boundaryFor = boundaryFor
 
 function Boundary.boundaryForPlayer(player, knownIdentity, deferValidationMiss,
     forceValidationRefresh, roofRefreshContextRead, roofRefreshGuardRead)
@@ -316,7 +250,7 @@ function Boundary.boundaryForPlayer(player, knownIdentity, deferValidationMiss,
     if hookOk and boundary == nil and record == "validation-deferred" then
         return nil, record
     end
-    local current = hookOk and currentBoundary(boundary) or nil
+    local current = hookOk and boundary or nil
     local anchor = current and TemplateGeometry.anchorFromManaged(current.managed,
         Template) or nil
     -- The manifest only carries the current identity; its geometry comes from
@@ -340,89 +274,12 @@ local function stateFor(player, knownIdentity)
     if not id then return nil end
     local state = Boundary._states[id.key]
     if not state then
-        state = { identity = id, correctionSequence = 0 }
+        state = { identity = id, inside = false, corrections = 0 }
         Boundary._states[id.key] = state
     else
         state.identity = id
     end
     return state
-end
-
-local function transitionIdentityKey(rvId, generation)
-    local normalizedGeneration = integer(generation)
-    if rvId == nil or tostring(rvId) == "" or normalizedGeneration == nil
-        or normalizedGeneration < 1 then
-        return nil
-    end
-    return tostring(rvId) .. ":" .. tostring(normalizedGeneration)
-end
-
--- Return only the activity facts needed by TemplateRecovery. Callers do not
--- receive Boundary's mutable player-state tables or lease field layout.
-function Boundary.transitionActivitySnapshot(tick)
-    if type(tick) ~= "number" or type(Boundary._states) ~= "table" then
-        return false, "boundary transition state unavailable"
-    end
-    local activity = {}
-    for _, state in pairs(Boundary._states) do
-        if type(state) == "table" then
-            local key = transitionIdentityKey(state.rvId, state.generation)
-            local transitionUntil = state.transitionUntil
-            local inWindow = type(transitionUntil) == "number"
-                and transitionUntil >= tick
-            if key and inWindow then
-                local snapshot = activity[key]
-                if not snapshot then
-                    snapshot = { active = false, recentlyCompleted = false }
-                    activity[key] = snapshot
-                end
-                if state.transitionToken ~= nil or state.transitionKind ~= nil then
-                    snapshot.active = true
-                else
-                    snapshot.recentlyCompleted = true
-                end
-            end
-        end
-    end
-    return true, activity
-end
-
--- Small lifecycle interface for independent services that must yield while
--- an authoritative player relocation is in flight. Listeners do not own or
--- alter transition state; failures are contained so they cannot block travel.
-local transitionLifecycleListeners =
-    Boundary._transitionLifecycleListeners
-if type(transitionLifecycleListeners) ~= "table" then
-    transitionLifecycleListeners = {}
-    Boundary._transitionLifecycleListeners = transitionLifecycleListeners
-end
-
-function Boundary.addTransitionLifecycleListener(name, listener)
-    if type(name) ~= "string" or name == ""
-        or type(listener) ~= "function" then
-        return false
-    end
-    transitionLifecycleListeners[name] = listener
-    return true
-end
-
-local function notifyTransitionLifecycle(eventName, player, state)
-    local transitionIdentity = type(state) == "table" and {
-        rvId = state.rvId,
-        generation = state.generation,
-    } or nil
-    for name, listener in pairs(transitionLifecycleListeners) do
-        if type(listener) == "function" then
-            local ok, reason = pcall(listener, eventName, player,
-                transitionIdentity,
-                Boundary._tick)
-            if not ok then
-                print("[RailroaderRVTest] boundary transition listener failed name="
-                    .. tostring(name) .. " event=" .. tostring(eventName)
-                    .. " reason=" .. tostring(reason))
-            end
-        end
-    end
 end
 
 function Boundary.beginTransition(player, rvId, generation, token, kind)
@@ -432,25 +289,20 @@ function Boundary.beginTransition(player, rvId, generation, token, kind)
     end
     local state = stateFor(player)
     if not state then return false end
-    state.rvId = rvId and tostring(rvId) or nil
+    state.rvId = tostring(rvId)
     state.generation = integer(generation)
-    state.transitionToken = type(token) == "string" and token or nil
-    state.transitionKind = kind or "relocation"
-    state.transitionUntil = Boundary._tick
+    state.leaseToken = type(token) == "string" and token or nil
+    state.leaseUntil = Boundary._tick
         + (integer(C.BOUNDARY_TRANSITION_TIMEOUT_TICKS) or 120)
-    state.validationRefreshTick = nil
-    notifyTransitionLifecycle("begin", player, state)
     return true
 end
 
 function Boundary.completeTransition(player, token)
     local state = stateFor(player)
     if not state then return false end
-    if token ~= nil and state.transitionToken ~= token then return false end
-    state.transitionToken = nil
-    state.transitionKind = nil
-    state.transitionUntil = Boundary._tick + 2
-    notifyTransitionLifecycle("complete", player, state)
+    if token ~= nil and state.leaseToken ~= token then return false end
+    state.leaseToken = nil
+    state.leaseUntil = Boundary._tick + 2
     return true
 end
 
@@ -462,14 +314,14 @@ end
 -- when a stale token tries to extend a different transition.
 function Boundary.extendTransition(player, token, untilTick)
     local state = stateFor(player)
-    if not state or type(state.transitionToken) ~= "string"
-        or state.transitionToken ~= token then
+    if not state or type(state.leaseToken) ~= "string"
+        or state.leaseToken ~= token then
         return false
     end
     if type(untilTick) ~= "number" then return false end
-    if type(state.transitionUntil) ~= "number"
-        or untilTick > state.transitionUntil then
-        state.transitionUntil = untilTick
+    if type(state.leaseUntil) ~= "number"
+        or untilTick > state.leaseUntil then
+        state.leaseUntil = untilTick
     end
     return true
 end
@@ -477,62 +329,39 @@ end
 function Boundary.clearPlayer(player)
     local id = identity(player)
     if id then
-        local state = Boundary._states[id.key]
         Boundary._states[id.key] = nil
-        notifyTransitionLifecycle("clear", player, state)
     end
     return true
 end
 
-local function transitionActive(state)
-    if not state or not state.transitionToken then return false end
-    if type(state.transitionUntil) == "number"
-        and state.transitionUntil >= Boundary._tick then
-        return true
+-- Single read-only transition query. TemplateRecovery asks it per queue
+-- identity; the state table stays private and no listener is notified.
+function Boundary.transitionActive(identityKey)
+    if type(identityKey) ~= "string" then return false end
+    local separator = string.find(identityKey, ":", 1, true)
+    if not separator then return false end
+    local rvId = string.sub(identityKey, 1, separator - 1)
+    local generation = integer(string.sub(identityKey, separator + 1))
+    if rvId == "" or not generation or generation < 1 then return false end
+    for _, state in pairs(Boundary._states) do
+        if type(state) == "table" and tostring(state.rvId) == rvId
+            and integer(state.generation) == generation then
+            if type(state.leaseToken) ~= "string" then return false end
+            if type(state.leaseUntil) == "number"
+                and state.leaseUntil >= Boundary._tick then
+                return true
+            end
+            state.leaseToken, state.leaseUntil = nil, nil
+            return false
+        end
     end
-    state.transitionToken, state.transitionKind, state.transitionUntil = nil, nil, nil
-    notifyTransitionLifecycle("timeout", nil, state)
     return false
 end
 
-local function prepareCorrection(player, boundary, state, target)
-    local anchor = TemplateGeometry.anchorFromManaged(boundary.managed, Template)
-    if not target or not anchor
-        or not TemplateGeometry.isWalkable(target, anchor, Template) then
-        return false
-    end
-    -- Recovery must not fabricate a teleport into an unloaded target square.
-    -- A last-valid point was loaded when recorded, but a reconnect/streaming
-    -- race can make a nearest active fallback unavailable; defer until the
-    -- authoritative cell exposes that exact square.
-    local cell = playerCell(player)
-    if not square(cell, math.floor(target.x), math.floor(target.y),
-        math.floor(target.z)) then
-        return false
-    end
-    local id = state and state.identity or identity(player)
-    if not id then return false end
-    state.correctionSequence = (integer(state.correctionSequence) or 0) + 1
-    local payload = {
-        rvId = boundary.rvId, generation = boundary.generation,
-        sequence = state.correctionSequence,
-        onlineId = id.onlineId, x = target.x, y = target.y, z = target.z,
-    }
-    return payload
-end
-
-local function notifyCorrection(player, payload)
-    callGlobal("sendServerCommand", player, C.MOD_ID,
-        C.COMMAND_RV_BOUNDARY_CORRECTION, payload)
-end
-
+-- A correction must use a fresh position that agrees with the server's loaded
+-- current square. Missing or stale square state leaves the player untouched.
 local function currentSquareMatches(player, position)
     local ok, current = call(player, "getCurrentSquare")
-    -- A nil current square means the current square has not been loaded (the
-    -- authoritative cell is unavailable)
-    -- (or the player cache is between cells).  It is not evidence that the
-    -- position is valid: last-valid may only advance after a loaded-square
-    -- check, and recovery must wait for the same proof.
     if not ok or current == nil then return false end
     local okX, x = call(current, "getX")
     local okY, y = call(current, "getY")
@@ -543,28 +372,21 @@ local function currentSquareMatches(player, position)
         and integer(z) == math.floor(position.z)
 end
 
+-- Return the validated current boundary and mapping record for a player who is
+-- authoritatively inside this RV, or nil.
 local function guardContextForPlayer(player, position, knownIdentity,
     deferValidationMiss)
-    local stateIdentity = knownIdentity or identity(player)
-    local priorState = stateIdentity and Boundary._states[stateIdentity.key] or nil
-    local refreshTicks = integer(C.BOUNDARY_SNAPSHOT_REFRESH_TICKS) or 60
-    local previousRefreshTick = priorState and priorState.validationRefreshTick
-    local forceValidationRefresh = priorState ~= nil
-        and (type(previousRefreshTick) ~= "number"
-            or (Boundary._tick - previousRefreshTick) >= refreshTicks)
     local boundary, record, relation, id = Boundary.boundaryForPlayer(player,
-        knownIdentity, deferValidationMiss, forceValidationRefresh, false, true)
-    if not boundary then
+        knownIdentity, deferValidationMiss, false, false, true)
+    if not boundary or type(record) ~= "table" or type(id) ~= "table" then
         return nil
     end
-    local currentOnlineId = type(id) == "table"
-        and integer(id.onlineId) or nil
+    local currentOnlineId = integer(id.onlineId)
     local relationOnlineId = type(relation) == "table"
         and integer(relation.onlineId) or nil
-    local rider = type(id) == "table" and type(record) == "table"
-        and type(record.players) == "table" and record.players[id.username] or nil
-    if type(id) ~= "table" or currentOnlineId == nil
-        or type(record) ~= "table"
+    local rider = type(record.players) == "table"
+        and record.players[id.username] or nil
+    if currentOnlineId == nil
         or type(relation) ~= "table" or relation.inside ~= true
         or tostring(relation.locoId) ~= tostring(record.locoId)
         or relationOnlineId ~= currentOnlineId
@@ -572,43 +394,10 @@ local function guardContextForPlayer(player, position, knownIdentity,
         or integer(rider.onlineId) ~= currentOnlineId then
         return nil
     end
-    local state = stateFor(player, id or knownIdentity)
-    if not state then
+    if type(position) ~= "table" or not currentSquareMatches(player, position) then
         return nil
     end
-    if state.boundaryReference ~= boundary
-        or state.rvId ~= boundary.rvId
-        or state.generation ~= boundary.generation then
-        state.rvId, state.generation = boundary.rvId, boundary.generation
-        state.boundaryReference = boundary
-        state.validationRefreshTick = nil
-    end
-    if state.validationRefreshTick == nil or forceValidationRefresh then
-        state.validationRefreshTick = Boundary._tick
-    end
-    if transitionActive(state) then return nil end
-    if not position then return nil end
-    -- A correction must use a fresh position that agrees with the server's
-    -- loaded current square. Missing or stale square state leaves the player
-    -- untouched and keeps repair work paused for this tick.
-    if not currentSquareMatches(player, position) then
-        return nil
-    end
-    local anchor = TemplateGeometry.anchorFromManaged(boundary.managed, Template)
-    return {
-        position = position,
-        managed = boundary.managed,
-        anchor = anchor,
-        boundary = boundary,
-        spawnIdentity = { rvId = boundary.rvId, generation = boundary.generation },
-        expectedSpawn = record.rvPosition,
-        preparePullback = function()
-            return prepareCorrection(player, boundary, state, record.rvPosition)
-        end,
-        notifyPullback = function(payload)
-            notifyCorrection(player, payload)
-        end,
-    }
+    return boundary, record, relationOnlineId
 end
 
 ctx.number = number
@@ -619,11 +408,6 @@ ctx.identity = identity
 ctx.playerPosition = playerPosition
 ctx.playerCell = playerCell
 ctx.square = square
-ctx.currentBoundary = currentBoundary
-ctx.boundaryFor = boundaryFor
-ctx.boundaryKey = boundaryKey
-ctx.sameBoundary = sameBoundary
 ctx.stateFor = stateFor
-ctx.transitionActive = transitionActive
 ctx.guardContextForPlayer = guardContextForPlayer
 end

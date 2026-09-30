@@ -9,9 +9,6 @@ local integer = ctx.integer
 local call = ctx.call
 local identity = ctx.identity
 local square = ctx.square
-local currentBoundary = ctx.currentBoundary
-local boundaryKey = ctx.boundaryKey
-local sameBoundary = ctx.sameBoundary
 local Common = require("RailroaderRV/Common/RV_Common")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
@@ -143,8 +140,15 @@ end
 -- deliberately fail-closed for missing/ambiguous metadata.
 function Boundary.isCurrentShellWall(object, boundary)
     if not object or type(boundary) ~= "table" then return false end
-    local current = currentBoundary(boundary)
-    if not current then return false end
+    -- The reader supplies the boundary for the current identity; only the
+    -- identity fields and the authored managed/edge ledger are consumed here.
+    local current = boundary
+    if type(current.rvId) ~= "string" or current.rvId == ""
+        or integer(current.generation) == nil or integer(current.generation) < 1
+        or type(current.managed) ~= "table"
+        or type(current.shellEdges) ~= "table" then
+        return false
+    end
     local isThumpable = Common.classInstance(object, "IsoThumpable")
     local isWindow = Common.classInstance(object, "IsoWindow")
     if not isThumpable and not isWindow then
@@ -426,7 +430,9 @@ function BuilderActionLedger.uniqueCandidate(object, x, y, z, tick)
         if type(action) == "table" and actionMatchesObject(action, x, y, z) then
             local boundary = action.boundary
             local current = Boundary.boundaryForPlayer(action.player)
-            if sameBoundary(current, boundary)
+            if type(current) == "table"
+                and tostring(current.rvId) == tostring(boundary.rvId)
+                and integer(current.generation) == integer(boundary.generation)
                 and TemplateGeometry.inManagedRegion({ x = x, y = y, z = z },
                     boundary.managed) then
                 if candidate ~= nil then return nil end
@@ -506,7 +512,8 @@ function Boundary.onProcessAction(actionName, player, args)
     -- player-scoped. A replacement build cannot reuse a stale action.
     BuilderActionLedger.invalidateForGeneration(boundary.rvId,
         boundary.generation)
-    BuilderActionLedger.submit(id.key .. ":" .. boundaryKey(boundary), action)
+    BuilderActionLedger.submit(id.key .. ":"
+        .. tostring(boundary.rvId) .. ":" .. tostring(boundary.generation), action)
 
     -- The standard build callback may run before or after this listener. If
     -- the builder already exposes its Java object, tag it for the bounded

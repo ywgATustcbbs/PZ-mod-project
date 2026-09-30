@@ -1,17 +1,26 @@
 -- TemplateRecoveryQueue owns player sampling, FIFO scheduling, tick quota, and
 -- the pause lifecycle around Boundary transitions. It delegates repair work.
+-- The Boundary sweep calls onPostPlayerTick directly after it has validated the
+-- active players and boundaries; this module registers no callback and the
+-- published instance is looked up at runtime through RailroaderRV.RecoveryQueue.
+local instance = nil
 return function(ctx)
+if instance then
+    -- A later require carries the live script instance's context table; keep the
+    -- published entry reading services from there.
+    instance.ctx = ctx
+    return instance
+end
 local Boundary = ctx.Boundary
 local Core = ctx.Core
 local Constants = ctx.Constants
-local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
 local Index = require("RailroaderRV/TemplateRecovery/RV_TemplateRecoveryIndex")(ctx)
 
 local queues = {}
 local reportedFailures = {}
 local transitionPauseUntil = {}
-local previousActiveTransitions = {}
+local transitionWasActive = {}
 local lastServedQueueKey = nil
 local sampleInterval = ServerUtil.toNumber(
     Constants.TEMPLATE_PROTECTION_REPAIR_SAMPLE_INTERVAL_TICKS)
@@ -22,9 +31,7 @@ end
 local transitionReturnGraceTicks = 100
 
 if type(Boundary) ~= "table"
-    or type(Boundary.addTransitionLifecycleListener) ~= "function"
-    or type(Boundary.transitionActivitySnapshot) ~= "function"
-    or type(Boundary.addPostPlayerTickHandler) ~= "function"
+    or type(Boundary.transitionActive) ~= "function"
     or type(Index.validCurrentContext) ~= "function"
     or type(Index.queueKey) ~= "function" then
     error("RailroaderRVTest: template-recovery queue dependencies are incomplete")
@@ -36,15 +43,39 @@ local function clearQueuedIdentity(identityKey)
     reportedFailures[identityKey] = nil
 end
 
+-- A live transition lease pauses repair for that identity; after the lease ends
+-- the bounded grace recorded in transitionPauseUntil keeps it paused while the
+-- relocation return settles.
 local function isIdentityPaused(identityKey, tick)
     if type(identityKey) ~= "string" then return false end
-    if previousActiveTransitions[identityKey] == true then return true end
+    if Boundary.transitionActive(identityKey) then return true end
     if type(tick) ~= "number" then return false end
     local untilTick = transitionPauseUntil[identityKey]
     if type(untilTick) ~= "number" then return false end
     if untilTick >= tick then return true end
     transitionPauseUntil[identityKey] = nil
     return false
+end
+
+-- Edge detection for one identity: a live lease is observed, and the tick it
+-- disappears is the tick the bounded return grace starts.  The queue is dropped
+-- either way so relocation-frame sampling cannot survive the transition.
+local function trackTransitionEnd(identityKey, tick)
+    if type(identityKey) ~= "string" then return end
+    if Boundary.transitionActive(identityKey) then
+        transitionWasActive[identityKey] = true
+        transitionPauseUntil[identityKey] = nil
+        clearQueuedIdentity(identityKey)
+        return
+    end
+    if transitionWasActive[identityKey] ~= true then return end
+    transitionWasActive[identityKey] = nil
+    local requestedUntil = tick + transitionReturnGraceTicks
+    local previousUntil = transitionPauseUntil[identityKey]
+    if type(previousUntil) ~= "number" or requestedUntil > previousUntil then
+        transitionPauseUntil[identityKey] = requestedUntil
+    end
+    clearQueuedIdentity(identityKey)
 end
 
 local function purgePreviousGenerations(rvId, currentKey)
@@ -62,101 +93,6 @@ local function purgePreviousGenerations(rvId, currentKey)
         end
     end
     Index.purgeOtherGenerations(id, currentKey)
-end
-
-local function activeForIdentity(activity, identityKey)
-    local state = type(activity) == "table" and activity[identityKey] or nil
-    return type(state) == "table" and state.active == true
-end
-
-local function observeBoundaryTransitions(tick)
-    local snapshotOk, activity = Boundary.transitionActivitySnapshot(tick)
-    if not snapshotOk or type(activity) ~= "table" then
-        return false, "boundary transition state unavailable"
-    end
-
-    local activeIdentities, recentlyCompleted = {}, {}
-    for key, state in pairs(activity) do
-        if type(key) == "string" and type(state) == "table" then
-            if state.active == true then
-                activeIdentities[key] = true
-            elseif state.recentlyCompleted == true then
-                recentlyCompleted[key] = true
-            end
-        end
-    end
-
-    for key in pairs(activeIdentities) do
-        transitionPauseUntil[key] = nil
-        clearQueuedIdentity(key)
-    end
-
-    for key in pairs(previousActiveTransitions) do
-        if not activeIdentities[key] then
-            previousActiveTransitions[key] = nil
-            transitionPauseUntil[key] = tick + transitionReturnGraceTicks
-            clearQueuedIdentity(key)
-        end
-    end
-
-    for key in pairs(recentlyCompleted) do
-        if not activeIdentities[key] then
-            local requestedUntil = tick + transitionReturnGraceTicks
-            local previousUntil = transitionPauseUntil[key]
-            if type(previousUntil) ~= "number"
-                or requestedUntil > previousUntil then
-                transitionPauseUntil[key] = requestedUntil
-            end
-            clearQueuedIdentity(key)
-        end
-    end
-
-    for key in pairs(activeIdentities) do
-        previousActiveTransitions[key] = true
-    end
-    for key, untilTick in pairs(transitionPauseUntil) do
-        if type(untilTick) ~= "number" or tick > untilTick then
-            transitionPauseUntil[key] = nil
-        end
-    end
-    if type(ctx.pruneTemplateProtectionRemovalTrace) == "function" then
-        pcall(ctx.pruneTemplateProtectionRemovalTrace, tick)
-    end
-    return true
-end
-
-local function identityHasActiveTransition(identity, tick)
-    local snapshotOk, activity = Boundary.transitionActivitySnapshot(tick)
-    if not snapshotOk or type(activity) ~= "table" then return nil end
-    local key = Index.identityKey(identity.rvId, identity.generation)
-    if not key then return nil end
-    return activeForIdentity(activity, key)
-end
-
-local function onBoundaryTransitionLifecycle(eventName, _, identity, tick)
-    if type(identity) ~= "table" then return end
-    local key = Index.identityKey(identity.rvId, identity.generation)
-    if not key then return end
-    if type(tick) ~= "number" then tick = Core.getTick() end
-    if eventName == "begin" then
-        previousActiveTransitions[key] = true
-        transitionPauseUntil[key] = nil
-        clearQueuedIdentity(key)
-        return
-    end
-    if eventName ~= "complete" and eventName ~= "clear"
-        and eventName ~= "timeout" then
-        return
-    end
-    local active = identityHasActiveTransition(identity, tick)
-    if active == nil or active then
-        previousActiveTransitions[key] = true
-        transitionPauseUntil[key] = nil
-    else
-        previousActiveTransitions[key] = nil
-        transitionPauseUntil[key] = tick + transitionReturnGraceTicks
-    end
-    clearQueuedIdentity(key)
 end
 
 local function compactQueue(queue)
@@ -222,7 +158,12 @@ local function popXY(queue)
 end
 
 local function restoreThroughConstruction(player, boundary, x, y)
-    local server = type(RV) == "table" and RV.Server or nil
+    -- The construction service is published on the live script instance while
+    -- RV_Server loads, so resolve it per call instead of capturing a snapshot.
+    local liveCtx = instance and instance.ctx or ctx
+    local rv = type(liveCtx.RV) == "table" and liveCtx.RV
+        or rawget(_G, "RailroaderRV")
+    local server = type(rv) == "table" and rv.Server or nil
     local construction = type(server) == "table" and server.Construction or nil
     if type(construction) ~= "table"
         or type(construction.restoreCurrentCell) ~= "function" then
@@ -244,13 +185,17 @@ local function processQueue(activeBoundaries, tick)
             if contextOk then
                 local key = Index.queueKey(boundary, record)
                 if key then
-                    purgePreviousGenerations(boundary.rvId, key)
-                    local queue = queues[key]
+                    trackTransitionEnd(key, tick)
                     if isIdentityPaused(key, tick) then
+                        -- A live lease and its return grace both own the queue.
                         clearQueuedIdentity(key)
-                    elseif queue and queue.count > 0 then
-                        ready[#ready + 1] = { key = key, queue = queue,
-                            boundary = boundary, player = item.player }
+                    else
+                        purgePreviousGenerations(boundary.rvId, key)
+                        local queue = queues[key]
+                        if queue and queue.count > 0 then
+                            ready[#ready + 1] = { key = key, queue = queue,
+                                boundary = boundary, player = item.player }
+                        end
                     end
                 end
             else
@@ -264,6 +209,12 @@ local function processQueue(activeBoundaries, tick)
                 end
             end
         end
+    end
+    -- Removal-trace pruning belongs to the live script instance's context, which
+    -- a cached instance only sees through the refreshed `instance.ctx`.
+    local liveCtx = instance and instance.ctx or ctx
+    if type(liveCtx.pruneTemplateProtectionRemovalTrace) == "function" then
+        pcall(liveCtx.pruneTemplateProtectionRemovalTrace, tick)
     end
     if #ready == 0 then return false end
     table.sort(ready, function(left, right) return left.key < right.key end)
@@ -306,22 +257,23 @@ local function onPostPlayerTick(tick, activePlayers, activeBoundaries)
     if type(tick) ~= "number" then
         return false, "invalid boundary tick"
     end
-    local observeOk, observeReason = observeBoundaryTransitions(tick)
-    if not observeOk then
-        print("[RailroaderRVTest] template-protection-repair transition observation skipped: "
-            .. tostring(observeReason))
-        return false, observeReason
+    if type(Core) ~= "table" or type(Core.tickModulo) ~= "function" then
+        return false, "server tick clock is unavailable"
     end
-
     if Core.tickModulo(sampleInterval)
         and type(activePlayers) == "table" then
         for i = 1, #activePlayers do
             local item = activePlayers[i]
-            local callOk, sampled, reason = pcall(samplePlayer,
-                item and item.boundary, item and item.player)
-            if not callOk or sampled ~= true then
-                print("[RailroaderRVTest] template-protection-repair player sampling skipped: "
-                    .. tostring(callOk and reason or sampled))
+            local boundary = type(item) == "table" and item.boundary or nil
+            local key = type(boundary) == "table"
+                and Index.identityKey(boundary.rvId, boundary.generation) or nil
+            if not key or not isIdentityPaused(key, tick) then
+                local callOk, sampled, reason = pcall(samplePlayer, boundary,
+                    item and item.player)
+                if not callOk or sampled ~= true then
+                    print("[RailroaderRVTest] template-protection-repair player sampling skipped: "
+                        .. tostring(callOk and reason or sampled))
+                end
             end
         end
     end
@@ -335,17 +287,11 @@ local function onPostPlayerTick(tick, activePlayers, activeBoundaries)
     return true
 end
 
-local lifecycleRegistered, lifecycleReason =
-    Boundary.addTransitionLifecycleListener("TemplateProtectionRepairQueue",
-        onBoundaryTransitionLifecycle)
-if lifecycleRegistered ~= true then
-    error("RailroaderRVTest: template-recovery lifecycle registration failed: "
-        .. tostring(lifecycleReason))
-end
-local tickRegistered, tickReason = Boundary.addPostPlayerTickHandler(
-    "TemplateRecoveryQueue", onPostPlayerTick)
-if tickRegistered ~= true then
-    error("RailroaderRVTest: template-recovery tick registration failed: "
-        .. tostring(tickReason))
-end
+instance = {
+    onPostPlayerTick = onPostPlayerTick,
+    ctx = ctx,
+}
+RailroaderRV = RailroaderRV or {}
+RailroaderRV.RecoveryQueue = instance
+return instance
 end

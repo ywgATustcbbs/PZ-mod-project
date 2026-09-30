@@ -11,9 +11,7 @@ RailroaderRV.BoundaryClient = RailroaderRV.BoundaryClient or {}
 local Client = RailroaderRV.BoundaryClient
 local C = RailroaderRV.Constants
 local states = Client._states or {}
-local clientTick = Client._tick or 0
 Client._states = states
-Client._tick = clientTick
 
 local function number(value)
     if type(value) == "number" then return value end
@@ -109,16 +107,8 @@ function Client.onServerCommand(module, command, args)
     end
 end
 
-function Client.onTick()
-    clientTick = clientTick + 1
-    Client._tick = clientTick
-end
-
 if Events and Events.OnServerCommand and type(Events.OnServerCommand.Add) == "function" then
     Events.OnServerCommand.Add(Client.onServerCommand)
-end
-if Events and Events.OnTick and type(Events.OnTick.Add) == "function" then
-    Events.OnTick.Add(Client.onTick)
 end
 if Events and Events.OnDisconnect and type(Events.OnDisconnect.Add) == "function" then
     Events.OnDisconnect.Add(function()

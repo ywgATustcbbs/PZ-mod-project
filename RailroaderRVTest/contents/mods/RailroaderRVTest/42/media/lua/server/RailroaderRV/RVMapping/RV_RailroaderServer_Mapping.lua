@@ -41,8 +41,6 @@ end
 local function markMappingChanged(boundaryChanged)
     Adapter.advanceMappingEpoch()
     if boundaryChanged ~= false then
-        Adapter._boundaryValidationEpoch =
-            (Adapter._boundaryValidationEpoch or 0) + 1
         invalidateBoundaryValidationCache()
     end
     -- The train map is server-persistent authority. No client code reads this

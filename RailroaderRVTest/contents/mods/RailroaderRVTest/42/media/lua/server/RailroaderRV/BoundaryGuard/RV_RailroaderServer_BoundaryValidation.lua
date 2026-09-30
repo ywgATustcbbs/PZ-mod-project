@@ -79,20 +79,17 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
         and type(roofBusy) == "boolean"
     local state = Boundary and Boundary._states
         and Boundary._states[identityKey]
-    local transitionActive = state and state.transitionToken ~= nil
+    local transitionActive = state ~= nil
+        and type(state.leaseToken) == "string"
         and type(Boundary._tick) == "number"
-        and type(state.transitionUntil) == "number"
-        and state.transitionUntil >= Boundary._tick
-    local mappingEpoch = Adapter._boundaryValidationEpoch or 0
-    local geometryEpoch = Boundary and Boundary._geometryEpoch or 0
+        and type(state.leaseUntil) == "number"
+        and state.leaseUntil >= Boundary._tick
     local now = Adapter._ticks or Core.getTick()
     local cached = cache[identityKey]
     if not forceRefresh and not roofRefreshContextRead
         and transactionStateValid
         and generationBusy == false and not transitionActive
         and type(cached) == "table"
-        and cached.mappingEpoch == mappingEpoch
-        and cached.geometryEpoch == geometryEpoch
         and type(cached.validatedAtTick) == "number"
         and now >= cached.validatedAtTick
         and (now - cached.validatedAtTick) < CACHE_TTL_TICKS
@@ -175,8 +172,6 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
         end
     end
     pending[identityKey] = nil
-    mappingEpoch = Adapter._boundaryValidationEpoch or 0
-    geometryEpoch = Boundary and Boundary._geometryEpoch or 0
     now = Adapter._ticks or Core.getTick()
     local boundary = Boundary and Boundary.boundaryFor(record) or nil
     if not boundary then
@@ -191,8 +186,6 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
             relation = relation,
             validatedIdentity = validatedIdentity,
             manifest = manifest,
-            mappingEpoch = mappingEpoch,
-            geometryEpoch = geometryEpoch,
             validatedAtTick = now,
         }
     end
@@ -212,8 +205,6 @@ local function needsRefresh(identityKey, forceRefresh)
     local cached = cache[identityKey]
     local now = Adapter._ticks or Core.getTick()
     return type(cached) ~= "table"
-        or cached.mappingEpoch ~= (Adapter._boundaryValidationEpoch or 0)
-        or cached.geometryEpoch ~= (Boundary and Boundary._geometryEpoch or 0)
         or type(cached.validatedAtTick) ~= "number"
         or now < cached.validatedAtTick
         or (now - cached.validatedAtTick) >= REFRESH_TICKS

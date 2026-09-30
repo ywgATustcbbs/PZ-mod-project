@@ -4,7 +4,6 @@ local C = require("RailroaderRV/Common/RV_Constants")
 local U = require("RailroaderRV/Common/RV_UtilityConstants")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local PowerConfig = require("RailroaderRV/Power/RV_UtilityPowerConfig")
-local DevSaveSchemaGate = require("RailroaderRV/Core/RV_DevSaveSchemaGate")
 
 local M = {}
 
@@ -47,61 +46,34 @@ local function waterSinkKey(x, y, z)
     if not x or not y or not z then return nil end
     return string.format("%d:%d:%d", x, y, z)
 end
--- Read-only root access. Persisted contents were deep-scanned once by the
--- startup gate; this path only requires the accepted root to remain readable.
 local function readRoot()
-    if not DevSaveSchemaGate.isReady() then error(C.INVALID_RV_DATA) end
-    if not ModData or type(ModData.get) ~= "function" then
-        error(C.INVALID_RV_DATA)
-    end
-    local ok, value = pcall(ModData.get, U.STORE_KEY)
-    if not ok then error(C.INVALID_RV_DATA) end
-    if value == nil then return nil end
-    if type(value) ~= "table" then error(C.INVALID_RV_DATA) end
-    if empty(value) then return value end
-    return value
+    return ModData.get(U.STORE_KEY)
 end
 
 
 local function root(allowCreate)
     local value = readRoot()
     if value == nil and allowCreate and ModData and type(ModData.getOrCreate) == "function" then
-        local ok, result = pcall(ModData.getOrCreate, U.STORE_KEY)
-        if not ok then error(C.INVALID_RV_DATA) end
-        value = result
+        value = ModData.getOrCreate(U.STORE_KEY)
     end
     if type(value) == "table" and empty(value) and allowCreate == true then
-        value.schemaVersion = U.STORE_SCHEMA_VERSION
         value.records = {}
     end
-    if not DevSaveSchemaGate.isReady() or type(value) ~= "table"
-        or type(value.records) ~= "table" then error(C.INVALID_RV_DATA) end
     return value
 end
 
 local function currentIdentityGate(identity)
-    if not identityValid(identity) then return false, C.INVALID_RV_DATA end
-    local rv = rawget(_G, "RailroaderRV")
-    local server = rv and rv.Server
-    if not server or type(server.currentRVManifestForBoundary) ~= "function"
-        or type(server.validateCurrentUtilityIdentity) ~= "function" then
-        return false, C.INVALID_RV_DATA
-    end
-    local ok, accepted = pcall(server.currentRVManifestForBoundary, identity.rvId,
-        identity.generation, identity.bitmapVersion)
-    if not ok or accepted ~= true then return false, C.INVALID_RV_DATA end
-    local mapOk, mapAccepted = pcall(server.validateCurrentUtilityIdentity, identity)
-    if not mapOk or mapAccepted ~= true then return false, C.INVALID_RV_DATA end
-    return true
+    local valid = identityValid(identity)
+    return valid, valid and nil or C.INVALID_RV_DATA
 end
 
 local function newWater()
-    return { schemaVersion = U.WATER_SCHEMA_VERSION, sinks = {},
+    return { sinks = {},
         state = U.WATER_STATE_ACTIVE }
 end
 
 local function newPower()
-    return { schemaVersion = U.POWER_SCHEMA_VERSION, generator = nil,
+    return { generator = nil,
         circuitState = U.CIRCUIT_OFF, generatorEnabled = false,
         virtualFuelL = 0, batteryWh = 0, batteryCapacityWh = 0,
         maxChargePowerW = 0, maxDischargePowerW = 0, generationPowerW = 0,
@@ -124,11 +96,9 @@ function M.validateIdentity(identity)
 end
 
 function M.getRecord(identity, allowCreate)
-    if not DevSaveSchemaGate.isReady() then return false, C.INVALID_RV_DATA end
     local gateOk, gateReason = currentIdentityGate(identity)
     if not gateOk then return false, gateReason end
-    local ok, value = pcall(readRoot)
-    if not ok then return false, C.INVALID_RV_DATA end
+    local value = readRoot()
     local id = tostring(identity.rvId)
     local record
     if value == nil or empty(value) then
@@ -152,7 +122,6 @@ function M.getRecord(identity, allowCreate)
 end
 
 function M.commit(record, identity)
-    if not DevSaveSchemaGate.isReady() then return false, C.INVALID_RV_DATA end
     local gateOk, gateReason = currentIdentityGate(identity)
     if not gateOk then return false, gateReason end
     if type(record) ~= "table"
@@ -161,8 +130,7 @@ function M.commit(record, identity)
         or integer(record.bitmapVersion) ~= integer(identity.bitmapVersion) then
         return false, C.INVALID_RV_DATA
     end
-    local ok, value = pcall(root, true)
-    if not ok then return false, C.INVALID_RV_DATA end
+    local value = root(true)
     -- Keep the caller's working copy detached even after a successful commit;
     -- later mutations must require another explicit commit.
     local id = tostring(identity.rvId)
@@ -183,45 +151,15 @@ function M.commit(record, identity)
 end
 
 function M.allRecords()
-    if not DevSaveSchemaGate.isReady() then return false, C.INVALID_RV_DATA end
-    local ok, value = pcall(readRoot)
-    if not ok then return false, C.INVALID_RV_DATA end
+    local value = readRoot()
     local result = {}
     if value == nil or empty(value) then return true, result end
-    if type(value.records) ~= "table" then return false, C.INVALID_RV_DATA end
-    for id, record in pairs(value.records) do
-        if type(id) ~= "string" or type(record) ~= "table"
-            or tostring(record.rvId) ~= id then
-            return false, C.INVALID_RV_DATA
-        end
+    for _, record in pairs(value.records) do
         local identity = { rvId = record.rvId, generation = record.generation,
             bitmapVersion = record.bitmapVersion }
-        if not identityValid(identity) then return false, C.INVALID_RV_DATA end
         result[#result + 1] = { identity = identity, record = copyTable(record) }
     end
     return true, result
-end
--- Validate the persistent utility contract before generation changes world state.
--- This deliberately does not call currentIdentityGate: the Railroader mapping
--- is committed later in the generation transaction and is required by that
--- gate.  A fresh root or a root with no record for this RV can be initialized
--- after the mapping is committed; an existing record must already match the
--- candidate generation exactly.
-function M.validateGenerationUtilityState(identity)
-    if not identityValid(identity) then return false, C.INVALID_RV_DATA end
-    local callOk, recordsOk, entries = pcall(M.allRecords)
-    if not callOk or recordsOk ~= true or type(entries) ~= "table" then
-        return false, C.INVALID_RV_DATA
-    end
-    for _, entry in ipairs(entries) do
-        if tostring(entry.identity.rvId) == tostring(identity.rvId)
-            and (integer(entry.identity.generation) ~= integer(identity.generation)
-                or integer(entry.identity.bitmapVersion)
-                    ~= integer(identity.bitmapVersion)) then
-            return false, C.INVALID_RV_DATA
-        end
-    end
-    return true
 end
 
 function M.snapshot(record)

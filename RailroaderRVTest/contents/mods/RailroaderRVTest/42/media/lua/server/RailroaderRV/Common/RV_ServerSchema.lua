@@ -122,8 +122,8 @@ local function boundsFor(layout)
     end
     -- This is a runtime requirement for generated layout data: the bitmap
     -- readers need one packed walk/build byte string for every managed z
-    -- level. Persisted bitmap schema/version validation belongs to the startup
-    -- development save gate, not this geometry helper.
+    -- level. Persisted bitmap versions are checked by the boundary readers;
+    -- this helper enforces the geometry needed by the current layout.
     local layerByteLength = Bitmap and Bitmap.byteLength(managedWidth, managedHeight)
     if not layerByteLength or type(bitmap.layers) ~= "table" then
         error("RailroaderRVTest: layout bitmap has no usable layer data")
@@ -165,7 +165,6 @@ local function boundsFor(layout)
         end
     end
     return {
-        schemaVersion = Constants.LAYOUT_SCHEMA_VERSION,
         clearMinX = clearMinX, clearMaxX = clearMaxX,
         clearMinY = clearMinY, clearMaxY = clearMaxY,
         clearMinZ = clearMinZ, clearMaxZ = clearMaxZ,

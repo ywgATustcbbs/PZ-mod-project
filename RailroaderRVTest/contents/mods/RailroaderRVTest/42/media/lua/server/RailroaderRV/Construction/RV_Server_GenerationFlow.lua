@@ -24,20 +24,6 @@ local function allocateRVRegion(...)
     return adapter.allocateRVRegion(...)
 end
 local function safeErrorText(...) return ctx.safeErrorText(...) end
-local function requireCurrentManifest(...) return ctx.requireCurrentManifest(...) end
-local function validateGenerationUtilityState(identity)
-    if not UtilityServer
-        or type(UtilityServer.validateGenerationUtilityState) ~= "function" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local callOk, accepted, reason = pcall(
-        UtilityServer.validateGenerationUtilityState, identity)
-    if not callOk or accepted ~= true then
-        return false, callOk and (reason or Constants.INVALID_RV_DATA)
-            or Constants.INVALID_RV_DATA
-    end
-    return true
-end
 local RELOCATION_TIMEOUT_TICKS = ctx.RELOCATION_TIMEOUT_TICKS
 local registerServerRoomOwnershipGuard = ctx.registerServerRoomOwnershipGuard
 local refreshServerRoomOwnershipGuard = ctx.refreshServerRoomOwnershipGuard
@@ -169,7 +155,6 @@ local function relocatePlayerIntoHouse(player, prepared)
             bitmapVersion = ServerUtil.requiredInteger(prepared.boundary
                 and prepared.boundary.bitmapVersion,
                 "final relocation bitmapVersion"),
-            mapSchemaVersion = Constants.MAP_SCHEMA_VERSION,
             onlineId = prepared.identity.onlineId,
             x = x,
             y = y,
@@ -249,13 +234,6 @@ local function generateForPlayer(player, prepared)
         return false, safeErrorText(manifestOrError)
     end
     manifest = manifestOrError
-    local schemaOk, schemaError = pcall(requireCurrentManifest, manifest, true)
-    if not schemaOk then
-        if Boundary and type(Boundary.clearPlayer) == "function" then
-            Boundary.clearPlayer(player)
-        end
-        return false, Constants.INVALID_RV_DATA
-    end
     if manifest.state == "RUNNING" then
         if Boundary and type(Boundary.clearPlayer) == "function" then
             Boundary.clearPlayer(player)
@@ -327,11 +305,6 @@ local function generateForPlayer(player, prepared)
         end
         prepared.rvId = tostring(rvId)
         prepared.boundary = boundaryOrReason
-        local utilityReady, utilityReason = validateGenerationUtilityState({
-            rvId = prepared.rvId, generation = generation,
-            bitmapVersion = boundaryOrReason.bitmapVersion,
-        })
-        if not utilityReady then error(utilityReason) end
         local construction = ctx.constructionService
         if type(construction) ~= "table"
             or type(construction.preflightCurrentGeneration) ~= "function" then
@@ -365,7 +338,6 @@ local function generateForPlayer(player, prepared)
         -- each captured-object host square and the room-ownership scan checks
         -- the captured roof.
         preserveManifestOnFailure = false
-        manifest.schemaVersion = Constants.MANIFEST_SCHEMA_VERSION
         manifest.techVersion = Constants.TECH_VERSION
         manifest.templateVersion = Constants.CAPTURED_TEMPLATE_VERSION
         manifest.generation = generation
@@ -374,7 +346,6 @@ local function generateForPlayer(player, prepared)
         manifest.anchor = { x = anchor.x, y = anchor.y, z = anchor.z }
         manifest.bounds = bounds
         manifest.rvId = prepared.rvId
-        manifest.boundarySchemaVersion = boundaryOrReason.schemaVersion
         manifest.bitmapVersion = boundaryOrReason.bitmapVersion
         manifest.boundary = boundaryOrReason
         manifest.startedAt = math.floor(os.time())
@@ -526,8 +497,7 @@ local function finalizeGenerationAfterRelocate(player, prepared)
             error("final relocation authoritative target is still synchronizing")
         end
         local manifest = manifestTable()
-        local schemaOk = pcall(requireCurrentManifest, manifest, false)
-        if not schemaOk or manifest.state ~= "RUNNING"
+        if manifest.state ~= "RUNNING"
             or manifest.phase ~= "FINAL_RELOCATE"
             or tostring(manifest.rvId) ~= tostring(prepared.rvId)
             or ServerUtil.integer(manifest.generation) ~= prepared.generation
@@ -560,8 +530,7 @@ local function finalizeGenerationAfterRelocate(player, prepared)
         setManifestState(manifest, "READY")
         refreshGenerationRoomOwnershipGuard(prepared.rvId,
             prepared.generation, prepared.bitmapVersion, "pre-mapping-commit")
-        local readySchemaOk = pcall(requireCurrentManifest, manifest, false)
-        if not readySchemaOk or manifest.state ~= "READY"
+        if manifest.state ~= "READY"
             or manifest.phase ~= "COMMITTED" then
             error(Constants.INVALID_RV_DATA)
         end
@@ -621,10 +590,6 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         return false, safeErrorText(manifestOrError)
     end
     local manifest = manifestOrError
-    local schemaOk = pcall(requireCurrentManifest, manifest, true)
-    if not schemaOk then
-        return false, Constants.INVALID_RV_DATA
-    end
     if manifest.state == "RUNNING" then
         return false, "generation already in progress"
     end
@@ -710,11 +675,6 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     local transitionBitmapVersion = ServerUtil.requiredInteger(
         layoutOrError.bitmap and layoutOrError.bitmap.bitmapVersion,
         "planned generation bitmapVersion")
-    local utilityReady, utilityReason = validateGenerationUtilityState({
-        rvId = tostring(transitionRvId), generation = transitionGeneration,
-        bitmapVersion = transitionBitmapVersion,
-    })
-    if not utilityReady then return false, utilityReason end
     if type(railroaderData) == "table" then
         -- Keep the complete generation identity on the adapter's asynchronous
         -- failure/commit payload as well as on the owned transaction record.

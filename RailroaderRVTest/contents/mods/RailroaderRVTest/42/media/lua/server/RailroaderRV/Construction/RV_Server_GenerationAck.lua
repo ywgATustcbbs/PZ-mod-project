@@ -10,7 +10,6 @@ local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local GenerationTransaction = ctx.GenerationTransaction
 local function safeErrorText(...) return ctx.safeErrorText(...) end
-local function requireCurrentManifest(...) return ctx.requireCurrentManifest(...) end
 local RELOCATION_MIN_TICKS = ctx.RELOCATION_MIN_TICKS
 local RELOCATION_POST_ACK_TICKS = ctx.RELOCATION_POST_ACK_TICKS
 local GENERATION_RELOCATION_RETRY_TICKS = ctx.GENERATION_RELOCATION_RETRY_TICKS
@@ -110,8 +109,7 @@ local function acknowledgeFinalRelocation(player, args)
     if not manifestOk or type(manifest) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
-    local schemaOk = pcall(requireCurrentManifest, manifest, false)
-    if not schemaOk or manifest.state ~= "RUNNING"
+    if manifest.state ~= "RUNNING"
         or manifest.phase ~= "FINAL_RELOCATE"
         or tostring(manifest.rvId) ~= tostring(pending.rvId)
         or ServerUtil.integer(manifest.generation) ~= pending.generation

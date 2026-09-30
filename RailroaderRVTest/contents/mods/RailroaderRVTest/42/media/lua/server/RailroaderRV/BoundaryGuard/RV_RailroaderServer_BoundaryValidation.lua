@@ -122,16 +122,7 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
         return nil, "validation-deferred"
     end
 
-    local map = knownMap
-    if type(map) ~= "table" then
-        local mapOk
-        mapOk, map = pcall(mapData)
-        if not mapOk then map = nil end
-    end
-    if type(map) ~= "table" then
-        cache[identityKey] = nil
-        return nil
-    end
+    local map = type(knownMap) == "table" and knownMap or mapData()
     local relation = map.players[name]
     local record = type(relation) == "table" and relation.locoId ~= nil
         and recordForLoco(map, relation.locoId) or nil
@@ -164,8 +155,7 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
         return nil
     end
     if not server
-        or type(server.currentRVManifestForBoundary) ~= "function"
-        or type(server.currentRVRecordGeometryConsistent) ~= "function" then
+        or type(server.currentRVManifestForBoundary) ~= "function" then
         cache[identityKey] = nil
         return nil
     end
@@ -175,13 +165,6 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
     if not manifestCallOk or manifestAccepted ~= true
         or type(manifest) ~= "table" then
         diagnose("manifest-rejected")
-        cache[identityKey] = nil
-        return nil
-    end
-    local geometryCallOk, geometryConsistent = pcall(
-        server.currentRVRecordGeometryConsistent, record, manifest)
-    if not geometryCallOk or geometryConsistent ~= true then
-        diagnose("geometry-rejected")
         cache[identityKey] = nil
         return nil
     end
@@ -267,12 +250,7 @@ function Adapter.prewarmCurrentBoundaryPlayers(knownMap, knownPlayers)
         Adapter._boundaryValidationWarmPending = false
         return true
     end
-    local map = knownMap
-    if type(map) ~= "table" then
-        local mapOk
-        mapOk, map = pcall(mapData)
-        if not mapOk or type(map) ~= "table" then return false end
-    end
+    local map = type(knownMap) == "table" and knownMap or mapData()
     for i = 1, #candidates do
         Adapter.prewarmCurrentBoundaryPlayer(candidates[i], map)
     end
@@ -288,8 +266,7 @@ end
 local function prewarmCreatedPlayer(playerIndex, player)
     local candidate = player or playerIndex
     if not playerPositionInRegion(candidate, rvRegion()) then return end
-    local mapOk, map = pcall(mapData)
-    if not mapOk or type(map) ~= "table" then return end
+    local map = mapData()
     Adapter.prewarmCurrentBoundaryPlayer(candidate, map)
 end
 

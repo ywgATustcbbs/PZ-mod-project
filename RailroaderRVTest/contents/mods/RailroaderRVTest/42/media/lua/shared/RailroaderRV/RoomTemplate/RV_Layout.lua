@@ -59,8 +59,6 @@ for x = C.CAB_MIN_OFFSET_X, C.CAB_MAX_OFFSET_X do
     end
 end
 
-Layout.SCHEMA_VERSION = C.LAYOUT_SCHEMA_VERSION
-
 function Layout.eachStructureCoordinate(bounds, callback)
     for x = bounds.wallMinX, bounds.wallMaxX do
         for y = bounds.wallMinY, bounds.wallMaxY do
@@ -260,7 +258,6 @@ function Layout.make(cx, cy, cz)
         C.RV_MANAGED_HEIGHT
     )
     local bitmap = {
-        schemaVersion = Bitmap.SCHEMA_VERSION,
         bitmapVersion = C.BITMAP_VERSION,
         originX = managed.originX,
         originY = managed.originY,
@@ -369,7 +366,6 @@ function Layout.make(cx, cy, cz)
     end
 
     local result = {
-        schemaVersion = Layout.SCHEMA_VERSION,
         anchor = anchor,
         clear = clear,
         managed = managed,

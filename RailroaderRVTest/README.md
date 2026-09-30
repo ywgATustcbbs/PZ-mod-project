@@ -1,7 +1,7 @@
 # RailroaderRVTest
 
 RailroaderRVTest 是 Railroader RV 的内部技术验证包，不承诺对外功能。Lua 命名空间为
-RailroaderRV；当前技术版本以 mod.info 和共享常量中的声明为准。
+RailroaderRV；ModData 使用包级统一 schema 版本，处理规则见“Schema 与模块接口”。
 
 ## 重构草案
 
@@ -14,9 +14,9 @@ RailroaderRV；当前技术版本以 mod.info 和共享常量中的声明为准�
 
 生成候选区从默认锚点 (20050,2050,0) 开始，按 5 行（Y）×20 列（X）排列；每格为一个
 半开区间 100×100 管理区域，首格 x=[20000,20100)、y=[2000,2100)。服务端只从当前
-Mapping 未占用的格子中按行优先顺序分配，并在 Mapping/manifest 当前 schema 中保存
-slotIndex 与 anchor。生成先将客户端和服务器移到由所选布局中心派生的 staging 位置，再等待目标
-IsoCell 可用并校验坐标与当前 schema；加载等待期间不做任何世界修改，也不要求预先加载完整
+Mapping 未占用的格子中按行优先顺序分配，并在 Mapping/manifest 中保存 slotIndex 与
+anchor。生成先将客户端和服务器移到由所选布局中心派生的 staging 位置，再等待目标 IsoCell
+可用并校验坐标；加载等待期间不做任何世界修改，也不要求预先加载完整
 100×100 基面或上层 square。清理遍历
 管理范围，只处理当前 cell 已有的 square，缺失 square 会跳过。Construction 在首次世界修改前
 检查全部已加载目标 square；由于无法完整快照并恢复既有对象，目标范围内有对象或旧代际没有
@@ -51,28 +51,27 @@ FIFO；每 tick 最多检查一个 XY 列，并核对该坐标的所有受管 Z 
 让管理区离开已加载的 chunk 集合，再执行远端 chunk 周期；服务端逐人权威送回并等待组内
 返回阶段完成；必须等组内全部成员的返回确认。断线重连沿用同一事务 token，暂停超时并重发当前阶段，服务端逐人回传。
 
-## 开发期存档规则
+## Schema 与模块接口
 
-只接受当前代码声明的 manifest、bitmap、shell ledger、RV mapping、异步身份和 utility
-schema。缺失、过期、部分写入或字段结构不符时，立即拒绝当前 RV 操作，不修改存档；
-不得用旧数据生成 geometry、清理对象、运行 boundary guard 或传送玩家。
-不自动迁移、转换、推断、兼容别名或修改旧存档。只有完全空的新容器可以按当前 schema
-初始化。旧水路对象身份不再由生成、事件、tick 或 UI 流程创建和维护。
+全包使用 Lua 中集中声明的单一 schema 版本号，并保存到 ModData。启动时只比较一次：匹配时继续，
+不匹配或缺失时发出警告但继续运行。各模块默认 ModData 与接口符合当前定义，不增加重复版本检查、
+结构防护、接口校验、兼容、迁移或回退分支。用户承诺不使用旧存档；运行错误由游戏正常抛出，
+之后由人工或 agent 排查是否与 schema 版本有关。
 
 ## RV 水管连接
 
 本轮只支持玩家对管理区内现有或后来放置的 sink 执行连接/断开，不新增模板 sink，
 也不转移水桶内容或维护自定义水量账本。客户端只提交目标格、对象索引和连接意图；服务端
-从当前 Mapping/RV record 重新验证 `rvId`、generation、bitmapVersion、slotIndex、anchor、
-权限、3 格操作距离、已加载对象、FluidContainer 和原版 water-piped 能力，并要求玩家持有
+根据当前 RV 数据验证 `rvId`、generation、slotIndex、anchor、权限、3 格操作距离、已加载对象、
+FluidContainer 和原版 water-piped 能力，并要求玩家持有
 Pipe Wrench。只有首次明确操作时，服务端才给合格 sink 写入精确的
 `ModData.RailroaderRVTestWater` 当前身份；没有 object-added 自动标记。
 
-Water 持久化使用 Water schema 6 与 Utility Store schema 6。每个 sink 条目保存当前 RV
+Water 与 utility 状态使用包级统一 schema。每个 sink 条目保存当前 RV
 映射身份、格坐标、原版外部水源连接状态和操作序号；实际供水仍由原版 sink/外部水源状态
 承担，不创建隐藏水箱或 proxy。服务端先同步并复核原版连接状态，再提交存档；失败时尝试
-恢复旧连接/可接管状态和对象标签，补偿结果无法确认时标记 `NEEDS_RECONCILE` 并拒绝后续
-水路操作。旧字段、旧 schema 或部分 Water 数据均拒绝并要求删除测试存档后重建，不自动迁移。
+恢复原连接状态和对象标签，补偿结果无法确认时标记 `NEEDS_RECONCILE` 并拒绝后续
+水路操作。代码假设存档符合当前结构；不为旧字段或部分数据添加版本门禁、兼容或迁移处理。
 
 ## 房车虚拟供电
 
@@ -117,11 +116,11 @@ media/lua/server/ 放服务端玩法和世界操作，media/lua/shared/ 放共�
 tests/ 放静态检查。
 
 Lua 实现按职责归入模块目录：客户端菜单和表现位于 `client/RailroaderRV/GUI/`；共享的
-`Common/`、`RoomTemplate/`、`RVMapping/`、`Water/` 和 `Power/` 提供对应数据契约；服务端
+`Common/`、`RoomTemplate/`、`RVMapping/`、`Water/` 和 `Power/` 提供对应数据定义；服务端
 `Core/`、`Common/`、`Construction/`、`RVMapping/`、`BoundaryGuard/`、`RoofRefresh/`、
 `DemolitionProtection/`、`TemplateRecovery/`、`Power/` 和 `Water/` 分别持有服务端职责。
 迁移中保留的顶层 Lua 文件只转发到模块入口，不拥有实现。静态检查直接读取这些模块文件，
-并检查模块归属和跨模块契约。
+并检查模块归属。模块间按现有接口直接协作，不添加接口校验、防护、兼容或迁移分支。
 
 照明灯依赖运行时启用的 BuildingCraft（Workshop ID 3459887404）提供灯具图集和 tile
 definition；本包不复制其资源。workshop.txt 有意留空 Workshop ID，发布前由 Workshop

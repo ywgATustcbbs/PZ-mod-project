@@ -210,22 +210,15 @@ end
 local function currentMappingRecord(identity)
     local rv = rawget(_G, "RailroaderRV")
     local adapter = rv and rv.RailroaderServer
-    if not adapter or type(adapter.currentUtilityRecord) ~= "function" then
-        return false, C.INVALID_RV_DATA
-    end
-    local ok, accepted, record = pcall(adapter.currentUtilityRecord, identity)
-    if not ok or accepted ~= true or type(record) ~= "table" then
+    local accepted, record = adapter.currentUtilityRecord(identity)
+    if accepted ~= true then
         return false, C.INVALID_RV_DATA
     end
     return true, record
 end
 
 local function forCurrentRecords(callback)
-    local recordsOk, entries = Store.allRecords()
-    if not recordsOk or type(entries) ~= "table" then
-        print("[RailroaderRVTest] utility power scan skipped: invalid current schema")
-        return
-    end
+    local _, entries = Store.allRecords()
     for i = 1, #entries do
         local entry = entries[i]
         local identity = entry.identity
@@ -459,13 +452,6 @@ function M.snapshotForPlayer(player)
     if not recordOk then return false, record end
     broadcast(context, record)
     return true, record
-end
-
-function M.validateGenerationUtilityState(identity)
-    if type(Store.validateGenerationUtilityState) ~= "function" then
-        return false, C.INVALID_RV_DATA
-    end
-    return Store.validateGenerationUtilityState(identity)
 end
 
 function M.initializeRecord(identity, context)

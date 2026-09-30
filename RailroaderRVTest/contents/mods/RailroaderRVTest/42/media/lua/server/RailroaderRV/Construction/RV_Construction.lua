@@ -236,29 +236,12 @@ function Construction.new(context, operations)
         return identity, template
     end
 
-    local function validateManifestGate(manifest, generation, phase)
-        local manifestGate = context.requireCurrentManifest
-        if type(manifestGate) ~= "function" then
-            error("RailroaderRVTest: current manifest gate is unavailable")
-        end
-        local copyOk, snapshot = pcall(context.ServerUtil.copyPlain, manifest)
-        if not copyOk or type(snapshot) ~= "table" then
-            error("RailroaderRVTest: current manifest cannot be validated safely")
-        end
-        operations.setGenerationPhase(snapshot, generation, phase)
-        local gateOk, accepted = pcall(manifestGate, snapshot, true)
-        if not gateOk or accepted ~= snapshot then
-            error("RailroaderRVTest: current manifest schema or identity is invalid")
-        end
-    end
-
     function service.clearCurrentGeneration(cell, bounds, generation, manifest)
         local pending = generationTransaction.current()
         local player = type(pending) == "table" and pending.player or nil
         local layout = type(pending) == "table" and pending.layout or nil
         local identity = validateCurrentPlan(player, layout, bounds,
             generation, manifest)
-        validateManifestGate(manifest, generation, "CLEARING")
         preflightClearTarget(player, cell, layout, bounds, generation,
             manifest, nil)
         operations.setGenerationPhase(manifest, generation, "CLEARING")
@@ -276,7 +259,6 @@ function Construction.new(context, operations)
             or manifest.phaseGeneration ~= generation then
             error("RailroaderRVTest: build requires the current clearing phase")
         end
-        validateManifestGate(manifest, generation, "CLEARING")
         if not sameIdentity(identity, currentIdentity(manifest, generation)) then
             error("RailroaderRVTest: generation identity changed before build")
         end

@@ -590,8 +590,7 @@ promoteFollowUpWallRemoval = function(map, roomKey)
                     end
                     -- A transient busy/identity gate must not swallow a distinct
                     -- wall operation.  Keep the stable event until its explicit
-                    -- expiry; a schema-invalid record is still rejected by the
-                    -- normal current-only gate on the next pass.
+                    -- expiry; mapping identity is checked on the next pass.
                     event.lastAttemptTick = now
                     break
                 end
@@ -710,36 +709,6 @@ local function revalidateQueuedRoofRefreshAfterGeneration(map, roomKey,
     return "revalidated"
 end
 
-local function clearRoofRefreshRuntimeState()
-    -- A rejected mapping invalidates roof-only identity caches and queued
-    -- observations.  Let the authoritative relocation service cancel an
-    -- active group so it can retain/retry its own return lease when needed;
-    -- never drop that service-owned lease or touch ModData/world objects here.
-    local server = RailroaderRV and RailroaderRV.Server
-    if not server or type(server.cancelRoofRefreshRelocation) ~= "function" then
-        error("roof refresh relocation cancellation service is unavailable", 0)
-    end
-    local cancelled, detail = server.cancelRoofRefreshRelocation(
-        "RV mapping schema is invalid")
-    if cancelled ~= true
-        and detail ~= "no roof refresh group relocation is active" then
-        error("could not cancel roof refresh relocation: " .. tostring(detail), 0)
-    end
-
-    local function clearEntries(state)
-        for key in pairs(state) do state[key] = nil end
-    end
-    clearEntries(roofRefreshRooms)
-    clearEntries(roofRefreshPlayers)
-    clearEntries(roomMonitorPlayers)
-    clearEntries(pendingWallRoofRefreshes)
-    clearEntries(followUpWallRemovalEvents)
-    clearEntries(roomTransitionStates)
-    clearEntries(suppressedRoomTransitions)
-    clearEntries(seenWallRemovalEvents)
-end
-
-ctx.clearRoofRefreshRuntimeState = clearRoofRefreshRuntimeState
 ctx.cancelPendingWallRoofRefresh = cancelPendingWallRoofRefresh
 ctx.finishCompletedRoofRefresh = finishCompletedRoofRefresh
 ctx.expireQueuedWallRoofRefreshes = expireQueuedWallRoofRefreshes

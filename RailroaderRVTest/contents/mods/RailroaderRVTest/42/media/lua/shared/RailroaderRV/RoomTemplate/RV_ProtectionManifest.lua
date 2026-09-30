@@ -460,10 +460,10 @@ local function sameIdentity(record, captured)
 end
 
 function P.validateTemplate(template)
-    if type(template) ~= "table" or template.schemaVersion ~= 11
+    if type(template) ~= "table" or template.templateVersion ~= 11
         or template.objectCount ~= P.OBJECT_COUNT or type(template.objects) ~= "table"
         or #template.objects ~= P.OBJECT_COUNT then
-        return false, "captured object list does not use the current protection schema"
+        return false, "captured object list does not use the current template version"
     end
     local manifestKeys, templateKeys = 0, 0
     local counts = { [1] = 0, [2] = 0, [3] = 0, [4] = 0 }

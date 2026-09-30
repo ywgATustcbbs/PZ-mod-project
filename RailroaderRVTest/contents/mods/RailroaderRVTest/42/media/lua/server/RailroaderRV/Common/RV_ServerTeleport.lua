@@ -1,10 +1,9 @@
 -- Shared server-authoritative teleport operations.
 local M = {}
-local DevSaveSchemaGate = require("RailroaderRV/Core/RV_DevSaveSchemaGate")
 local Common = require("RailroaderRV/Common/RV_Common")
 
 function M.teleportToPosition(player, position)
-    if not DevSaveSchemaGate.isReady() or not player or type(position) ~= "table"
+    if not player or type(position) ~= "table"
         or not Common.isFiniteNumber(position.x) or not Common.isFiniteNumber(position.y)
         or not Common.isFiniteNumber(position.z) or type(player.teleportTo) ~= "function" then
         return false
@@ -17,7 +16,7 @@ end
 -- Resolve the spawn from the server's current mapping. The caller supplies an
 -- already validated mapping identity, never coordinates from a client packet.
 function M.teleportToRVSpawn(player, source, expectedPosition)
-    if not DevSaveSchemaGate.isReady() or type(source) ~= "table" then return false end
+    if type(source) ~= "table" then return false end
     local rv = rawget(_G, "RailroaderRV")
     local adapter = rv and rv.RailroaderServer
     if not adapter or type(adapter.currentMappingRecord) ~= "function" then

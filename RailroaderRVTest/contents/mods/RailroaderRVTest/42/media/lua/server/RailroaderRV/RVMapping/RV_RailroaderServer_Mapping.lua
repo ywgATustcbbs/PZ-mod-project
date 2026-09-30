@@ -1,6 +1,5 @@
 -- RV_RailroaderServer: Mapping responsibilities.
 return function(ctx)
-local DevSaveSchemaGate = require("RailroaderRV/Core/RV_DevSaveSchemaGate")
 local Core = require("RailroaderRV/Core/RV_Server_Core")
 local Boundary = ctx.Boundary
 local Adapter = ctx.Adapter
@@ -26,18 +25,6 @@ local findTrain = ctx.findTrain
 local trainPosition = ctx.trainPosition
 local copyPosition = ctx.copyPosition
 
-DevSaveSchemaGate.configureMapping({
-    C = C,
-    RegionSlots = RegionSlots,
-    Boundary = Boundary,
-    number = number,
-    integer = integer,
-    copyPosition = copyPosition,
-    WORLD_MIN_Z = WORLD_MIN_Z,
-    WORLD_MAX_Z = WORLD_MAX_Z,
-})
-
-local MAP_SCHEMA_VALIDATION_TTL_TICKS = 120
 local validatedMapCache
 local boundaryValidation
 
@@ -51,52 +38,7 @@ local function invalidateBoundaryValidationCache()
 end
 
 local function mapData()
-    if not DevSaveSchemaGate.isReady() then error(C.INVALID_RV_DATA) end
-    if not ModData then
-        error(C.INVALID_RV_DATA)
-    end
-    local map
-    if type(ModData.get) == "function" then
-        local ok, value = pcall(ModData.get, C.RV_MAP_KEY)
-        if not ok then error(C.INVALID_RV_DATA) end
-        map = value
-    elseif type(ModData.getOrCreate) == "function" then
-        local ok, value = pcall(ModData.getOrCreate, C.RV_MAP_KEY)
-        if not ok then error("Railroader RV map ModData is unavailable") end
-        map = value
-    else
-        error("Railroader RV map ModData is unavailable")
-    end
-    if map == nil then
-        if type(ModData.getOrCreate) ~= "function" then
-            error("Railroader RV map ModData is unavailable")
-        end
-        local ok, value = pcall(ModData.getOrCreate, C.RV_MAP_KEY)
-        if not ok or type(value) ~= "table" then
-            error("Railroader RV map ModData is unavailable")
-        end
-        map = value
-        map.schemaVersion = C.MAP_SCHEMA_VERSION
-        map.locomotives = {}
-        map.players = {}
-    elseif type(map) ~= "table" then
-        error(C.INVALID_RV_DATA)
-    else
-        local empty = true
-        for _ in pairs(map) do
-            empty = false
-            break
-        end
-        if empty then
-            -- An empty key is a new save's uninitialised map, not a persisted
-            -- This is an empty new container.  Initialise only the current
-            -- schema; a non-empty incompatible container is rejected above.
-            map.schemaVersion = C.MAP_SCHEMA_VERSION
-            map.locomotives = {}
-            map.players = {}
-        end
-    end
-    return map
+    return ModData.get(C.RV_MAP_KEY)
 end
 
 local function markMappingChanged(boundaryChanged)
@@ -192,7 +134,7 @@ local function validRegion(region)
 end
 
 local function validMapRelation(relation, requireLocoId)
-    return DevSaveSchemaGate.isReady() and type(relation) == "table"
+    return type(relation) == "table"
         and type(relation.inside) == "boolean"
         and integer(relation.onlineId) ~= nil and integer(relation.onlineId) >= 0
         and (requireLocoId ~= true
@@ -200,7 +142,7 @@ local function validMapRelation(relation, requireLocoId)
 end
 
 local function validMappingRecord(record)
-    return DevSaveSchemaGate.isReady() and type(record) == "table"
+    return type(record) == "table"
         and record.generated == true
         and type(record.rvId) == "string" and record.rvId ~= ""
         and tostring(record.locoId) == record.rvId
@@ -500,8 +442,7 @@ local function recordAtPlayerCoordinate(map, player)
 end
 
 local function allocateRVRegion(locoId)
-    local ok, map = pcall(mapData)
-    if not ok or type(map) ~= "table" then return false, C.INVALID_RV_DATA end
+    local map = mapData()
     if locoId ~= nil then
         local existing = recordForLoco(map, tostring(locoId))
         if existing then
@@ -577,8 +518,7 @@ local function allocateRVRegion(locoId)
 end
 
 local function currentMappingRecord(rvId, generation, bitmapVersion)
-    local ok, map = pcall(mapData)
-    if not ok or type(map) ~= "table" then return false, C.INVALID_RV_DATA end
+    local map = mapData()
     local record = recordForLoco(map, rvId)
     if not record or not validMappingRecord(record)
         or integer(record.generation) ~= integer(generation)
@@ -590,8 +530,8 @@ end
 
 -- Utility commands resolve the current RV exclusively from the authoritative
 -- mapping and player coordinate.  Client-supplied RV ids, generations and
--- object coordinates never enter this result.  The generic server geometry
--- gate is run again so a water request cannot use a stale mapping snapshot.
+-- object coordinates never enter this result. Identity checks run when an
+-- operation consumes the mapped record.
 
 ctx.mapData = mapData
 ctx.markMappingChanged = markMappingChanged

@@ -1,7 +1,6 @@
 -- RV_Server: Commands responsibilities.
 return function(ctx)
 local Core = ctx.Core
-local DevSaveSchemaGate = require("RailroaderRV/Core/RV_DevSaveSchemaGate")
 local COMMAND_MODULE = ctx.COMMAND_MODULE
 local COMMAND_RELOCATE_ACK = ctx.COMMAND_RELOCATE_ACK
 local COMMAND_FINAL_RELOCATE_ACK = ctx.COMMAND_FINAL_RELOCATE_ACK
@@ -48,7 +47,6 @@ local function isInvalidRVData(reason)
 end
 
 function RV.Server.OnTick(tick)
-    if not DevSaveSchemaGate.isReady() then return end
     ctx.serverTick = tick or Core.getTick()
     -- Extend the token-scoped boundary lease before Boundary.onTick runs.  The
     -- roof transaction may temporarily place the player outside the active
@@ -197,7 +195,6 @@ function RV.Server.OnTick(tick)
 end
 
 function RV.Server.OnClientCommand(module, command, player, args)
-    if not DevSaveSchemaGate.isReady() then return end
     -- OnClientCommand is shared by every mod.  Foreign Railroader/vanilla
     -- commands are not RV requests and must not be reported as malformed RV
     -- traffic.
@@ -305,17 +302,11 @@ if not railroaderAdapterOk then
         .. safeErrorText(railroaderAdapterOrError))
 elseif type(railroaderAdapterOrError) == "table"
     and type(railroaderAdapterOrError.installTransactionHooks) == "function" then
-    -- Utility persistence validates the same current Railroader mapping and
-    -- geometry as the generation transaction.  Keep these adapter gates on
-    -- the public server facade so the commit hook does not fail closed merely
-    -- because the optional adapter was loaded in its own module table.
+    -- The optional adapter is loaded in its own module table, so expose its
+    -- current utility resolver on the server facade.
     if type(railroaderAdapterOrError.resolveCurrentUtilityRV) == "function" then
         RV.Server.resolveCurrentUtilityRV =
             railroaderAdapterOrError.resolveCurrentUtilityRV
-    end
-    if type(railroaderAdapterOrError.validateCurrentUtilityIdentity) == "function" then
-        RV.Server.validateCurrentUtilityIdentity =
-            railroaderAdapterOrError.validateCurrentUtilityIdentity
     end
     if railroaderAdapterOrError.installTransactionHooks() then
         print("[RailroaderRVTest] Railroader RV transaction hooks installed.")

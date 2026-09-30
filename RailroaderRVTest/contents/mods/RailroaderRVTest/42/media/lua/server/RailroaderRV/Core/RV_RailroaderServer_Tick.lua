@@ -22,7 +22,6 @@ local validateGeneration = ctx.validateGeneration
 local processStatelessRelocationSentinel = ctx.processStatelessRelocationSentinel
 local sampleRoofRefreshPlayers = ctx.sampleRoofRefreshPlayers
 local pauseFollowUpWallRemovalDeadlines = ctx.pauseFollowUpWallRemovalDeadlines
-local clearRoofRefreshRuntimeState = ctx.clearRoofRefreshRuntimeState
 local cancelPendingWallRoofRefresh = ctx.cancelPendingWallRoofRefresh
 local expireQueuedWallRoofRefreshes = ctx.expireQueuedWallRoofRefreshes
 local processPendingWallRoofRefreshGroup = ctx.processPendingWallRoofRefreshGroup
@@ -103,19 +102,7 @@ local function processPendingWallRoofRefreshes()
     -- A queued item marked waiting above must first pass the current-record
     -- revalidation below; only then may its fresh queued deadline run.
     expireQueuedWallRoofRefreshes(now)
-    local mapOk, mapOrReason = pcall(mapData)
-    if not mapOk or type(mapOrReason) ~= "table" then
-        -- A transient ModData read/engine exception must not silently erase an
-        -- already accepted follow-up.  Keep its bounded/expiring queue until
-        -- the next successful current-schema read; the explicit schema gate
-        -- below is the only path allowed to reject it.
-        local detail = type(mapOrReason) == "string" and mapOrReason or ""
-        if string.find(detail, C.INVALID_RV_DATA, 1, true) then
-            clearRoofRefreshRuntimeState(true)
-        end
-        return
-    end
-    local map = mapOrReason
+    local map = mapData()
     for roomKey in pairs(followUpWallRemovalEvents) do
         if pendingWallRoofRefreshes[roomKey] == nil then
             promoteFollowUpWallRemoval(map, roomKey)
@@ -181,21 +168,7 @@ function Adapter.OnTick(tick)
     -- transactions have had their phase/claim opportunity for this tick.
     processStatelessRelocationSentinel()
     if not Core.tickModulo(30) then return end
-    local ok, mapOrReason = pcall(mapData)
-    if not ok or type(mapOrReason) ~= "table" then
-        if not Adapter._schemaWarning then
-            print("[RailroaderRVTest] " .. tostring(mapOrReason
-                or C.INVALID_RV_DATA))
-            Adapter._schemaWarning = true
-        end
-        local detail = type(mapOrReason) == "string" and mapOrReason or ""
-        if string.find(detail, C.INVALID_RV_DATA, 1, true) then
-            clearRoofRefreshRuntimeState(true)
-        end
-        return
-    end
-    Adapter._schemaWarning = nil
-    local map = mapOrReason
+    local map = mapData()
     local changed = false
     if Core.tickModulo(120) then
         for _, record in pairs(map.locomotives or {}) do

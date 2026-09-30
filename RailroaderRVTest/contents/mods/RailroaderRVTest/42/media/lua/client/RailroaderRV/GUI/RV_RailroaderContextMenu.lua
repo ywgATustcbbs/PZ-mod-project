@@ -99,7 +99,6 @@ local function validUtilityMapping(value)
         and finiteInteger(value.generation) ~= nil
         and finiteInteger(value.generation) >= 1
         and finiteInteger(value.bitmapVersion) == C.BITMAP_VERSION
-        and finiteInteger(value.mapSchemaVersion) == C.MAP_SCHEMA_VERSION
 end
 
 local function rememberUtilityMapping(args)
@@ -111,7 +110,6 @@ local function rememberUtilityMapping(args)
         locoId = tostring(args.locoId or ""),
         generation = finiteInteger(args.generation),
         bitmapVersion = finiteInteger(args.bitmapVersion),
-        mapSchemaVersion = finiteInteger(args.mapSchemaVersion),
     }
     if validUtilityMapping(mapping) then
         Menu._rvUtilityMapping = mapping
@@ -231,14 +229,12 @@ function Menu.getUtilityMapping()
     return {
         rvId = mapping.rvId, locoId = mapping.locoId,
         generation = mapping.generation, bitmapVersion = mapping.bitmapVersion,
-        mapSchemaVersion = mapping.mapSchemaVersion,
     }
 end
 
--- Reconnect recovery is a server-created candidate only.  The payload does
--- not grant permission or carry coordinates; it is accepted solely after the
--- local online identity and current code schema have been checked.  Every
--- utility command still performs the complete server-side mapping/range gate.
+-- Reconnect recovery is a server-created candidate only. The payload does
+-- not grant permission or carry coordinates. Every utility command still
+-- performs the complete server-side mapping/range gate.
 function Menu.acceptUtilityMapping(args)
     if type(args) ~= "table" or args.ok ~= true then return false end
     local onlineId = finiteInteger(args.onlineId)
@@ -248,7 +244,6 @@ function Menu.acceptUtilityMapping(args)
         locoId = tostring(args.locoId or ""),
         generation = finiteInteger(args.generation),
         bitmapVersion = finiteInteger(args.bitmapVersion),
-        mapSchemaVersion = finiteInteger(args.mapSchemaVersion),
     }
     if not validUtilityMapping(mapping) then return false end
     Menu._rvUtilityMapping = mapping

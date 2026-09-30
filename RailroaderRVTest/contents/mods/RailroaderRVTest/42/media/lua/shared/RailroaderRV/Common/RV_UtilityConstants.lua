@@ -9,12 +9,8 @@ RailroaderRV = RailroaderRV or {}
 RailroaderRV.UtilityConstants = RailroaderRV.UtilityConstants or {}
 
 local U = RailroaderRV.UtilityConstants
-local C = RailroaderRV.Constants or {}
 
 U.STORE_KEY = "RailroaderRVTest.Utility"
-U.STORE_SCHEMA_VERSION = C.UTILITY_STORE_SCHEMA_VERSION
-U.WATER_SCHEMA_VERSION = C.UTILITY_WATER_SCHEMA_VERSION
-U.POWER_SCHEMA_VERSION = C.UTILITY_POWER_SCHEMA_VERSION
 U.POWER = require("RailroaderRV/Power/RV_UtilityPowerConfig")
 require("RailroaderRV/Power/RV_UtilityItems")
 U.SERVER_TICK_INTERVAL = 1

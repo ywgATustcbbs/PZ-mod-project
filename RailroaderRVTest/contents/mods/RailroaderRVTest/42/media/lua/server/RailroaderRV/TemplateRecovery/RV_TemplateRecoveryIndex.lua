@@ -8,7 +8,6 @@ local Constants = ctx.Constants
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local manifestTable = ctx.manifestTable
-local requireCurrentManifest = ctx.requireCurrentManifest
 local Bitmap = require("RailroaderRV/Common/RV_Bitmap")
 local CapturedTemplate = require("RailroaderRV/RoomTemplate/RV_Template")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
@@ -107,8 +106,7 @@ local function validCurrentContext(player, expectedBoundary)
     if not manifestOk or type(manifest) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
-    local schemaOk = pcall(requireCurrentManifest, manifest, false)
-    if not schemaOk or manifest.state ~= "READY" or manifest.phase ~= "COMMITTED"
+    if manifest.state ~= "READY" or manifest.phase ~= "COMMITTED"
         or not sameIdentity(manifest, boundary)
         or not sameIdentity(manifest.boundary, boundary)
         or not sameIdentity(record, boundary)

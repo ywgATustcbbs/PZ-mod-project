@@ -1,7 +1,6 @@
 -- RV_RailroaderServer: Sentinel responsibilities.
 return function(ctx)
 local Core = require("RailroaderRV/Core/RV_Server_Core")
-local DevSaveSchemaGate = require("RailroaderRV/Core/RV_DevSaveSchemaGate")
 local Boundary = ctx.Boundary
 local Bitmap = ctx.Bitmap
 local Adapter = ctx.Adapter
@@ -15,7 +14,6 @@ local ROOF_REFRESH_REMOTE_OFFSET_Z = ctx.ROOF_REFRESH_REMOTE_OFFSET_Z
 local relocationSentinelWarnings = ctx.relocationSentinelWarnings
 local roofRefreshOwnsPlayer
 local roofRefreshTransactionBlocks
-local currentGeometryGate
 local serverTransactionMutexStatus
 local integer = ctx.integer
 local call = ctx.call
@@ -132,7 +130,6 @@ function Adapter.syncUtilityMapping(player)
         locoId = tostring(record.locoId),
         generation = integer(identity.generation),
         bitmapVersion = integer(identity.bitmapVersion),
-        mapSchemaVersion = C.MAP_SCHEMA_VERSION,
     }
     local sentOk, sent = callGlobal("sendServerCommand", player, C.MOD_ID,
         C.COMMAND_RV_UTILITY_MAPPING, payload)
@@ -285,18 +282,6 @@ end
 -- manifest still describe one complete geometry before arming a boundary,
 -- changing map.players/record.players, or sending a teleport.  The server
 -- hook is intentionally mandatory; no shallow adapter fallback is safe.
-currentGeometryGate = function(record)
-    local server = RailroaderRV and RailroaderRV.Server
-    if not server or type(server.validateCurrentRVRecord) ~= "function" then
-        return false, C.INVALID_RV_DATA
-    end
-    local callOk, accepted = pcall(server.validateCurrentRVRecord, record)
-    if not callOk or accepted ~= true then
-        return false, C.INVALID_RV_DATA
-    end
-    return true
-end
-
 local function sentinelWarn(identityKey, reason)
     if type(reason) ~= "string" or reason == "" then
         reason = C.INVALID_RV_DATA
@@ -346,7 +331,7 @@ local function sentinelRelationsConsistent(map, record)
 end
 
 local function sentinelBitmapAndCenter(record)
-    if not DevSaveSchemaGate.isReady() or type(record) ~= "table"
+    if type(record) ~= "table"
         or type(record.managed) ~= "table"
         or type(record.boundary) ~= "table" then
         return false, C.INVALID_RV_DATA
@@ -362,6 +347,15 @@ local function sentinelBitmapAndCenter(record)
     end
     local bitmap = type(Boundary.cachedBitmap) == "function"
         and Boundary.cachedBitmap(record) or nil
+    if not bitmap and Boundary
+        and type(Boundary.registerGeneration) == "function" then
+        local registerOk, registered = pcall(Boundary.registerGeneration,
+            record.rvId, record.generation, record.boundary, record)
+        if registerOk and registered == true then
+            bitmap = type(Boundary.cachedBitmap) == "function"
+                and Boundary.cachedBitmap(record) or nil
+        end
+    end
     if not bitmap then return false, C.INVALID_RV_DATA end
     local centerX = originX + math.floor(width / 2)
     local centerY = originY + math.floor(height / 2)
@@ -380,18 +374,6 @@ local function sentinelBitmapAndCenter(record)
         bitmap = bitmap, centerX = centerX, centerY = centerY,
         centerZ = integer(record.anchor and record.anchor.z),
     }
-end
-
--- A mapping record and the current manifest may share an identity while still
--- carrying different bitmap snapshots.  The sentinel must not choose a target
--- from one snapshot and arm a boundary from the other, so compare the complete
--- current bitmap contract before accepting a candidate.
-local function sentinelRecordManifestConsistent(record, manifest)
-    local server = RailroaderRV and RailroaderRV.Server
-    local checker = server and server.currentRVRecordGeometryConsistent
-    if type(checker) ~= "function" then return false end
-    local ok, consistent = pcall(checker, record, manifest)
-    return ok and consistent == true
 end
 
 local function sentinelRecordCandidate(map, player, server)
@@ -441,9 +423,6 @@ local function sentinelRecordCandidate(map, player, server)
                     if not manifestOk or type(manifestOrReason) ~= "table" then
                         invalidReason = type(manifestOrReason) == "string"
                             and manifestOrReason or C.INVALID_RV_DATA
-                    elseif not sentinelRecordManifestConsistent(record,
-                            manifestOrReason) then
-                        invalidReason = C.INVALID_RV_DATA
                     else
                         candidates[#candidates + 1] = {
                             record = record, center = center,
@@ -525,7 +504,6 @@ local function sentinelReturnToRV(candidate, player, map)
         end
     end
     if not manifestOk or type(manifestOrReason) ~= "table"
-        or not sentinelRecordManifestConsistent(record, manifestOrReason)
         or not sentinelRelationsConsistent(map, record) then
         return false, C.INVALID_RV_DATA
     end
@@ -632,5 +610,4 @@ ctx.sentinelReturnToRV = sentinelReturnToRV
 ctx.warnSentinelPlayersAtTemporaryCell = warnSentinelPlayersAtTemporaryCell
 ctx.serverTransactionMutexStatus = serverTransactionMutexStatus
 ctx.roofRefreshTransactionBlocks = roofRefreshTransactionBlocks
-ctx.currentGeometryGate = currentGeometryGate
 end

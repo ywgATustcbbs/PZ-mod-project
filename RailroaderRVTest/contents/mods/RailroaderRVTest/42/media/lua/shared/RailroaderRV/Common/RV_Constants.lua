@@ -57,17 +57,8 @@ C.RV_MAP_KEY = "RailroaderRVTest.TrainMap"
 C.MANIFEST_KEY = "RailroaderRVTest.Manifest"
 C.LAYOUT_CAPTURE_KEY = "RailroaderRVTest.LayoutCapture"
 C.TECH_VERSION = "0.4.0-tech"
-C.MANIFEST_SCHEMA_VERSION = 10
-C.MAP_SCHEMA_VERSION = 8
-C.RV_RECORD_SCHEMA_VERSION = 7
-C.RV_RELATION_SCHEMA_VERSION = 4
-C.BOUNDARY_SCHEMA_VERSION = 6
-C.LAYOUT_SCHEMA_VERSION = 11
+C.SAVE_SCHEMA_VERSION = 9
 C.CAPTURED_TEMPLATE_VERSION = 11
-C.LAYOUT_CAPTURE_SCHEMA_VERSION = 1
-C.UTILITY_STORE_SCHEMA_VERSION = 6
-C.UTILITY_WATER_SCHEMA_VERSION = 6
-C.UTILITY_POWER_SCHEMA_VERSION = 3
 C.INVALID_RV_DATA = "RailroaderRVTest: RV data is invalid; delete this development test save and rebuild it"
 
 -- The current test button always targets this server-selected destination.
@@ -89,7 +80,6 @@ C.RV_MANAGED_HEIGHT = 100
 -- selected clear/managed bounds remain independently limited by the layout.
 C.RV_IDENTITY_MIN_Z = -32
 C.RV_IDENTITY_MAX_Z = 32
-C.BITMAP_SCHEMA_VERSION = 3
 C.BITMAP_VERSION = 6
 C.RV_REGION_MIN_OFFSET_X = -50
 C.RV_REGION_MIN_OFFSET_Y = -50

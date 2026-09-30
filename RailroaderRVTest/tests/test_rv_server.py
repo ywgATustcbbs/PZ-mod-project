@@ -147,7 +147,6 @@ def main() -> int:
     protection_manifest_path = shared_root / "RoomTemplate" / "RV_ProtectionManifest.lua"
     bitmap_path = shared_root / "Common" / "RV_Bitmap.lua"
     mapping_path = server_root / "RVMapping" / "RV_RailroaderServer_Mapping.lua"
-    manifest_validation_path = server_root / "Core" / "RV_Server_ManifestValidation.lua"
     boundary_geometry_path = server_root / "BoundaryGuard" / "RV_BoundaryServer_Geometry.lua"
     boundary_sweep_path = server_root / "BoundaryGuard" / "RV_BoundaryServer_Sweep.lua"
     boundary_server_path = server_root / "BoundaryGuard" / "RV_BoundaryServer.lua"
@@ -191,6 +190,7 @@ def main() -> int:
     client_relocation_path = client_root / "GUI" / "RV_ContextMenu_Relocation.lua"
     world_objects_path = server_root / "Construction" / "RV_Server_WorldObjects.lua"
     template_protection_repair_path = server_root / "TemplateRecovery" / "RV_Server_TemplateProtectionRepair.lua"
+    template_recovery_index_path = server_root / "TemplateRecovery" / "RV_TemplateRecoveryIndex.lua"
     entry_exit_path = server_root / "RVMapping" / "RV_RailroaderServer_EntryExit.lua"
     boundary_objects_path = server_root / "DemolitionProtection" / "RV_BoundaryServer_Objects.lua"
     start_bat_path = root / "testserver" / "steamcmd" / "380870" / "StartServer64 - test.bat"
@@ -236,6 +236,7 @@ def main() -> int:
         client_relocation_path,
         world_objects_path,
         template_protection_repair_path,
+        template_recovery_index_path,
         entry_exit_path,
         boundary_objects_path,
     ):
@@ -368,6 +369,11 @@ def main() -> int:
         template_protection_repair = (
             read_utf8(template_protection_repair_path) if template_protection_repair_path.is_file() else ""
         )
+        template_recovery_index = (
+            read_utf8(template_recovery_index_path)
+            if template_recovery_index_path.is_file()
+            else ""
+        )
         # Existing contract checks intentionally inspect one logical server
         # surface.  Include each require chunk, then normalize only the
         # private module qualifier so assertions continue to cover helpers
@@ -387,11 +393,6 @@ def main() -> int:
         )
         bitmap = read_utf8(bitmap_path) if bitmap_path.is_file() else ""
         mapping = read_utf8(mapping_path) if mapping_path.is_file() else ""
-        manifest_validation = (
-            read_utf8(manifest_validation_path)
-            if manifest_validation_path.is_file()
-            else ""
-        )
         boundary_geometry = (
             read_utf8(boundary_geometry_path)
             if boundary_geometry_path.is_file()
@@ -814,19 +815,13 @@ def main() -> int:
             r"local function validGenerator",
         )
         checks.true(
-            water_validator is not None
-            and 'exactKeys(value, { "schemaVersion", "sinks", "state" })' in water_validator
-            and "waterInteger(value.schemaVersion) ~= U.WATER_SCHEMA_VERSION" in water_validator
-            and "validWaterSink(sink, identity)" in water_validator
+            water_validator is None
+            and "if type(value) == \"table\" and empty(value) and allowCreate == true then" in utility_store
             and "local function newWater()" in utility_store
-            and "schemaVersion = U.WATER_SCHEMA_VERSION, sinks = {}" in utility_store
-            and re.search(
-                r'exactKeys\(value,\s*\{\s*"rvId",\s*"generation",\s*"bitmapVersion",\s*"power",\s*"water"\s*\}\)',
-                utility_store,
-            ) is not None
-            and "validWater(value.water, identity)" in utility_store
-            and "integer(value.schemaVersion) ~= U.STORE_SCHEMA_VERSION" in utility_store,
-            "Water persistence does not require the exact new current schema or initialize only fresh records",
+            and "sinks = {}," in utility_store
+            and "schemaVersion" not in utility_store
+            and "local function newPower()" in utility_store,
+            "Utility storage must initialize current records without nested schema tags",
         )
         checks.true(
             "function M.validateMapping" in utility_water_ledger
@@ -855,10 +850,11 @@ def main() -> int:
 
         checks.true(
             all(token in bitmap for token in (
-                "BITMAP_SCHEMA_VERSION", "newBitset", "toHex", "fromHex",
+                "newBitset", "toHex", "fromHex",
                 "containsScope", "isActive", "isBuildable", "walkBounds",
                 "inAABB", "edgeForSide", "bitmapVersion ~= C.BITMAP_VERSION",
             ))
+            and "schemaVersion" not in bitmap
             and all(token not in bitmap for token in (
                 "segmentValid", "nearestActive", "local function addTime",
                 "local function sortUniqueTimes",
@@ -871,10 +867,10 @@ def main() -> int:
             and "return count == #expected" in bitmap
             and "Bitmap.hasExactKeys = exactKeys" in bitmap
             and "local exactKeys = Bitmap.hasExactKeys" in boundary_server
-            and "not exactKeys(boundary," in boundary_geometry
-            and "not exactKeys(managed," in boundary_geometry
+            and "schemaVersion" not in boundary_geometry
+            and "integer(managed.originX) ~= integer(bitmap.originX)" not in boundary_geometry
             and "not exactKeys(edge, fields)" in boundary_geometry,
-            "bitmap and boundary schema validators do not share exact current-field rejection",
+            "bitmap codec retained a persisted schema-version or geometry cross-check",
         )
         checks.true(
             "function M.profileAdd" not in utility_catalog
@@ -1082,18 +1078,18 @@ def main() -> int:
             "obsolete old-generation cleanup is reachable without a complete undo snapshot",
         )
         repair_context = section(
-            template_protection_repair,
+            template_recovery_index,
             r"local function validCurrentContext",
             r"local function isCabCoordinate",
         )
         checks.true(
             repair_context is not None
-            and "pcall(requireCurrentManifest, manifest, false)" in repair_context
+            and "pcall(Boundary.boundaryForPlayer, player)" in repair_context
+            and "pcall(requireCurrentManifest" not in repair_context
             and 'manifest.state ~= "READY"' in repair_context
             and 'manifest.phase ~= "COMMITTED"' in repair_context
             and "sameIdentity(manifest, boundary)" in repair_context
-            and "manifest.bounds.schemaVersion ~= Constants.LAYOUT_SCHEMA_VERSION"
-                in repair_context,
+            and "schemaVersion" not in repair_context,
             "template protection repair does not require the current committed manifest before using bounds",
         )
         checks.true(
@@ -1124,10 +1120,10 @@ def main() -> int:
             "Railroader entry/exit can bypass the server boundary service",
         )
         checks.true(
-            "currentBoundsValid" in server
-            and "manifest.boundary.managed" in server
-            and "Bitmap.containsScope(bitmap, entry.x, entry.y, entry.z)" in server,
-            "persisted RV bounds are not checked against the current bitmap scope",
+            "currentRVManifestForBoundary" in record_validation
+            and "schemaVersion" not in boundary_geometry
+            and "Bitmap.decode(boundary.bitmap)" in boundary_geometry,
+            "current manifest identity or latest-format bitmap decode path is missing",
         )
         checks.true(
             "local function roomOwnershipGuardKey" in room_ownership
@@ -1576,20 +1572,12 @@ def main() -> int:
             and "sampleRoofRefreshPlayers(map)" in tick_refresh,
             "delayed roof refresh is not deferred into the server 30-tick presence path",
         )
-        runtime_clear = section(
-            adapter_roof_refresh_flow_source,
-            r"local function clearRoofRefreshRuntimeState",
-            r"\r?\nend\r?\n\s*ctx\.clearRoofRefreshRuntimeState",
-        )
         checks.true(
-            runtime_clear is not None
-            and "local function clearEntries(state)" in runtime_clear
-            and "for key in pairs(state) do state[key] = nil end" in runtime_clear
-            and "clearEntries(pendingWallRoofRefreshes)" in runtime_clear
-            and "clearRoofRefreshRuntimeState(true)" in tick_refresh
-            and "clearEntries(followUpWallRemovalEvents)" in runtime_clear
-            and "clearEntries(roomTransitionStates)" in runtime_clear,
-            "schema failure rejects queued roof state while transient reads retain it",
+            "clearRoofRefreshRuntimeState" not in adapter_roof_refresh_flow_source
+            and "clearRoofRefreshRuntimeState" not in tick_refresh
+            and "local map = mapData()" in tick_refresh
+            and "pcall(mapData)" not in tick_refresh,
+            "roof refresh still suppresses invalid saved-map reads or clears queued work on schema failure",
         )
         checks.true(
             "local function cancelPendingWallRoofRefresh" in adapter_roof_refresh_flow_source
@@ -1723,7 +1711,8 @@ def main() -> int:
         roof_relocation = roof_destinations
         checks.true(
             roof_relocation is not None
-            and "currentRVRecordGeometryConsistent" in roof_relocation
+            and "currentRVManifestForBoundary" in roof_relocation
+            and "currentRVRecordGeometryConsistent" not in roof_relocation
             and "originX + math.floor(width / 2)" in roof_relocation
             and "originY + math.floor(height / 2)" in roof_relocation
             and "ROOF_REFRESH_REMOTE_OFFSET_X" in roof_relocation
@@ -1878,36 +1867,12 @@ def main() -> int:
             and "member.relocationNeedsResend = true" in roof_disconnect_pause,
             "roof relocation does not pause its timeout and rebind members after reconnect",
         )
-        geometry_gate = record_validation
         checks.true(
-            geometry_gate is not None
-            and "currentManifestValid" in geometry_gate
-            and "record.region" in geometry_gate
-            and "record.rvPosition" in geometry_gate
-            and "bounds.shellEdges" in geometry_gate
-            and "record.boundary.shellEdges" in geometry_gate
-            and "Boundary.registerGeneration" in geometry_gate,
-            "current RV geometry gate does not compare record/manifest bitmap, walls, shell and region identity",
-        )
-        bounds_bitmap_gate = section(
-            manifest_validation,
-            r"local function currentBoundsValid",
-            r"local function currentManifestValid",
-        )
-        checks.true(
-            bounds_bitmap_gate is not None
-            and all(
-                token in bounds_bitmap_gate
-                for token in (
-                    "type(bounds.bitmap) ~= \"table\"",
-                    "Bitmap.validate",
-                    "bounds.bitmap[field] ~= bitmap[field]",
-                    "boundsLayer.walkBits ~= boundaryLayer.walkBits",
-                    "boundsLayer.buildBits ~= boundaryLayer.buildBits",
-                )
-            )
-            and "manifest.bounds.bitmap" in server,
-            "current bounds gate does not validate/compare manifest.bounds.bitmap layer bits",
+            "currentRVManifestForRelocation" in record_validation
+            and "currentRVManifestForBoundary" in record_validation
+            and "currentRVRecordGeometryConsistent" not in record_validation
+            and "validateCurrentRVRecord" not in record_validation,
+            "current manifest reads still depend on the removed cross-geometry validator",
         )
         mutex_gate = section(
             roof_relocation_source,
@@ -1925,7 +1890,7 @@ def main() -> int:
         checks.true(
             "function RV.Server.isGenerationTransactionActive" in server
             and "function RV.Server.isRoofRefreshTransactionActive" in server
-            and "function RV.Server.validateCurrentRVRecord" in server
+            and "function RV.Server.validateCurrentRVRecord" not in server
             and "function RV.Server.isRoofRefreshTransactionActive(_rvId)" in server
             and "active roof transaction must never be bypassed" in server
             and "roof refresh is in progress" in server
@@ -1967,9 +1932,10 @@ def main() -> int:
             "adapter roof-owner gate confuses a generation claim with roof refresh",
         )
         checks.true(
-            "local function currentGeometryGate" in railroader_server
-            or "currentGeometryGate = function" in railroader_server,
-            "adapter does not expose a narrow current geometry gate for Enter/Exit",
+            "currentGeometryGate" not in railroader_server
+            and "currentRVRecordGeometryConsistent" not in railroader_server
+            and "currentManifestForRecord" not in railroader_server,
+            "Entry/Exit still contain removed cross-module geometry or manifest guards",
         )
         existing_entry = section(
             railroader_server,
@@ -1978,12 +1944,10 @@ def main() -> int:
         )
         checks.true(
             existing_entry is not None
-            and "currentGeometryGate(record)" in existing_entry
-            and existing_entry.find("currentGeometryGate(record)")
-            < existing_entry.find("local armed = Boundary.beginTransition")
-            and existing_entry.find("currentGeometryGate(record)")
-            < existing_entry.find("armRoomOwnershipMonitor"),
-            "existing RV entry does not gate current geometry before mutation",
+            and "currentManifestForRecord(record)" not in existing_entry
+            and "local armed = Boundary.beginTransition" in existing_entry
+            and "armRoomOwnershipMonitor" in existing_entry,
+            "existing RV entry retains a removed manifest guard or lost boundary transition checks",
         )
         exit_entry = section(
             entry_exit,
@@ -1992,12 +1956,10 @@ def main() -> int:
         )
         checks.true(
             exit_entry is not None
-            and "currentGeometryGate(record)" in exit_entry
-            and exit_entry.find("currentGeometryGate(record)")
-            < exit_entry.find("local armed = Boundary.beginTransition")
-            and exit_entry.find("currentGeometryGate(record)")
-            < exit_entry.find("markPlayerOutside"),
-            "RV exit does not gate current geometry before mutation",
+            and "currentManifestForRecord(record)" not in exit_entry
+            and "local armed = Boundary.beginTransition" in exit_entry
+            and "markPlayerOutside" in exit_entry,
+            "RV exit retains a removed manifest guard or lost boundary transition checks",
         )
         boundary_gate = section(
             boundary_server,
@@ -2009,14 +1971,14 @@ def main() -> int:
             and "validateCurrentBoundaryPlayer" in boundary_gate
             and "loadedBoundary(boundary)" in boundary_gate
             and "if not hookOk" in boundary_gate,
-            "boundary guard does not fail closed through the full current map/record validator",
+            "boundary guard does not fail closed through its current identity and player checks",
         )
         checks.true(
             "sameBoundaryGeometry" in boundary_server
             and "state.boundaryReference ~= boundary" in boundary_server
             and "currentRVManifestForBoundary" in railroader_server
-            and "currentRVRecordGeometryConsistent" in railroader_server,
-            "boundary cache/state can reuse an inconsistent geometry snapshot",
+            and "currentRVRecordGeometryConsistent" not in railroader_server,
+            "boundary cache lost its local snapshot check or retained a cross-record geometry dependency",
         )
         checks.true(
             "function RV.Server.isRelocationIdentityClaimed" in server
@@ -2026,7 +1988,7 @@ def main() -> int:
             and "math.floor(position.z) ~= RELOCATION_SENTINEL_Z" in railroader_server
             and "sentinelPosition" in railroader_server
             and "player left the temporary cell" in railroader_server
-            and "sentinelRecordManifestConsistent" in railroader_server
+            and "sentinelRecordManifestConsistent" not in railroader_server
             and "queuedRoofRefreshClaims" in railroader_server
             and "for _, saved in pairs(pending.players or {})" in railroader_server
             and "sentinelWarn" in railroader_server
@@ -2195,10 +2157,7 @@ def main() -> int:
         if constants_path.is_file():
             checks.true(
                 all(token in constants for token in (
-                    "MANIFEST_SCHEMA_VERSION", "MAP_SCHEMA_VERSION",
-                    "RV_RECORD_SCHEMA_VERSION", "RV_RELATION_SCHEMA_VERSION",
-                    "BOUNDARY_SCHEMA_VERSION", "LAYOUT_SCHEMA_VERSION",
-                    "BITMAP_SCHEMA_VERSION", "BITMAP_VERSION",
+                    "SAVE_SCHEMA_VERSION", "BITMAP_VERSION",
                     "RELOCATION_SENTINEL_Z",
                     "RELOCATION_SENTINEL_INTERVAL_TICKS",
                     "RELOCATION_SENTINEL_RETRY_COOLDOWN_TICKS",
@@ -2218,16 +2177,28 @@ def main() -> int:
                 "independent wall events are not retained in a bounded stable follow-up queue",
             )
             checks.true(
-                "if not manifestKeys[key] then return false end" in manifest_validation
-                and 'not mapOnlyKeys(map, { "schemaVersion", "locomotives", "players" })' in mapping
-                and '"slotIndex", "anchor", "region"' in mapping
-                and "occupiedSlots[integer(record.slotIndex)]" in mapping
-                and "recordCount > RegionSlots.COUNT" in mapping
-                and "owner = true, slotIndex = true, anchor = true" in manifest_validation
-                and "integer(map.schemaVersion) ~= C.MAP_SCHEMA_VERSION" in mapping
-                and 'not exactKeys(encoded, { "schemaVersion", "bitmapVersion"' in bitmap
-                and 'not exactKeys(boundary, { "schemaVersion", "rvId"' in boundary_geometry,
-                "current manifest, mapping, bitmap, and boundary validators do not enforce current exact fields",
+                "function checkSaveSchemaVersion()" in railroader_server
+                and "events.OnInitGlobalModData" in railroader_server
+                and "map.schemaVersion = C.SAVE_SCHEMA_VERSION" in railroader_server
+                and "map.schemaVersion ~= C.SAVE_SCHEMA_VERSION" in railroader_server
+                and "Continuing without migration" in railroader_server
+                and "The user promises not to use old saves" in railroader_server
+                and railroader_server.count("map.schemaVersion = C.SAVE_SCHEMA_VERSION") == 1
+                and railroader_server.count("map.schemaVersion ~= C.SAVE_SCHEMA_VERSION") == 1
+                and "pcall(mapData)" not in railroader_server
+                and "pcall(ModData.getOrCreate" not in railroader_server
+                and "return ModData.get(C.RV_MAP_KEY)" in mapping
+                and "pcall(ModData.get, C.RV_MAP_KEY)" not in mapping
+                and "map.locomotives = {}" not in mapping
+                and "map.players = {}" not in mapping
+                and "schemaVersion ~= " not in mapping
+                and "schemaVersion = map.schemaVersion" in entry_exit
+                and all("schemaVersion" not in source for source in (
+                    generation_build, generation_flow, server_schema,
+                    record_validation, layout, bitmap,
+                    boundary_geometry, utility_store,
+                )),
+                "the single warning-only startup schema check or unguarded runtime read path is missing",
             )
             checks.true(
                 "C.RV_REGION_SLOT_ROWS = 5" in constants
@@ -2242,13 +2213,15 @@ def main() -> int:
                 "5x20 row-major slot matrix or mapping-only free-slot allocation is incomplete",
             )
             checks.true(
-                "pcall(requireCurrentManifest, manifest, true)" in generation_flow
-                and "error(C.INVALID_RV_DATA)" in mapping
-                and "error(Constants.INVALID_RV_DATA)" in manifest_validation
-                and "Bitmap.decode(encoded)" in boundary_geometry
-                and "schemaVersion ~= Bitmap.SCHEMA_VERSION" in bitmap
-                and "integer(boundary.schemaVersion) ~= C.BOUNDARY_SCHEMA_VERSION" in boundary_geometry,
-                "current schema mismatch does not fail closed with generic invalid-RV-data",
+                "local function mapData()" in mapping
+                and "return ModData.get(C.RV_MAP_KEY)" in mapping
+                and "function Bitmap.decode(encoded)" in bitmap
+                and "local bitmap = Bitmap.decode(boundary.bitmap)" in boundary_geometry
+                and all("schemaVersion" not in source for source in (
+                    mapping, generation_build, generation_flow, bitmap,
+                    boundary_geometry, utility_store,
+                )),
+                "runtime paths must use current data without nested save-schema gates",
             )
             checks.true(
                 re.search(r"C\.TELEPORT_X\s*=\s*20050", constants) is not None
@@ -2280,7 +2253,7 @@ def main() -> int:
                 r"C\.CAPTURED_TEMPLATE_VERSION\s*=\s*(\d+)", constants
             )
             source_template_version = re.search(
-                r"schemaVersion\s*=\s*(\d+)", captured_template
+                r"templateVersion\s*=\s*(\d+)", captured_template
             )
             room_template_version = re.search(
                 r"CURRENT_TEMPLATE_VERSION\s*=\s*(\d+)", room_template
@@ -2376,16 +2349,11 @@ def main() -> int:
                 "NW corner does not have the exact corner-north/wall-west support pair with current visual tags",
             )
             checks.true(
-                re.search(r"C\.MANIFEST_SCHEMA_VERSION\s*=\s*10", constants)
-                and re.search(r"C\.MAP_SCHEMA_VERSION\s*=\s*8", constants)
+                re.search(r"C\.SAVE_SCHEMA_VERSION\s*=\s*9", constants)
                 and re.search(r"C\.RV_REGION_SLOT_ROWS\s*=\s*5", constants)
                 and re.search(r"C\.RV_REGION_SLOT_COLUMNS\s*=\s*20", constants)
-                and re.search(r"C\.RV_RECORD_SCHEMA_VERSION\s*=\s*7", constants)
-                and re.search(r"C\.RV_RELATION_SCHEMA_VERSION\s*=\s*4", constants)
-                and re.search(r"C\.BOUNDARY_SCHEMA_VERSION\s*=\s*6", constants)
-                and re.search(r"C\.LAYOUT_SCHEMA_VERSION\s*=\s*11", constants)
                 and re.search(r"C\.BITMAP_VERSION\s*=\s*6", constants),
-                "current manifest, mapping, matrix, boundary, layout, and bitmap versions were not advanced",
+                "the single save schema version or shared RV matrix/bitmap contract is missing",
             )
             checks.true(
                 len(captured_template_objects) == 412
@@ -2506,8 +2474,6 @@ def main() -> int:
                 and "bounds.wallObjectCount ~= 59" in server_schema
                 and "bounds.northEdges ~= 12 or bounds.westEdges ~= 47" in server_schema
                 and "bounds.wallCornerCount ~= 1" in server_schema
-                and "values.wallObjectCount ~= 59" in manifest_validation
-                and "values.northEdges ~= 12 or values.westEdges ~= 47" in manifest_validation
                 and "return edgeCount == 59" in boundary_geometry,
                 "captured shell contract is not 59 edges with N12/W47/corner1",
             )
@@ -2571,7 +2537,7 @@ def main() -> int:
             "local function tableIsEmpty" in server
             and "for _ in pairs(value)" in server
             and "next(" not in server,
-            "server Lua still relies on the unavailable Kahlua global next",
+            "server empty-table checks should use the broadly available pairs iterator",
         )
         clear_tag = section(
             server,
@@ -2766,13 +2732,14 @@ def main() -> int:
                 "same-slot rebuild is not refused when its prior generation lacks a complete undo snapshot",
             )
             checks.true(
-                "requireCurrentManifest" in queue
+                "pcall(manifestTable)" in queue
+                and "if not manifestOk or type(manifestOrError) ~= \"table\" then" in queue
                 and "manifestSlot = ServerUtil.integer(manifest.slotIndex)" in queue
                 and "manifestRvId = tostring(manifest.rvId)" in queue
                 and "priorGeneration ~= nil and oldBounds == nil" in queue
                 and "persistedBoundsMatchBoundary" not in queue
                 and "prior bounds are untrusted" not in queue,
-                "generation queue does not gate current manifest data before using bounds",
+                "generation queue does not check the current manifest root before using its fields",
             )
             validation_pos = queue.find(
                 "validateTargetCoordinates(plannedBounds, destination)"
@@ -2919,7 +2886,7 @@ def main() -> int:
         preflight_call = generation_flow.find(
             "construction.preflightCurrentGeneration"
         )
-        manifest_write = generation_flow.find("manifest.schemaVersion =")
+        manifest_write = generation_flow.find("manifest.techVersion =")
         preserve_failure_gate = generation_flow.find(
             "local preserveManifestOnFailure = true"
         )
@@ -3060,8 +3027,8 @@ def main() -> int:
             )
 
         entry_generator_helper = section(
-            template_protection_repair,
-            r"function Boundary\.ensureGeneratorForEntry\(player, record\)",
+            world_objects,
+            r"local function ensureGeneratorForEntry\(player, record\)",
             r"local function compactQueue",
         )
         checks.true(
@@ -3078,11 +3045,11 @@ def main() -> int:
                 and "if ambiguous then return false" in entry_generator_helper
                 and "if present then return true end" in entry_generator_helper
                 and entry_generator_helper.count("rollbackEntryGenerator") >= 2
-                and "generatorOnClickedSquare" not in template_protection_repair,
+                and "generatorOnClickedSquare" not in world_objects,
                 "entry generator repair does not require the committed current identity or roll back failed creation",
             )
         entry_existing_pos = entry_exit.find("local function enterExisting")
-        generator_entry_pos = entry_exit.find("Boundary.ensureGeneratorForEntry", entry_existing_pos)
+        generator_entry_pos = entry_exit.find("construction.ensureGeneratorForEntry", entry_existing_pos)
         transition_pos = entry_exit.find("Boundary.beginTransition", generator_entry_pos)
         checks.true(
             entry_existing_pos >= 0

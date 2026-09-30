@@ -967,12 +967,13 @@ local function ensureGeneratorForEntry(player, record)
     end
     local rv = rawget(_G, "RailroaderRV")
     local server = rv and rv.Server
-    if not server or type(server.validateCurrentRVRecord) ~= "function" then
+    if not server or type(server.currentRVManifestForRelocation) ~= "function" then
         return false, Constants.INVALID_RV_DATA
     end
-    local gateOk, accepted, manifest = pcall(
-        server.validateCurrentRVRecord, record)
-    if not gateOk or accepted ~= true or type(manifest) ~= "table"
+    local manifestOk, accepted, manifest = pcall(
+        server.currentRVManifestForRelocation, record.rvId,
+        record.generation, record.bitmapVersion)
+    if not manifestOk or accepted ~= true or type(manifest) ~= "table"
         or manifest.state ~= "READY" or manifest.phase ~= "COMMITTED"
         or not sameIdentity(record, manifest)
         or not sameIdentity(record, record.boundary)

@@ -201,39 +201,16 @@ local function currentRoofRefreshContext(player, request)
     end
 
     local server = RV and RV.Server
-    if not server or type(server.currentRVManifestForBoundary) ~= "function"
-        or type(server.currentRVRecordGeometryConsistent) ~= "function" then
+    if not server or type(server.currentRVManifestForBoundary) ~= "function" then
         return false, Constants.INVALID_RV_DATA
     end
     local manifestCallOk, manifestAccepted, manifest = pcall(
         server.currentRVManifestForBoundary, request.rvId,
         requestGeneration, requestBitmapVersion)
     if not manifestCallOk or manifestAccepted ~= true
-        or type(manifest) ~= "table"
-        or tostring(manifest.rvId) ~= tostring(request.rvId)
-        or ServerUtil.integer(manifest.generation) ~= requestGeneration
-        or ServerUtil.integer(manifest.bitmapVersion) ~= requestBitmapVersion
-        or type(manifest.boundary) ~= "table"
-        or tostring(manifest.boundary.rvId) ~= tostring(request.rvId)
-        or ServerUtil.integer(manifest.boundary.generation) ~= ServerUtil.integer(request.generation)
-        or ServerUtil.integer(manifest.boundary.bitmapVersion) ~= ServerUtil.integer(request.bitmapVersion) then
+        or type(manifest) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
-    -- All consumers share one cross-object geometry proof.  Keeping this
-    -- check in RV_Server prevents the roof path, boundary guard, and
-    -- stateless sentinel from each accepting a different "current" snapshot.
-    local geometryService = server.currentRVRecordGeometryConsistent
-    if type(geometryService) ~= "function" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local geometryCallOk, geometryConsistent = pcall(geometryService, record,
-        manifest)
-    if not geometryCallOk or geometryConsistent ~= true then
-        return false, Constants.INVALID_RV_DATA
-    end
-    -- The startup schema gate decoded and registered every persisted boundary.
-    -- Runtime consumers use that validated in-memory bitmap instead of
-    -- repeating the persisted bitmap schema walk on each roof request.
     local bitmap = type(Boundary.cachedBitmap) == "function"
         and Boundary.cachedBitmap(record) or nil
     if type(bitmap) ~= "table" then

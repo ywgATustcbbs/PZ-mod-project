@@ -14,7 +14,6 @@ local ServerWorld = ctx.ServerWorld
 local ServerSchema = ctx.ServerSchema
 local roomOwnershipGuards = ctx.roomOwnershipGuards
 local function safeErrorText(...) return ctx.safeErrorText(...) end
-local function requireCurrentManifest(...) return ctx.requireCurrentManifest(...) end
 local ROOM_OWNERSHIP_MIN_TICKS = ctx.ROOM_OWNERSHIP_MIN_TICKS
 local ROOM_OWNERSHIP_STABLE_TICKS = ctx.ROOM_OWNERSHIP_STABLE_TICKS
 local ROOM_OWNERSHIP_MAX_TICKS = ctx.ROOM_OWNERSHIP_MAX_TICKS

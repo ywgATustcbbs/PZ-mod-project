@@ -9,7 +9,6 @@ local Adapter = ctx.Adapter
 local C = ctx.C
 local function recordForLoco(...) return ctx.recordForLoco(...) end
 local function roofRefreshTransactionBlocks(...) return ctx.roofRefreshTransactionBlocks(...) end
-local function currentGeometryGate(...) return ctx.currentGeometryGate(...) end
 local sourceWithinRange
 local number = ctx.number
 local integer = ctx.integer
@@ -52,11 +51,7 @@ function Adapter.resolveCurrentUtilityRV(player)
     if not player or playerDead(player) then
         return false, "permission-denied"
     end
-    local mapOk, mapOrReason = pcall(mapData)
-    if not mapOk or type(mapOrReason) ~= "table" then
-        return false, C.INVALID_RV_DATA
-    end
-    local map = mapOrReason
+    local map = mapData()
     local name = playerName(player)
     local onlineId = playerId(player)
     local relation = name and map.players and map.players[name] or nil
@@ -105,13 +100,6 @@ function Adapter.resolveCurrentUtilityRV(player)
             return false, C.INVALID_RV_DATA
         end
     end
-    local rv = rawget(_G, "RailroaderRV")
-    local server = rv and rv.Server
-    if not server or type(server.validateCurrentRVRecord) ~= "function" then
-        return false, C.INVALID_RV_DATA
-    end
-    local gateOk, gateResult = pcall(server.validateCurrentRVRecord, record)
-    if not gateOk or gateResult ~= true then return false, C.INVALID_RV_DATA end
     return true, {
         identity = { rvId = tostring(record.rvId), generation = integer(record.generation),
             bitmapVersion = integer(record.bitmapVersion) },
@@ -121,60 +109,15 @@ function Adapter.resolveCurrentUtilityRV(player)
     }
 end
 
--- Tick settlement has no client player to use as an identity source.  It
--- still needs the complete current map/manifest/geometry gate before a
--- persisted utility record can be touched, so expose the same read-only
--- validation without accepting coordinates or RV identity from a request.
-function Adapter.validateCurrentUtilityIdentity(identity)
-    local function reject(stage)
-        print("[RailroaderRVTest] utility identity gate rejected stage=" .. stage)
-        return false, C.INVALID_RV_DATA
-    end
-    if type(identity) ~= "table" or type(identity.rvId) ~= "string"
-        or identity.rvId == "" or integer(identity.generation) == nil
-        or integer(identity.bitmapVersion) ~= C.BITMAP_VERSION then
-        return reject("identity")
-    end
-    local mapOk, map = pcall(mapData)
-    if not mapOk or type(map) ~= "table" then
-        return reject("map-read")
-    end
+function Adapter.currentUtilityRecord(identity)
+    local map = mapData()
     local record = recordForLoco(map, identity.rvId)
-    if not record then
-        return reject("mapping-missing")
-    end
-    if not validMappingRecord(record)
+    if not record or not validMappingRecord(record)
         or integer(record.generation) ~= integer(identity.generation)
         or integer(record.bitmapVersion) ~= integer(identity.bitmapVersion) then
-        return reject("mapping-schema-or-identity")
-    end
-    local rv = rawget(_G, "RailroaderRV")
-    local server = rv and rv.Server
-    if not server or type(server.currentRVManifestForBoundary) ~= "function"
-        or type(server.currentRVRecordGeometryConsistent) ~= "function" then
-        return reject("server-gate-missing")
-    end
-    local manifestOk, manifestAccepted, manifest = pcall(
-        server.currentRVManifestForBoundary, record.rvId, record.generation,
-        record.bitmapVersion)
-    if not manifestOk or manifestAccepted ~= true or type(manifest) ~= "table" then
-        return reject("manifest")
-    end
-    local geometryOk, consistent = pcall(
-        server.currentRVRecordGeometryConsistent, record, manifest)
-    if not geometryOk or consistent ~= true then
-        return reject("geometry")
-    end
-    return true, { record = record, train = findTrain(record.locoId) }
-end
-
-function Adapter.currentUtilityRecord(identity)
-    local ok, validated = Adapter.validateCurrentUtilityIdentity(identity)
-    if ok ~= true or type(validated) ~= "table"
-        or type(validated.record) ~= "table" then
         return false, C.INVALID_RV_DATA
     end
-    return true, validated.record
+    return true, record
 end
 
 local function settleUtilityTransition(record, player, phase)
@@ -228,7 +171,6 @@ local function movePlayer(player, position, action, relation)
             payload.rvId = tostring(relation.rvId)
             payload.generation = integer(relation.generation)
             payload.bitmapVersion = integer(relation.bitmapVersion)
-            payload.mapSchemaVersion = C.MAP_SCHEMA_VERSION
         end
     end
     local sentCallOk, sentResult = callGlobal("sendServerCommand", player,
@@ -252,7 +194,6 @@ local function markPlayerOutside(map, record, key, player, position, seat, role)
     if type(relation) ~= "table" then relation = {} end
     relation.locoId = record and tostring(record.locoId) or relation.locoId
     relation.onlineId = playerId(player)
-    relation.schemaVersion = C.RV_RELATION_SCHEMA_VERSION
     relation.inside = false
     relation.role = role
     relation.seat = seat
@@ -264,7 +205,6 @@ local function markPlayerOutside(map, record, key, player, position, seat, role)
         end
         local rider = record.players[name]
         if type(rider) ~= "table" then rider = {} end
-        rider.schemaVersion = C.RV_RELATION_SCHEMA_VERSION
         rider.onlineId = playerId(player)
         rider.inside = false
         rider.role = role
@@ -281,7 +221,6 @@ local function markPlayerInside(map, record, key, player, sourcePosition,
     local enterPosition = copyPosition(sourcePosition)
     if not enterPosition then error(C.INVALID_RV_DATA) end
     local relation = {
-        schemaVersion = C.RV_RELATION_SCHEMA_VERSION,
         locoId = tostring(record.locoId),
         onlineId = playerId(player), inside = true,
         role = sourceRole, seat = sourceSeat,
@@ -292,7 +231,6 @@ local function markPlayerInside(map, record, key, player, sourcePosition,
         error(C.INVALID_RV_DATA)
     end
     record.players[name] = {
-        schemaVersion = C.RV_RELATION_SCHEMA_VERSION,
         locoId = tostring(record.locoId),
         onlineId = relation.onlineId, inside = true,
         role = sourceRole, seat = sourceSeat,
@@ -345,10 +283,6 @@ local function enterExisting(player, train, record, key, sourceRole,
     if roofBlocked then
         return false, roofReason
     end
-    local geometryOk, geometryReason = currentGeometryGate(record)
-    if not geometryOk then
-        return false, geometryReason
-    end
     if not Boundary or type(Boundary.beginTransition) ~= "function"
         or type(Boundary.completeTransition) ~= "function" then
         return false, "RV boundary entry service is unavailable"
@@ -371,8 +305,7 @@ local function enterExisting(player, train, record, key, sourceRole,
     local target = copyPosition(record.rvPosition)
     if not target then return false, C.INVALID_RV_DATA end
     -- Re-arm the persistent client stale-room monitor before changing seats or
-    -- moving the player.  A missing/incompatible current manifest therefore
-    -- fails closed without performing the RV teleport.
+    -- moving the player.
     local monitorOk, monitorReason = armRoomOwnershipMonitor(player, record,
         "existing-entry")
     if not monitorOk then return false, monitorReason end
@@ -578,7 +511,6 @@ local function commitGeneration(player, data, prepared)
     end
     candidateMap.locomotives[key] = candidateRecord
     local train = findTrain(locoId)
-    candidateRecord.schemaVersion = C.RV_RECORD_SCHEMA_VERSION
     candidateRecord.generated = true
     candidateRecord.locoId = locoId
     candidateRecord.rvId = locoId
@@ -596,7 +528,6 @@ local function commitGeneration(player, data, prepared)
     candidateRecord.enterPosition = copyPosition(data.entryPosition)
     candidateRecord.locoPosition = train and trainPose(train)
         or copyPose(data.locoPosition)
-    candidateRecord.boundarySchemaVersion = C.BOUNDARY_SCHEMA_VERSION
     candidateRecord.bitmapVersion = C.BITMAP_VERSION
     candidateRecord.boundary = prepared.boundary
     candidateRecord.managed = prepared.boundary.managed
@@ -704,10 +635,6 @@ local function exitPlayer(player)
     local roofBlocked, roofReason = roofRefreshTransactionBlocks(record.rvId)
     if roofBlocked then
         return false, roofReason
-    end
-    local geometryOk, geometryReason = currentGeometryGate(record)
-    if not geometryOk then
-        return false, geometryReason
     end
     if not train then
         local target = persistedBesidePosition(record)

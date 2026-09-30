@@ -54,13 +54,11 @@ modinfos.json                         模组 metadata，只读、禁止全量读
 3. Surgical changes: 只改必要内容，匹配现有风格，只清理自己造成的残留
 4. Goal-driven: 先定义成功条件与验证方式，改完必须验证
 
-### RailroaderRVTest 开发期存档 schema 强制门
+### RailroaderRVTest schema 版本
 
-- RailroaderRVTest 开发期 MUST 只支持当前代码声明的 manifest、bitmap、shell ledger、RV mapping 和异步身份 schema。
-- 任何缺失、过期、部分写入、字段别名、旧 bounds、旧 bitmap、旧 mapping、旧 generation 或旧 manifest MUST 立即拒绝当前 RV 操作，并向用户明确提示删除该测试存档并重建。
-- 代码 MUST NOT 自动迁移、转换、推断、兼容旧字段，MUST NOT 用旧数据生成 geometry、删除对象、传送玩家或运行 boundary guard，也 MUST NOT 自动删除/修改旧存档。
-- 新建空容器可以按当前 schema 初始化；这不构成旧数据迁移。失败后的当前 schema 数据也不得降级成旧结构路径。
-- 兼容未来 schema 只有在用户以后明确重新授权后才可设计和实现；在此之前不得添加 fallback、alias 或 new/old conversion 分支。
+- Lua 中只维护一个 schema 版本号，并将其写入 ModData。模组启动时集中比较 ModData 中的版本号：一致时继续；不一致或缺失时只报警，不拦截操作。
+- 其他代码默认数据符合当前 schema，不重复检查版本或存档结构。用户承诺不使用旧存档，因此不编写旧存档防护、迁移、转换、字段兼容或回退逻辑。
+- 模块之间按既定接口直接协作，不添加针对其他模块接口的验证、防护、兼容或迁移代码。数据或接口错误由游戏正常抛出异常，后续由人工或 agent 排查，包括判断是否与 schema 版本有关。
 
 ## `modinfos.json` 约束
 

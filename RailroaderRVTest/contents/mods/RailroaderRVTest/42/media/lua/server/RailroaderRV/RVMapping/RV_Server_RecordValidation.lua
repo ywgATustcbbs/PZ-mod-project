@@ -1,23 +1,18 @@
 -- RV_Server: RecordValidation responsibilities.
 return function(ctx)
-local DevSaveSchemaGate = require("RailroaderRV/Core/RV_DevSaveSchemaGate")
 local Constants = ctx.Constants
-local Boundary = ctx.Boundary
-local Bitmap = ctx.Bitmap
+local ServerSchema = ctx.ServerSchema
 local RoofRefresh = ctx.RoofRefresh
 local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
-local ServerSchema = ctx.ServerSchema
 local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
 local function safeErrorText(...) return ctx.safeErrorText(...) end
-local function requireCurrentManifest(...) return ctx.requireCurrentManifest(...) end
 local armTargetedClientRoomOwnershipGuard = ctx.armTargetedClientRoomOwnershipGuard
 local manifestTable = ctx.manifestTable
 local playerIdentity = ctx.playerIdentity
 local currentRoofRefreshContext = ctx.currentRoofRefreshContext
 local queueGeneration = ctx.queueGeneration
 
-DevSaveSchemaGate.configureRecordGeometry({ ServerSchema = ServerSchema })
 local function currentMappingRecord(rvId, generation, bitmapVersion)
     local adapter = RailroaderRV and RailroaderRV.RailroaderServer
     if type(adapter) ~= "table"
@@ -47,7 +42,6 @@ local function manifestViewForRecord(record)
         local generation = ServerUtil.integer(record.generation)
         local bitmapVersion = ServerUtil.integer(record.bitmapVersion)
         local snapshot = {
-            schemaVersion = Constants.MANIFEST_SCHEMA_VERSION,
             techVersion = Constants.TECH_VERSION,
             templateVersion = Constants.CAPTURED_TEMPLATE_VERSION,
             generation = generation,
@@ -56,7 +50,6 @@ local function manifestViewForRecord(record)
             anchor = anchor,
             bounds = bounds,
             rvId = tostring(record.rvId),
-            boundarySchemaVersion = Constants.BOUNDARY_SCHEMA_VERSION,
             bitmapVersion = bitmapVersion,
             boundary = record.boundary,
             startedAt = updatedAt,
@@ -70,7 +63,6 @@ local function manifestViewForRecord(record)
         if updatedAt == nil or generation == nil or bitmapVersion == nil then
             error(Constants.INVALID_RV_DATA)
         end
-        requireCurrentManifest(snapshot, false)
         return snapshot
     end)
     if not ok or type(manifest) ~= "table" then
@@ -81,50 +73,40 @@ end
 
 local function manifestForIdentity(rvId, generation, bitmapVersion,
     allowRunning)
+    local recordOk, record = currentMappingRecord(rvId, generation, bitmapVersion)
+    if not recordOk then return false, record end
     local manifestOk, persisted = pcall(manifestTable)
     if not manifestOk or type(persisted) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
-    local schemaOk = pcall(requireCurrentManifest, persisted, false)
-    if not schemaOk then return false, Constants.INVALID_RV_DATA end
     local identityMatches = tostring(persisted.rvId) == tostring(rvId)
         and ServerUtil.integer(persisted.generation) == ServerUtil.integer(generation)
         and ServerUtil.integer(persisted.bitmapVersion) == ServerUtil.integer(bitmapVersion)
-    if identityMatches and persisted.state == "RUNNING" then
-        local transaction = ctx.GenerationTransaction
-        local transactionOk, pending = false, nil
-        if type(transaction) == "table"
-            and type(transaction.current) == "function" then
-            transactionOk, pending = pcall(transaction.current)
-        end
-        local activeRunning = allowRunning == true
-            and transactionOk == true
-            and type(pending) == "table"
-            and tostring(pending.rvId) == tostring(rvId)
-            and ServerUtil.integer(pending.generation) == ServerUtil.integer(generation)
-            and ServerUtil.integer(pending.bitmapVersion)
-                == ServerUtil.integer(bitmapVersion)
-        if activeRunning then return true, persisted end
-    end
-    -- The ModData manifest is a single transaction record. A READY identity
-    -- used for ordinary RV operations must be rebuilt from its current strict
-    -- Mapping record. An unrelated transaction state must not hide another
-    -- RV; a non-READY state for this same RV remains a hard rejection.
     if tostring(persisted.rvId) == tostring(rvId) then
-        if not identityMatches or persisted.state ~= "READY" then
+        if not identityMatches then return false, Constants.INVALID_RV_DATA end
+        if persisted.state == "RUNNING" then
+            local transaction = ctx.GenerationTransaction
+            local transactionOk, pending = false, nil
+            if type(transaction) == "table"
+                and type(transaction.current) == "function" then
+                transactionOk, pending = pcall(transaction.current)
+            end
+            local activeRunning = allowRunning == true
+                and transactionOk == true
+                and type(pending) == "table"
+                and tostring(pending.rvId) == tostring(rvId)
+                and ServerUtil.integer(pending.generation)
+                    == ServerUtil.integer(generation)
+                and ServerUtil.integer(pending.bitmapVersion)
+                    == ServerUtil.integer(bitmapVersion)
+            if activeRunning then return true, persisted end
             return false, Constants.INVALID_RV_DATA
         end
-    end
-    local recordOk, record = currentMappingRecord(rvId, generation, bitmapVersion)
-    if not recordOk then return false, record end
-    local viewOk, view = manifestViewForRecord(record)
-    if not viewOk then return false, view end
-    local comparison = identityMatches and persisted or view
-    local geometryOk, consistent = pcall(
-        RV.Server.currentRVRecordGeometryConsistent, record, comparison)
-    if not geometryOk or consistent ~= true then
+        if persisted.state == "READY" then return true, persisted end
         return false, Constants.INVALID_RV_DATA
     end
+    local viewOk, view = manifestViewForRecord(record)
+    if not viewOk then return false, view end
     return true, view
 end
 
@@ -151,92 +133,21 @@ function RV.Server.requestRailroaderGeneration(player, railroaderData)
     return queueGeneration(player, nil, railroaderData)
 end
 
--- Read-only current-schema gate for the stateless -15 sentinel.  It returns
--- the manifest only after the same strict validator used by normal entry has
--- checked the persisted boundary/bitmap contract; it never repairs or writes.
+-- Read-only current identity for the stateless -15 sentinel.
 function RV.Server.currentRVManifestForRelocation(rvId, generation,
     bitmapVersion)
     return manifestForIdentity(rvId, generation, bitmapVersion, false)
 end
 
--- BoundaryServer needs the same strict manifest/geometry identity while a
--- generation is still RUNNING (the normal roof/entry guard must not require
--- READY until the final acknowledgement commits it).  This narrow hook keeps
--- that exception explicit and still rejects FAILED/partial/unknown schemas.
+-- BoundaryServer may inspect the current identity while generation is still
+-- RUNNING; ordinary relocation reads require READY.
 function RV.Server.currentRVManifestForBoundary(rvId, generation,
     bitmapVersion)
     return manifestForIdentity(rvId, generation, bitmapVersion, true)
 end
 
-local function currentRVRecordGeometryConsistent(record, manifest)
-
-    if not DevSaveSchemaGate.isReady() or type(record) ~= "table"
-        or type(manifest) ~= "table" or record.generated ~= true then
-        return false
-    end
-    local generation = ServerUtil.integer(record.generation)
-    local bitmapVersion = ServerUtil.integer(record.bitmapVersion)
-    local boundary = record.boundary
-    local manifestBoundary = manifest.boundary
-    if type(record.rvId) ~= "string" or record.rvId == ""
-        or tostring(record.locoId) ~= record.rvId
-        or tostring(manifest.rvId) ~= record.rvId
-        or generation == nil or generation < 1
-        or generation ~= ServerUtil.integer(manifest.generation)
-        or bitmapVersion ~= Constants.BITMAP_VERSION
-        or bitmapVersion ~= ServerUtil.integer(manifest.bitmapVersion)
-        or type(boundary) ~= "table" or type(manifestBoundary) ~= "table"
-        or tostring(boundary.rvId) ~= record.rvId
-        or tostring(manifestBoundary.rvId) ~= record.rvId
-        or ServerUtil.integer(boundary.generation) ~= generation
-        or ServerUtil.integer(manifestBoundary.generation) ~= generation
-        or ServerUtil.integer(boundary.bitmapVersion) ~= bitmapVersion
-        or ServerUtil.integer(manifestBoundary.bitmapVersion) ~= bitmapVersion
-        or type(record.managed) ~= "table"
-        or type(boundary.managed) ~= "table"
-        or type(manifestBoundary.managed) ~= "table" then
-        return false
-    end
-    local fields = { "originX", "originY", "width", "height", "minZ", "maxZ" }
-    for i = 1, #fields do
-        local field = fields[i]
-        local value = ServerUtil.integer(record.managed[field])
-        if value == nil or value ~= ServerUtil.integer(boundary.managed[field])
-            or value ~= ServerUtil.integer(manifestBoundary.managed[field]) then
-            return false
-        end
-    end
-    return true
-end
-
-RV.Server.currentRVRecordGeometryConsistent = currentRVRecordGeometryConsistent
-
--- Narrow current-only gate for adapter Enter/Exit mutations. Callers do not
--- supply a manifest snapshot: the service resolves current mapping and
--- manifest identities, then compares their live managed bounds.
-function RV.Server.validateCurrentRVRecord(record)
-    if type(record) ~= "table" or type(record.rvId) ~= "string"
-        or record.rvId == "" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local manifestCallOk, manifestAccepted, manifestOrReason = pcall(
-        RV.Server.currentRVManifestForRelocation, record.rvId,
-        record.generation, record.bitmapVersion)
-    if not manifestCallOk or manifestAccepted ~= true
-        or type(manifestOrReason) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local geometryCallOk, consistent = pcall(
-        RV.Server.currentRVRecordGeometryConsistent, record, manifestOrReason)
-    if not geometryCallOk or consistent ~= true then
-        return false, Constants.INVALID_RV_DATA
-    end
-    return true, manifestOrReason
-end
-
 -- Rebuild the captured south-window floor's room/roof neighbours after an
--- existing RV entry or reconnect. The current manifest gate must pass before
--- persisted geometry or generation identity reaches the roof refresh helper.
+-- existing RV entry or reconnect.
 function RV.Server.refreshRoofVisuals(player, record)
     if not RoofRefresh then
         return false, "roof refresh module is unavailable"
@@ -267,8 +178,8 @@ function RV.Server.refreshRoofVisuals(player, record)
 end
 
 -- Re-arm a client's persistent stale-room monitor when it enters an already
--- generated RV or appears after reconnect. The mapping record is checked for
--- the current schema/identity, then its anchor and boundary rebuild a strict
+-- generated RV or appears after reconnect. The mapping identity, anchor and
+-- boundary rebuild a strict
 -- current manifest view for this RV. No client state or caller-supplied bounds
 -- participate in this command.
 function RV.Server.armCurrentRoomOwnershipMonitor(player, record)

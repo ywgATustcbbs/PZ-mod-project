@@ -5,7 +5,6 @@ local Bitmap = ctx.Bitmap
 local Boundary = ctx.Boundary
 local Core = ctx.Core
 local C = ctx.C
-local DevSaveSchemaGate = require("RailroaderRV/Core/RV_DevSaveSchemaGate")
 local Template = require("RailroaderRV/RoomTemplate/RV_Template")
 local exactKeys = ctx.exactKeys
 -- A registered boundary is immutable. Retain its decoded snapshot by source
@@ -210,24 +209,13 @@ function Boundary.makeBoundary(layout, rvId, generation)
     local encoded = Bitmap.encode(layout.bitmap)
     if not encoded then return nil, "layout bitmap failed validation" end
     local bitmap = layout.bitmap
-    local managed = layout.managed
-    if type(managed) ~= "table"
-        or integer(managed.originX) ~= integer(bitmap.originX)
-        or integer(managed.originY) ~= integer(bitmap.originY)
-        or integer(managed.width) ~= integer(bitmap.width)
-        or integer(managed.height) ~= integer(bitmap.height)
-        or integer(managed.minZ) ~= integer(bitmap.minZ)
-        or integer(managed.maxZ) ~= integer(bitmap.maxZ) then
-        return nil, "layout managed scope does not match bitmap"
-    end
     local bitmapVersion = integer(bitmap.bitmapVersion)
     if bitmapVersion ~= C.BITMAP_VERSION then
         return nil, "layout bitmap version is invalid"
     end
     local shellEdges = encodeShellEdges(layout.shellEdges, rvId, generation,
         bitmapVersion)
-local boundary = {
-        schemaVersion = C.BOUNDARY_SCHEMA_VERSION,
+    local boundary = {
         rvId = tostring(rvId), generation = integer(generation),
         bitmapVersion = bitmapVersion,
         managed = {
@@ -238,12 +226,6 @@ local boundary = {
         bitmap = encoded,
         shellEdges = shellEdges,
     }
-    if not boundary.generation or not boundary.managed.originX
-        or not boundary.managed.originY or not boundary.managed.width
-        or not boundary.managed.height or not boundary.managed.minZ
-        or not boundary.managed.maxZ then
-        return nil, "layout managed scope is incomplete"
-    end
     -- New records are built from a current in-memory bitmap. Keep that decoded
     -- value beside the encoded record so later runtime registration does not
     -- re-run persisted-schema decoding.
@@ -263,10 +245,10 @@ local function decodeBoundary(boundary)
         return generated, tostring(boundary.rvId), integer(boundary.generation),
             integer(boundary.bitmapVersion)
     end
-    if not DevSaveSchemaGate.isValidating() then return nil end
-    local bitmap, rvId, generation, bitmapVersion =
-        DevSaveSchemaGate.validatedBoundary(boundary)
-    if not bitmap then return nil end
+    local bitmap = Bitmap.decode(boundary.bitmap)
+    local rvId = tostring(boundary.rvId or "")
+    local generation = integer(boundary.generation)
+    local bitmapVersion = integer(boundary.bitmapVersion)
     return bitmap, rvId, generation, bitmapVersion
 end
 local function boundaryKey(boundary)
@@ -429,12 +411,9 @@ local function loadedBoundary(boundary)
             or bitmapVersion ~= C.BITMAP_VERSION then
             return nil
         end
-    elseif DevSaveSchemaGate.isValidating() then
+    else
         bitmap, rvId, generation, bitmapVersion = decodeBoundary(boundary)
         if not bitmap then return nil end
-    else
-        -- A runtime cache miss cannot reopen the persisted schema validator.
-        return nil
     end
     local key = boundaryKey({ rvId = rvId, generation = generation,
         bitmapVersion = bitmapVersion })
@@ -486,10 +465,8 @@ function Boundary.boundaryForPlayer(player, knownIdentity, deferValidationMiss,
     forceValidationRefresh, roofRefreshContextRead, roofRefreshGuardRead)
     local id = knownIdentity or identity(player)
     if not id then return nil end
-    -- The complete current-only map/record validator lives in the Railroader
-    -- adapter.  Boundary must not maintain a second shallow ModData parser:
-    -- if the hook is missing, or rejects a missing/unknown/partial schema,
-    -- no boundary guard is allowed to run.
+    -- The Railroader adapter checks the player's current mapping and manifest
+    -- identity; this module validates the boundary it needs locally.
     local rv = rawget(_G, "RailroaderRV")
     local adapter = rv and rv.RailroaderServer
     local validator = adapter and adapter.validateCurrentBoundaryPlayer

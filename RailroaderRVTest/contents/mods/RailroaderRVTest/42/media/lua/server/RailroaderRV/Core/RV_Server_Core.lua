@@ -3,8 +3,6 @@
 --
 -- This module owns transient dispatch state only. It never writes SandboxVars,
 -- ModData, or any other persisted state.
-local DevSaveSchemaGate = require("RailroaderRV/Core/RV_DevSaveSchemaGate")
-
 local RV = rawget(_G, "RailroaderRV") or {}
 rawset(_G, "RailroaderRV", RV)
 
@@ -188,9 +186,6 @@ local function callOrdered(entries, predicate, ...)
 end
 
 local function dispatchEvent(eventName, ...)
-    -- No RV-owned command, tick, or world callback may run until the single
-    -- startup scan has accepted every persisted RV schema.
-    if not DevSaveSchemaGate.isReady() then return end
     if eventName == "OnTick" then
         local advanced, reason = nextTick()
         if not advanced then error(reason, 0) end

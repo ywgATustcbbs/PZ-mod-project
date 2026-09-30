@@ -20,7 +20,6 @@ local C = RailroaderRV.Constants
 local walkBoundsCache = setmetatable({}, { __mode = "k" })
 local layerBits
 
-Bitmap.SCHEMA_VERSION = C.BITMAP_SCHEMA_VERSION
 Bitmap.DEFAULT_WIDTH = C.RV_MANAGED_WIDTH
 Bitmap.DEFAULT_HEIGHT = C.RV_MANAGED_HEIGHT
 
@@ -394,7 +393,6 @@ function Bitmap.encode(bitmap)
     end
     Bitmap.prepareWalkBounds(bitmap)
     local result = {
-        schemaVersion = bitmap.schemaVersion,
         bitmapVersion = bitmap.bitmapVersion,
         originX = bitmap.originX, originY = bitmap.originY,
         width = bitmap.width, height = bitmap.height,
@@ -412,12 +410,10 @@ end
 
 function Bitmap.decode(encoded)
     if type(encoded) ~= "table" then return nil end
-    if not exactKeys(encoded, { "schemaVersion", "bitmapVersion", "originX",
+    if not exactKeys(encoded, { "bitmapVersion", "originX",
         "originY", "width", "height", "minZ", "maxZ", "layers",
         "encoding" }) then return nil end
     if encoded.encoding ~= "hex" then return nil end
-    local schemaVersion = integer(encoded.schemaVersion)
-    if schemaVersion ~= Bitmap.SCHEMA_VERSION then return nil end
     local scope = Bitmap.makeScope(encoded.originX, encoded.originY,
         encoded.minZ, encoded.maxZ, encoded.width, encoded.height)
     if not scope then return nil end
@@ -434,7 +430,6 @@ function Bitmap.decode(encoded)
     end
     if layerCount ~= scope.maxZ - scope.minZ then return nil end
     local result = {
-        schemaVersion = schemaVersion,
         bitmapVersion = bitmapVersion,
         originX = scope.originX, originY = scope.originY,
         width = scope.width, height = scope.height,
@@ -457,16 +452,15 @@ end
 
 function Bitmap.validate(bitmap, allowEncoded)
     if type(bitmap) ~= "table" then return false end
-    local expectedKeys = { "schemaVersion", "bitmapVersion", "originX",
+    local expectedKeys = { "bitmapVersion", "originX",
         "originY", "width", "height", "minZ", "maxZ", "layers",
         "encoding" }
     if not exactKeys(bitmap, expectedKeys) then return false end
-    local schema = integer(bitmap.schemaVersion)
     local width, height = integer(bitmap.width), integer(bitmap.height)
     local originX, originY = integer(bitmap.originX), integer(bitmap.originY)
     local minZ, maxZ = integer(bitmap.minZ), integer(bitmap.maxZ)
     local bitmapVersion = integer(bitmap.bitmapVersion)
-    if schema ~= Bitmap.SCHEMA_VERSION or not width or not height
+    if not width or not height
         or width ~= Bitmap.DEFAULT_WIDTH or height ~= Bitmap.DEFAULT_HEIGHT
         or not originX or not originY or not minZ or not maxZ or maxZ <= minZ
         or bitmapVersion ~= C.BITMAP_VERSION

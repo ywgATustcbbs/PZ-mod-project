@@ -8,7 +8,6 @@ local Core = ctx.Core
 local ServerUtil = ctx.ServerUtil
 local GenerationTransaction = ctx.GenerationTransaction
 local function safeErrorText(...) return ctx.safeErrorText(...) end
-local function requireCurrentManifest(...) return ctx.requireCurrentManifest(...) end
 local ROOF_REFRESH_TEMP_Z = ctx.ROOF_REFRESH_TEMP_Z
 local manifestTable = ctx.manifestTable
 local resolveRoofRefreshGroupPlayer = ctx.resolveRoofRefreshGroupPlayer

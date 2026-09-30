@@ -95,7 +95,6 @@ local pendingSerial = 0
 local serverTick = Core.getTick()
 local roomOwnershipGuards = {}
 local safeErrorText
-local requireCurrentManifest
 
 if UtilityServer and type(UtilityServer.initializeRecord) == "function" then
     RV.Server.initializeUtilityRecord = UtilityServer.initializeRecord
@@ -175,7 +174,6 @@ local ctx = {
     serverTick = serverTick,
     roomOwnershipGuards = roomOwnershipGuards,
     safeErrorText = safeErrorText,
-    requireCurrentManifest = requireCurrentManifest,
     RELOCATION_MIN_TICKS = RELOCATION_MIN_TICKS,
     RELOCATION_POST_ACK_TICKS = RELOCATION_POST_ACK_TICKS,
     RELOCATION_TIMEOUT_TICKS = RELOCATION_TIMEOUT_TICKS,
@@ -204,7 +202,6 @@ require("RailroaderRV/RoofRefresh/RV_Server_RoomOwnership")(ctx)
 require("RailroaderRV/Construction/RV_Server_WorldObjects")(ctx)
 require("RailroaderRV/Construction/RV_Server_GenerationBuild")(ctx)
 require("RailroaderRV/Construction/RV_Server_PlayerValidation")(ctx)
-require("RailroaderRV/Core/RV_Server_ManifestValidation")(ctx)
 require("RailroaderRV/TemplateRecovery/RV_Server_TemplateProtectionRepair")(ctx)
 require("RailroaderRV/TemplateRecovery/RV_TemplateRecoveryQueue")(ctx)
 require("RailroaderRV/RoofRefresh/RV_Server_RoofDestinations")(ctx)

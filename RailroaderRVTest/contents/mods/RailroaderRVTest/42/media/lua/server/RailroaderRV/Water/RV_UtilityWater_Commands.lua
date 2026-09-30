@@ -27,11 +27,8 @@ end
 local function currentMappingRecord(identity)
     local rv = rawget(_G, "RailroaderRV")
     local adapter = rv and rv.RailroaderServer
-    if not adapter or type(adapter.currentUtilityRecord) ~= "function" then
-        return false, C.INVALID_RV_DATA
-    end
-    local ok, accepted, record = pcall(adapter.currentUtilityRecord, identity)
-    if not ok or accepted ~= true or type(record) ~= "table" then
+    local accepted, record = adapter.currentUtilityRecord(identity)
+    if accepted ~= true then
         return false, C.INVALID_RV_DATA
     end
     return true, record

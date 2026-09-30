@@ -9,7 +9,6 @@ local Protection = require "RailroaderRV/RoomTemplate/RV_ProtectionManifest"
 local C = RailroaderRV.Constants
 local RoomTemplate = {}
 
-RoomTemplate.SCHEMA_VERSION = 1
 RoomTemplate.TEMPLATE_ID = "railroader-rv"
 RoomTemplate.CURRENT_TEMPLATE_VERSION = 11
 RoomTemplate.CURRENT_OBJECT_COUNT = 412
@@ -33,7 +32,7 @@ local segmentByName = {
     z4to31 = segments[3],
 }
 local sourceKeys = {
-    schemaVersion = true, sourceTarget = true, objectCount = true,
+    templateVersion = true, sourceTarget = true, objectCount = true,
     buildCells = true, objects = true,
 }
 local objectKeys = {
@@ -110,7 +109,7 @@ end
 
 local function assertSource()
     if not exactKeys(Source, sourceKeys)
-        or Source.schemaVersion ~= RoomTemplate.CURRENT_TEMPLATE_VERSION
+        or Source.templateVersion ~= RoomTemplate.CURRENT_TEMPLATE_VERSION
         or Source.objectCount ~= RoomTemplate.CURRENT_OBJECT_COUNT
         or not finiteInteger(Source.objectCount)
         or denseList(Source.objects) ~= Source.objectCount
@@ -346,7 +345,6 @@ local template = {
         id = RoomTemplate.TEMPLATE_ID,
         displayName = "Railroader RV",
         templateVersion = RoomTemplate.CURRENT_TEMPLATE_VERSION,
-        schemaVersion = RoomTemplate.SCHEMA_VERSION,
         -- Object coordinates use (0,0,0) as the local anchor. sourceTarget
         -- below records the original capture cell only, not a world target.
         anchor = { x = 0, y = 0, z = 0 },
@@ -385,7 +383,7 @@ local templateRootKeys = {
 }
 local metadataKeys = {
     id = true, displayName = true, templateVersion = true,
-    schemaVersion = true, anchor = true, sourceTarget = true,
+    anchor = true, sourceTarget = true,
     width = true, height = true, minX = true, maxXExclusive = true,
     minY = true, maxYExclusive = true, objectCount = true,
     segmentSchema = true,
@@ -477,7 +475,6 @@ function RoomTemplate.validate(value)
         or metadata.id ~= RoomTemplate.TEMPLATE_ID
         or metadata.displayName ~= "Railroader RV"
         or metadata.templateVersion ~= RoomTemplate.CURRENT_TEMPLATE_VERSION
-        or metadata.schemaVersion ~= RoomTemplate.SCHEMA_VERSION
         or not validPoint(metadata.anchor) or metadata.anchor.x ~= 0
         or metadata.anchor.y ~= 0 or metadata.anchor.z ~= 0
         or not validPoint(metadata.sourceTarget)
@@ -489,7 +486,7 @@ function RoomTemplate.validate(value)
         or metadata.minY ~= RoomTemplate.MIN_Y
         or metadata.maxYExclusive ~= RoomTemplate.MAX_Y_EXCLUSIVE
         or metadata.objectCount ~= RoomTemplate.CURRENT_OBJECT_COUNT then
-        return false, "template metadata does not use the current identity/schema"
+        return false, "template metadata does not use the current identity/version"
     end
 
     local segmentCount = denseList(metadata.segmentSchema)

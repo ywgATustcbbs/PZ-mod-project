@@ -139,12 +139,7 @@ local function processStatelessRelocationSentinel()
     -- the sentinel retries on its next fixed interval without competing for a
     -- player or a boundary lease.
     if generationActive or roofActive then return end
-    local mapOk, map = pcall(mapData)
-    if not mapOk or type(map) ~= "table" then
-        warnSentinelPlayersAtTemporaryCell(
-            mapOk and map or C.INVALID_RV_DATA, sentinelPlayers)
-        return
-    end
+    local map = mapData()
     for i = 1, #sentinelPlayers do
         local player = sentinelPlayers[i]
         local candidate, identityKey, reason
@@ -517,8 +512,7 @@ local function queueWallRoofRefreshForObject(object, source)
         return false
     end
 
-    local mapOk, map = pcall(mapData)
-    if not mapOk or type(map) ~= "table" then return false end
+    local map = mapData()
     local match
     for _, record in pairs(map.locomotives or {}) do
         local wallOk, isCurrentWall = false, false

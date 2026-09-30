@@ -122,15 +122,6 @@ function Common.getPlayerPosition(player)
     return true, { x = x, y = y, z = z }
 end
 
-function Common.getSquare(cell, x, y, z)
-    x, y, z = Common.integer(x), Common.integer(y), Common.integer(z)
-    if x == nil or y == nil or z == nil then
-        return false, nil
-    end
-    local ok, square = Common.invoke(cell, "getGridSquare", x, y, z)
-    return ok and square ~= nil, square
-end
-
 local function playerIdentity(player)
     local nameOk, name = Common.invoke(player, "getUsername")
     local idOk, onlineId = Common.invoke(player, "getOnlineID")

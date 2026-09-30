@@ -24,6 +24,12 @@ return {
         { minX = -4, maxX = 2, minY = -6, maxY = 17,
             minZ = 0, maxZExclusive = 1 },
     },
+    -- Cells whose room/roof state must be refreshed once the RV exists in the
+    -- world.  Each point names the captured entry that owns the cell, so the
+    -- point and its entry can never drift apart.
+    roofRefreshPoints = {
+        { x = -4, y = 3, z = 0, templateIndex = 34 },
+    },
     objects = {
     {x=-4, y=-6, z=0, class="IsoObject", name="IsoObject", sprite="industry_01_13", direction="N", state={hoppable=false}},
     {x=-4, y=-6, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_02_33", north=true, direction="N", state={health=250,hoppable=false,locked=false,maxHealth=250,doRender=false}},

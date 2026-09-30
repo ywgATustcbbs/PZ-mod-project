@@ -24,43 +24,6 @@ local function cellKey(x, y, z)
     return tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
 end
 
-local function compileRoofTargets(objects, buildCells)
-    local minX, maxX, maxY
-    for index = 1, #buildCells do
-        local cell = buildCells[index]
-        minX = minX == nil and cell.x or math.min(minX, cell.x)
-        maxX = maxX == nil and cell.x or math.max(maxX, cell.x)
-        maxY = maxY == nil and cell.y or math.max(maxY, cell.y)
-    end
-
-    local window
-    for index = 1, #objects do
-        local object = objects[index]
-        if object.class == "IsoWindow" and object.z == 0
-            and object.x >= minX and object.x <= maxX
-            and object.y == maxY + 1 then
-            window = object
-        end
-    end
-
-    local floor
-    for index = 1, #objects do
-        local object = objects[index]
-        if object.class == "IsoObject" and object.x == window.x
-            and object.y == window.y + 1 and object.z == 0 then
-            floor = object
-        end
-    end
-    return { {
-        kind = "room-refresh-floor",
-        x = floor.x,
-        y = floor.y,
-        z = floor.z,
-        templateIndex = floor.templateIndex,
-        identity = floor,
-    } }
-end
-
 local buildCellSet = {}
 for index = 1, #Source.buildCells do
     local cell = Source.buildCells[index]
@@ -125,8 +88,31 @@ for index = 1, Source.objectCount do
     layer[#layer + 1] = object
 end
 
-template.misc.roofTargets = compileRoofTargets(objectsByIndex,
-    Source.buildCells)
+-- Every declared refresh point must name a real captured entry that sits on the
+-- exact template coordinates the point declares.  Both sides are this mod's own
+-- authored data, so a mismatch is a hard load failure.
+local function validateRoofRefreshPoints(points, orderedObjects)
+    if type(points) ~= "table" then
+        error("RailroaderRVTest: template roof refresh points are missing")
+    end
+    for index = 1, #points do
+        local point = points[index]
+        local templateIndex = type(point) == "table"
+            and point.templateIndex or nil
+        local entry = templateIndex ~= nil
+            and orderedObjects[templateIndex] or nil
+        if not entry or entry.x ~= point.x or entry.y ~= point.y
+            or entry.z ~= point.z then
+            error("RailroaderRVTest: template roof refresh point "
+                .. tostring(index) .. " does not match captured entry "
+                .. "templateIndex=" .. tostring(templateIndex))
+        end
+    end
+    return points
+end
+
+local roofRefreshPoints = validateRoofRefreshPoints(Source.roofRefreshPoints,
+    objectsByIndex)
 
 local function cellCoordinates(x, y)
     return integer(x) and integer(y)
@@ -156,8 +142,8 @@ function RoomTemplate.hasLayer(value, x, y, z)
     return cell ~= nil and cell.layers[z] ~= nil
 end
 
-function RoomTemplate.roofTargets(value)
-    return value.misc.roofTargets
+function RoomTemplate.roofRefreshPoints(value)
+    return roofRefreshPoints
 end
 
 function RoomTemplate.orderedObjects(value)

@@ -1,21 +1,24 @@
 -- RV_Server: PlayerValidation responsibilities.
+--
+-- This module owns player identity/position validation, the single generation
+-- Boundary-lease keep-alive, and the two server->client generation relocation
+-- commands.  Relocation state is process-local: exact authoritative
+-- coordinates and stable identities live only while this process is alive.
 return function(ctx)
-local Core = ctx.Core
 local COMMAND_MODULE = ctx.COMMAND_MODULE
 local COMMAND_RELOCATE = ctx.COMMAND_RELOCATE
 local COMMAND_FINAL_RELOCATE = ctx.COMMAND_FINAL_RELOCATE
 local Boundary = ctx.Boundary
 local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
-local RELOCATION_POST_ACK_TICKS = ctx.RELOCATION_POST_ACK_TICKS
 local RELOCATION_TIMEOUT_TICKS = ctx.RELOCATION_TIMEOUT_TICKS
-local GENERATION_RELOCATION_RETRY_TICKS = ctx.GENERATION_RELOCATION_RETRY_TICKS
-local GenerationTransaction = ctx.GenerationTransaction
 local WORLD_MIN_Z = ctx.WORLD_MIN_Z
 local WORLD_MAX_Z = ctx.WORLD_MAX_Z
-local function cancelPending(...) return ctx.cancelPending(...) end
 
-local relocationServices = (function()
+-- One bounded resend cadence shared by both acknowledged stages.  A resend is
+-- idempotent on the client and only re-states a server-selected destination.
+local GENERATION_RESEND_TICKS = 30
+
 local function readPlayerCoordinate(player, methodName, label)
     local ok, value = ServerUtil.invoke(player, methodName)
     if not ok then
@@ -43,7 +46,8 @@ local function validateAuthoritativePlayer(player)
     if not worldOk or not world then
         return false, "getWorld is unavailable"
     end
-    local validOk, valid = ServerUtil.invoke(world, "isValidSquare", math.floor(px), math.floor(py), math.floor(pz))
+    local validOk, valid = ServerUtil.invoke(world, "isValidSquare", math.floor(px),
+        math.floor(py), math.floor(pz))
     if not validOk or valid ~= true then
         return false, "authoritative player coordinate is outside the legal world"
     end
@@ -113,39 +117,24 @@ local function playerIdentity(player)
     }
 end
 
-local function resolvePendingPlayer(pending)
-    if type(pending) ~= "table" or type(pending.identity) ~= "table"
-        or not ServerUtil.isFiniteNumber(pending.identity.onlineId) then
+-- Pure lookup of the live IsoPlayer for a record's stable online ID.  A missing
+-- object is reported as a reason; this never rebinds a transaction, never
+-- writes record state and never runs a side effect.
+local function resolvePendingPlayer(record)
+    if type(record) ~= "table" or type(record.identity) ~= "table"
+        or not ServerUtil.isFiniteNumber(record.identity.onlineId) then
         return false, "relocation player identity is unavailable"
     end
-    local foundOk, current = ServerUtil.callGlobal("getPlayerByOnlineID", pending.identity.onlineId)
+    local foundOk, current = ServerUtil.callGlobal("getPlayerByOnlineID",
+        record.identity.onlineId)
     if not foundOk or current == nil then
         return false, "requesting player disconnected or was replaced"
     end
     local identityOk, identityOrReason = playerIdentity(current)
-    if not identityOk or identityOrReason.key ~= pending.identity.key then
+    if not identityOk or identityOrReason.key ~= record.identity.key then
         return false, identityOk and "requesting player identity changed" or identityOrReason
     end
-    -- The online ID is the stable server identity across a transient
-    -- IsoPlayer object replacement. Generation state is rebound through its
-    -- owner; RoofRelocation applies the same result to its member record.
-    local previous = pending.player
-    if type(GenerationTransaction) == "table"
-        and type(GenerationTransaction.owns) == "function"
-        and GenerationTransaction.owns(nil, pending.token) then
-        local reboundOk, ownerPrevious = GenerationTransaction.setPlayer(
-            current, ctx.serverTick)
-        if not reboundOk then
-            return false, "generation player could not be rebound"
-        end
-        previous = ownerPrevious
-    end
-    if previous ~= nil and previous ~= current then
-        if type(ctx.invalidatePlayerPosition) == "function" then
-            pcall(ctx.invalidatePlayerPosition, previous)
-        end
-    end
-    return true, current, previous
+    return true, current
 end
 
 local function relocationPositionsEqual(left, right)
@@ -153,25 +142,30 @@ local function relocationPositionsEqual(left, right)
         and left.x == right.x and left.y == right.y and left.z == right.z
 end
 
-return {
-    readPlayerCoordinate = readPlayerCoordinate,
-    validateAuthoritativePlayer = validateAuthoritativePlayer,
-    authoritativePlayerPosition = authoritativePlayerPosition,
-    validateGenerationPermission = validateGenerationPermission,
-    playerIdentity = playerIdentity,
-    resolvePendingPlayer = resolvePendingPlayer,
-    relocationPositionsEqual = relocationPositionsEqual,
-}
-end)()
-
--- These validators are shared by the rest of the server transaction code.
-local readPlayerCoordinate = relocationServices.readPlayerCoordinate
-local validateAuthoritativePlayer = relocationServices.validateAuthoritativePlayer
-local authoritativePlayerPosition = relocationServices.authoritativePlayerPosition
-local validateGenerationPermission = relocationServices.validateGenerationPermission
-local playerIdentity = relocationServices.playerIdentity
-local resolvePendingPlayer = relocationServices.resolvePendingPlayer
-local relocationPositionsEqual = relocationServices.relocationPositionsEqual
+-- B42.20's IsoPlayer network path can normalize a half-cell teleport back to
+-- the containing square before a token-only acknowledgement reaches the server.
+-- Exact proof first; otherwise only that documented normalization is accepted,
+-- and a different cell still fails closed.  This is the single position proof
+-- shared by the final acknowledgement and the commit step.
+local function generationPositionProof(player, target)
+    if type(target) ~= "table" then
+        return false, "generation destination is unavailable"
+    end
+    local positionOk, position = authoritativePlayerPosition(player)
+    if not positionOk then return false, position, false end
+    if relocationPositionsEqual(position, target) then return true, "exact" end
+    if type(position) == "table" and position.x ~= nil and position.y ~= nil
+        and position.z ~= nil and target.x ~= nil and target.y ~= nil
+        and target.z ~= nil
+        and math.floor(target.x) ~= target.x
+        and math.floor(target.y) ~= target.y
+        and position.z == target.z
+        and math.floor(position.x) == math.floor(target.x)
+        and math.floor(position.y) == math.floor(target.y) then
+        return true, "target-cell"
+    end
+    return false, position, true
+end
 
 -- pcall prepends its own success flag to every return value.  Normalize the
 -- two-result authoritative position helper once so relocation paths never
@@ -184,200 +178,160 @@ local function tryAuthoritativePlayerPosition(player)
     return true, positionOrReason
 end
 
-local function generationDisconnected(reason)
-    return reason == "requesting player disconnected or was replaced"
+local function earlierTick(left, right)
+    return left <= right and left or right
 end
 
-local function pauseGenerationForDisconnect(pending)
-    if type(pending) ~= "table" then return end
-    if type(GenerationTransaction) == "table"
-        and type(GenerationTransaction.pauseForDisconnect) == "function" then
-        GenerationTransaction.pauseForDisconnect(ctx.serverTick)
-    end
+local function sendRelocate(player, payload)
+    return ServerUtil.callGlobalSucceeded("sendServerCommand", player,
+        COMMAND_MODULE, COMMAND_RELOCATE, payload)
 end
 
-local function resumeGenerationAfterDisconnect(pending)
-    if type(pending) ~= "table"
-        or pending.disconnectStartedTick == nil then
-        return
+-- Re-state the staging relocation for the record's current phase.  "temporary"
+-- is the initial staging move; "return" is the single abort-path return to the
+-- server-captured original position.  Both carry only a server-selected target.
+local function sendStagingRelocation(record, phase)
+    local target = phase == "return" and record.originalPosition
+        or record.stagingDestination
+    if type(target) ~= "table" then
+        return false, "generation relocation destination is unavailable"
     end
-    local paused = ctx.serverTick - pending.disconnectStartedTick
-    -- Do not let a missing IsoPlayer consume the normal transaction timeout.
-    -- The in-memory owner remains live until this identity reconnects.
-    if type(GenerationTransaction) == "table"
-        and type(GenerationTransaction.resumeAfterDisconnect) == "function" then
-        GenerationTransaction.resumeAfterDisconnect(ctx.serverTick, paused)
-    end
-end
-
-local function rearmGenerationTransition(pending, player, kind)
-    if type(pending) ~= "table" or pending.boundaryCleared == true
-        or not Boundary then
-        return false
-    end
-    local token = pending.token
-    if type(token) ~= "string" or token == "" then return false end
-    if type(Boundary.extendTransition) == "function" then
-        local extendOk, extended = pcall(Boundary.extendTransition, player,
-            token, ctx.serverTick + RELOCATION_POST_ACK_TICKS + 2)
-        if extendOk and extended == true then return true end
-    end
-    if type(Boundary.beginTransition) ~= "function" then return false end
-    local beginOk, armed = pcall(Boundary.beginTransition, player,
-        pending.rvId, pending.generation, token, kind or "generation")
-    if not beginOk or armed ~= true then return false end
-    if type(Boundary.extendTransition) == "function" then
-        pcall(Boundary.extendTransition, player, token,
-            ctx.serverTick + RELOCATION_POST_ACK_TICKS + 2)
-    end
-    return true
-end
-
--- Reissue only the currently owned phase after a stable identity rebind.  A
--- reconnect invalidates the client's pending command, but never changes the
--- server token or its exact destination.  The retry tick is deliberately
--- bounded so a transient send failure cannot flood the network every tick.
-local function resendGenerationPhase(pending, player, phase)
-    if type(pending) ~= "table" or not player then return false end
-    local identity = pending.identity
-    if type(identity) ~= "table" then return false end
-    local payload
-    if phase == "final" then
-        local target = pending.finalDestination
-        if type(target) ~= "table" then return false end
-        payload = {
-            token = pending.token,
-            onlineId = identity.onlineId,
-            rvId = tostring(pending.rvId),
-            generation = pending.generation,
-            x = target.x, y = target.y, z = target.z,
-        }
-        if type(pending.railroader) == "table" then
-            payload.railroaderTransition = true
-            payload.action = "enter"
-            payload.locoId = pending.railroader.locoId
-            payload.role = pending.railroader.sourceRole
-            payload.seat = pending.railroader.sourceSeat
-        end
-        if not ServerUtil.callGlobalSucceeded("sendServerCommand", player,
-            COMMAND_MODULE, COMMAND_FINAL_RELOCATE, payload) then
-            return false
-        end
-        -- B42.20's float teleport overload floors x/y.  Restore the
-        -- server-selected half-cell center through the official setters so
-        -- the authoritative proof and the client ACK compare the same exact
-        -- destination.  Keep the movement history coherent with the move.
-        if not RV.Server.teleportToPosition(player, target)
-            or not ServerUtil.callSucceeded(player, "setX", target.x)
-            or not ServerUtil.callSucceeded(player, "setY", target.y)
-            or not ServerUtil.callSucceeded(player, "setZ", target.z)
-            or not ServerUtil.callSucceeded(player, "setLastX", target.x)
-            or not ServerUtil.callSucceeded(player, "setLastY", target.y) then
-            return false
-        end
-        local finalDeadline = pending.finalRelocationDeadlineTick
-            or (ctx.serverTick + RELOCATION_TIMEOUT_TICKS)
-        GenerationTransaction.markRelocationSent("final", ctx.serverTick,
-            ctx.serverTick, finalDeadline)
-        return true
-    end
-
-    local target
-    if phase == "rollback" then
-        target = pending.originalPosition
-    else
-        target = pending.stagingDestination
-    end
-    if type(target) ~= "table" then return false end
-    payload = {
-        token = pending.token,
-        onlineId = identity.onlineId,
-        rvId = tostring(pending.rvId),
-        generation = pending.generation,
-        x = target.x, y = target.y, z = target.z,
+    local payload = {
+        token = record.token,
+        onlineId = record.identity.onlineId,
+        rvId = tostring(record.rvId),
+        generation = record.generation,
+        x = target.x,
+        y = target.y,
+        z = target.z,
         generationTransition = true,
-        generationPhase = phase == "rollback" and "return" or "temporary",
+        generationPhase = phase == "return" and "return" or "temporary",
     }
-    if phase == "rollback" then payload.action = "cancel" end
-    if type(pending.railroader) == "table" and phase ~= "rollback" then
+    -- Only a Railroader-backed generation carries a local Ride transition hint.
+    -- A return must not re-enter a seat; seat truth stays with Railroader.
+    if phase ~= "return" and type(record.railroader) == "table" then
         payload.railroaderTransition = true
         payload.action = "enter"
-        payload.locoId = pending.railroader.locoId
-        payload.role = pending.railroader.sourceRole
-        payload.seat = pending.railroader.sourceSeat
+        payload.locoId = record.railroader.locoId
+        payload.role = record.railroader.sourceRole
+        payload.seat = record.railroader.sourceSeat
     end
-    local teleportX = phase == "rollback" and target.x or target.x + 0.5
-    local teleportY = phase == "rollback" and target.y or target.y + 0.5
-    if not ServerUtil.callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
-        COMMAND_RELOCATE, payload)
-        or not RV.Server.teleportToPosition(player, {
+    -- The staging target is an integer contract point; the return target is the
+    -- exact captured position and must not be re-centered.
+    local teleportX = phase == "return" and target.x or target.x + 0.5
+    local teleportY = phase == "return" and target.y or target.y + 0.5
+    if not sendRelocate(record.player, payload)
+        or not RV.Server.teleportToPosition(record.player, {
             x = teleportX, y = teleportY, z = target.z,
         }) then
-        return false
+        return false, "server-to-client relocation command failed"
     end
-    if phase == "rollback" then
-        -- B42's float teleport overload floors x/y.  A failed generation must
-        -- return to the exact server-captured position before the transaction
-        -- can complete; otherwise cancelPending sees the floored position and
-        -- resends the same return command every retry tick.
-        if not ServerUtil.callSucceeded(player, "setX", target.x)
-            or not ServerUtil.callSucceeded(player, "setY", target.y)
-            or not ServerUtil.callSucceeded(player, "setZ", target.z)
-            or not ServerUtil.callSucceeded(player, "setLastX", target.x)
-            or not ServerUtil.callSucceeded(player, "setLastY", target.y) then
-            return false
+    if phase == "return" then
+        -- B42's float teleport overload floors x/y.  The return must land on the
+        -- exact captured position; otherwise the abort path cannot release the
+        -- transaction on a proved position.
+        if not ServerUtil.callSucceeded(record.player, "setX", target.x)
+            or not ServerUtil.callSucceeded(record.player, "setY", target.y)
+            or not ServerUtil.callSucceeded(record.player, "setZ", target.z)
+            or not ServerUtil.callSucceeded(record.player, "setLastX", target.x)
+            or not ServerUtil.callSucceeded(record.player, "setLastY", target.y) then
+            return false, "authoritative return relocation failed"
         end
     end
-    GenerationTransaction.markRelocationSent(phase == "rollback"
-        and "rollback" or "temporary", ctx.serverTick, ctx.serverTick)
+    record.lastSentTick = ctx.serverTick
     return true
 end
 
-local function keepGenerationTransitionAlive()
-    local transactionOk, pending = pcall(GenerationTransaction.current)
-    if not transactionOk then return false end
-    if type(pending) ~= "table" then return true end
-    local resolved, playerOrReason = resolvePendingPlayer(pending)
+-- Re-state the final in-house relocation.  `deadline` is supplied only by the
+-- initial build-step send; a resend keeps the deadline already granted.
+local function sendFinalRelocation(record, deadline)
+    local target = record.finalDestination
+    if type(target) ~= "table" then
+        return false, "final relocation destination is unavailable"
+    end
+    local payload = {
+        token = record.token,
+        onlineId = record.identity.onlineId,
+        rvId = tostring(record.rvId),
+        generation = record.generation,
+        x = target.x,
+        y = target.y,
+        z = target.z,
+    }
+    -- Railroader generation removed the official seat before staging.  Carry
+    -- only a transition hint so the client adapter can run Ride.dismount(true)
+    -- before this final RV teleport; seat truth still comes from Railroader's
+    -- next server snapshot.
+    if type(record.railroader) == "table" then
+        payload.railroaderTransition = true
+        payload.action = "enter"
+        payload.locoId = record.railroader.locoId
+        payload.role = record.railroader.sourceRole
+        payload.seat = record.railroader.sourceSeat
+    end
+    if not ServerUtil.callGlobalSucceeded("sendServerCommand", record.player,
+        COMMAND_MODULE, COMMAND_FINAL_RELOCATE, payload) then
+        return false, "final server-to-client relocation command failed"
+    end
+    -- B42.20's float teleport overload floors x/y.  Restore the server-selected
+    -- half-cell center through the official setters so the authoritative proof
+    -- and the client acknowledgement compare the same exact destination.
+    if not RV.Server.teleportToPosition(record.player, target)
+        or not ServerUtil.callSucceeded(record.player, "setX", target.x)
+        or not ServerUtil.callSucceeded(record.player, "setY", target.y)
+        or not ServerUtil.callSucceeded(record.player, "setZ", target.z)
+        or not ServerUtil.callSucceeded(record.player, "setLastX", target.x)
+        or not ServerUtil.callSucceeded(record.player, "setLastY", target.y) then
+        return false, "final authoritative server relocation failed"
+    end
+    if deadline ~= nil then record.deadlineTick = deadline end
+    record.lastSentTick = ctx.serverTick
+    return true
+end
+
+-- Keep the token-scoped Boundary lease armed and re-state the current stage's
+-- relocation while the record waits for its client acknowledgement.  The send
+-- cadence is bounded so a transient failure cannot flood the network, and a
+-- missing IsoPlayer only extends the deadline: the next tick after reconnect
+-- re-sends naturally on the same token.
+local function keepGenerationTransitionAlive(record)
+    if type(record) ~= "table"
+        or (record.stage ~= "WAIT_STAGING" and record.stage ~= "WAIT_FINAL") then
+        return
+    end
+    if not Boundary or type(Boundary.extendTransition) ~= "function" then
+        return
+    end
+    local resolved, playerOrReason = resolvePendingPlayer(record)
     if not resolved then
-        if generationDisconnected(playerOrReason) then
-            pauseGenerationForDisconnect(pending)
-        end
-        -- OnTick owns identity/death failure decisions.  A missing player is
-        -- intentionally non-fatal while this process waits for rebind.
-        return true
+        record.deadlineTick = ctx.serverTick + RELOCATION_TIMEOUT_TICKS
+        return
     end
-    resumeGenerationAfterDisconnect(pending)
-    pending = GenerationTransaction.current() or pending
-    local player = playerOrReason
-    local phase = pending.cancelled and "rollback"
-        or pending.finalRelocationSent and "final" or "temporary"
-    local rearmed = rearmGenerationTransition(pending, player,
-        phase == "final" and "generation-final" or "generation")
-    if not rearmed then
-        -- Keep trying the same token; do not clear the pending transaction or
-        -- invent a new one merely because a lease API briefly failed.
-        GenerationTransaction.requestRelocationResend()
+    record.player = playerOrReason
+    local leaseUntil = earlierTick(record.deadlineTick,
+        ctx.serverTick + GENERATION_RESEND_TICKS)
+    pcall(Boundary.extendTransition, playerOrReason, record.token, leaseUntil)
+    local lastSentTick = record.lastSentTick
+    if lastSentTick ~= nil
+        and (ctx.serverTick - lastSentTick) < GENERATION_RESEND_TICKS then
+        return
     end
-    if pending.relocationNeedsResend and not pending.cancelled
-        and ctx.serverTick >= (pending.relocationRetryAtTick or 0) then
-        local resent = resendGenerationPhase(pending, player, phase)
-        GenerationTransaction.scheduleRelocationRetry(ctx.serverTick
-            + GENERATION_RELOCATION_RETRY_TICKS, not resent)
+    if record.stage == "WAIT_STAGING" then
+        sendStagingRelocation(record, "temporary")
+    else
+        sendFinalRelocation(record)
     end
-    return true
 end
 
-ctx.tryAuthoritativePlayerPosition = tryAuthoritativePlayerPosition
-ctx.generationDisconnected = generationDisconnected
-ctx.pauseGenerationForDisconnect = pauseGenerationForDisconnect
-ctx.resumeGenerationAfterDisconnect = resumeGenerationAfterDisconnect
-ctx.rearmGenerationTransition = rearmGenerationTransition
-ctx.resendGenerationPhase = resendGenerationPhase
 ctx.keepGenerationTransitionAlive = keepGenerationTransitionAlive
+ctx.sendStagingRelocation = sendStagingRelocation
+ctx.sendFinalRelocation = sendFinalRelocation
+ctx.tryAuthoritativePlayerPosition = tryAuthoritativePlayerPosition
 ctx.validateAuthoritativePlayer = validateAuthoritativePlayer
 ctx.authoritativePlayerPosition = authoritativePlayerPosition
 ctx.validateGenerationPermission = validateGenerationPermission
 ctx.playerIdentity = playerIdentity
 ctx.resolvePendingPlayer = resolvePendingPlayer
 ctx.relocationPositionsEqual = relocationPositionsEqual
+ctx.generationPositionProof = generationPositionProof
 end

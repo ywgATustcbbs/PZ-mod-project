@@ -746,6 +746,7 @@ end
 
 ctx.notifyFailure = notifyFailure
 ctx.removeOldGeneration = removeOldGeneration
+ctx.removeGeneration = removeGeneration
 ctx.requestRoomOwnershipScan = requestRoomOwnershipScan
 ctx.requestRoomOwnershipRemovalScan = requestRoomOwnershipRemovalScan
 ctx.registerServerRoomOwnershipGuard = registerServerRoomOwnershipGuard
@@ -753,6 +754,5 @@ ctx.refreshServerRoomOwnershipGuard = refreshServerRoomOwnershipGuard
 ctx.refreshGenerationRoomOwnershipGuard = refreshGenerationRoomOwnershipGuard
 ctx.processServerRoomOwnershipGuards = processServerRoomOwnershipGuards
 ctx.armClientRoomOwnershipGuard = armClientRoomOwnershipGuard
-ctx.removeGeneration = removeGeneration
 ctx.armTargetedClientRoomOwnershipGuard = armTargetedClientRoomOwnershipGuard
 end

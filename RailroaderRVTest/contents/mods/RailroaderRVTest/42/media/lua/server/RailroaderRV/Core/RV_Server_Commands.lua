@@ -19,22 +19,15 @@ local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry"
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
 local function safeErrorText(...) return ctx.safeErrorText(...) end
-local RELOCATION_MIN_TICKS = ctx.RELOCATION_MIN_TICKS
-local RELOCATION_POST_ACK_TICKS = ctx.RELOCATION_POST_ACK_TICKS
-local RELOCATION_TIMEOUT_TICKS = ctx.RELOCATION_TIMEOUT_TICKS
 local notifyFailure = ctx.notifyFailure
 local requestRoomOwnershipScan = ctx.requestRoomOwnershipScan
 local requestRoomOwnershipRemovalScan = ctx.requestRoomOwnershipRemovalScan
 local processServerRoomOwnershipGuards = ctx.processServerRoomOwnershipGuards
-local generationDisconnected = ctx.generationDisconnected
-local pauseGenerationForDisconnect = ctx.pauseGenerationForDisconnect
-local resumeGenerationAfterDisconnect = ctx.resumeGenerationAfterDisconnect
 local keepGenerationTransitionAlive = ctx.keepGenerationTransitionAlive
 local validateAuthoritativePlayer = ctx.validateAuthoritativePlayer
 local validateGenerationPermission = ctx.validateGenerationPermission
 local resolvePendingPlayer = ctx.resolvePendingPlayer
 local playerIsAtStagingDestination = ctx.playerIsAtStagingDestination
-local relocationPositionStillSyncing = ctx.relocationPositionStillSyncing
 local processRoofRefreshGroupFinalReturn = ctx.processRoofRefreshGroupFinalReturn
 local keepRoofRefreshTransitionAlive = ctx.keepRoofRefreshTransitionAlive
 local validateRequest = ctx.validateRequest
@@ -43,7 +36,7 @@ local finalizeGenerationAfterRelocate = ctx.finalizeGenerationAfterRelocate
 local queueGeneration = ctx.queueGeneration
 local acknowledgeRelocation = ctx.acknowledgeRelocation
 local acknowledgeFinalRelocation = ctx.acknowledgeFinalRelocation
-local cancelPending = ctx.cancelPending
+local abortGeneration = ctx.abortGeneration
 local processRoofRefreshRelocationGroup = ctx.processRoofRefreshRelocationGroup
 
 local stateReaders = {
@@ -171,6 +164,107 @@ local function isInvalidRVData(reason)
         and string.find(tostring(reason), marker, 1, true) ~= nil
 end
 
+-- One abort path for every generation stage.  The acknowledgement module owns
+-- the cleanup; this handler owns the one decision to run it, so a failed
+-- operation is marked cancelled once, logged once, and the player can press the
+-- button again.  `GenerationTransaction.cancel` is the request signal;
+-- `abortGeneration` is the only observer.
+local function runGenerationAbort(record, reason)
+    if record == nil then return end
+    GenerationTransaction.cancel(reason)
+    local abortOk, abortError = pcall(abortGeneration, record, reason)
+    if not abortOk then
+        print("[RailroaderRVTest] generation abort failed: "
+            .. safeErrorText(abortError))
+    end
+end
+
+-- The generation stage machine: WAIT_STAGING -> BUILD -> WAIT_FINAL -> DONE.
+-- `record.stage` is the single stage authority; there is no rollback stage and
+-- no retry ledger.  Every branch either advances, returns, or aborts once.
+local function processPendingGeneration()
+    local record = GenerationTransaction.current()
+    if record == nil then
+        return
+    end
+    -- `keepGenerationTransitionAlive` already ran this tick and extended
+    -- deadlineTick for a missing IsoPlayer; a disconnected identity never
+    -- cancels the generation.
+    local resolved, playerOrReason = resolvePendingPlayer(record)
+    if not resolved then
+        return
+    end
+    local player = playerOrReason
+    if ctx.serverTick > record.deadlineTick then
+        runGenerationAbort(record, "generation transaction timed out in stage "
+            .. tostring(record.stage))
+        return
+    end
+
+    if record.stage == "WAIT_STAGING" then
+        if record.stagingAcked ~= true then
+            return
+        end
+        local atStaging, stagingReason = playerIsAtStagingDestination(player,
+            record.stagingDestination, record.bounds)
+        if not atStaging then
+            print("[RailroaderRVTest] generation staging not settled: "
+                .. tostring(stagingReason))
+            return
+        end
+        -- The relocation itself streams the remote target.  Wait for its cell,
+        -- then let the sparse preflight inspect only squares already present;
+        -- missing non-template squares do not block generation.
+        local targetLoaded, targetLoadReason = ServerSchema.targetAreaLoadStatus(
+            player, record.bounds, safeErrorText)
+        if targetLoaded == nil then
+            runGenerationAbort(record, targetLoadReason)
+            return
+        end
+        if not targetLoaded then
+            return
+        end
+        local built, buildReason = generateForPlayer(player, record)
+        if not built then
+            runGenerationAbort(record, buildReason)
+        end
+        -- On success the build step has already sent the final relocation and
+        -- moved the record to WAIT_FINAL.
+        return
+    end
+
+    if record.stage == "BUILD" then
+        -- `generateForPlayer` claims BUILD before it can fail; reaching this
+        -- branch means the previous build step returned without reaching
+        -- WAIT_FINAL, so surface it and abort once.  The record never stays in
+        -- BUILD across ticks.
+        runGenerationAbort(record, "generation build did not complete")
+        return
+    end
+
+    if record.stage == "WAIT_FINAL" then
+        if record.finalAcked ~= true then
+            return
+        end
+        local committed, commitReason = finalizeGenerationAfterRelocate(
+            player, record)
+        if committed then
+            GenerationTransaction.release()
+            print("[RailroaderRVTest] generation committed READY")
+        elseif commitReason == "final relocation authoritative target is still synchronizing" then
+            -- The commit step re-asserted the server-selected target and will
+            -- require a fresh post-update proof on the next tick, until the
+            -- deadline or a proved position.
+            return
+        else
+            print("[RailroaderRVTest] generation finalization failed: "
+                .. safeErrorText(commitReason))
+            runGenerationAbort(record, commitReason)
+        end
+        return
+    end
+end
+
 function RV.Server.OnTick(tick)
     ctx.serverTick = tick or Core.getTick()
     -- Extend the token-scoped boundary lease before Boundary.onTick runs.  The
@@ -178,7 +272,10 @@ function RV.Server.OnTick(tick)
     -- template geometry while the engine settles room state; correction must stay paused
     -- for that bounded transaction only.
     if not keepRoofRefreshTransitionAlive() then return end
-    if not keepGenerationTransitionAlive() then return end
+    local generationRecord = GenerationTransaction.current()
+    if generationRecord ~= nil then
+        keepGenerationTransitionAlive(generationRecord)
+    end
     if Boundary and type(Boundary.onTick) == "function" then
         pcall(Boundary.onTick)
     end
@@ -191,126 +288,10 @@ function RV.Server.OnTick(tick)
             print("[RailroaderRVTest] utility tick error: " .. safeErrorText(utilityError))
         end
     end
-    local pendingOk, pending = pcall(GenerationTransaction.current)
-    if not pendingOk then return end
-    if pending == nil then
-        return
-    end
-    if pending.cancelled == true then
-        cancelPending(pending.failureReason or "generation transaction cancelled")
-        return
-    end
-    local resolved, playerOrReason = resolvePendingPlayer(pending)
-    if not resolved then
-        -- A live server keeps the exact-tick transaction until the same stable
-        -- identity reconnects; no timeout or failure callback is run on a
-        -- missing player object.
-        if not generationDisconnected(playerOrReason) then
-            cancelPending(playerOrReason)
-        else
-            pauseGenerationForDisconnect(pending)
-        end
-        return
-    end
-    resumeGenerationAfterDisconnect(pending)
-    pending = GenerationTransaction.current() or pending
-    if pending.finalRelocationSent ~= true
-        and (ctx.serverTick - pending.queuedAtTick)
-            >= RELOCATION_TIMEOUT_TICKS + 1 then
-        cancelPending("relocation acknowledgement timed out before world mutation")
-        return
-    end
-    if pending.railroader == nil then
-        local permissionOk, permissionReason = validateGenerationPermission(playerOrReason)
-        if not permissionOk then
-            cancelPending(permissionReason)
-            return
-        end
-    end
-    -- Keep the liveness/world-coordinate check active while waiting for the
-    -- server-side player object to observe the client relocation.  A stale
-    -- coordinate is retryable, but a dead/invalid player is not.
-    local stateCallOk, stateOk, stateOrReason = pcall(validateAuthoritativePlayer,
-        playerOrReason)
-    if not stateCallOk then
-        cancelPending(safeErrorText(stateOk))
-        return
-    end
-    if not stateOk then
-        cancelPending(stateOrReason)
-        return
-    end
-    if pending.finalRelocationSent == true then
-        if not pending.finalRelocationAcked then
-            if ctx.serverTick
-                > (pending.finalRelocationDeadlineTick or ctx.serverTick) then
-                cancelPending("final relocation acknowledgement timed out")
-            end
-            return
-        end
-        if ctx.serverTick
-            > (pending.finalRelocationDeadlineTick or ctx.serverTick) then
-            cancelPending("final relocation target synchronization timed out")
-            return
-        end
-        local finalOk, finalReason = finalizeGenerationAfterRelocate(
-            playerOrReason, pending)
-        if finalOk then
-            GenerationTransaction.release(pending.token)
-            print("[RailroaderRVTest] generation committed READY")
-        elseif finalReason == "final relocation authoritative target is still synchronizing" then
-            -- The server object may still carry the previous staging packet;
-            -- finalizeGenerationAfterRelocate has reasserted the selected slot
-            -- and will require a fresh post-update proof on the next tick.
-            return
-        else
-            GenerationTransaction.cancel(finalReason)
-            cancelPending(finalReason)
-            print("[RailroaderRVTest] generation finalization failed: "
-                .. safeErrorText(finalReason))
-        end
-        return
-    end
-    if not pending.acknowledged
-        or (ctx.serverTick - pending.queuedAtTick) < RELOCATION_MIN_TICKS
-        or (ctx.serverTick - pending.acknowledgedAtTick)
-            < RELOCATION_POST_ACK_TICKS then
-        return
-    end
-    local atStaging, stagingReason = playerIsAtStagingDestination(playerOrReason,
-        pending.stagingDestination, pending.bounds)
-    if not atStaging then
-        if relocationPositionStillSyncing(stagingReason) then
-            return
-        end
-        cancelPending(stagingReason)
-        return
-    end
-
-    -- The relocation itself streams the remote target.  Wait for its cell,
-    -- then let the sparse preflight inspect only squares already present;
-    -- missing non-template squares do not block generation.
-    local targetLoaded, targetLoadReason = ServerSchema.targetAreaLoadStatus(playerOrReason,
-        pending.bounds, safeErrorText)
-    if targetLoaded == nil then
-        cancelPending(targetLoadReason)
-        return
-    end
-    if not targetLoaded then
-        return
-    end
-
-    local completedPending = pending
-    local ok, reason = generateForPlayer(playerOrReason, completedPending)
-    if not ok then
-        GenerationTransaction.cancel(reason)
-        cancelPending(reason)
-        print("[RailroaderRVTest] generation failed: " .. tostring(reason))
-    elseif reason == "await-final-relocate" then
-        print("[RailroaderRVTest] generation awaiting FinalRelocateAck")
-    else
-        GenerationTransaction.release(completedPending.token)
-        print("[RailroaderRVTest] generation committed READY")
+    local pendingOk, pendingError = pcall(processPendingGeneration)
+    if not pendingOk then
+        print("[RailroaderRVTest] generation tick error: "
+            .. safeErrorText(pendingError))
     end
 end
 
@@ -358,11 +339,11 @@ function RV.Server.OnClientCommand(module, command, player, args)
         end
         if not accepted then
             if isInvalidRVData(reason) then
-                -- The final ACK proves a live generation phase.  If its
-                -- current persisted identity is invalid, cancel through the
-                -- transaction rollback path so the affected player receives
-                -- the schema rebuild notice after rollback settles.
-                cancelPending(reason)
+                -- A final ACK that cannot belong to the record's current stage
+                -- means the client is out of contract with the server-owned
+                -- transaction; run the single abort path instead of leaving the
+                -- generation waiting for an acknowledgement it cannot accept.
+                runGenerationAbort(GenerationTransaction.current(), reason)
                 return
             end
             print("[RailroaderRVTest] final relocation acknowledgement rejected: "

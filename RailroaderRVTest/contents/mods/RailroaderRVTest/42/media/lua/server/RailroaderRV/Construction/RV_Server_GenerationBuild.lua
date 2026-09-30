@@ -148,28 +148,6 @@ local function buildGeneration(player, layout, bounds, generation)
     createGenerator(cell, generatorSquare, generatorSprite, generation, tagContext)
 end
 
--- Failure is reported to the caller; the in-memory transaction owns the
--- retry/rollback outcome, so generation keeps no durable failure marker.
-local function finalizeGeneration(ok, resultOrError)
-    local finalized, finalResult, finalReason = pcall(function()
-        if not ok then
-            if Boundary and type(Boundary.clearPlayer) == "function" then
-                local pending = GenerationTransaction.current()
-                if pending then
-                    GenerationTransaction.markBoundaryCleared()
-                    pcall(Boundary.clearPlayer, pending.player)
-                end
-            end
-            return false, safeErrorText(resultOrError)
-        end
-        return true, resultOrError
-    end)
-    if not finalized then
-        return false, safeErrorText(finalResult)
-    end
-    return finalResult, finalReason
-end
-
 local rawClearGenerationArea = clearGenerationArea
 local rawBuildGeneration = buildGeneration
 local construction = ConstructionModule.new(ctx, {
@@ -197,6 +175,5 @@ ctx.constructionService = construction
 if type(ctx.RV) == "table" and type(ctx.RV.Server) == "table" then
     ctx.RV.Server.Construction = construction
 end
-ctx.finalizeGeneration = finalizeGeneration
 ctx.safeErrorText = safeErrorText
 end

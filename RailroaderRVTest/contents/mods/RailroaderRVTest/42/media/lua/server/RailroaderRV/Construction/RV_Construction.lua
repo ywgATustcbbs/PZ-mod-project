@@ -15,8 +15,7 @@ function Construction.new(context, operations)
     local generationTransaction = context.GenerationTransaction
 
     local function requireCurrentBuild(player)
-        if player == nil or generationTransaction.owns(player, nil,
-            "building") ~= true then
+        if player == nil or generationTransaction.owns(player) ~= true then
             error("RailroaderRVTest: Construction requires the active server transaction")
         end
     end
@@ -51,12 +50,13 @@ function Construction.new(context, operations)
         return true
     end
 
-    -- Phase ownership is process-local.  `buildStage` is unset until the build
-    -- pass claims it, so the clear pass only rejects an already-claimed stage.
+    -- Phase ownership is process-local.  The record's stage is the single stage
+    -- authority: the clear pass runs while the record is in BUILD, and the build
+    -- pass runs exactly once, after the clear pass has completed.
     local function requireCurrentMutation(player)
         requireCurrentBuild(player)
         local pending = generationTransaction.current()
-        if not pending or pending.buildStage ~= nil then
+        if not pending or pending.stage ~= "BUILD" then
             error("RailroaderRVTest: generation is not in its current clear phase")
         end
     end
@@ -70,16 +70,12 @@ function Construction.new(context, operations)
         return operations.clear(cell, bounds, generation)
     end
 
-    -- clearCurrentGeneration already proved the current transaction owns the
-    -- clearing phase; this function only advances the process-local phase.
     function service.buildCurrentGeneration(player, layout, bounds, generation)
         requireCurrentBuild(player)
         local pending = generationTransaction.current()
-        if not pending or pending.buildStage == "building"
-            or tostring(pending.generation) ~= tostring(generation) then
+        if not pending or tostring(pending.generation) ~= tostring(generation) then
             error("RailroaderRVTest: build requires the current clearing phase")
         end
-        pending.buildStage = "building"
         return operations.build(player, layout, bounds, generation)
     end
 

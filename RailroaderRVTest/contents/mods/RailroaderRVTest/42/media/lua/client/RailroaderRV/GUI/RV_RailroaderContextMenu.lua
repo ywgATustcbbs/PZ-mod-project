@@ -5,7 +5,7 @@
 -- player seat, speed, range and all world coordinates again.
 
 require("RailroaderRV/Common/RV_Constants")
-local U = require("RailroaderRV/Common/RV_UtilityConstants")
+require("RailroaderRV/Common/RV_UtilityConstants")
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.RailroaderContextMenu = RailroaderRV.RailroaderContextMenu or {}
@@ -259,25 +259,6 @@ function Menu.hasUtilityDashboardCandidate(player)
     if not locomotive then return false end
     local id = locomotiveId(locomotive)
     return id ~= nil and tostring(id) == mapping.locoId
-end
-
--- This is only a local entry-point hint for the menu/dashboard. The server
--- resolves the live relation and locomotive again and rejects a mismatched
--- label, so stale client position or mapping state cannot grant the deferred
--- locomotive path.
-function Menu.utilityEntryPoint(player)
-    local mapping = Menu.getUtilityMapping()
-    if mapping and player and mapContainsPlayer(player) then
-        return U.ENTRY_INTERNAL
-    end
-    if mapping and player then
-        local locomotive = nearestLocomotive()
-        local id = locomotive and locomotiveId(locomotive) or nil
-        if id ~= nil and tostring(id) == mapping.locoId then
-            return U.ENTRY_LOCOMOTIVE
-        end
-    end
-    return U.ENTRY_INTERNAL
 end
 
 local function nowMs()

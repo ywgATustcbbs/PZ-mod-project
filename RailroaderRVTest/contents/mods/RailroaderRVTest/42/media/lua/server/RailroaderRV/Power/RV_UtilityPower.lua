@@ -593,17 +593,6 @@ function M.handleIntent(identity, context, operation, hint)
     return false, U.REASONS.INVALID_REQUEST
 end
 
-function M.bindGenerator(identity, context)
-    local recordOk, recordOrReason = Store.getRecord(identity, false)
-    if not recordOk then return false, recordOrReason end
-    local bound, reason = bindProxy(identity, recordOrReason.power, context)
-    if not bound then return false, reason end
-    bump(recordOrReason.power)
-    local saved, commitReason = commit(recordOrReason, identity)
-    if not saved then return false, commitReason end
-    return true, { record = recordOrReason }
-end
-
 function M.maintainNativeProxy(identity, record)
     local object, state = boundProxy(identity, record.power, nil)
     if not object or not state then return false end

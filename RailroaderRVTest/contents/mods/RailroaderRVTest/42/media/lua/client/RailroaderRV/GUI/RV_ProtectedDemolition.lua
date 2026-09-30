@@ -62,12 +62,6 @@ end
 
 local function showInvalidRVData(character)
     if not character then return end
-    local rv = rawget(_G, "RailroaderRV")
-    local utilityClient = rv and rv.UtilityClient
-    if utilityClient and type(utilityClient.showInvalidRVData) == "function" then
-        local shown = pcall(utilityClient.showInvalidRVData, character)
-        if shown then return end
-    end
     if type(character.setHaloNote) ~= "function" then return end
     local message = "RV data is invalid. Delete this test save and recreate it."
     if type(getText) == "function" then
@@ -232,7 +226,7 @@ local function isCurrentProhibitedObject(object, character)
     if not objectMatchesStaticIdentity(object, tag, expected, index) then
         return rejectInvalidRVData(character, "template-static-identity-mismatch")
     end
-    if TemplateGeometry.cabContainsWorld(world, anchor, Template) then
+    if TemplateGeometry.isBuildable(world, anchor, Template) then
         return false
     end
     if cabDoorWindowHost(world, anchor) and isDoorOrWindow(object) then

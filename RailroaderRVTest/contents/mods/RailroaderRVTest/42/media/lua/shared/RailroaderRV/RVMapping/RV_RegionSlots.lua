@@ -100,14 +100,6 @@ local function validatedRegion(region)
     return index, { minX = minX, minY = minY, maxX = maxX, maxY = maxY }
 end
 
-function Slots.indexToSlot(index)
-    return slotForIndex(index)
-end
-
-function Slots.slotToIndex(row, column)
-    return indexForSlot(row, column)
-end
-
 function Slots.indexToAnchor(index)
     local row, column = slotForIndex(index)
     if not row then return nil end
@@ -131,11 +123,6 @@ function Slots.indexForAnchor(anchor)
         return nil
     end
     return indexForSlot(dy / SIZE + 1, dx / SIZE + 1)
-end
-
-function Slots.indexForRegion(region)
-    local index = validatedRegion(region)
-    return index
 end
 
 function Slots.findFirstFree(regions)

@@ -11,14 +11,10 @@ RailroaderRV = RailroaderRV or {}
 local C = RailroaderRV.Constants
 local M = {}
 local integer = StrictSchema.integer
-local exactKeys = StrictSchema.exactKeys
 
 -- The tag names the owning RV generation and the slot allocation that fixes
 -- the sink's position in the slot matrix.  `anchor` is deliberately absent:
 -- it is `RegionSlots.indexToAnchor(slotIndex)`, a pure template lookup.
-M.SINK_IDENTITY_FIELDS = {
-    "owner", "role", "rvId", "generation", "slotIndex",
-}
 M.WATER_TAG_KEY = "RailroaderRVTestWater"
 
 local function tagForObject(object)
@@ -26,7 +22,7 @@ local function tagForObject(object)
     local ok, data = pcall(object.getModData, object)
     if not ok or type(data) ~= "table" then return nil end
     local tag = data[M.WATER_TAG_KEY]
-    if not exactKeys(tag, M.SINK_IDENTITY_FIELDS)
+    if type(tag) ~= "table"
         or tag.owner ~= C.MOD_ID or tag.role ~= "sink"
         or type(tag.rvId) ~= "string" or tag.rvId == ""
         or integer(tag.generation) == nil or tag.generation < 1

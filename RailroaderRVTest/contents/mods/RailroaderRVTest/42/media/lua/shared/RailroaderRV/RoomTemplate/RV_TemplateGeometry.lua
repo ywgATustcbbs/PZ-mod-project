@@ -120,18 +120,6 @@ function G.contains(world, anchor, template)
     return RoomTemplate.hasLayer(template, x, y, z)
 end
 
-function G.regionAt(world, anchor, template)
-    template = template or Template
-    local offset = G.worldToTemplate(world, anchor)
-    if not offset then
-        return nil
-    end
-    local x, y, z = math.floor(offset.x), math.floor(offset.y),
-        math.floor(offset.z)
-    if not RoomTemplate.hasLayer(template, x, y, z) then return nil end
-    return RoomTemplate.cellAt(template, x, y), { x = x, y = y, z = z }
-end
-
 function G.isWalkable(world, anchor, template)
     template = template or Template
     local offset = G.worldToTemplate(world, anchor)
@@ -254,10 +242,6 @@ function G.lookupObjectsAtWorld(world, anchor, template)
         return nil
     end
     return G.lookupObjectsAtTemplate(offset.x, offset.y, offset.z, template)
-end
-
-function G.cabContainsWorld(world, anchor, template)
-    return G.isBuildable(world, anchor, template)
 end
 
 return G

@@ -170,12 +170,6 @@ function Client.requestSnapshot(player)
     return true
 end
 
-function Client.requestGenerator(player, operation, object)
-    local hint = hintForObject(object)
-    if not hint then return false, nil end
-    return Client.send(player, operation, hint, nil)
-end
-
 function Client.requestWaterConnection(player, object, connected)
     if type(connected) ~= "boolean" then
         return rejectSend(player)
@@ -207,10 +201,6 @@ local function showInvalidRVData(player)
             player:setHaloNote(message, 255, 255, 255, 5000)
         end)
     end
-end
-
-function Client.showInvalidRVData(player)
-    showInvalidRVData(player or localPlayer(0))
 end
 
 function Client.onServerCommand(module, command, args)
@@ -261,7 +251,7 @@ function Client.onServerCommand(module, command, args)
         Client.showFeedback(player, message)
     end
     if args.reason == U.REASON_INVALID_RV_DATA then
-        Client.showInvalidRVData(localPlayer(0))
+        showInvalidRVData(localPlayer(0))
     end
 end
 

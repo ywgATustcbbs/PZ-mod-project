@@ -1,11 +1,13 @@
 -- RV_Server: RecordValidation responsibilities.
 return function(ctx)
 local Constants = ctx.Constants
+local Boundary = ctx.Boundary
 local ServerSchema = ctx.ServerSchema
 local RoofRefresh = ctx.RoofRefresh
 local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
 local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
+local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local armTargetedClientRoomOwnershipGuard = ctx.armTargetedClientRoomOwnershipGuard
 local manifestTable = ctx.manifestTable
@@ -27,41 +29,33 @@ local function currentMappingRecord(rvId, generation)
     return true, record
 end
 
+-- A mapping record is the published authority.  Its anchor, managed region,
+-- shell edges and bounds are pure functions of the compiled template and the
+-- record's slot index, so this view rebuilds them instead of reading a
+-- persisted geometry copy.  It deliberately carries no mutation state: a
+-- published record is by construction committed, so readers must not be able
+-- to mistake a fabricated `state` for real generation state.
 local function manifestViewForRecord(record)
-    if type(record) ~= "table" or type(record.anchor) ~= "table"
-        or type(record.boundary) ~= "table" then
+    if type(record) ~= "table" then
+        return false, Constants.INVALID_RV_DATA
+    end
+    local slotIndex = ServerUtil.integer(record.slotIndex)
+    local generation = ServerUtil.integer(record.generation)
+    local anchor = slotIndex and RegionSlots.indexToAnchor(slotIndex) or nil
+    local boundary = Boundary.boundaryFor(record)
+    if not anchor or not boundary or generation == nil then
         return false, Constants.INVALID_RV_DATA
     end
     local ok, manifest = pcall(function()
-        local anchor = { x = ServerUtil.integer(record.anchor.x),
-            y = ServerUtil.integer(record.anchor.y),
-            z = ServerUtil.integer(record.anchor.z) }
         local layout = Layout.make(anchor.x, anchor.y, anchor.z)
-        local bounds = ServerSchema.boundsFor(layout)
-        local updatedAt = ServerUtil.integer(record.updatedAt)
-        local generation = ServerUtil.integer(record.generation)
-        local snapshot = {
-            techVersion = Constants.TECH_VERSION,
-            templateVersion = Constants.CAPTURED_TEMPLATE_VERSION,
+        return {
             generation = generation,
-            owner = ctx.OWNER,
-            slotIndex = ServerUtil.integer(record.slotIndex),
+            slotIndex = slotIndex,
             anchor = anchor,
-            bounds = bounds,
-            rvId = tostring(record.rvId),
-            boundary = record.boundary,
-            startedAt = updatedAt,
-            state = "READY",
-            updatedAt = updatedAt,
-            phase = "COMMITTED",
-            phaseGeneration = generation,
-            phaseUpdatedAt = updatedAt,
-            completedAt = updatedAt,
+            bounds = ServerSchema.boundsFor(layout),
+            rvId = tostring(record.locoId),
+            boundary = boundary,
         }
-        if updatedAt == nil or generation == nil then
-            error(Constants.INVALID_RV_DATA)
-        end
-        return snapshot
     end)
     if not ok or type(manifest) ~= "table" then
         return false, Constants.INVALID_RV_DATA
@@ -76,10 +70,10 @@ local function manifestForIdentity(rvId, generation, allowRunning)
     if not manifestOk or type(persisted) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
-    local identityMatches = tostring(persisted.rvId) == tostring(rvId)
-        and ServerUtil.integer(persisted.generation) == ServerUtil.integer(generation)
     if tostring(persisted.rvId) == tostring(rvId) then
-        if not identityMatches then return false, Constants.INVALID_RV_DATA end
+        if ServerUtil.integer(persisted.generation) ~= ServerUtil.integer(generation) then
+            return false, Constants.INVALID_RV_DATA
+        end
         if persisted.state == "RUNNING" then
             local transaction = ctx.GenerationTransaction
             local transactionOk, pending = false, nil
@@ -146,7 +140,7 @@ function RV.Server.refreshRoofVisuals(player, record)
     end
     if type(record) ~= "table" then return false, Constants.INVALID_RV_DATA end
     local manifestOk, manifest = RV.Server.currentRVManifestForRelocation(
-        record.rvId, record.generation)
+        record.locoId, record.generation)
     if not manifestOk or type(manifest) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
@@ -175,11 +169,8 @@ end
 function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
     if type(record) ~= "table"
         or record.generated ~= true
-        or record.locoId == nil or tostring(record.locoId) == ""
-        or record.rvId == nil or tostring(record.rvId) ~= tostring(record.locoId)
-        or type(record.boundary) ~= "table"
-        or type(record.boundary.managed) ~= "table"
-        or type(record.boundary.shellEdges) ~= "table" then
+        or type(record.locoId) ~= "string" or record.locoId == ""
+        or type(record.players) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
     local recordGeneration = ServerUtil.toNumber(record.generation)
@@ -187,20 +178,17 @@ function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
         ~= recordGeneration or recordGeneration < 1 then
         return false, Constants.INVALID_RV_DATA
     end
-    local boundaryGeneration = ServerUtil.toNumber(record.boundary.generation)
-    if tostring(record.boundary.rvId) ~= tostring(record.rvId)
-        or boundaryGeneration ~= recordGeneration then
+    -- Managed bounds come from the compiled template, never from the record.
+    local boundary = Boundary.boundaryFor(record)
+    if type(boundary) ~= "table" or type(boundary.managed) ~= "table"
+        or type(boundary.shellEdges) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
 
     local identityOk, identityOrReason = playerIdentity(player)
     if not identityOk then return false, identityOrReason end
-    local manifestOk, manifestOrError = pcall(manifestTable)
-    if not manifestOk or type(manifestOrError) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
     local manifestAccepted, manifest = RV.Server.currentRVManifestForBoundary(
-        record.rvId, recordGeneration)
+        record.locoId, recordGeneration)
     if manifestAccepted ~= true or type(manifest) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
@@ -208,20 +196,18 @@ function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
         return false, "RV manifest is not READY"
     end
     local manifestGeneration = ServerUtil.toNumber(manifest.generation)
-    if tostring(manifest.rvId) ~= tostring(record.rvId)
-        or manifestGeneration ~= recordGeneration
-        or tostring(manifest.boundary.rvId) ~= tostring(record.rvId)
-        or ServerUtil.toNumber(manifest.boundary.generation) ~= recordGeneration then
+    if tostring(manifest.rvId) ~= tostring(record.locoId)
+        or manifestGeneration ~= recordGeneration then
         return false, Constants.INVALID_RV_DATA
     end
 
     local armedOk, armedError = pcall(armTargetedClientRoomOwnershipGuard,
-        player, recordGeneration, manifest.bounds, record.rvId)
+        player, recordGeneration, manifest.bounds, record.locoId)
     if not armedOk then
         return false, safeErrorText(armedError)
     end
     print("[RailroaderRVTest] targeted room ownership monitor armed player="
-        .. tostring(identityOrReason.key) .. " rvId=" .. tostring(record.rvId)
+        .. tostring(identityOrReason.key) .. " rvId=" .. tostring(record.locoId)
         .. " generation=" .. tostring(recordGeneration))
     return true
 end

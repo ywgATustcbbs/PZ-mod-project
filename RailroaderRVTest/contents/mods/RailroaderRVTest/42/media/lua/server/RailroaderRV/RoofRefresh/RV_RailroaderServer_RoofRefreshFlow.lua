@@ -543,7 +543,7 @@ promoteFollowUpWallRemoval = function(map, roomKey)
                         for _ in pairs(currentEvents) do count = count + 1 end
                         if count < WALL_REMOVAL_FOLLOWUP_MAX then
                             event.roomKey = currentRoomKey
-                            event.rvId = tostring(record.rvId)
+                            event.rvId = tostring(record.locoId)
                             if waitingForGeneration then
                                 -- The current record/rvId/generation is now
                                 -- proven complete. Give
@@ -682,7 +682,7 @@ local function revalidateQueuedRoofRefreshAfterGeneration(map, roomKey,
     pending.roomKey = currentRoomKey
     pending.player = players[1].player
     pending.players = players
-    pending.rvId = tostring(record.rvId)
+    pending.rvId = tostring(record.locoId)
     pending.generation = integer(record.generation)
     pending.identityKey = players[1].identityKey
     pending.returnPosition = players[1].originalPosition

@@ -6,6 +6,8 @@ local Core = ctx.Core
 local C = ctx.C
 local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
+local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
+local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 
 local function number(value)
@@ -219,6 +221,34 @@ function Boundary.makeBoundary(layout, rvId, generation)
     }
 end
 
+-- Managed bounds and shell edges are pure functions of the compiled template
+-- and the record's slot index.  Nothing in this file persists them; readers
+-- query the current template here instead of trusting a stored copy.
+local derivedBoundaries = {}
+local function boundaryFor(record)
+    if type(record) ~= "table" then return nil end
+    local rvId = type(record.locoId) == "string" and record.locoId or nil
+    local generation = integer(record.generation)
+    local slotIndex = integer(record.slotIndex)
+    if not rvId or rvId == "" or not generation or generation < 1
+        or not slotIndex then
+        return nil
+    end
+    local anchor = RegionSlots.indexToAnchor(slotIndex)
+    if not anchor then return nil end
+    -- One template layout per anchor; the compiled template never changes at
+    -- runtime, so the derived boundary may be reused for this identity.
+    local cached = derivedBoundaries[slotIndex]
+    if cached and cached.rvId == rvId and cached.generation == generation then
+        return cached
+    end
+    local layout = Layout.make(anchor.x, anchor.y, anchor.z)
+    local derived = makeBoundary(layout, rvId, generation)
+    if type(derived) ~= "table" then return nil end
+    derivedBoundaries[slotIndex] = derived
+    return derived
+end
+
 local function currentBoundary(boundary)
     if type(boundary) ~= "table" or type(boundary.managed) ~= "table"
         or type(boundary.shellEdges) ~= "table" then
@@ -257,9 +287,8 @@ function Boundary.registerGeneration(rvId, generation, boundary, record)
         or integer(generation) ~= loaded.generation then
         return false
     end
-    if record and (tostring(record.rvId) ~= tostring(rvId)
-        or integer(record.generation) ~= loaded.generation
-        or record.boundary ~= boundary) then
+    if record and (tostring(record.locoId) ~= tostring(rvId)
+        or integer(record.generation) ~= loaded.generation) then
         return false
     end
     geometryChanged()
@@ -290,17 +319,17 @@ function Boundary.boundaryForPlayer(player, knownIdentity, deferValidationMiss,
     local current = hookOk and currentBoundary(boundary) or nil
     local anchor = current and TemplateGeometry.anchorFromManaged(current.managed,
         Template) or nil
+    -- The manifest only carries the current identity; its geometry comes from
+    -- the template, so compare the derived anchor rather than a stored copy.
     if not current or type(record) ~= "table" or type(relation) ~= "table"
         or type(validatedIdentity) ~= "table"
         or validatedIdentity.key ~= id.key
-        or type(manifest) ~= "table" or type(manifest.anchor) ~= "table"
-        or tostring(manifest.rvId) ~= tostring(record.rvId)
+        or type(manifest) ~= "table"
+        or tostring(manifest.rvId) ~= tostring(record.locoId)
         or integer(manifest.generation) ~= integer(record.generation)
-        or tostring(current.rvId) ~= tostring(record.rvId)
+        or tostring(current.rvId) ~= tostring(record.locoId)
         or current.generation ~= integer(record.generation)
-        or integer(manifest.anchor.x) ~= anchor.x
-        or integer(manifest.anchor.y) ~= anchor.y
-        or integer(manifest.anchor.z) ~= anchor.z then
+        or not anchor then
         return nil
     end
     return current, record, relation, validatedIdentity, manifest
@@ -602,6 +631,7 @@ ctx.playerPosition = playerPosition
 ctx.playerCell = playerCell
 ctx.square = square
 ctx.currentBoundary = currentBoundary
+ctx.boundaryFor = boundaryFor
 ctx.boundaryKey = boundaryKey
 ctx.sameBoundary = sameBoundary
 ctx.stateFor = stateFor

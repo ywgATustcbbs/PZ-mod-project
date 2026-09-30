@@ -428,7 +428,9 @@ local function isWhitelistedTemplateObject(object, boundary, manifest, edges,
     local tag = objectTag(object)
     if not tag or not sameIdentity(tag, boundary) then return false end
     local index = integer(tag.templateIndex)
-    local anchor = manifest and manifest.anchor
+    -- The anchor is the template transform of the already validated managed
+    -- region; no geometry is stored beside the current identity.
+    local anchor = TemplateGeometry.anchorFromManaged(boundary.managed)
     if not index or type(anchor) ~= "table" then return false end
     local expected = templateEntry(index, anchor)
     if tag.templateClass ~= expected.class
@@ -488,7 +490,7 @@ local function isWhitelistedGenerator(object, boundary, manifest)
         or not ServerUtil.classInstance(object, "IsoGenerator") then
         return false
     end
-    local anchor = manifest.anchor
+    local anchor = TemplateGeometry.anchorFromManaged(boundary.managed)
     local xOk, x = ServerUtil.invoke(object, "getX")
     local yOk, y = ServerUtil.invoke(object, "getY")
     local zOk, z = ServerUtil.invoke(object, "getZ")
@@ -762,7 +764,8 @@ local function repairTemplateProtectionCoordinate(cell, x, y, z, squareInfo,
     local targets = index.byCoordinate[coordinateKey(x, y, z)] or {}
     if #targets == 0 then return true end
     local updatedFloors = {}
-    local anchor = manifest.anchor
+    local anchor = TemplateGeometry.anchorFromManaged(boundary.managed)
+    if not anchor then return false, Constants.INVALID_RV_DATA end
     local tagContext = {
         rvId = boundary.rvId,
         anchorX = anchor.x,
@@ -777,7 +780,7 @@ local function repairTemplateProtectionCoordinate(cell, x, y, z, squareInfo,
         end
         if not squareInfo then
             if not TemplateGeometry.contains({ x = expected.x, y = expected.y,
-                z = expected.z }, manifest.anchor) then
+                z = expected.z }, anchor) then
                 return false, Constants.INVALID_RV_DATA
             end
             if not loadedLayerForCell(cell, expected.x, expected.y,

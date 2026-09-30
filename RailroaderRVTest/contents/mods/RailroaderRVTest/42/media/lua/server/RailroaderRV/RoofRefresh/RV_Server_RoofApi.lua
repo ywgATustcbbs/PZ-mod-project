@@ -389,7 +389,7 @@ function RV.Server.roofRefreshSquaresLoaded(player, record)
     end
     if type(record) ~= "table" then return false, Constants.INVALID_RV_DATA end
     local manifestCallOk, manifestAccepted, manifest = pcall(
-        RV.Server.currentRVManifestForRelocation, record.rvId,
+        RV.Server.currentRVManifestForRelocation, record.locoId,
         record.generation)
     if not manifestCallOk or manifestAccepted ~= true
         or type(manifest) ~= "table" then
@@ -398,11 +398,11 @@ function RV.Server.roofRefreshSquaresLoaded(player, record)
     local identityOk, identityOrReason = playerIdentity(player)
     if not identityOk then return false, identityOrReason end
     local contextOk, contextOrReason = currentRoofRefreshContext(player,
-        { rvId = record.rvId, generation = record.generation,
+        { rvId = record.locoId, generation = record.generation,
             identityKey = identityOrReason.key })
     if not contextOk then return false, contextOrReason end
     if type(record) == "table"
-        and (tostring(record.rvId) ~= tostring(contextOrReason.boundary.rvId)
+        and (tostring(record.locoId) ~= tostring(contextOrReason.boundary.rvId)
             or ServerUtil.integer(record.generation) ~= contextOrReason.boundary.generation) then
         return false, Constants.INVALID_RV_DATA
     end

@@ -274,19 +274,13 @@ local function generateForPlayer(player, prepared)
         -- each captured-object host square and the room-ownership scan checks
         -- the captured roof.
         preserveManifestOnFailure = false
-        manifest.techVersion = Constants.TECH_VERSION
-        manifest.templateVersion = Constants.CAPTURED_TEMPLATE_VERSION
+        -- Only slot allocation and mutation state are durable here.  Anchor,
+        -- managed bounds, shell edges, template and schema identity are all
+        -- derived from the compiled template at read time.
         manifest.generation = generation
-        manifest.owner = OWNER
         manifest.slotIndex = prepared.slotIndex
-        manifest.anchor = { x = anchor.x, y = anchor.y, z = anchor.z }
-        manifest.bounds = bounds
         manifest.rvId = prepared.rvId
-        manifest.boundary = boundaryOrReason
-        manifest.startedAt = math.floor(os.time())
         manifest.rollback = nil
-        manifest.completedAt = nil
-        manifest.lastError = nil
         setManifestState(manifest, "RUNNING")
         local buildOk, buildError = pcall(clearGenerationArea, cell, bounds,
             generation, manifest)
@@ -342,16 +336,12 @@ local function generateForPlayer(player, prepared)
             -- otherwise a failed generator/API call would leave a partial
             -- captured model or powered generator in the world.
             local rollbackOk, rollbackError = pcall(function()
-                removeGeneration(cell, bounds, generation, manifest.rvId,
-                    manifest.phase)
+                removeGeneration(cell, bounds, generation, manifest.rvId)
             end)
             if rollbackOk then
-                manifest.rollback = "COMPLETE"
-                manifest.phase = "ROLLED_BACK"
                 print("[RailroaderRVTest] generation=" .. tostring(generation)
                     .. " rollback=COMPLETE")
             else
-                manifest.rollback = "FAILED"
                 print("[RailroaderRVTest] generation=" .. tostring(generation)
                     .. " rollback=FAILED: " .. safeErrorText(rollbackError))
                 error(safeErrorText(buildError) .. " (rollback failed: "
@@ -431,14 +421,13 @@ local function finalizeGenerationAfterRelocate(player, prepared)
                 .. " reasserted=" .. tostring(reasserted))
             error("final relocation authoritative target is still synchronizing")
         end
-        local manifest = manifestTable()
-        if manifest.state ~= "RUNNING"
-            or manifest.phase ~= "FINAL_RELOCATE"
-            or tostring(manifest.rvId) ~= tostring(prepared.rvId)
-            or ServerUtil.integer(manifest.generation) ~= prepared.generation then
+        -- The in-flight transaction is the authority for "this request is the
+        -- one being finalised"; the durable record only holds slot allocation.
+        if prepared.transactionStage ~= "committing" then
             error(Constants.INVALID_RV_DATA)
         end
-        local anchor = manifest.anchor
+        local manifest = manifestTable()
+        local anchor = prepared.anchor
         local anchorX = ServerUtil.requiredInteger(anchor.x, "final manifest anchor x")
         local anchorY = ServerUtil.requiredInteger(anchor.y, "final manifest anchor y")
         local anchorZ = ServerUtil.requiredInteger(anchor.z, "final manifest anchor z")
@@ -460,12 +449,10 @@ local function finalizeGenerationAfterRelocate(player, prepared)
             error("generation boundary transition could not be completed")
         end
         setGenerationPhase(manifest, prepared.generation, "COMMITTED")
-        manifest.completedAt = math.floor(os.time())
         setManifestState(manifest, "READY")
         refreshGenerationRoomOwnershipGuard(prepared.rvId,
             prepared.generation, "pre-mapping-commit")
-        if manifest.state ~= "READY"
-            or manifest.phase ~= "COMMITTED" then
+        if manifest.state ~= "READY" then
             error(Constants.INVALID_RV_DATA)
         end
         -- The mapping is the persistent publication point. It runs only after
@@ -519,14 +506,9 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         return false, originalPosition
     end
 
-    local manifest = manifestTable()
-    if manifest.state == "RUNNING" then
-        return false, "generation already in progress"
-    end
-
-    -- The client supplies intent only. The server allocates the region and
-    -- builds the template plan from that authoritative anchor.
-    local allocated, selectedSlot, anchor, region, priorGeneration =
+    -- Concurrency is owned by the in-memory transaction (checked above); the
+    -- durable record only remembers which slot the last generation claimed.
+    local allocated, selectedSlot, anchor, priorGeneration =
         allocateRVRegion(railroaderData and railroaderData.locoId or nil)
     if allocated ~= true then
         return false, selectedSlot or "no free RV region slot"
@@ -536,34 +518,13 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     local rvId = railroaderData and tostring(railroaderData.locoId)
         or ("technical:slot:" .. tostring(slotIndex))
     local oldBounds
-    if manifest.generation ~= nil then
-        local manifestRvId = tostring(manifest.rvId)
-        local manifestSlot = manifest.slotIndex
-        local expectedTechnicalId = "technical:slot:" .. tostring(slotIndex)
-        if manifestSlot == slotIndex
-            and (manifestRvId == rvId
-                or manifestRvId == expectedTechnicalId) then
-            return false, "RailroaderRVTest: same-slot rebuild is refused because "
-                .. "the previous generation has no complete undo snapshot"
-        elseif manifestSlot == slotIndex or manifestRvId == rvId then
-            return false, "current generation identity does not match the selected RV slot"
-        end
-    end
     if priorGeneration ~= nil then
         return false, "RailroaderRVTest: same-slot rebuild is refused because "
             .. "the previous generation has no complete undo snapshot"
     end
-    if manifest.state == "FAILED" and manifest.rollback == "FAILED"
-        and (manifest.slotIndex == slotIndex or tostring(manifest.rvId) == rvId) then
-        return false, "previous generation rollback failed; remove this test save and rebuild"
-    end
-    local generation = priorGeneration ~= nil and priorGeneration + 1 or 1
+    local generation = 1
     if railroaderData then
         railroaderData.slotIndex = slotIndex
-        railroaderData.anchor = { x = targetX, y = targetY, z = targetZ }
-        railroaderData.region = region
-        railroaderData.rvPosition = { x = targetX + 0.5,
-            y = targetY + 0.5, z = targetZ }
     end
     local layout = ServerUtil.makeLayout(targetX, targetY, targetZ)
     local bounds = ServerSchema.boundsFor(layout)

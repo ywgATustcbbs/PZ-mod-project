@@ -295,7 +295,7 @@ local function sentinelRelationsConsistent(map, record)
         or type(map.players) ~= "table" or type(record.players) ~= "table" then
         return false
     end
-    local wanted = tostring(record.rvId or record.locoId or "")
+    local wanted = tostring(record.locoId or "")
     if wanted == "" then return false end
     for name, rider in pairs(record.players) do
         if type(name) ~= "string" or not validMapRelation(rider, false) then
@@ -329,11 +329,14 @@ local function sentinelRelationsConsistent(map, record)
 end
 
 local function sentinelGeometryAndCenter(record)
-    if type(record) ~= "table"
-        or type(record.boundary) ~= "table" then
+    if type(record) ~= "table" then
         return false, C.INVALID_RV_DATA
     end
-    local managed = record.boundary.managed
+    -- The managed region is derived from the current template and the record's
+    -- slot; it is not persisted on the record.
+    local boundary = Boundary.boundaryFor(record)
+    local managed = type(boundary) == "table" and boundary.managed or nil
+    if type(managed) ~= "table" then return false, C.INVALID_RV_DATA end
     local originX, originY = integer(managed.originX), integer(managed.originY)
     local width, height = integer(managed.width), integer(managed.height)
     local minZ, maxZ = integer(managed.minZ), integer(managed.maxZ)
@@ -343,9 +346,7 @@ local function sentinelGeometryAndCenter(record)
         return false, C.INVALID_RV_DATA
     end
     local anchor = TemplateGeometry.anchorFromManaged(managed)
-    if not anchor or anchor.z ~= integer(record.anchor and record.anchor.z) then
-        return false, C.INVALID_RV_DATA
-    end
+    if not anchor then return false, C.INVALID_RV_DATA end
     local centerX = originX + math.floor(width / 2)
     local centerY = originY + math.floor(height / 2)
     local rvPosition = copyPosition(record.rvPosition)
@@ -399,7 +400,7 @@ local function sentinelRecordCandidate(map, player, server)
                         == "function" then
                         local callOk, current, detail = pcall(
                             server.currentRVManifestForRelocation,
-                            record.rvId, record.generation)
+                            record.locoId, record.generation)
                         if callOk and current == true and type(detail) == "table" then
                             manifestOk, manifestOrReason = true, detail
                         else
@@ -445,7 +446,7 @@ local function sentinelRecordCandidate(map, player, server)
     local rider = candidate.record.players[candidate.username]
     if type(relation) ~= "table" or type(rider) ~= "table"
         or relation.inside ~= true or rider.inside ~= true
-        or tostring(relation.locoId) ~= tostring(candidate.record.rvId)
+        or tostring(relation.locoId) ~= tostring(candidate.record.locoId)
         or integer(relation.onlineId) ~= candidate.onlineId
         or integer(rider.onlineId) ~= candidate.onlineId then
         return nil, identityKey, C.INVALID_RV_DATA
@@ -482,7 +483,7 @@ local function sentinelReturnToRV(candidate, player, map)
     if type(server.currentRVManifestForRelocation) == "function" then
         local callOk, current, detail = pcall(
             server.currentRVManifestForRelocation,
-            record.rvId, record.generation)
+            record.locoId, record.generation)
         if callOk and current == true and type(detail) == "table" then
             manifestOk, manifestOrReason = true, detail
         else
@@ -514,7 +515,7 @@ local function sentinelReturnToRV(candidate, player, map)
     local beginOk, armed = false, false
     if Boundary and type(Boundary.beginTransition) == "function"
         and type(Boundary.completeTransition) == "function" then
-        beginOk, armed = pcall(Boundary.beginTransition, player, record.rvId,
+        beginOk, armed = pcall(Boundary.beginTransition, player, record.locoId,
             record.generation, token, "sentinel")
     end
     if not beginOk or armed ~= true then
@@ -542,7 +543,7 @@ local function sentinelReturnToRV(candidate, player, map)
     end
     local moved = movePlayer(player, target, "enter", {
         locoId = record.locoId, role = relation.role, seat = relation.seat,
-        rvId = record.rvId, generation = record.generation,
+        rvId = record.locoId, generation = record.generation,
     })
     if not moved then
         if type(Boundary.clearPlayer) == "function" then

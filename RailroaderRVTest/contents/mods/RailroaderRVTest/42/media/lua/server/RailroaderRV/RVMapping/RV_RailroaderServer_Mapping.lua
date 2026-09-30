@@ -140,11 +140,15 @@ local function validMapRelation(relation, requireLocoId)
             or type(relation.locoId) == "string" and relation.locoId ~= "")
 end
 
+local function recordRegion(record)
+    return RegionSlots.indexToRegion(integer(record and record.slotIndex))
+end
+
 local function validMappingRecord(record)
     return type(record) == "table"
         and record.generated == true
-        and type(record.rvId) == "string" and record.rvId ~= ""
-        and tostring(record.locoId) == record.rvId
+        and type(record.locoId) == "string" and record.locoId ~= ""
+        and integer(record.slotIndex) ~= nil
         and integer(record.generation) ~= nil and integer(record.generation) >= 1
 end
 
@@ -183,13 +187,12 @@ boundaryValidation = require("RailroaderRV/BoundaryGuard/RV_RailroaderServer_Bou
     end,
 })
 local function roofRefreshRoomKey(record)
-    if type(record) ~= "table" or record.locoId == nil
-        or record.rvId == nil or tostring(record.rvId) == ""
-        or tostring(record.rvId) ~= tostring(record.locoId)
+    if type(record) ~= "table" or type(record.locoId) ~= "string"
+        or record.locoId == ""
         or integer(record.generation) == nil or integer(record.generation) < 1 then
         return nil
     end
-    return tostring(record.rvId) .. ":" .. tostring(record.generation)
+    return tostring(record.locoId) .. ":" .. tostring(record.generation)
 end
 
 local function isWallRemovalSource(source)
@@ -340,7 +343,7 @@ local function refreshRoofForPlayer(player, record, force, reason)
     if not roomKey then return false, "RV generation key is unavailable" end
     local cached = roofRefreshRooms[roomKey]
     local cacheMatches = type(cached) == "table"
-        and tostring(cached.rvId) == tostring(record.rvId)
+        and tostring(cached.rvId) == tostring(record.locoId)
         and integer(cached.generation) == integer(record.generation)
     if not force and cacheMatches then return true, "already refreshed" end
     local ok, refreshed, detail = pcall(server.refreshRoofVisuals, player, record)
@@ -351,7 +354,7 @@ local function refreshRoofForPlayer(player, record, force, reason)
     if refreshed == true then
         roofRefreshRooms[roomKey] = {
             roomKey = roomKey,
-            rvId = tostring(record.rvId),
+            rvId = tostring(record.locoId),
             generation = integer(record.generation),
             updatedAtTick = Adapter._ticks or Core.getTick(),
         }
@@ -421,7 +424,7 @@ local function recordAtPlayerCoordinate(map, player)
     local position = playerPositionInRegion(player, rvRegion())
     if not position then return nil, nil, nil, "outside-rv" end
     for key, record in pairs(map.locomotives or {}) do
-        if type(record) == "table" and inRegion(position, record.region) then
+        if type(record) == "table" and inRegion(position, recordRegion(record)) then
             if not validMappingRecord(record) then
                 error(C.INVALID_RV_DATA)
             end
@@ -443,19 +446,22 @@ local function allocateRVRegion(locoId)
             if not validMappingRecord(existing) then
                 return false, C.INVALID_RV_DATA
             end
-            return true, integer(existing.slotIndex), {
-                x = integer(existing.anchor.x), y = integer(existing.anchor.y),
-                z = integer(existing.anchor.z),
-            }, regionForAnchor(existing.anchor), integer(existing.generation)
+            local slotIndex = integer(existing.slotIndex)
+            local anchor = RegionSlots.indexToAnchor(slotIndex)
+            if not anchor then return false, C.INVALID_RV_DATA end
+            return true, slotIndex, anchor,
+                RegionSlots.indexToRegion(slotIndex), integer(existing.generation)
         end
     end
     local occupied, occupiedSlots = {}, {}
     for _, record in pairs(map.locomotives or {}) do
         if not validMappingRecord(record) then return false, C.INVALID_RV_DATA end
-        local region = record.region
+        local region = recordRegion(record)
         local slotIndex = integer(record.slotIndex)
-        if occupiedSlots[slotIndex] then return false, C.INVALID_RV_DATA end
-        occupiedSlots[slotIndex] = tostring(record.rvId)
+        if type(region) ~= "table" or occupiedSlots[slotIndex] then
+            return false, C.INVALID_RV_DATA
+        end
+        occupiedSlots[slotIndex] = tostring(record.locoId)
         occupied[#occupied + 1] = { minX = integer(region.minX),
             minY = integer(region.minY), maxX = integer(region.maxX),
             maxY = integer(region.maxY) }
@@ -477,12 +483,9 @@ local function allocateRVRegion(locoId)
                 local manifestRvId = type(manifest.rvId) == "string"
                     and manifest.rvId or nil
                 local state = manifest.state
-                local manifestAnchor = manifest.anchor
                 if not manifestSlot or manifestSlot < 1
                     or manifestSlot > RegionSlots.COUNT
-                    or not manifestRvId or manifestRvId == ""
-                    or type(state) ~= "string"
-                    or RegionSlots.indexForAnchor(manifestAnchor) ~= manifestSlot then
+                    or not manifestRvId or manifestRvId == "" then
                     return false, C.INVALID_RV_DATA
                 end
                 local mappedRvId = occupiedSlots[manifestSlot]

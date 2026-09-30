@@ -135,7 +135,7 @@ local function processPendingWallRoofRefreshes()
                         stateDetail or "roof refresh relocation failed")
                 else
                     local record = recordForLoco(map, pending.rvId)
-                    if not record or tostring(record.rvId) ~= pending.rvId
+                    if not record or tostring(record.locoId) ~= pending.rvId
                         or integer(record.generation) ~= pending.generation
                         or not validRecord(record) then
                         cancelPendingWallRoofRefresh(roomKey, pending,
@@ -178,7 +178,6 @@ function Adapter.OnTick(tick)
                     if not old or old.x ~= position.x or old.y ~= position.y
                         or old.z ~= position.z then
                         record.locoPosition = position
-                        record.updatedAt = math.floor(os.time())
                         changed = true
                     end
                 end

@@ -105,17 +105,12 @@ local function acknowledgeFinalRelocation(player, args)
             and "final acknowledgement sender does not own the request"
             or identityOrReason
     end
-    local manifestOk, manifest = pcall(manifestTable)
-    if not manifestOk or type(manifest) ~= "table" then
+    -- The in-flight stage is the authority for "this ACK belongs to a
+    -- relocation that is still waiting"; the durable record never held it.
+    if pending.transactionStage ~= "final-relocation" then
         return false, Constants.INVALID_RV_DATA
     end
-    if manifest.state ~= "RUNNING"
-        or manifest.phase ~= "FINAL_RELOCATE"
-        or tostring(manifest.rvId) ~= tostring(pending.rvId)
-        or ServerUtil.integer(manifest.generation) ~= pending.generation then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local anchor = manifest.anchor
+    local anchor = pending.anchor
     local anchorX = type(anchor) == "table"
         and ServerUtil.requiredInteger(anchor.x, "final acknowledgement anchor x") or nil
     local anchorY = type(anchor) == "table"
@@ -228,14 +223,12 @@ local function rollbackPendingGenerationWorld(pending, reason)
     local rollbackOk, rollbackReason = pcall(removeGeneration, cell,
         pending.bounds, pending.generation, pending.rvId)
     if not rollbackOk then
-        manifest.rollback = "FAILED"
         GenerationTransaction.rollback("world-retry",
             Core.tickAdd(ctx.serverTick, GENERATION_RELOCATION_RETRY_TICKS))
         print("[RailroaderRVTest] final relocation rollback failed: "
             .. safeErrorText(rollbackReason))
         return false
     end
-    manifest.rollback = "COMPLETE"
     local markedOk, marked, markedReason = pcall(markGenerationFailed, manifest,
         safeErrorText(reason or "final relocation acknowledgement failed"))
     if not markedOk or marked ~= true then

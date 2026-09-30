@@ -28,11 +28,11 @@ function Construction.new(context, operations)
         local schema = context.ServerSchema
 
         -- A prior generation has no complete inverse snapshot, so the same RV
-        -- cannot be rebuilt in place.
+        -- cannot be rebuilt in place.  The durable manifest records only the
+        -- claimed slot and identity; the anchor is that slot's template anchor.
         if existingManifest
             and existingManifest.rvId == identity.rvId
-            and existingManifest.slotIndex == identity.slotIndex
-            and samePoint(existingManifest.anchor, identity.anchor) then
+            and existingManifest.slotIndex == identity.slotIndex then
             error("RailroaderRVTest: same-slot rebuild is refused because "
                 .. "the previous generation has no complete undo snapshot")
         end
@@ -81,10 +81,14 @@ function Construction.new(context, operations)
 
     function service.buildCurrentGeneration(player, layout, bounds, generation, manifest)
         requireCurrentMutation(player, manifest)
-        if manifest.phase ~= "CLEARING"
-            or manifest.phaseGeneration ~= generation then
+        -- The clear->build ordering is a process-local transaction invariant;
+        -- it is not part of the durable record.
+        local pending = generationTransaction.current()
+        if not pending or pending.buildStage == "building"
+            or tostring(pending.generation) ~= tostring(generation) then
             error("RailroaderRVTest: build requires the current clearing phase")
         end
+        pending.buildStage = "building"
         return operations.build(player, layout, bounds, generation, manifest)
     end
 

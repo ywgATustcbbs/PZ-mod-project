@@ -35,7 +35,7 @@ local function roofRefreshBoundaryReadAllowed(server, record, identityKey)
         return false
     end
     local callOk, allowed = pcall(server.isRoofRefreshBoundaryReadAllowed,
-        record.rvId, record.generation, identityKey)
+        record.locoId, record.generation, identityKey)
     return callOk and allowed == true
 end
 
@@ -47,7 +47,7 @@ local function roofRefreshBoundaryContextReadAllowed(server, record,
         return false
     end
     local callOk, allowed = pcall(
-        server.isRoofRefreshBoundaryContextReadAllowed, record.rvId,
+        server.isRoofRefreshBoundaryContextReadAllowed, record.locoId,
         record.generation, identityKey)
     return callOk and allowed == true
 end
@@ -160,7 +160,7 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
         return nil
     end
     local manifestCallOk, manifestAccepted, manifest = pcall(
-        server.currentRVManifestForBoundary, record.rvId, record.generation)
+        server.currentRVManifestForBoundary, record.locoId, record.generation)
     if not manifestCallOk or manifestAccepted ~= true
         or type(manifest) ~= "table" then
         diagnose("manifest-rejected")
@@ -182,9 +182,15 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
     mappingEpoch = Adapter._boundaryValidationEpoch or 0
     geometryEpoch = Boundary and Boundary._geometryEpoch or 0
     now = Adapter._ticks or Core.getTick()
+    local boundary = Boundary and Boundary.boundaryFor(record) or nil
+    if not boundary then
+        diagnose("geometry-rejected")
+        cache[identityKey] = nil
+        return nil
+    end
     if not transitionActive and not roofRefreshContextRead then
         cache[identityKey] = {
-            boundary = record.boundary,
+            boundary = boundary,
             record = record,
             relation = relation,
             validatedIdentity = validatedIdentity,
@@ -194,7 +200,7 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
             validatedAtTick = now,
         }
     end
-    return record.boundary, record, relation, validatedIdentity, manifest
+    return boundary, record, relation, validatedIdentity, manifest
 end
 
 function Adapter.validateCurrentBoundaryPlayer(player, suppliedIdentity,

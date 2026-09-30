@@ -203,13 +203,15 @@ local function currentRoofRefreshContext(player, request)
     local manifestCallOk, manifestAccepted, manifest = pcall(
         server.currentRVManifestForBoundary, request.rvId, requestGeneration)
     if not manifestCallOk or manifestAccepted ~= true
-        or type(manifest) ~= "table" then
+        or type(manifest) ~= "table"
+        or tostring(manifest.rvId) ~= tostring(request.rvId)
+        or ServerUtil.integer(manifest.generation) ~= requestGeneration then
         return false, Constants.INVALID_RV_DATA
     end
+    -- The anchor is the template transform of the already validated managed
+    -- region; the manifest carries no geometry copy of its own.
     local anchor = TemplateGeometry.anchorFromManaged(boundary.managed)
-    if not anchor or anchor.x ~= ServerUtil.integer(manifest.anchor.x)
-        or anchor.y ~= ServerUtil.integer(manifest.anchor.y)
-        or anchor.z ~= ServerUtil.integer(manifest.anchor.z) then
+    if not anchor then
         return false, Constants.INVALID_RV_DATA
     end
     return true, {

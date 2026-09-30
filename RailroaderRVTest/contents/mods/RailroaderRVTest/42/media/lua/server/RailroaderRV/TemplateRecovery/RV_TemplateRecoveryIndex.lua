@@ -10,6 +10,7 @@ local ServerWorld = ctx.ServerWorld
 local manifestTable = ctx.manifestTable
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
+local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
 
@@ -90,35 +91,31 @@ local function validCurrentContext(player, expectedBoundary)
     if not manifestOk or type(manifest) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
-    if manifest.state ~= "READY" or manifest.phase ~= "COMMITTED"
+    -- The manifest carries identity and mutation state only.  The template and
+    -- slot matrix are the authority for every geometric fact below.
+    if manifest.state ~= "READY"
         or not sameIdentity(manifest, boundary)
-        or not sameIdentity(manifest.boundary, boundary)
-        or not sameIdentity(record, boundary)
-        or manifest.templateVersion ~= Constants.CAPTURED_TEMPLATE_VERSION
-        or type(manifest.bounds) ~= "table" then
+        or not sameIdentity(record, boundary) then
         return false, Constants.INVALID_RV_DATA
     end
-    local region, managed = record.region, boundary.managed
-    if type(region) ~= "table" or type(managed) ~= "table"
-        or type(manifest.anchor) ~= "table" then
+    local region = RegionSlots.indexToRegion(record.slotIndex)
+    local managed = boundary.managed
+    if type(region) ~= "table" or type(managed) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
     local regionMinX, regionMinY = integer(region.minX), integer(region.minY)
     local regionMaxX, regionMaxY = integer(region.maxX), integer(region.maxY)
-    local regionMinZ, regionMaxZ = integer(region.minZ), integer(region.maxZ)
     local originX, originY = integer(managed.originX), integer(managed.originY)
     local width, height = integer(managed.width), integer(managed.height)
     local managedMinZ, managedMaxZ = integer(managed.minZ), integer(managed.maxZ)
     local anchor = TemplateGeometry.anchorFromManaged(managed, Template)
     if not regionMinX or not regionMinY or not regionMaxX or not regionMaxY
-        or not regionMinZ or not regionMaxZ or not originX or not originY
+        or not originX or not originY
         or not width or not height or not managedMinZ or not managedMaxZ
-        or not anchor or anchor.x ~= integer(manifest.anchor.x)
-        or anchor.y ~= integer(manifest.anchor.y)
-        or anchor.z ~= integer(manifest.anchor.z)
+        or not anchor
+        or RegionSlots.indexForAnchor(anchor) ~= integer(record.slotIndex)
         or originX < regionMinX or originY < regionMinY
-        or originX + width > regionMaxX or originY + height > regionMaxY
-        or managedMinZ < regionMinZ or managedMaxZ > regionMaxZ then
+        or originX + width > regionMaxX or originY + height > regionMaxY then
         return false, Constants.INVALID_RV_DATA
     end
     return true, boundary, record, manifest, identity
@@ -152,13 +149,13 @@ local function templateEntry(templateIndex, anchor)
     }
 end
 
-local function expectedEdgeMap(manifest)
+local function expectedEdgeMap(boundary)
     local result = {}
-    local edges = manifest.boundary and manifest.boundary.shellEdges
+    local edges = boundary and boundary.shellEdges
     if type(edges) ~= "table" then return nil end
     for key, edge in pairs(edges) do
         if type(key) ~= "string" or type(edge) ~= "table"
-            or edge.edgeKey ~= key or not sameIdentity(edge, manifest) then
+            or edge.edgeKey ~= key or not sameIdentity(edge, boundary) then
             return nil
         end
         if edge.side ~= "north" and edge.side ~= "south"
@@ -185,8 +182,9 @@ local function expectedEdgeMap(manifest)
 end
 
 local function buildRepairIndex(boundary, manifest)
-    local edges = expectedEdgeMap(manifest)
-    local anchor = manifest and manifest.anchor
+    local edges = expectedEdgeMap(boundary)
+    local anchor = type(boundary) == "table"
+        and TemplateGeometry.anchorFromManaged(boundary.managed, Template) or nil
     if not edges or type(anchor) ~= "table"
         or not integer(anchor.x) or not integer(anchor.y)
         or not integer(anchor.z) then

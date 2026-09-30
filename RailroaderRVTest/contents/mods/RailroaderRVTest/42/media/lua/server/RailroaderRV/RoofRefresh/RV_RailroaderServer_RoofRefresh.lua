@@ -1,6 +1,7 @@
 -- RV_RailroaderServer: RoofRefresh responsibilities.
 return function(ctx)
 local Core = require("RailroaderRV/Core/RV_Server_Core")
+local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local processIsServer = ctx.processIsServer
 local RV = ctx.RV
 local Boundary = ctx.Boundary
@@ -27,6 +28,10 @@ local relocationSentinelBusy = ctx.relocationSentinelBusy
 local relocationSentinelCooldown = ctx.relocationSentinelCooldown
 local relocationSentinelWarnings = ctx.relocationSentinelWarnings
 local function recordForLoco(...) return ctx.recordForLoco(...) end
+-- The region is a pure function of the record's slot; it is not stored.
+local function recordRegion(record)
+    return RegionSlots.indexToRegion(integer(record and record.slotIndex))
+end
 local insidePlayersForRecord
 local scheduleRoofRefresh
 local observeRoomTransitions
@@ -189,7 +194,7 @@ local function processStatelessRelocationSentinel()
                                 relocationSentinelWarnings[identityKey] = nil
                                 print("[RailroaderRVTest] relocation sentinel returned identity="
                                     .. identityKey .. " rvId="
-                                    .. tostring(candidate.record.rvId)
+                                    .. tostring(candidate.record.locoId)
                                     .. " kind=" .. candidate.generationKind)
                             end
                         end
@@ -238,7 +243,7 @@ local function sampleRoofRefreshPlayers(map)
             if type(relation) == "table" and relation.inside == true then
                 local record = recordForLoco(map, relation.locoId)
                 if record and validRecord(record)
-                    and inRegion(position, record.region) then
+                    and inRegion(position, recordRegion(record)) then
                     local roomKey = roofRefreshRoomKey(record)
                     local presenceKey = roomKey and name
                         and (name .. ":" .. roomKey) or nil
@@ -357,7 +362,7 @@ scheduleRoofRefresh = function(map, record, source, eventKey, coordinateKey)
         roomKey = roomKey,
         player = players[1].player,
         players = players,
-        rvId = tostring(record.rvId),
+        rvId = tostring(record.locoId),
         generation = integer(record.generation),
         identityKey = players[1].identityKey,
         returnPosition = players[1].originalPosition,
@@ -411,7 +416,7 @@ local function rememberFollowUpWallRemoval(record, roomKey, eventKey,
     end
     events[eventKey] = {
         roomKey = roomKey,
-        rvId = tostring(record.rvId),
+        rvId = tostring(record.locoId),
         eventKey = eventKey,
         coordinateKey = coordinateKey,
         waitingForGeneration = waitingForGeneration == true,
@@ -512,10 +517,10 @@ local function queueWallRoofRefreshForObject(object, source)
     local match
     for _, record in pairs(map.locomotives or {}) do
         local wallOk, isCurrentWall = false, false
-        if type(record) == "table" and record.rvId ~= nil
+        if type(record) == "table" and type(record.locoId) == "string"
             and validRecord(record) then
             wallOk, isCurrentWall = pcall(Boundary.isCurrentShellWall,
-                object, record.boundary)
+                object, Boundary.boundaryFor(record))
         end
         if wallOk and isCurrentWall == true then
             if match then
@@ -637,13 +642,14 @@ insidePlayersForRecord = function(map, record)
     local result = {}
     if type(map) ~= "table" or type(record) ~= "table"
         or type(record.players) ~= "table" then return result end
-    local wanted = tostring(record.rvId or record.locoId)
+    local wanted = tostring(record.locoId or "")
+    local region = recordRegion(record)
     local players = onlinePlayersSnapshot()
     local area = rvRegion()
     for i = 1, #players do
         local player = players[i]
         local position = playerPositionInRegion(player, area)
-        if position and inRegion(position, record.region) then
+        if position and region and inRegion(position, region) then
             local name = playerName(player)
             local relation = name and map.players[name] or nil
             local rider = name and record.players[name] or nil

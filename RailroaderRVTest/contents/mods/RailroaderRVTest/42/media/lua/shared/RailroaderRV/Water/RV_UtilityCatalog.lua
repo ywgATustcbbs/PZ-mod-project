@@ -13,24 +13,13 @@ local M = {}
 local integer = StrictSchema.integer
 local exactKeys = StrictSchema.exactKeys
 
+-- The tag names the owning RV generation and the slot allocation that fixes
+-- the sink's position in the slot matrix.  `anchor` is deliberately absent:
+-- it is `RegionSlots.indexToAnchor(slotIndex)`, a pure template lookup.
 M.SINK_IDENTITY_FIELDS = {
-    "owner", "role", "rvId", "generation", "slotIndex", "anchor",
+    "owner", "role", "rvId", "generation", "slotIndex",
 }
 M.WATER_TAG_KEY = "RailroaderRVTestWater"
-
-local function validAnchor(anchor)
-    if not exactKeys(anchor, { "x", "y", "z" })
-        or integer(anchor.x) == nil or integer(anchor.y) == nil
-        or integer(anchor.z) == nil then
-        return false
-    end
-    return true
-end
-
-local function sameAnchor(a, b)
-    return validAnchor(a) and validAnchor(b)
-        and a.x == b.x and a.y == b.y and a.z == b.z
-end
 
 local function tagForObject(object)
     if object == nil or type(object.getModData) ~= "function" then return nil end
@@ -44,8 +33,6 @@ local function tagForObject(object)
         or integer(tag.slotIndex) == nil then
         return nil
     end
-    local slotAnchor = RegionSlots.indexToAnchor(tag.slotIndex)
-    if not slotAnchor or not sameAnchor(tag.anchor, slotAnchor) then return nil end
     return tag
 end
 
@@ -56,7 +43,6 @@ function M.readSinkIdentity(object)
         rvId = tag.rvId,
         generation = tag.generation,
         slotIndex = tag.slotIndex,
-        anchor = { x = tag.anchor.x, y = tag.anchor.y, z = tag.anchor.z },
     }
 end
 
@@ -74,13 +60,11 @@ function M.isCurrentWaterSink(object, identity, mappingRecord)
     if identity == nil and mappingRecord == nil then return true end
     if type(identity) ~= "table" or type(mappingRecord) ~= "table"
         or type(identity.rvId) ~= "string" or identity.rvId == ""
-        or integer(identity.generation) == nil
-        or integer(mappingRecord.slotIndex) ~= tag.slotIndex
-        or not sameAnchor(mappingRecord.anchor, tag.anchor) then
+        or integer(identity.generation) == nil then
         return false
     end
-    return tag.rvId == identity.rvId
-        and tag.generation == integer(identity.generation)
+    return tostring(tag.rvId) == tostring(identity.rvId)
+        and integer(tag.generation) == integer(identity.generation)
 end
 
 local function invoke(target, method, ...)

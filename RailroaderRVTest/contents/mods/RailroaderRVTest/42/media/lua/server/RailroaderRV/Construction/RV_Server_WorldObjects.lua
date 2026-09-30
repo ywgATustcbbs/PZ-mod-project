@@ -2,6 +2,7 @@
 return function(ctx)
 local OWNER = ctx.OWNER
 local Constants = ctx.Constants
+local Boundary = ctx.Boundary
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
@@ -16,10 +17,17 @@ local function integer(value)
     return number
 end
 
+local function identityOf(value)
+    if type(value) ~= "table" then return nil, nil end
+    return value.rvId ~= nil and tostring(value.rvId) or tostring(value.locoId),
+        integer(value.generation)
+end
+
 local function sameIdentity(left, right)
-    return type(left) == "table" and type(right) == "table"
-        and tostring(left.rvId) == tostring(right.rvId)
-        and integer(left.generation) == integer(right.generation)
+    local leftId, leftGeneration = identityOf(left)
+    local rightId, rightGeneration = identityOf(right)
+    return leftId ~= nil and rightId ~= nil
+        and leftId == rightId and leftGeneration == rightGeneration
 end
 
 local function applyIntegerState(object, state, key, setter, getter)
@@ -891,7 +899,7 @@ local function isWhitelistedGenerator(object, boundary, manifest)
         or not ServerUtil.classInstance(object, "IsoGenerator") then
         return false
     end
-    local anchor = manifest.anchor
+    local anchor = TemplateGeometry.anchorFromManaged(boundary.managed)
     local xOk, x = ServerUtil.invoke(object, "getX")
     local yOk, y = ServerUtil.invoke(object, "getY")
     local zOk, z = ServerUtil.invoke(object, "getZ")
@@ -944,20 +952,22 @@ local function ensureGeneratorForEntry(player, record)
         return false, Constants.INVALID_RV_DATA
     end
     local manifestOk, accepted, manifest = pcall(
-        server.currentRVManifestForRelocation, record.rvId,
+        server.currentRVManifestForRelocation, record.locoId,
         record.generation)
+    -- The manifest view derives the anchor and managed bounds from the
+    -- compiled template for the record's slot; nothing geometry-shaped is
+    -- stored beside the record, so only the identity is compared here.
+    local boundary = Boundary and Boundary.boundaryFor(record) or nil
     if not manifestOk or accepted ~= true or type(manifest) ~= "table"
-        or manifest.state ~= "READY" or manifest.phase ~= "COMMITTED"
+        or manifest.state ~= "READY"
         or not sameIdentity(record, manifest)
-        or not sameIdentity(record, record.boundary)
-        or not sameIdentity(record, manifest.boundary)
-        or manifest.templateVersion ~= Constants.CAPTURED_TEMPLATE_VERSION
-        or type(manifest.anchor) ~= "table" then
+        or type(boundary) ~= "table"
+        or type(boundary.managed) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
-
-    local anchorX, anchorY, anchorZ = integer(manifest.anchor.x),
-        integer(manifest.anchor.y), integer(manifest.anchor.z)
+    local anchor = TemplateGeometry.anchorFromManaged(boundary.managed)
+    local anchorX, anchorY, anchorZ = integer(anchor and anchor.x),
+        integer(anchor and anchor.y), integer(anchor and anchor.z)
     if not anchorX or not anchorY or not anchorZ then
         return false, Constants.INVALID_RV_DATA
     end
@@ -965,7 +975,7 @@ local function ensureGeneratorForEntry(player, record)
     local y = anchorY + Constants.GENERATOR_OFFSET.y
     local z = anchorZ + Constants.GENERATOR_OFFSET.z
     if not TemplateGeometry.inManagedRegion({ x = x, y = y, z = z },
-        record.boundary.managed) then
+        boundary.managed) then
         return false, Constants.INVALID_RV_DATA
     end
 
@@ -1003,7 +1013,7 @@ local function ensureGeneratorForEntry(player, record)
     for i = 1, #objects do
         local object = objects[i]
         before[object] = true
-        if isWhitelistedGenerator(object, record.boundary, manifest) then
+        if isWhitelistedGenerator(object, boundary, manifest) then
             present = true
         elseif ServerUtil.classInstance(object, "IsoGenerator") then
             ambiguous = true
@@ -1014,10 +1024,10 @@ local function ensureGeneratorForEntry(player, record)
 
     local createOk, created = pcall(createGenerator, cell, square,
         Constants.SPRITES.generator.sprite, record.generation,
-        { rvId = record.rvId })
+        { rvId = record.locoId })
     if not createOk or not created then
         local rollbackCallOk, rollbackOk, rollbackReason = pcall(
-            rollbackEntryGenerator, square, before, record.boundary)
+            rollbackEntryGenerator, square, before, boundary)
         local failure = "entry generator creation failed: " .. tostring(created)
         if not rollbackCallOk or not rollbackOk then
             failure = failure .. "; " .. tostring(rollbackCallOk
@@ -1030,11 +1040,11 @@ local function ensureGeneratorForEntry(player, record)
         local containsOk, attached = ServerWorld.squareContainsObject(square,
             created)
         return containsOk and attached == true
-            and isWhitelistedGenerator(created, record.boundary, manifest)
+            and isWhitelistedGenerator(created, boundary, manifest)
     end)
     if not verifyOk or attachedAndCurrent ~= true then
         local rollbackCallOk, rollbackOk, rollbackReason = pcall(
-            rollbackEntryGenerator, square, before, record.boundary, created)
+            rollbackEntryGenerator, square, before, boundary, created)
         local failure = "entry generator creation did not persist"
         if not rollbackCallOk or not rollbackOk then
             failure = failure .. "; " .. tostring(rollbackCallOk

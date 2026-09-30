@@ -101,7 +101,7 @@ function Adapter.resolveCurrentUtilityRV(player)
         end
     end
     return true, {
-        identity = { rvId = tostring(record.rvId), generation = integer(record.generation) },
+        identity = { rvId = tostring(record.locoId), generation = integer(record.generation) },
         record = record, relation = relation, train = train, status = status,
         phase = "READY",
         authorized = true, locomotiveSide = locomotiveSide,
@@ -127,7 +127,7 @@ local function settleUtilityTransition(record, player, phase)
         return false
     end
     local ok, accepted, reason = pcall(server.settleRVUtilityLoad, {
-        rvId = tostring(record.rvId), generation = record.generation,
+        rvId = tostring(record.locoId), generation = record.generation,
     }, player)
     if not ok or accepted ~= true then
         print("[RailroaderRVTest] utility transition settlement failed phase="
@@ -273,7 +273,7 @@ end
 
 local function enterExisting(player, train, record, key, sourceRole,
     sourceSeat, sourcePosition, map)
-    local roofBlocked, roofReason = roofRefreshTransactionBlocks(record.rvId)
+    local roofBlocked, roofReason = roofRefreshTransactionBlocks(record.locoId)
     if roofBlocked then
         return false, roofReason
     end
@@ -455,18 +455,13 @@ local function commitGeneration(player, data, prepared)
     local locoId = tostring(data.locoId)
     local generation = integer(prepared and prepared.generation)
     local slotIndex = integer(prepared and prepared.slotIndex)
-    local anchor = copyPosition(data and data.anchor)
-    if not generation or not slotIndex
+    local anchor = RegionSlots.indexToAnchor(slotIndex)
+    if not generation or not anchor
         or slotIndex ~= integer(data and data.slotIndex)
-        or type(prepared.anchor) ~= "table" or not anchor
+        or type(prepared.anchor) ~= "table"
         or anchor.x ~= integer(prepared.anchor.x)
         or anchor.y ~= integer(prepared.anchor.y)
-        or anchor.z ~= integer(prepared.anchor.z)
-        or RegionSlots.indexForAnchor(anchor) ~= slotIndex
-        or RegionSlots.indexForRegion({ minX = data.region.minX,
-            minY = data.region.minY, maxX = data.region.maxX,
-            maxY = data.region.maxY }) ~= slotIndex
-        or not validRegion(data.region) then
+        or anchor.z ~= integer(prepared.anchor.z) then
         return false, C.INVALID_RV_DATA
     end
     for otherKey, other in pairs(map.locomotives or {}) do
@@ -475,7 +470,10 @@ local function commitGeneration(player, data, prepared)
             return false, "RV candidate slot became occupied before mapping commit"
         end
     end
-    if type(prepared.boundary) ~= "table" then
+    local boundary = Boundary and Boundary.boundaryFor({
+        locoId = locoId, generation = generation, slotIndex = slotIndex,
+    }) or nil
+    if type(boundary) ~= "table" then
         return false, "RV boundary manifest registration failed"
     end
     local record, key = recordForLoco(map, locoId)
@@ -503,31 +501,22 @@ local function commitGeneration(player, data, prepared)
     end
     candidateMap.locomotives[key] = candidateRecord
     local train = findTrain(locoId)
+    -- Durable record state only: identity, slot allocation and the two
+    -- cross-restart poses.  Anchor, region, bounds and shell edges are
+    -- derived from slotIndex and the compiled template when they are read.
     candidateRecord.generated = true
     candidateRecord.locoId = locoId
-    candidateRecord.rvId = locoId
     candidateRecord.generation = generation
     candidateRecord.slotIndex = slotIndex
-    candidateRecord.anchor = anchor
-    if not candidateRecord.slotIndex or not candidateRecord.anchor
-        or not validRegion(data.region) then return false, C.INVALID_RV_DATA end
-    candidateRecord.region = {
-        minX = integer(data.region.minX), minY = integer(data.region.minY),
-        maxX = integer(data.region.maxX), maxY = integer(data.region.maxY),
-        minZ = integer(data.region.minZ), maxZ = integer(data.region.maxZ),
-    }
     candidateRecord.rvPosition = copyPosition(data.rvPosition)
-    candidateRecord.enterPosition = copyPosition(data.entryPosition)
     candidateRecord.locoPosition = train and trainPose(train)
         or copyPose(data.locoPosition)
-    candidateRecord.boundary = prepared.boundary
-    if not candidateRecord.rvPosition or not candidateRecord.enterPosition
+    if not candidateRecord.slotIndex or not candidateRecord.rvPosition
         or not candidateRecord.locoPosition
         or number(candidateRecord.locoPosition.dirX) == nil
         or number(candidateRecord.locoPosition.dirY) == nil then
         return false, C.INVALID_RV_DATA
     end
-    candidateRecord.updatedAt = math.floor(os.time())
     local validatedOk, validated = pcall(validMappingRecord, candidateRecord)
     if not validatedOk or validated ~= true then
         return false, C.INVALID_RV_DATA
@@ -536,8 +525,8 @@ local function commitGeneration(player, data, prepared)
         key, player, data.entryPosition, data.sourceRole, data.sourceSeat)
     if not relationOk then return false, C.INVALID_RV_DATA end
     if not Boundary or type(Boundary.registerGeneration) ~= "function"
-        or Boundary.registerGeneration(candidateRecord.rvId,
-            candidateRecord.generation, candidateRecord.boundary,
+        or Boundary.registerGeneration(candidateRecord.locoId,
+            candidateRecord.generation, boundary,
             candidateRecord) ~= true then
         return false, C.INVALID_RV_DATA
     end
@@ -566,9 +555,11 @@ local function commitGeneration(player, data, prepared)
     -- settled post-commit refresh below broadcasts only after Mapping is current.
     local utilityOk, utilityAccepted, utilityReason = pcall(
         server.initializeUtilityRecord,
-        { rvId = candidateRecord.rvId, generation = candidateRecord.generation },
+        { rvId = candidateRecord.locoId,
+            generation = candidateRecord.generation },
         { identity = {
-            rvId = candidateRecord.rvId, generation = candidateRecord.generation,
+            rvId = candidateRecord.locoId,
+            generation = candidateRecord.generation,
         }, record = candidateRecord })
     if not utilityOk or utilityAccepted ~= true then
         map.locomotives, map.players = oldLocomotives, oldPlayers
@@ -578,7 +569,7 @@ local function commitGeneration(player, data, prepared)
     end
     if type(server.settleRVUtilityLoad) == "function" then
         local settleOk, settled, settleReason = pcall(server.settleRVUtilityLoad,
-            { rvId = tostring(candidateRecord.rvId),
+            { rvId = tostring(candidateRecord.locoId),
                 generation = candidateRecord.generation }, player)
         if not settleOk or settled ~= true then
             print("[RailroaderRVTest] new RV entry load refresh failed reason="
@@ -619,7 +610,7 @@ local function exitPlayer(player)
     if not record then
         return false, C.INVALID_RV_DATA
     end
-    local roofBlocked, roofReason = roofRefreshTransactionBlocks(record.rvId)
+    local roofBlocked, roofReason = roofRefreshTransactionBlocks(record.locoId)
     if roofBlocked then
         return false, roofReason
     end

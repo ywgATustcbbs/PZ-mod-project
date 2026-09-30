@@ -28,21 +28,19 @@ local function validContext(context, identity)
     local record = context and context.record
     if type(identity) ~= "table" or type(record) ~= "table"
         or context.authorized ~= true or context.phase ~= "READY"
-        or record.rvId ~= identity.rvId
-        or integer(record.generation) ~= integer(identity.generation)
-        or integer(record.slotIndex) == nil then
+        or tostring(record.locoId) ~= tostring(identity.rvId)
+        or integer(record.generation) ~= integer(identity.generation) then
         return false
     end
-    local expectedAnchor = RegionSlots.indexToAnchor(record.slotIndex)
-    local region = RegionSlots.indexToRegion(record.slotIndex)
-    local anchor = record.anchor
-    if not expectedAnchor or not region or type(anchor) ~= "table"
-        or anchor.x ~= expectedAnchor.x or anchor.y ~= expectedAnchor.y
-        or anchor.z ~= expectedAnchor.z
-        or RegionSlots.indexForAnchor(anchor) ~= record.slotIndex then
+    -- Slot allocation is the only durable coordinate fact; the anchor and the
+    -- region are derived from the current template matrix.
+    local slotIndex = integer(record.slotIndex)
+    local anchor = RegionSlots.indexToAnchor(slotIndex)
+    local region = RegionSlots.indexToRegion(slotIndex)
+    if not anchor or not region then
         return false
     end
-    return true, record, expectedAnchor, region
+    return true, record, anchor, region
 end
 
 local function withinReach(player, x, y, z)
@@ -151,9 +149,6 @@ function M.ensureSinkIdentity(object, identity, mappingRecord)
         role = "sink",
         rvId = identity.rvId,
         generation = identity.generation,
-        slotIndex = mappingRecord.slotIndex,
-        anchor = { x = mappingRecord.anchor.x, y = mappingRecord.anchor.y,
-            z = mappingRecord.anchor.z },
     }
     data[Catalog.WATER_TAG_KEY] = tag
     if Util.callSucceeded(object, "transmitModData")

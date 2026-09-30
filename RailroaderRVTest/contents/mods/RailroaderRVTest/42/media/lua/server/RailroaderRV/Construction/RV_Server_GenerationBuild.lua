@@ -1,6 +1,7 @@
 -- RV_Server: GenerationBuild responsibilities.
 return function(ctx)
-local MANIFEST_KEY = ctx.MANIFEST_KEY
+local C = ctx.Constants
+local MANIFEST_KEY = C.MANIFEST_KEY
 local Constants = ctx.Constants
 local Boundary = ctx.Boundary
 local ServerUtil = ctx.ServerUtil
@@ -32,24 +33,17 @@ safeErrorText = function(err)
     return text
 end
 
-local function setManifestState(manifest, state, reason)
-    manifest.state = state
-    manifest.updatedAt = math.floor(os.time())
-    if reason then
-        manifest.lastError = safeErrorText(reason)
-    end
-end
-
+-- The durable manifest holds only slot allocation and mutation state.  Every
+-- geometric or schema fact is derived from the compiled template at read time.
 local function manifestTable()
     return ModData.getOrCreate(MANIFEST_KEY)
 end
 
+local function setManifestState(manifest, state)
+    manifest.state = state
+end
+
 local function setGenerationPhase(manifest, generation, phase)
-    if manifest then
-        manifest.phase = phase
-        manifest.phaseGeneration = generation
-        manifest.phaseUpdatedAt = math.floor(os.time())
-    end
     print("[RailroaderRVTest] generation=" .. tostring(generation)
         .. " phase=" .. tostring(phase))
 end
@@ -122,8 +116,11 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
     -- Every feature point is part of the current shared layout contract.
     local anchor = layout.anchor
     local anchorX, anchorY, anchorZ = anchor.x, anchor.y, anchor.z
+    -- The object tags carry the current generation identity.  It comes from the
+    -- in-flight transaction, not from the durable manifest record.
+    local pending = GenerationTransaction.current()
     local tagContext = {
-        rvId = manifest.rvId,
+        rvId = pending and pending.rvId,
         anchorX = anchorX,
         anchorY = anchorY,
         anchorZ = anchorZ,
@@ -167,9 +164,10 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
     createGenerator(cell, generatorSquare, generatorSprite, generation, tagContext)
 end
 
+-- The generation failure marker is durable: it stops the same RV slot from
+-- being rebuilt silently after a rollback that did not complete.
 local function markGenerationFailed(manifest, errorText)
-    manifest.phase = "FAILED"
-    setManifestState(manifest, "FAILED", errorText)
+    if type(manifest) == "table" then manifest.state = "FAILED" end
     return true, nil
 end
 

@@ -469,15 +469,6 @@ local function roomOwnershipGuardKey(rvId, generation)
     return tostring(rvId) .. ":" .. tostring(generation)
 end
 
-local ROOF_COMPLETE_GENERATION_PHASES = {
-    STRUCTURE_RECALC = true,
-    GENERATOR = true,
-    COUNTER_SINK = true,
-    LIGHT = true,
-    FINAL_RELOCATE = true,
-    COMMITTED = true,
-}
-
 local function collectMaterializedRoofCoordinates(cell, bounds)
     local coordinates = {}
     local roofZ = ServerUtil.requiredInteger(bounds.roofZ,
@@ -701,7 +692,7 @@ local function armClientRoomOwnershipGuard(generation, oldBounds, newBounds,
     end
 end
 
-local function removeGeneration(cell, bounds, generation, rvId, generationPhase)
+local function removeGeneration(cell, bounds, generation, rvId, buildStage)
     if not cell or type(bounds) ~= "table"
         or ServerUtil.requiredInteger(generation, "rollback generation") < 1
         or type(rvId) ~= "string" or rvId == "" then
@@ -746,7 +737,7 @@ local function removeGeneration(cell, bounds, generation, rvId, generationPhase)
     -- build has passed the captured-object loop, rollback requires every
     -- captured roof-object host.
     local roofBuildComplete = guard.newRoofComplete == true
-        or ROOF_COMPLETE_GENERATION_PHASES[generationPhase] == true
+        or buildStage == "building"
     if roofBuildComplete then
         guard.newRoofCoordinates = nil
         guard.newRoofComplete = true

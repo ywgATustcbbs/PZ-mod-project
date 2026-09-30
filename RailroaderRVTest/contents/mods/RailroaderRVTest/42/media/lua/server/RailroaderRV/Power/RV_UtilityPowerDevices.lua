@@ -2,6 +2,7 @@
 -- The cache contains coordinates and primitive identity data, never IsoObject references.
 local C = require("RailroaderRV/Common/RV_Constants")
 local P = require("RailroaderRV/Power/RV_UtilityPowerConfig")
+local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local World = require("RailroaderRV/Common/RV_ServerWorld")
 local Util = require("RailroaderRV/Common/RV_ServerUtil")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
@@ -232,11 +233,9 @@ local function scanSquare(identity, player, x, y, z)
 end
 
 local function interior(record)
-    local anchor = type(record) == "table" and record.anchor or nil
-    if type(anchor) ~= "table" or Util.integer(anchor.x) == nil
-        or Util.integer(anchor.y) == nil or Util.integer(anchor.z) == nil then
-        return nil
-    end
+    local slotIndex = type(record) == "table" and record.slotIndex or nil
+    local anchor = slotIndex and RegionSlots.indexToAnchor(slotIndex) or nil
+    if not anchor then return nil end
     local coords, seen = {}, {}
     for _, box in ipairs(Template.misc.walkAabbs) do
         for z = box.minZ, box.maxZExclusive - 1 do
@@ -264,7 +263,9 @@ function M.scanAll(identity, record, player)
     if not squares then return false, "RV interior coordinates are invalid" end
     for i = 1, #squares do
         local square = squares[i]
-        scanSquare(identity, player, square.x, square.y, square.z)
+        if not scanSquare(identity, player, square.x, square.y, square.z) then
+            return false, "RV device square scan failed"
+        end
     end
     local key = Util.identityKey(identity.rvId, identity.generation)
     scans[key] = { cursor = 1 }

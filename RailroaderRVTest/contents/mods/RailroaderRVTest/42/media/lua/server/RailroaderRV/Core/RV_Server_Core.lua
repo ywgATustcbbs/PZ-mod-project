@@ -84,7 +84,7 @@ end
 -- command is offered to "*" first and then to a named handler.
 local function onCommand(command, callback)
     on("OnClientCommand", function(module, received, player, args)
-        if received ~= command then return end
+        if command ~= "*" and received ~= command then return end
         return callback(module, received, player, args)
     end)
 end

@@ -51,7 +51,7 @@ C.COMMAND_RV_UTILITY_ACK = "RVUtilityAck"
 C.COMMAND_RV_UTILITY_SNAPSHOT = "RVUtilitySnapshot"
 C.COMMAND_RV_UTILITY_MAPPING = "RVUtilityMapping"
 C.RV_MAP_KEY = "RailroaderRVTest.TrainMap"
-C.SAVE_SCHEMA_VERSION = 9
+C.SAVE_SCHEMA_VERSION = 10
 C.INVALID_RV_DATA = "RailroaderRVTest: RV data is invalid; delete this development test save and rebuild it"
 
 -- The current test button always targets this server-selected destination.

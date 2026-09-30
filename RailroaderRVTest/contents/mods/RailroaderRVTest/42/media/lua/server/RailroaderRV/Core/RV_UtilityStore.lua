@@ -77,7 +77,7 @@ local function newPower()
         maxChargePowerW = 0, maxDischargePowerW = 0, generationPowerW = 0,
         chargerEfficiency = PowerConfig.DEFAULT_CHARGER_EFFICIENCY,
         inverterEfficiency = PowerConfig.DEFAULT_INVERTER_EFFICIENCY,
-        batteries = {}, charger = nil, inverter = nil,
+        batteries = {}, nextBatteryId = 1, charger = nil, inverter = nil,
         lastUpdateTime = 0, lastSettlementTime = 0, sequence = 0,
         state = U.POWER_STATE_READY }
 end

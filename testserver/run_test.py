@@ -1340,6 +1340,8 @@ def initialize_ramdisk_caches(settings: Settings) -> None:
         role: str(destination.resolve())
         for role, (destination, _source) in requested.items()
     }
+    new_roles = dict(requested)
+    layout: dict[str, object] | None = None
 
     if marker is not None:
         if marker.get("version") != 1 or marker.get("root") != expected_root:
@@ -1356,7 +1358,9 @@ def initialize_ramdisk_caches(settings: Settings) -> None:
         if not isinstance(recorded, dict):
             raise RunnerError(f"RAM disk cache 布局缺少路径记录: {marker_path}")
         for role, (destination, _source) in requested.items():
-            if recorded.get(role) != str(destination.resolve()):
+            if role not in recorded:
+                continue
+            if recorded[role] != str(destination.resolve()):
                 raise RunnerError(
                     f"RAM disk {role} cache 路径与已有布局记录不一致: {marker_path}。"
                     "没有修改任何存档。"
@@ -1374,11 +1378,31 @@ def initialize_ramdisk_caches(settings: Settings) -> None:
                 f"Z: 剩余空间不足 128 MiB（当前 {free_bytes / (1024 * 1024):.1f} MiB）；"
                 "请先由用户清理 RAM disk 后再启动。脚本没有删除任何内容。"
             )
-        return
+        new_roles = {
+            role: entry for role, entry in requested.items() if role not in recorded
+        }
+        if not new_roles:
+            return
+
+        layout = dict(marker)
+        merged_caches = dict(recorded)
+        merged_caches.update(
+            {
+                role: str(destination.resolve())
+                for role, (destination, _source) in new_roles.items()
+            }
+        )
+        layout["caches"] = merged_caches
+        merged_sources = dict(marker.get("sources", {}))
+        merged_sources.update(
+            {role: str(source.resolve()) for role, (_destination, source) in new_roles.items()}
+        )
+        layout["sources"] = merged_sources
+        layout["status"] = "initializing"
 
     source_sizes: dict[str, int] = {}
     estimated_copy_bytes = 0
-    for role, (destination, source) in requested.items():
+    for role, (destination, source) in new_roles.items():
         if _is_reparse_point(destination):
             raise RunnerError(
                 f"Z: 目标 cache 是链接或 junction，拒绝接管: {destination}"
@@ -1404,17 +1428,18 @@ def initialize_ramdisk_caches(settings: Settings) -> None:
             "请清理 RAM disk 后重试。"
         )
 
-    layout: dict[str, object] = {
-        "version": 1,
-        "status": "initializing",
-        "root": expected_root,
-        "caches": expected_caches,
-        "sources": {
-            role: str(source.resolve()) for role, (_destination, source) in requested.items()
-        },
-    }
+    if layout is None:
+        layout = {
+            "version": 1,
+            "status": "initializing",
+            "root": expected_root,
+            "caches": expected_caches,
+            "sources": {
+                role: str(source.resolve()) for role, (_destination, source) in requested.items()
+            },
+        }
     _write_cache_layout(marker_path, layout)
-    for role, (destination, source) in requested.items():
+    for role, (destination, source) in new_roles.items():
         if destination.exists():
             _cache_tree_size(destination)
             log(f"采用已有且无工作区副本的 Z: {role} cache: {destination}")

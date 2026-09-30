@@ -7,7 +7,6 @@
 -- that runs RoofRefresh.run once every member is back inside.
 return function(ctx)
 local Core = require("RailroaderRV/Core/RV_Server_Core")
-local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local WallReload = require("RailroaderRV/WallReloadProtection/RV_WallReloadProtection")
 local RoofRefresh = require("RailroaderRV/RoofRefresh/RV_RoofRefresh")
 
@@ -26,6 +25,7 @@ local copyPosition = ctx.copyPosition
 local mapData = ctx.mapData
 local rvRegion = ctx.rvRegion
 local inRegion = ctx.inRegion
+local recordRegion = ctx.recordRegion
 local validRecord = ctx.validRecord
 local playerPositionInRegion = ctx.playerPositionInRegion
 
@@ -66,7 +66,7 @@ local function insidePlayersForRecord(map, record)
         return result
     end
     local wanted = tostring(record.locoId or "")
-    local region = RegionSlots.indexToRegion(integer(record.slotIndex))
+    local region = recordRegion(record)
     local players = Adapter.onlinePlayersSnapshot()
     local area = rvRegion()
     for i = 1, #players do

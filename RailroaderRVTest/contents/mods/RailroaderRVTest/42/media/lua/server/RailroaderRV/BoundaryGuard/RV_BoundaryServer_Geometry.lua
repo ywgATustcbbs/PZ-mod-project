@@ -9,6 +9,8 @@ local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
+-- Match BoundaryValidation's cache lifetime for players already tracked here.
+local VALIDATION_REFRESH_TICKS = 60
 
 local function number(value)
     if type(value) == "number" then return value end
@@ -351,8 +353,14 @@ end
 -- authoritatively inside this RV, or nil.
 local function guardContextForPlayer(player, position, knownIdentity,
     deferValidationMiss)
+    local stateIdentity = knownIdentity or identity(player)
+    local priorState = stateIdentity and Boundary._states[stateIdentity.key] or nil
+    local previousRefreshTick = priorState and priorState.validationRefreshTick
+    local forceValidationRefresh = priorState ~= nil
+        and (type(previousRefreshTick) ~= "number"
+            or (Boundary._tick - previousRefreshTick) >= VALIDATION_REFRESH_TICKS)
     local boundary, record, relation, id = Boundary.boundaryForPlayer(player,
-        knownIdentity, deferValidationMiss, false)
+        knownIdentity, deferValidationMiss, forceValidationRefresh)
     if not boundary or type(record) ~= "table" or type(id) ~= "table" then
         return nil
     end
@@ -368,6 +376,18 @@ local function guardContextForPlayer(player, position, knownIdentity,
         or type(rider) ~= "table" or rider.inside ~= true
         or integer(rider.onlineId) ~= currentOnlineId then
         return nil
+    end
+    local state = stateFor(player, id)
+    if not state then return nil end
+    if state.boundaryReference ~= boundary
+        or tostring(state.rvId) ~= tostring(boundary.rvId)
+        or integer(state.generation) ~= integer(boundary.generation) then
+        state.boundaryReference = boundary
+        state.rvId, state.generation = boundary.rvId, boundary.generation
+        state.validationRefreshTick = nil
+    end
+    if state.validationRefreshTick == nil or forceValidationRefresh then
+        state.validationRefreshTick = Boundary._tick
     end
     if type(position) ~= "table" or not currentSquareMatches(player, position) then
         return nil

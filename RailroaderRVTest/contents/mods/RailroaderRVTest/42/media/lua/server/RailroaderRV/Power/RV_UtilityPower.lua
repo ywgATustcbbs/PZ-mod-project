@@ -373,6 +373,27 @@ local function resolveFuelSource(player, hint)
     return true, found, container, amount, petrol
 end
 
+local function restorePetrolAmount(container, petrol, expectedAmount)
+    local currentOk, currentAmount = invoke(container, "getAmount")
+    currentAmount = currentOk and Util.toNumber(currentAmount) or nil
+    if not finite(currentAmount)
+        or currentAmount > expectedAmount + P.NUMERIC_EPSILON then
+        return false
+    end
+    local missing = math.max(0, expectedAmount - currentAmount)
+    local addOk, addResult = true, nil
+    if missing > P.NUMERIC_EPSILON then
+        addOk, addResult = invoke(container, "addFluid", petrol, missing)
+    end
+    local amountOk, restoredAmount = invoke(container, "getAmount")
+    local containsOk, contains = invoke(container, "contains", petrol)
+    local mixtureOk, mixture = invoke(container, "isMixture")
+    restoredAmount = amountOk and Util.toNumber(restoredAmount) or nil
+    return addOk and addResult ~= false and finite(restoredAmount)
+        and math.abs(restoredAmount - expectedAmount) <= P.NUMERIC_EPSILON
+        and containsOk and contains == true and mixtureOk and mixture == false
+end
+
 function M.addFuel(identity, context, hint)
     local recordOk, recordOrReason = Store.getRecord(identity, false)
     if not recordOk then return false, recordOrReason end
@@ -390,6 +411,9 @@ function M.addFuel(identity, context, hint)
     if not removeOk or removeResult == false or not finite(after)
         or confirmed == nil or confirmed <= P.NUMERIC_EPSILON
         or confirmed > transfer + P.NUMERIC_EPSILON then
+        if not restorePetrolAmount(container, petrol, amount) then
+            return false, U.REASONS.POSTCONDITION_FAILED
+        end
         return false, U.REASONS.API_ERROR
     end
     power.virtualFuelL = math.min(P.VIRTUAL_FUEL_CAPACITY_L,
@@ -398,8 +422,9 @@ function M.addFuel(identity, context, hint)
     local saved, reason = commit(recordOrReason, identity)
     if not saved then
         -- The canonical record did not accept the fuel: return it to the can.
-        local givenBack = invoke(container, "addFluid", petrol, confirmed)
-        if not givenBack then return false, U.REASONS.POSTCONDITION_FAILED end
+        if not restorePetrolAmount(container, petrol, amount) then
+            return false, U.REASONS.POSTCONDITION_FAILED
+        end
         return false, reason
     end
     return true, { record = recordOrReason }
@@ -423,11 +448,10 @@ function M.addBattery(identity, context, hint)
     local values = P.batteryParameters(condition, maxCondition)
     if not values or values.capacityWh <= 0 then return false, U.REASONS.SOURCE_INVALID end
     local power = recordOrReason.power
-    -- The identifier only labels a slot in this list; it is derived here instead
-    -- of being stored, so it can never drift from the battery array.
-    local battery = { id = #power.batteries + 1, fullType = fullType,
+    local battery = { id = power.nextBatteryId, fullType = fullType,
         condition = condition, maxCondition = maxCondition, usedDelta = usedDelta }
     power.batteries[#power.batteries + 1] = battery
+    power.nextBatteryId = power.nextBatteryId + 1
     -- Item charge contributes proportionally; condition independently shapes pack capacity.
     power.batteryWh = power.batteryWh + values.capacityWh * usedDelta
     recomputeBatteryPack(power)
@@ -647,6 +671,7 @@ end
 
 function M.snapshot(record, identity, context)
     local result = Store.snapshot(record).power
+    result.nextBatteryId = nil
     -- The load is a live reading of the resolved device cache, not ledger state;
     -- compute it here so the client never reads a stale persisted copy.
     result.currentLoadW = Devices.currentLoadW(identity)

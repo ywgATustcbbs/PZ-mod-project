@@ -72,6 +72,7 @@ end
 local RV = rawget(_G, "RailroaderRV") or {}
 rawset(_G, "RailroaderRV", RV)
 RV.Server = RV.Server or {}
+RV.Server.isGenerationTransactionActive = GenerationTransaction.isActive
 
 -- Generic invocation, numeric validation, and shared layout checks live in a
 -- separate require chunk.  Keeping this facade focused on the transaction and

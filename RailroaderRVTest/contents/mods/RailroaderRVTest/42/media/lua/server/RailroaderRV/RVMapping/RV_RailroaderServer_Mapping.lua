@@ -57,13 +57,6 @@ local function rvRegion(anchor)
         maxY = minY + size * RegionSlots.ROWS, minZ = minZ, maxZ = maxZ }
 end
 
-local function regionForAnchor(anchor)
-    local envelope = rvRegion(anchor)
-    envelope.maxX = envelope.minX + integer(C.RV_REGION_SIZE)
-    envelope.maxY = envelope.minY + integer(C.RV_REGION_SIZE)
-    return envelope
-end
-
 local function playerPositionInRegion(player, region)
     if not player or type(region) ~= "table" then return nil end
     local zOk, z = call(player, "getZ")
@@ -120,7 +113,10 @@ local function validRegion(region)
 end
 
 local function recordRegion(record)
-    return RegionSlots.indexToRegion(integer(record and record.slotIndex))
+    local region = RegionSlots.indexToRegion(integer(record and record.slotIndex))
+    region.minZ = integer(C.RV_IDENTITY_MIN_Z)
+    region.maxZ = integer(C.RV_IDENTITY_MAX_Z)
+    return region
 end
 
 local function validMappingRecord(record)
@@ -155,7 +151,9 @@ boundaryValidation = require("RailroaderRV/BoundaryGuard/RV_RailroaderServer_Bou
     playerPositionInRegion = playerPositionInRegion,
     recordForLoco = recordForLoco,
     validRecord = validRecord,
-    serverTransactionMutexStatus = serverTransactionMutexStatus,
+    serverTransactionMutexStatus = function()
+        return ctx.serverTransactionMutexStatus()
+    end,
     integer = integer,
     playerId = playerId,
     playerName = playerName,
@@ -253,8 +251,7 @@ local function allocateRVRegion(locoId)
             local slotIndex = integer(existing.slotIndex)
             local anchor = RegionSlots.indexToAnchor(slotIndex)
             if not anchor then return false, C.INVALID_RV_DATA end
-            return true, slotIndex, anchor,
-                RegionSlots.indexToRegion(slotIndex), integer(existing.generation)
+            return true, slotIndex, anchor, integer(existing.generation)
         end
     end
     local occupied, occupiedSlots = {}, {}
@@ -277,7 +274,7 @@ local function allocateRVRegion(locoId)
     if not slotIndex or type(anchor) ~= "table" then
         return false, slotIndex == nil and "no free RV region slot" or C.INVALID_RV_DATA
     end
-    return true, slotIndex, anchor, regionForAnchor(anchor)
+    return true, slotIndex, anchor
 end
 
 local function currentMappingRecord(rvId, generation)
@@ -302,6 +299,8 @@ ctx.inRegion = inRegion
 ctx.validRegion = validRegion
 ctx.validMappingRecord = validMappingRecord
 ctx.validRecord = validRecord
+ctx.recordRegion = recordRegion
+ctx.playerPositionInRegion = playerPositionInRegion
 ctx.refreshRoofForPlayer = refreshRoofForPlayer
 ctx.armRoomOwnershipMonitor = armRoomOwnershipMonitor
 ctx.recordAtPlayerCoordinate = recordAtPlayerCoordinate

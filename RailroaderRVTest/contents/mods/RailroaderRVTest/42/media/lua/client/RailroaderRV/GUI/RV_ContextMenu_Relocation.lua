@@ -64,8 +64,8 @@ end
 -- streaming from teleporting to and acknowledging a destination square it has
 -- not loaded yet; the server's relocation timeout bounds the wait.
 local function destinationSquareIsLoaded(x, y, z)
-    local targetX = finiteInteger(x)
-    local targetY = finiteInteger(y)
+    local targetX = finiteNumber(x)
+    local targetY = finiteNumber(y)
     local targetZ = finiteInteger(z)
     if targetX == nil or targetY == nil or targetZ == nil then
         return false
@@ -75,7 +75,7 @@ local function destinationSquareIsLoaded(x, y, z)
         return false
     end
     local squareCallOk, square = pcall(function()
-        return cell:getGridSquare(targetX, targetY, targetZ)
+        return cell:getGridSquare(math.floor(targetX), math.floor(targetY), targetZ)
     end)
     return squareCallOk and square ~= nil
 end

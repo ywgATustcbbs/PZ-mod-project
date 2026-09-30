@@ -261,6 +261,9 @@ local function processPendingGeneration()
         end
         return
     end
+
+    error("RailroaderRVTest: unknown generation transaction stage "
+        .. tostring(record.stage), 0)
 end
 
 function RV.Server.OnTick(tick)

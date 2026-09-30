@@ -17,11 +17,6 @@ local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
-local templateValid, templateError = RoomTemplate.validate(Template)
-if not templateValid or type(templateObjects) ~= "table" then
-    error("RailroaderRVTest: current boundary RoomTemplate is invalid: "
-        .. tostring(templateError or "ordered object index is incomplete"))
-end
 
 local function objectModData(object)
     local ok, data = call(object, "getModData")

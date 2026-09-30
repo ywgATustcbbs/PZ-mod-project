@@ -45,28 +45,8 @@ local relocationPositionsEqual = ctx.relocationPositionsEqual
 -- Generation staging belongs to this flow: roof refresh has a separate
 -- remote relocation contract and must not publish these generation helpers.
 local function selectGenerationStagingDestination(layout, bounds)
-    if type(layout) ~= "table" or type(bounds) ~= "table"
-        or type(layout.managed) ~= "table" then
-        error("RailroaderRVTest: generation staging contract is incomplete")
-    end
-    local originX = ServerUtil.requiredInteger(bounds.managedOriginX,
-        "generation managed origin x")
-    local originY = ServerUtil.requiredInteger(bounds.managedOriginY,
-        "generation managed origin y")
-    local width = ServerUtil.requiredInteger(bounds.managedWidth,
-        "generation managed width")
-    local height = ServerUtil.requiredInteger(bounds.managedHeight,
-        "generation managed height")
-    if width ~= ServerUtil.requiredInteger(layout.managed.width, "generation managed width")
-        or height ~= ServerUtil.requiredInteger(layout.managed.height,
-            "generation managed height")
-        or originX ~= ServerUtil.requiredInteger(layout.managed.originX,
-            "generation managed origin x")
-        or originY ~= ServerUtil.requiredInteger(layout.managed.originY,
-            "generation managed origin y")
-        or width <= 0 or height <= 0 then
-        error("RailroaderRVTest: generation staging geometry is stale")
-    end
+    local originX, originY = bounds.managedOriginX, bounds.managedOriginY
+    local width, height = bounds.managedWidth, bounds.managedHeight
     local destination = {
         x = originX + math.floor(width / 2),
         y = originY + math.floor(height / 2),
@@ -108,15 +88,12 @@ local function playerIsAtStagingDestination(player, destination, bounds)
     return false, "generation staging destination identity is stale"
 end
 
-local function validateRequest(module, command, player, args)
+local function validateRequest(module, command, player)
     if module ~= COMMAND_MODULE then
         return false, "invalid command module"
     end
     if command ~= COMMAND then
         return false, "invalid command"
-    end
-    if not ServerUtil.isEmptyCommandArgs(args) then
-        return false, "command args must be nil or an empty table"
     end
     local ok, positionOrReason = validateAuthoritativePlayer(player)
     if not ok then
@@ -135,22 +112,14 @@ end
 local function relocatePlayerIntoHouse(player, prepared)
     local destination = prepared.finalDestination
     local anchor = prepared.anchor
-    if type(destination) ~= "table" or type(anchor) ~= "table" then
-        error("RailroaderRVTest: final relocation contract is incomplete")
-    end
-    local x = ServerUtil.requiredNumber(destination.x, "final relocation x")
-    local y = ServerUtil.requiredNumber(destination.y, "final relocation y")
-    local z = ServerUtil.requiredNumber(destination.z, "final relocation z")
-    local anchorX = ServerUtil.requiredInteger(anchor.x, "final relocation anchor x")
-    local anchorY = ServerUtil.requiredInteger(anchor.y, "final relocation anchor y")
-    local anchorZ = ServerUtil.requiredInteger(anchor.z, "final relocation anchor z")
+    local x, y, z = destination.x, destination.y, destination.z
+    local anchorX, anchorY, anchorZ = anchor.x, anchor.y, anchor.z
     if x ~= anchorX + 0.5 or y ~= anchorY + 0.5 or z ~= anchorZ then
         error("RailroaderRVTest: final relocation is not the house interior center")
     end
     local finalPayload = {
             token = prepared.token,
-            generation = ServerUtil.requiredInteger(prepared.generation,
-                "final relocation generation"),
+            generation = prepared.generation,
             rvId = tostring(prepared.rvId),
             onlineId = prepared.identity.onlineId,
             x = x,
@@ -161,7 +130,7 @@ local function relocatePlayerIntoHouse(player, prepared)
     -- only a transition hint so the client adapter can run Ride.dismount(true)
     -- before this final RV teleport; seat truth still comes from Railroader's
     -- next server snapshot.
-    if type(prepared.railroader) == "table" then
+    if prepared.railroader then
         finalPayload.railroaderTransition = true
         finalPayload.action = "enter"
         finalPayload.locoId = prepared.railroader.locoId
@@ -204,33 +173,16 @@ local function relocatePlayerIntoHouse(player, prepared)
 end
 
 local function generateForPlayer(player, prepared)
-    if type(GenerationTransaction) ~= "table"
-        or type(GenerationTransaction.advanceStage) ~= "function"
-        or GenerationTransaction.owns(player) ~= true
+    if GenerationTransaction.owns(player) ~= true
         or GenerationTransaction.advanceStage("building") ~= true then
         return false, "generation already in progress"
     end
     prepared = GenerationTransaction.current()
-    if type(prepared) ~= "table" or type(prepared.layout) ~= "table"
-        or type(prepared.bounds) ~= "table" or type(prepared.anchor) ~= "table"
-        or type(prepared.destination) ~= "table"
-        or type(prepared.stagingDestination) ~= "table"
-        or type(prepared.finalDestination) ~= "table" then
-        return false, "prepared generation plan is incomplete"
-    end
     if prepared.oldBounds ~= nil then
         return false, "RailroaderRVTest: same-slot rebuild is refused because "
             .. "the previous generation has no complete undo snapshot"
     end
-    local manifest
-    local manifestOk, manifestOrError = pcall(manifestTable)
-    if not manifestOk or type(manifestOrError) ~= "table" then
-        if Boundary and type(Boundary.clearPlayer) == "function" then
-            Boundary.clearPlayer(player)
-        end
-        return false, safeErrorText(manifestOrError)
-    end
-    manifest = manifestOrError
+    local manifest = manifestTable()
     if manifest.state == "RUNNING" then
         if Boundary and type(Boundary.clearPlayer) == "function" then
             Boundary.clearPlayer(player)
@@ -288,37 +240,26 @@ local function generateForPlayer(player, prepared)
         -- mutation. Managed squares are sparse: cleanup inspects existing
         -- squares, while the build pass creates only captured-object hosts.
         ServerSchema.preflightLoaded(cell, bounds)
-        local generation = ServerUtil.requiredInteger(prepared.generation,
-            "prepared RV generation")
+        local generation = prepared.generation
         if not Boundary then
             error("RailroaderRVTest: RV boundary service is unavailable")
         end
         local rvId = prepared.rvId
-        local boundaryOk, boundaryOrReason = pcall(Boundary.makeBoundary,
-            layout, rvId, generation)
-        if not boundaryOk or type(boundaryOrReason) ~= "table" then
-            error(boundaryOk and "RailroaderRVTest: boundary manifest is unavailable"
-                or safeErrorText(boundaryOrReason))
-        end
+        local boundaryOrReason = Boundary.makeBoundary(layout, rvId, generation)
         prepared.rvId = tostring(rvId)
         prepared.boundary = boundaryOrReason
         local construction = ctx.constructionService
-        if type(construction) ~= "table"
-            or type(construction.preflightCurrentGeneration) ~= "function" then
-            error("RailroaderRVTest: Construction clear preflight is unavailable")
-        end
-        local preflightOk, preflightAccepted, preflightReason = pcall(
-            construction.preflightCurrentGeneration, player, cell, layout,
+        local preflightAccepted, preflightReason =
+            construction.preflightCurrentGeneration(player, cell, layout,
             bounds, generation, {
                 rvId = prepared.rvId,
                 generation = generation,
                 slotIndex = prepared.slotIndex,
                 anchor = anchor,
             }, manifest)
-        if not preflightOk or preflightAccepted ~= true then
-            error(preflightOk and (preflightReason
+        if preflightAccepted ~= true then
+            error(preflightReason
                 or "RailroaderRVTest: Construction target preflight was rejected")
-                or safeErrorText(preflightAccepted))
         end
         -- Arm every connected client before any old captured object is removed.
         -- Reliable packet order installs the guard before the following world
@@ -578,94 +519,70 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         return false, originalPosition
     end
 
-    local manifestOk, manifestOrError = pcall(manifestTable)
-    if not manifestOk or type(manifestOrError) ~= "table" then
-        return false, safeErrorText(manifestOrError)
-    end
-    local manifest = manifestOrError
+    local manifest = manifestTable()
     if manifest.state == "RUNNING" then
         return false, "generation already in progress"
     end
 
-    -- Capture the selected free-slot plan before relocation. It is never
-    -- recomputed from the client, and the client contributes no coordinates.
-    local planOk, layoutOrError, bounds, destination, finalDestination,
-        stagingDestination, oldBounds, slotIndex, rvId, generation = pcall(function()
-        local allocated, selectedSlot, anchor, region, priorGeneration =
-            allocateRVRegion(railroaderData and railroaderData.locoId or nil)
-        if allocated ~= true or type(anchor) ~= "table"
-            or type(region) ~= "table" then
-            error(selectedSlot or Constants.INVALID_RV_DATA)
-        end
-        local slotIndex = ServerUtil.requiredInteger(selectedSlot,
-            "allocated RV slot index")
-        local targetX = ServerUtil.requiredInteger(anchor.x,
-            "allocated RV target x")
-        local targetY = ServerUtil.requiredInteger(anchor.y,
-            "allocated RV target y")
-        local targetZ = ServerUtil.requiredInteger(anchor.z,
-            "allocated RV target z")
-        local rvId = railroaderData and tostring(railroaderData.locoId)
-            or ("technical:slot:" .. tostring(slotIndex))
-        local oldBounds = nil
-        if manifest.generation ~= nil then
-            local manifestRvId = tostring(manifest.rvId)
-            local manifestSlot = ServerUtil.integer(manifest.slotIndex)
-            local expectedTechnicalId = "technical:slot:" .. tostring(slotIndex)
-            if manifestSlot == slotIndex
-                and (manifestRvId == rvId
-                    or manifestRvId == expectedTechnicalId) then
-                error("RailroaderRVTest: same-slot rebuild is refused because "
-                    .. "the previous generation has no complete undo snapshot")
-            elseif manifestSlot == slotIndex or manifestRvId == rvId then
-                error("current generation identity does not match the selected RV slot")
-            end
-        end
-        if priorGeneration ~= nil and oldBounds == nil then
-            error("RailroaderRVTest: same-slot rebuild is refused because "
-                .. "the previous generation has no complete undo snapshot")
-        end
-        if manifest.state == "FAILED" and manifest.rollback == "FAILED"
-            and (ServerUtil.integer(manifest.slotIndex) == slotIndex
-                or tostring(manifest.rvId) == rvId) then
-            error("previous generation rollback failed; remove this test save and rebuild")
-        end
-        local generationBase = priorGeneration
-        local generation = generationBase ~= nil and generationBase + 1 or 1
-        if railroaderData then
-            railroaderData.slotIndex = slotIndex
-            railroaderData.anchor = { x = targetX, y = targetY, z = targetZ }
-            railroaderData.region = region
-            railroaderData.rvPosition = { x = targetX + 0.5,
-                y = targetY + 0.5, z = targetZ }
-        end
-        local layout = ServerUtil.makeLayout(targetX, targetY, targetZ)
-        local plannedBounds = ServerSchema.boundsFor(layout)
-        local destination = { x = targetX, y = targetY, z = targetZ }
-        local finalDestination = {
-            x = targetX + 0.5,
-            y = targetY + 0.5,
-            z = targetZ,
-        }
-        -- This is a pure world-coordinate legality check.  It must precede
-        -- both network relocation and the authoritative server teleport; it
-        -- intentionally does not inspect loaded target squares.
-        ServerSchema.validateTargetCoordinates(plannedBounds, destination)
-        local stagingDestination = selectGenerationStagingDestination(layout,
-            plannedBounds)
-        return layout, plannedBounds, destination, finalDestination,
-            stagingDestination, oldBounds, slotIndex, rvId, generation
-    end)
-    if not planOk then
-        return false, safeErrorText(layoutOrError)
+    -- The client supplies intent only. The server allocates the region and
+    -- builds the template plan from that authoritative anchor.
+    local allocated, selectedSlot, anchor, region, priorGeneration =
+        allocateRVRegion(railroaderData and railroaderData.locoId or nil)
+    if allocated ~= true then
+        return false, selectedSlot or "no free RV region slot"
     end
-
+    local slotIndex = selectedSlot
+    local targetX, targetY, targetZ = anchor.x, anchor.y, anchor.z
+    local rvId = railroaderData and tostring(railroaderData.locoId)
+        or ("technical:slot:" .. tostring(slotIndex))
+    local oldBounds
+    if manifest.generation ~= nil then
+        local manifestRvId = tostring(manifest.rvId)
+        local manifestSlot = manifest.slotIndex
+        local expectedTechnicalId = "technical:slot:" .. tostring(slotIndex)
+        if manifestSlot == slotIndex
+            and (manifestRvId == rvId
+                or manifestRvId == expectedTechnicalId) then
+            return false, "RailroaderRVTest: same-slot rebuild is refused because "
+                .. "the previous generation has no complete undo snapshot"
+        elseif manifestSlot == slotIndex or manifestRvId == rvId then
+            return false, "current generation identity does not match the selected RV slot"
+        end
+    end
+    if priorGeneration ~= nil then
+        return false, "RailroaderRVTest: same-slot rebuild is refused because "
+            .. "the previous generation has no complete undo snapshot"
+    end
+    if manifest.state == "FAILED" and manifest.rollback == "FAILED"
+        and (manifest.slotIndex == slotIndex or tostring(manifest.rvId) == rvId) then
+        return false, "previous generation rollback failed; remove this test save and rebuild"
+    end
+    local generation = priorGeneration ~= nil and priorGeneration + 1 or 1
+    if railroaderData then
+        railroaderData.slotIndex = slotIndex
+        railroaderData.anchor = { x = targetX, y = targetY, z = targetZ }
+        railroaderData.region = region
+        railroaderData.rvPosition = { x = targetX + 0.5,
+            y = targetY + 0.5, z = targetZ }
+    end
+    local layout = ServerUtil.makeLayout(targetX, targetY, targetZ)
+    local bounds = ServerSchema.boundsFor(layout)
+    local destination = { x = targetX, y = targetY, z = targetZ }
+    local finalDestination = {
+        x = targetX + 0.5,
+        y = targetY + 0.5,
+        z = targetZ,
+    }
+    -- Check map coordinates before either relocation. This is a live world
+    -- boundary check, not a second validation of the compiled layout.
+    ServerSchema.validateTargetCoordinates(bounds, destination)
+    local stagingDestination = selectGenerationStagingDestination(layout, bounds)
     ctx.pendingSerial = ctx.pendingSerial + 1
     local token = identityOrReason.key .. ":" .. Core.formatTick(ctx.serverTick)
         .. ":" .. tostring(ctx.pendingSerial)
     local transitionRvId = rvId
     local transitionGeneration = generation
-    if type(railroaderData) == "table" then
+    if railroaderData then
         -- Keep the generation identity on the adapter's asynchronous payload.
         railroaderData.rvId = tostring(transitionRvId)
         railroaderData.generation = transitionGeneration
@@ -688,7 +605,7 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         relocationRetryAtTick = ctx.serverTick,
         relocationNeedsResend = false,
         disconnectStartedTick = nil,
-        layout = layoutOrError,
+        layout = layout,
         bounds = bounds,
         slotIndex = slotIndex,
         oldBounds = oldBounds,
@@ -742,14 +659,11 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         generationTransition = true,
         generationPhase = "temporary",
     }
-    -- Re-assert the generation identity after payload construction.
-    relocatePayload.rvId = tostring(transitionRvId)
-    relocatePayload.generation = transitionGeneration
     -- Only a Railroader-backed generation carries a local Ride transition
     -- hint.  The marker is intentionally server-created and is not part of
     -- the ordinary technical Generate protocol; its coordinates remain the
     -- server-selected staging destination above.
-    if type(railroaderData) == "table" then
+    if railroaderData then
         relocatePayload.railroaderTransition = true
         relocatePayload.action = "enter"
         relocatePayload.locoId = railroaderData.locoId

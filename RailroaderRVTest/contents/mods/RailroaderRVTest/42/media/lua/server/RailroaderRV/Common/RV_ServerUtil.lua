@@ -18,35 +18,6 @@ local toNumber = Common.toNumber
 local isFiniteNumber = Common.isFiniteNumber
 local integer = Common.integer
 
-local function tableIsEmpty(value)
-    if type(value) ~= "table" then
-        return false
-    end
-    -- Kahlua's server environment does not expose Lua's global `next`.
-    for _ in pairs(value) do
-        return false
-    end
-    return true
-end
-
-local function isEmptyCommandArgs(args)
-    -- GameServer.receiveClientCommand passes nil when the wire packet has no
-    -- args table.  This is the canonical representation for this command.
-    if args == nil then
-        return true
-    end
-    -- The current empty-payload contract also accepts the B42 network table
-    -- representation; every non-empty or unrelated value remains rejected.
-    if type(args) == "table" then
-        return tableIsEmpty(args)
-    end
-    if not classInstance(args, "PZNetKahluaTableImpl") then
-        return false
-    end
-    local ok, size = invoke(args, "size")
-    return ok and toNumber(size) == 0
-end
-
 local function requiredNumber(value, label)
     local number = toNumber(value)
     if not isFiniteNumber(number) then
@@ -98,8 +69,6 @@ M.identityKey = Common.identityKey
 M.getPlayerPosition = Common.getPlayerPosition
 M.getSquare = Common.getSquare
 M.newPlayerPositionCache = Common.newPlayerPositionCache
-M.tableIsEmpty = tableIsEmpty
-M.isEmptyCommandArgs = isEmptyCommandArgs
 M.requiredNumber = requiredNumber
 M.requiredInteger = requiredInteger
 M.floorInt = floorInt

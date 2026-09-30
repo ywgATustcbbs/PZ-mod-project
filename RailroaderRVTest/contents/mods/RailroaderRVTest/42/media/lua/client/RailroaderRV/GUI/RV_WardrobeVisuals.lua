@@ -5,13 +5,7 @@
 local C = require "RailroaderRV/Common/RV_Constants"
 local RoomTemplate = require "RailroaderRV/RoomTemplate/RV_RoomTemplate"
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
-local ProtectionManifest = require "RailroaderRV/RoomTemplate/RV_ProtectionManifest"
-
-local templateValid, templateError = RoomTemplate.validate(Template)
-if not templateValid then
-    error("RailroaderRVTest: current wardrobe RoomTemplate is invalid: "
-        .. tostring(templateError))
-end
+local templateObjects = RoomTemplate.orderedObjects(Template)
 
 local wardrobeSpritesByY = {
     [-2] = "furniture_storage_01_25",
@@ -45,7 +39,7 @@ local function isWardrobeTemplateEntry(entry)
         and entry.x == -5 and entry.z == 0
         and wardrobeSpritesByY[entry.y] == entry.sprite
         and entry.north == true and entry.direction == "N"
-        and entry.protectionClass == ProtectionManifest.PROHIBITED
+        and entry.protected == true
         and type(entry.state) == "table" and entry.state.doRender == false
 end
 
@@ -67,7 +61,7 @@ local function isTaggedWardrobe(object)
 
     local templateIndex = C.finiteInteger(tag.templateIndex)
     if templateIndex == nil or templateIndex < 1 then return false end
-    local entry = ProtectionManifest.get(templateIndex)
+    local entry = templateObjects[templateIndex]
     local anchorX, anchorY, anchorZ = C.finiteInteger(tag.templateAnchorX),
         C.finiteInteger(tag.templateAnchorY), C.finiteInteger(tag.templateAnchorZ)
     if not isWardrobeTemplateEntry(entry)
@@ -76,7 +70,7 @@ local function isTaggedWardrobe(object)
         or tag.templateSprite ~= entry.sprite
         or tag.templateNorth ~= entry.north
         or tag.templateDirection ~= entry.direction
-        or C.finiteInteger(tag.protectionClass) ~= entry.protectionClass
+        or tag.protected ~= entry.protected
         or C.finiteInteger(tag.templateX) ~= entry.x
         or C.finiteInteger(tag.templateY) ~= entry.y
         or C.finiteInteger(tag.templateZ) ~= entry.z

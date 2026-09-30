@@ -4,16 +4,9 @@ local C = require "RailroaderRV/Common/RV_Constants"
 local BoundaryClient = require "RailroaderRV/GUI/RV_BoundaryClient"
 local RoomTemplate = require "RailroaderRV/RoomTemplate/RV_RoomTemplate"
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
-local ProtectionManifest = require "RailroaderRV/RoomTemplate/RV_ProtectionManifest"
 local TemplateGeometry = require "RailroaderRV/RoomTemplate/RV_TemplateGeometry"
 require "TimedActions/ISDestroyStuffAction"
 require "TimedActions/ISDismantleAction"
-
-local templateValid, templateError = RoomTemplate.validate(Template)
-if not templateValid then
-    error("RailroaderRVTest: current demolition RoomTemplate is invalid: "
-        .. tostring(templateError))
-end
 
 local templateRoles = {
     ["captured-template"] = true,
@@ -33,7 +26,7 @@ end
 
 local objectCoordinates
 local function tagMatchesStaticIdentity(tag, expected, templateIndex,
-    protectionClass)
+    protected)
     if type(tag) ~= "table" or type(expected) ~= "table"
         or C.finiteInteger(tag.templateIndex) ~= templateIndex
         or C.finiteInteger(tag.templateX) ~= expected.x
@@ -43,7 +36,7 @@ local function tagMatchesStaticIdentity(tag, expected, templateIndex,
         or tag.templateName ~= expected.name
         or tag.templateSprite ~= expected.sprite
         or tag.templateDirection ~= expected.direction
-        or C.finiteInteger(tag.protectionClass) ~= protectionClass then
+        or tag.protected ~= protected then
         return false
     end
     if expected.north == "none" then
@@ -137,12 +130,12 @@ local function rejectInvalidRVData(character, reason)
 end
 
 local function objectMatchesStaticIdentity(object, tag, expected,
-    templateIndex, protectionClass)
+    templateIndex, protected)
     local function fail(reason, detail)
         return false
     end
     if not tagMatchesStaticIdentity(tag, expected, templateIndex,
-        protectionClass) then
+        protected) then
         return fail("template-tag-static-fields-mismatch")
     end
     local indexOk, objectIndex = call(object, "getObjectIndex")
@@ -194,10 +187,9 @@ end
 local function resolveTemplateObject(object, tag)
     local index = C.finiteInteger(tag and tag.templateIndex)
     if index == nil then return nil, "template-index-unavailable" end
-    local indexedObject, indexedAt, indexedProtection =
-        TemplateGeometry.lookupObjectByIndex(index, Template, ProtectionManifest)
-    if type(indexedObject) ~= "table" or indexedAt ~= index
-        or type(indexedProtection) ~= "table" then
+    local indexedObject, indexedAt =
+        TemplateGeometry.lookupObjectByIndex(index, Template)
+    if type(indexedObject) ~= "table" or indexedAt ~= index then
         return nil, "template-index-unrecognized"
     end
 
@@ -218,12 +210,12 @@ local function resolveTemplateObject(object, tag)
     if type(offset) ~= "table" then return nil, "world-to-template-failed" end
 
     local matches = TemplateGeometry.lookupObjectsAtWorld(world, anchor,
-        Template, ProtectionManifest)
+        Template)
     if type(matches) ~= "table" then return nil, "template-world-lookup-failed" end
     for i = 1, #matches do
         local match = matches[i]
         if match.index == index then
-            return match.object, match.index, match.protection, anchor, world, offset
+            return match.object, match.index, anchor, world, offset
         end
     end
     return nil, "template-index-does-not-match-world-coordinate"
@@ -246,7 +238,7 @@ local function isCurrentProhibitedObject(object, character)
     end
 
     local hasTemplateMarker = type(tag) == "table"
-        and (tag.templateIndex ~= nil or tag.protectionClass ~= nil
+        and (tag.templateIndex ~= nil or tag.protected ~= nil
             or templateRoles[tag.role] == true)
         or templateRoles[data.role] == true
     if not hasTemplateMarker then
@@ -263,16 +255,16 @@ local function isCurrentProhibitedObject(object, character)
         return rejectInvalidRVData(character, tagFailure)
     end
 
-    local expected, index, protection, anchor, world =
+    local expected, index, anchor, world =
         resolveTemplateObject(object, tag)
     if not expected then
         return rejectInvalidRVData(character,
             index or "template-object-unrecognized")
     end
     if not tagMatchesStaticIdentity(tag, expected, index,
-        protection.protectionClass)
+        expected.protected)
         or not objectMatchesStaticIdentity(object, tag, expected, index,
-            protection.protectionClass) then
+            expected.protected) then
         return rejectInvalidRVData(character, "template-static-identity-mismatch")
     end
     if TemplateGeometry.cabContainsWorld(world, anchor, Template) then
@@ -281,8 +273,7 @@ local function isCurrentProhibitedObject(object, character)
     if cabDoorWindowHost(world, anchor) and isDoorOrWindow(object) then
         return false
     end
-    if type(protection) ~= "table"
-        or protection.protectionClass ~= ProtectionManifest.PROHIBITED then
+    if expected.protected ~= true then
         return false
     end
     return true

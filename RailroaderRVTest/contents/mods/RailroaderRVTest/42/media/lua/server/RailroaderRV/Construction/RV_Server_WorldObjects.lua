@@ -4,7 +4,6 @@ local OWNER = ctx.OWNER
 local Constants = ctx.Constants
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
-local ProtectionManifest = require("RailroaderRV/RoomTemplate/RV_ProtectionManifest")
 local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 
 local function integer(value)
@@ -252,39 +251,16 @@ local function applyCapturedIdentityAndState(object, entry, deferHealth)
 end
 
 local function capturedTagData(entry, edge, tagContext)
-    if not ProtectionManifest.matchesCapturedEntry(entry.templateIndex, entry) then
-        error("RailroaderRVTest: captured protection identity is incomplete at index "
-            .. tostring(entry.templateIndex))
-    end
-    local templateObject, resolvedIndex, protection =
+    local templateObject =
         TemplateGeometry.lookupObjectByIndex(entry.templateIndex)
-    if type(templateObject) ~= "table" or resolvedIndex ~= entry.templateIndex
-        or type(protection) ~= "table" then
-        error("RailroaderRVTest: captured template lookup failed at index "
-            .. tostring(entry.templateIndex))
-    end
-    local anchorX = ServerUtil.requiredInteger(tagContext and tagContext.anchorX,
-        "captured tag anchorX")
-    local anchorY = ServerUtil.requiredInteger(tagContext and tagContext.anchorY,
-        "captured tag anchorY")
-    local anchorZ = ServerUtil.requiredInteger(tagContext and tagContext.anchorZ,
-        "captured tag anchorZ")
-    local relative = TemplateGeometry.worldToTemplate(
-        { x = entry.x, y = entry.y, z = entry.z },
-        { x = anchorX, y = anchorY, z = anchorZ })
-    if not relative
-        or relative.x ~= protection.x or relative.y ~= protection.y
-        or relative.z ~= protection.z
-        or relative.x ~= templateObject.x or relative.y ~= templateObject.y
-        or relative.z ~= templateObject.z then
-        error("RailroaderRVTest: captured tag coordinates differ from static ledger at index "
-            .. tostring(entry.templateIndex))
-    end
+    local anchorX = tagContext.anchorX
+    local anchorY = tagContext.anchorY
+    local anchorZ = tagContext.anchorZ
     local result = {
         templateIndex = entry.templateIndex,
-        templateX = protection.x,
-        templateY = protection.y,
-        templateZ = protection.z,
+        templateX = templateObject.x,
+        templateY = templateObject.y,
+        templateZ = templateObject.z,
         templateAnchorX = anchorX,
         templateAnchorY = anchorY,
         templateAnchorZ = anchorZ,
@@ -295,7 +271,7 @@ local function capturedTagData(entry, edge, tagContext)
         templateName = entry.name,
         templateSprite = entry.sprite,
         templateNorth = entry.north,
-        protectionClass = protection.protectionClass,
+        protected = templateObject.protected,
         templateDirection = entry.direction,
     }
     if edge then

@@ -5,17 +5,11 @@
 -- the caller because the XY region does not determine the RV's vertical level.
 require "RailroaderRV/Common/RV_Constants"
 local RoomTemplate = require "RailroaderRV/RoomTemplate/RV_RoomTemplate"
-local ProtectionManifest = require "RailroaderRV/RoomTemplate/RV_ProtectionManifest"
 local Constants = RailroaderRV.Constants
 
 local G = {}
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
-local templateValid, templateError = RoomTemplate.validate(Template)
-if not templateValid or type(templateObjects) ~= "table" then
-    error("RailroaderRV: current RoomTemplate contract is invalid: "
-        .. tostring(templateError or "ordered object index is incomplete"))
-end
 
 G.REGION_SIZE = Constants.RV_REGION_SIZE
 G.ANCHOR_OFFSET = math.floor(G.REGION_SIZE / 2)
@@ -112,12 +106,8 @@ function G.templateToWorld(offset, anchor)
     return world
 end
 
-local function validTemplate(template)
-    return template == Template
-end
-
 local function inBoxes(boxes, offset)
-    if type(boxes) ~= "table" or not offset then return false end
+    if not offset then return false end
     for index = 1, #boxes do
         local box = boxes[index]
         if offset.x >= box.minX and offset.x < box.maxX
@@ -131,7 +121,6 @@ end
 
 function G.contains(world, anchor, template)
     template = template or Template
-    if not validTemplate(template) then return false end
     local offset = G.worldToTemplate(world, anchor)
     if not offset then
         return false
@@ -145,7 +134,7 @@ end
 function G.regionAt(world, anchor, template)
     template = template or Template
     local offset = G.worldToTemplate(world, anchor)
-    if not validTemplate(template) or not offset then
+    if not offset then
         return nil
     end
     local x, y, z = math.floor(offset.x), math.floor(offset.y),
@@ -156,7 +145,6 @@ end
 
 function G.isWalkable(world, anchor, template)
     template = template or Template
-    if not validTemplate(template) then return false end
     local offset = G.worldToTemplate(world, anchor)
     if not offset then return false end
     local tile = { x = math.floor(offset.x), y = math.floor(offset.y),
@@ -167,7 +155,6 @@ end
 
 function G.isBuildable(world, anchor, template)
     template = template or Template
-    if not validTemplate(template) then return false end
     local offset = G.worldToTemplate(world, anchor)
     if not offset then return false end
     local tile = { x = math.floor(offset.x), y = math.floor(offset.y),
@@ -183,7 +170,6 @@ end
 
 function G.isBuildCellSideHost(world, anchor, template)
     template = template or Template
-    if not validTemplate(template) then return false end
     local offset = G.worldToTemplate(world, anchor)
     if not offset then return false end
     local x, y, z = math.floor(offset.x), math.floor(offset.y),
@@ -199,44 +185,34 @@ function G.isBuildCellSideHost(world, anchor, template)
 end
 
 function G.inManagedRegion(world, managed)
-    if not validPoint(world) or type(managed) ~= "table" then return false end
-    local originX, originY = integer(managed.originX), integer(managed.originY)
-    local width, height = integer(managed.width), integer(managed.height)
-    local minZ, maxZ = integer(managed.minZ), integer(managed.maxZ)
-    return originX ~= nil and originY ~= nil and width ~= nil and height ~= nil
-        and minZ ~= nil and maxZ ~= nil
-        and world.x >= originX and world.x < originX + width
-        and world.y >= originY and world.y < originY + height
-        and math.floor(world.z) >= minZ and math.floor(world.z) < maxZ
+    return validPoint(world)
+        and world.x >= managed.originX
+        and world.x < managed.originX + managed.width
+        and world.y >= managed.originY
+        and world.y < managed.originY + managed.height
+        and math.floor(world.z) >= managed.minZ
+        and math.floor(world.z) < managed.maxZ
 end
 
 function G.anchorFromManaged(managed, template)
     template = template or Template
-    if not validTemplate(template) or type(managed) ~= "table" then return nil end
-    local originX, originY = integer(managed.originX), integer(managed.originY)
-    local width, height = integer(managed.width), integer(managed.height)
-    local minZ = integer(managed.minZ)
-    if originX == nil or originY == nil or width ~= template.metadata.width
-        or height ~= template.metadata.height or minZ == nil then
-        return nil
-    end
     return {
-        x = originX - template.metadata.minX,
-        y = originY - template.metadata.minY,
-        z = minZ - managedMinZOffset,
+        x = managed.originX - template.metadata.minX,
+        y = managed.originY - template.metadata.minY,
+        z = managed.minZ - managedMinZOffset,
     }
 end
 
 function G.isWalkableInManagedRegion(world, managed, template)
     template = template or Template
     local anchor = G.anchorFromManaged(managed, template)
-    return anchor ~= nil and G.isWalkable(world, anchor, template) or false
+    return G.isWalkable(world, anchor, template)
 end
 
 function G.isBuildableInManagedRegion(world, managed, template)
     template = template or Template
     local anchor = G.anchorFromManaged(managed, template)
-    return anchor ~= nil and G.isBuildable(world, anchor, template) or false
+    return G.isBuildable(world, anchor, template)
 end
 
 function G.edgeKey(axis, x, y, z)
@@ -261,52 +237,40 @@ function G.edgeForSide(side, x, y, z)
     return nil
 end
 
-function G.lookupObjectByIndex(templateIndex, template, manifest)
+function G.lookupObjectByIndex(templateIndex, template)
     template = template or Template
-    if not validTemplate(template) or not integer(templateIndex)
-        or templateIndex < 1 then
+    if not integer(templateIndex) or templateIndex < 1 then
         return nil
     end
     local object = templateObjects[templateIndex]
-    if type(object) ~= "table" then return nil end
-    if template == Template then manifest = manifest or ProtectionManifest end
-    local protection = type(manifest) == "table"
-        and type(manifest.get) == "function" and manifest.get(templateIndex) or nil
-    -- Return the index alongside the row so callers can distinguish several
-    -- template objects which occupy the same tile. The optional third result
-    -- reuses the protection manifest's existing index lookup.
-    return object, templateIndex, protection
+    return object, templateIndex
 end
 
-function G.lookupObjectsAtTemplate(x, y, z, template, manifest)
+function G.lookupObjectsAtTemplate(x, y, z, template)
     template = template or Template
-    if not validTemplate(template) or not integer(x)
-        or not integer(y) or not integer(z) then
+    if not integer(x) or not integer(y) or not integer(z) then
         return nil
     end
-    if template == Template then manifest = manifest or ProtectionManifest end
+    local cell = RoomTemplate.cellAt(template, x, y)
+    local layer = cell and cell.layers[z]
     local matches = {}
-    for index, object in ipairs(templateObjects) do
-        if object.x == x and object.y == y and object.z == z then
-            local protection = type(manifest) == "table"
-                and type(manifest.get) == "function" and manifest.get(index) or nil
-            matches[#matches + 1] = {
-                index = index,
-                object = object,
-                protection = protection,
-            }
-        end
+    for index = 1, #(layer or {}) do
+        local object = layer[index]
+        matches[#matches + 1] = {
+            index = object.templateIndex,
+            object = object,
+        }
     end
     return matches
 end
 
-function G.lookupObjectsAtWorld(world, anchor, template, manifest)
+function G.lookupObjectsAtWorld(world, anchor, template)
     local offset = G.worldToTemplate(world, anchor)
     if not offset or not integer(offset.x)
         or not integer(offset.y) or not integer(offset.z) then
         return nil
     end
-    return G.lookupObjectsAtTemplate(offset.x, offset.y, offset.z, template, manifest)
+    return G.lookupObjectsAtTemplate(offset.x, offset.y, offset.z, template)
 end
 
 function G.cabContainsWorld(world, anchor, template)

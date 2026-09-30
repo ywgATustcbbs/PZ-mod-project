@@ -10,8 +10,14 @@ local Constants = ctx.Constants
 local Boundary = ctx.Boundary
 local RV = ctx.RV
 local ServerSchema = ctx.ServerSchema
+local ServerUtil = ctx.ServerUtil
+local ServerWorld = ctx.ServerWorld
 local UtilityServer = ctx.UtilityServer
 local GenerationTransaction = ctx.GenerationTransaction
+local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
+local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
+local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
+local templateObjects = RoomTemplate.orderedObjects(Template)
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local RELOCATION_MIN_TICKS = ctx.RELOCATION_MIN_TICKS
 local RELOCATION_POST_ACK_TICKS = ctx.RELOCATION_POST_ACK_TICKS
@@ -39,6 +45,125 @@ local acknowledgeRelocation = ctx.acknowledgeRelocation
 local acknowledgeFinalRelocation = ctx.acknowledgeFinalRelocation
 local cancelPending = ctx.cancelPending
 local processRoofRefreshRelocationGroup = ctx.processRoofRefreshRelocationGroup
+
+local stateReaders = {
+    { "open", "isOpen" }, { "locked", "isLocked" },
+    { "hoppable", "isHoppable" }, { "health", "getHealth" },
+    { "maxHealth", "getMaxHealth" }, { "fuel", "getFuelAmount" },
+    { "water", "getWaterAmount" }, { "uses", "getUses" },
+}
+
+local function isTransientObject(object)
+    if ServerWorld.isPlayerObject(object) or ServerWorld.isVehicleObject(object) then
+        return true
+    end
+    for _, className in ipairs({ "IsoZombie", "IsoAnimal", "IsoDeadBody",
+        "IsoWorldInventoryObject" }) do
+        if ServerUtil.classInstance(object, className) then return true end
+    end
+    return false
+end
+
+local function captureObjectClass(object)
+    local _, class = ServerUtil.invoke(object, "getClass")
+    local name = string.gsub(tostring(class), "^class%s+", "")
+    return string.match(name, "([^%.]+)$") or name
+end
+
+local function captureObjectName(object)
+    for _, method in ipairs({ "getName", "getObjectName", "getCustomName" }) do
+        local ok, name = ServerUtil.invoke(object, method)
+        if ok and name ~= nil then
+            return tostring(name)
+        end
+    end
+    return nil
+end
+
+local function captureObjectState(object)
+    local values = {}
+    for index = 1, #stateReaders do
+        local reader = stateReaders[index]
+        local ok, value = ServerUtil.invoke(object, reader[2])
+        if ok and value ~= nil then
+            values[#values + 1] = reader[1] .. "=" .. tostring(value)
+        end
+    end
+    return table.concat(values, ",")
+end
+
+local function dumpTemplateCapture(player)
+    local valid, positionOrReason = validateAuthoritativePlayer(player)
+    if not valid then return false, positionOrReason end
+    local allowed, permissionReason = validateGenerationPermission(player)
+    if not allowed then return false, permissionReason end
+
+    local position = positionOrReason
+    local anchor = TemplateGeometry.templateAnchorForWorld(
+        position.x, position.y, position.z)
+    if not anchor or not TemplateGeometry.isWalkable(position, anchor, Template) then
+        return false, "player is outside the current template editing geometry"
+    end
+
+    local cell = ServerWorld.getCellForPlayer(player)
+    local seenHosts = {}
+    local objectCount = 0
+    local function captureHost(x, y, z)
+        local key = tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
+        if seenHosts[key] then return end
+        seenHosts[key] = true
+        local square = ServerWorld.getSquare(cell,
+            anchor.x + x, anchor.y + y, anchor.z + z)
+        if not square then return end
+        local objects = ServerWorld.squareSnapshot(square)
+        for index = 1, #objects do
+            local object = objects[index]
+            if not isTransientObject(object) then
+                local northOk, north = ServerUtil.invoke(object, "getNorth")
+                local directionOk, direction = ServerUtil.invoke(object, "getDir")
+                local northValue, directionValue
+                if northOk then northValue = north end
+                if directionOk then directionValue = direction end
+                objectCount = objectCount + 1
+                print("[RailroaderRVTest][TemplateCapture] object rel="
+                    .. tostring(x) .. "," .. tostring(y) .. "," .. tostring(z)
+                    .. " class=" .. captureObjectClass(object)
+                    .. " name=" .. tostring(captureObjectName(object))
+                    .. " sprite=" .. tostring(ServerWorld.getSpriteName(object))
+                    .. " north=" .. tostring(northValue)
+                    .. " direction=" .. tostring(directionValue)
+                    .. " state=" .. captureObjectState(object))
+            end
+        end
+    end
+
+    for index = 1, #Template.misc.walkAabbs do
+        local box = Template.misc.walkAabbs[index]
+        for z = box.minZ, box.maxZExclusive - 1 do
+            for y = box.minY, box.maxY - 1 do
+                for x = box.minX, box.maxX - 1 do
+                    captureHost(x, y, z)
+                end
+            end
+        end
+    end
+    for index = 1, #Template.misc.buildCells do
+        local buildCell = Template.misc.buildCells[index]
+        local z = buildCell.z == nil and Template.metadata.anchor.z or buildCell.z
+        captureHost(buildCell.x, buildCell.y, z)
+        captureHost(buildCell.x + 1, buildCell.y, z)
+        captureHost(buildCell.x, buildCell.y + 1, z)
+    end
+    for index = 1, #templateObjects do
+        local object = templateObjects[index]
+        captureHost(object.x, object.y, object.z)
+    end
+
+    print("[RailroaderRVTest][TemplateCapture] origin="
+        .. tostring(anchor.x) .. "," .. tostring(anchor.y) .. "," .. tostring(anchor.z)
+        .. " bounds=100x100 objects=" .. tostring(objectCount))
+    return true
+end
 
 local function isInvalidRVData(reason)
     local marker = Constants and Constants.INVALID_RV_DATA
@@ -220,6 +345,15 @@ function RV.Server.OnClientCommand(module, command, player, args)
         and (command == COMMAND_RV_ENTER or command == COMMAND_RV_EXIT) then
         return
     end
+    if module == Constants.MOD_ID
+        and command == Constants.COMMAND_DUMP_TEMPLATE_CAPTURE then
+        local accepted, reason = dumpTemplateCapture(player)
+        if accepted ~= true then
+            print("[RailroaderRVTest][TemplateCapture] rejected reason="
+                .. tostring(reason or "unspecified reason"))
+        end
+        return
+    end
     if module == COMMAND_MODULE and command == COMMAND_FINAL_RELOCATE_ACK then
         local ackOk, accepted, reason = pcall(acknowledgeFinalRelocation,
             player, args)
@@ -253,7 +387,7 @@ function RV.Server.OnClientCommand(module, command, player, args)
         end
         return
     end
-    local checkOk, accepted, reason = pcall(validateRequest, module, command, player, args)
+    local checkOk, accepted, reason = pcall(validateRequest, module, command, player)
     if not checkOk then
         reason = safeErrorText(accepted)
         accepted = false

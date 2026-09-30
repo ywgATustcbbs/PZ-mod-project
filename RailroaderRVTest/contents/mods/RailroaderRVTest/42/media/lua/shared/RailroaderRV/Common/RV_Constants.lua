@@ -38,8 +38,7 @@ end
 
 C.MOD_ID = "RailroaderRVTest"
 C.COMMAND_GENERATE = "Generate"
-C.COMMAND_LAYOUT_BUILD = "BeginLayoutBuild"
-C.COMMAND_LAYOUT_FINISH = "FinishLayoutBuild"
+C.COMMAND_DUMP_TEMPLATE_CAPTURE = "DumpTemplateCapture"
 C.COMMAND_FINAL_RELOCATE = "FinalRelocate"
 C.COMMAND_FINAL_RELOCATE_ACK = "FinalRelocateAck"
 C.COMMAND_REFRESH_ROOM_OWNERSHIP = "RefreshRoomOwnership"
@@ -53,7 +52,6 @@ C.COMMAND_RV_UTILITY_SNAPSHOT = "RVUtilitySnapshot"
 C.COMMAND_RV_UTILITY_MAPPING = "RVUtilityMapping"
 C.RV_MAP_KEY = "RailroaderRVTest.TrainMap"
 C.MANIFEST_KEY = "RailroaderRVTest.Manifest"
-C.LAYOUT_CAPTURE_KEY = "RailroaderRVTest.LayoutCapture"
 C.TECH_VERSION = "0.4.0-tech"
 C.SAVE_SCHEMA_VERSION = 9
 C.CAPTURED_TEMPLATE_VERSION = 11

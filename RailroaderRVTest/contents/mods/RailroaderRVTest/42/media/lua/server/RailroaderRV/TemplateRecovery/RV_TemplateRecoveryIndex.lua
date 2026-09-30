@@ -8,22 +8,10 @@ local Constants = ctx.Constants
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local manifestTable = ctx.manifestTable
-local CapturedTemplate = require("RailroaderRV/RoomTemplate/RV_Template")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
-local ProtectionManifest = require("RailroaderRV/RoomTemplate/RV_ProtectionManifest")
-
-if type(Template) ~= "table" or type(Template.metadata) ~= "table"
-    or Template.metadata.templateVersion ~= Constants.CAPTURED_TEMPLATE_VERSION
-    or Template.metadata.objectCount ~= RoomTemplate.CURRENT_OBJECT_COUNT
-    or type(templateObjects) ~= "table"
-    or #templateObjects ~= Template.metadata.objectCount
-    or not RoomTemplate.validate(Template)
-    or not ProtectionManifest.validateTemplate(CapturedTemplate) then
-    error("RailroaderRVTest: current template-recovery index is incomplete")
-end
 
 local indexes = {}
 local capturedClasses = {}
@@ -148,13 +136,20 @@ local function isCabSideHostCoordinate(x, y, z, index)
 end
 
 local function templateEntry(templateIndex, anchor)
-    local expected = ProtectionManifest.worldEntry(templateIndex, anchor)
-    if not expected or not ProtectionManifest.matchesLayoutEntry(templateIndex,
-        expected, anchor) then
-        error("RailroaderRVTest: static protection class is missing at index "
-            .. tostring(templateIndex))
-    end
-    return expected
+    local captured = templateObjects[templateIndex]
+    return {
+        templateIndex = templateIndex,
+        x = anchor.x + captured.x,
+        y = anchor.y + captured.y,
+        z = anchor.z + captured.z,
+        class = captured.class,
+        name = captured.name,
+        sprite = captured.sprite,
+        north = captured.north,
+        direction = captured.direction,
+        state = captured.state,
+        protected = captured.protected,
+    }
 end
 
 local function expectedEdgeMap(manifest)
@@ -207,17 +202,10 @@ local function buildRepairIndex(boundary, manifest)
         byCoordinate = {},
         protectedCoordinates = {},
     }
-    for templateIndex = 1, ProtectionManifest.OBJECT_COUNT do
-        local protection = ProtectionManifest.get(templateIndex)
-        if not protection then return nil end
+    for templateIndex = 1, Template.metadata.objectCount do
         local expected = templateEntry(templateIndex, anchor)
         local edge = edges[templateIndex]
-        local protectionClass = expected.protectionClass
-        if protectionClass == ProtectionManifest.SPECIAL then
-            return nil
-        end
-        local protected = protectionClass == ProtectionManifest.RESTORE_ONLY
-            or protectionClass == ProtectionManifest.PROHIBITED
+        local protected = expected.protected
         local editableCab = isCabCoordinate(expected.x, expected.y,
             expected.z, anchor)
         local sideDoorOrWindow = isCabSideHostCoordinate(expected.x,

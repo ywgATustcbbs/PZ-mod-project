@@ -9,7 +9,6 @@ local ensureRoofSquare = ctx.ensureRoofSquare
 local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local createCapturedTemplateObject = ctx.createCapturedTemplateObject
 local configureCapturedDoorFrame = ctx.configureCapturedDoorFrame
-local ProtectionManifest = require("RailroaderRV/RoomTemplate/RV_ProtectionManifest")
 local Index = require("RailroaderRV/TemplateRecovery/RV_TemplateRecoveryIndex")(ctx)
 local integer = Index.integer
 local sameIdentity = Index.sameIdentity
@@ -368,12 +367,7 @@ local function isProtectedBuildingCandidate(object, x, y, z, boundary,
     end
     local expected = claimedTarget.expected
     local templateIndex = integer(expected.templateIndex)
-    local protection = templateIndex
-        and ProtectionManifest.get(templateIndex) or nil
-    if not protection
-        or protection.protectionClass ~= expected.protectionClass
-        or (protection.protectionClass ~= ProtectionManifest.RESTORE_ONLY
-            and protection.protectionClass ~= ProtectionManifest.PROHIBITED)
+    if not templateIndex or expected.protected ~= true
         or expected.x ~= x or expected.y ~= y or expected.z ~= z then
         return false, "target-is-not-a-current-protected-template-entry"
     end
@@ -434,25 +428,18 @@ local function isWhitelistedTemplateObject(object, boundary, manifest, edges,
     local tag = objectTag(object)
     if not tag or not sameIdentity(tag, boundary) then return false end
     local index = integer(tag.templateIndex)
-    local protection = index and ProtectionManifest.get(index) or nil
-    local expectedNorth
-    if protection then expectedNorth = protection.north end
-    if expectedNorth == "none" then expectedNorth = nil end
-    if not protection or tag.templateClass ~= protection.class
-        or tag.templateName ~= protection.name
-        or tag.templateSprite ~= protection.sprite
-        or tag.templateDirection ~= protection.direction
-        or tag.templateNorth ~= expectedNorth
-        or integer(tag.protectionClass) ~= protection.protectionClass
-        or integer(tag.templateX) ~= protection.x
-        or integer(tag.templateY) ~= protection.y
-        or integer(tag.templateZ) ~= protection.z then
-        return false
-    end
     local anchor = manifest and manifest.anchor
-    if type(anchor) ~= "table" then return false end
+    if not index or type(anchor) ~= "table" then return false end
     local expected = templateEntry(index, anchor)
-    if not ProtectionManifest.matchesLayoutEntry(index, expected, anchor)
+    if tag.templateClass ~= expected.class
+        or tag.templateName ~= expected.name
+        or tag.templateSprite ~= expected.sprite
+        or tag.templateDirection ~= expected.direction
+        or tag.templateNorth ~= expected.north
+        or tag.protected ~= expected.protected
+        or integer(tag.templateX) ~= expected.x - anchor.x
+        or integer(tag.templateY) ~= expected.y - anchor.y
+        or integer(tag.templateZ) ~= expected.z - anchor.z
         or integer(tag.templateAnchorX) ~= integer(anchor.x)
         or integer(tag.templateAnchorY) ~= integer(anchor.y)
         or integer(tag.templateAnchorZ) ~= integer(anchor.z)
@@ -475,9 +462,7 @@ local function isWhitelistedTemplateObject(object, boundary, manifest, edges,
     end
     local openable = expected.class == "IsoDoor"
         or expected.class == "IsoWindow"
-    local requiresCapturedState = expected.protectionClass
-        ~= ProtectionManifest.FREE_DEMOLITION
-    if not openable and requiresCapturedState
+    if not openable and expected.protected
         and not objectMatchesCaptured(object, expected) then
         return false
     end
@@ -514,9 +499,9 @@ local function isWhitelistedGenerator(object, boundary, manifest)
 end
 
 local function currentTemplateTagMismatch(object, expected, edge, boundary)
-    local protection = expected
-        and ProtectionManifest.get(expected.templateIndex) or nil
-    if not protection then return "static protection record is missing" end
+    if not expected or type(boundary.anchor) ~= "table" then
+        return "current template entry is missing"
+    end
     local tag = objectTag(object)
     if not tag then return "tag expected=current identity observed=missing" end
     if not sameIdentity(tag, boundary) then
@@ -524,9 +509,9 @@ local function currentTemplateTagMismatch(object, expected, edge, boundary)
     end
     local checks = {
         { "templateIndex", expected.templateIndex, integer(tag.templateIndex) },
-        { "templateX", protection.x, integer(tag.templateX) },
-        { "templateY", protection.y, integer(tag.templateY) },
-        { "templateZ", protection.z, integer(tag.templateZ) },
+        { "templateX", expected.x - boundary.anchor.x, integer(tag.templateX) },
+        { "templateY", expected.y - boundary.anchor.y, integer(tag.templateY) },
+        { "templateZ", expected.z - boundary.anchor.z, integer(tag.templateZ) },
         { "templateClass", expected.class, tag.templateClass },
         { "templateName", expected.name, tag.templateName },
         { "templateSprite", expected.sprite, tag.templateSprite },
@@ -535,14 +520,13 @@ local function currentTemplateTagMismatch(object, expected, edge, boundary)
         { "templateWorldX", expected.x, integer(tag.templateWorldX) },
         { "templateWorldY", expected.y, integer(tag.templateWorldY) },
         { "templateWorldZ", expected.z, integer(tag.templateWorldZ) },
-        { "templateAnchorX", expected.x - protection.x,
+        { "templateAnchorX", boundary.anchor.x,
             integer(tag.templateAnchorX) },
-        { "templateAnchorY", expected.y - protection.y,
+        { "templateAnchorY", boundary.anchor.y,
             integer(tag.templateAnchorY) },
-        { "templateAnchorZ", expected.z - protection.z,
+        { "templateAnchorZ", boundary.anchor.z,
             integer(tag.templateAnchorZ) },
-        { "protectionClass", expected.protectionClass,
-            integer(tag.protectionClass) },
+        { "protected", expected.protected, tag.protected },
     }
     for i = 1, #checks do
         local check = checks[i]

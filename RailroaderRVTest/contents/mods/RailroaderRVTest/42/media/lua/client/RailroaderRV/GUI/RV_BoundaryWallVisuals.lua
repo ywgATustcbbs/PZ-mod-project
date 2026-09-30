@@ -5,13 +5,7 @@
 local C = require "RailroaderRV/Common/RV_Constants"
 local RoomTemplate = require "RailroaderRV/RoomTemplate/RV_RoomTemplate"
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
-local ProtectionManifest = require "RailroaderRV/RoomTemplate/RV_ProtectionManifest"
-
-local templateValid, templateError = RoomTemplate.validate(Template)
-if not templateValid then
-    error("RailroaderRVTest: current boundary RoomTemplate is invalid: "
-        .. tostring(templateError))
-end
+local templateObjects = RoomTemplate.orderedObjects(Template)
 
 local boundaryRoles = {
     ["wall-north"] = true,
@@ -48,7 +42,7 @@ local function isTaggedBoundarySupportWall(object)
     if not dataOk or type(data) ~= "table" then return false end
     local tag = data.RailroaderRVTest
     local templateIndex = type(tag) == "table" and C.finiteInteger(tag.templateIndex) or nil
-    local expected = templateIndex and ProtectionManifest.get(templateIndex) or nil
+    local expected = templateIndex and templateObjects[templateIndex] or nil
     local anchorX = type(tag) == "table" and C.finiteInteger(tag.templateAnchorX) or nil
     local anchorY = type(tag) == "table" and C.finiteInteger(tag.templateAnchorY) or nil
     local anchorZ = type(tag) == "table" and C.finiteInteger(tag.templateAnchorZ) or nil
@@ -59,8 +53,8 @@ local function isTaggedBoundarySupportWall(object)
         or C.finiteInteger(data.generation) == nil or C.finiteInteger(data.generation) < 1
         or C.finiteInteger(data.generation) ~= C.finiteInteger(tag.generation)
         or data.role ~= tag.role or not boundaryRoles[tag.role]
-        or not expected or expected.protectionClass ~= ProtectionManifest.PROHIBITED
-        or C.finiteInteger(tag.protectionClass) ~= expected.protectionClass
+        or not expected or expected.protected ~= true
+        or tag.protected ~= expected.protected
         or C.finiteInteger(tag.templateX) ~= expected.x
         or C.finiteInteger(tag.templateY) ~= expected.y
         or C.finiteInteger(tag.templateZ) ~= expected.z

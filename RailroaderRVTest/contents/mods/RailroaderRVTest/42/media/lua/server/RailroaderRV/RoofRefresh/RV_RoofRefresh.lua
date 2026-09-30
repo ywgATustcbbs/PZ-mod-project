@@ -7,13 +7,8 @@
 require("RailroaderRV/Common/RV_Constants")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
-local roofTargets = RoomTemplate.roofTargets(Template)
-local roofTarget = type(roofTargets) == "table" and roofTargets[1] or nil
+local roofTarget = RoomTemplate.roofTargets(Template)[1]
 local ServerWorld = require("RailroaderRV/Common/RV_ServerWorld")
-if type(roofTarget) ~= "table" or roofTarget.kind ~= "room-refresh-floor"
-    or type(roofTarget.identity) ~= "table" then
-    error("RailroaderRVTest: current RoomTemplate has no validated room-refresh roof target")
-end
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.RoofRefresh = RailroaderRV.RoofRefresh or {}

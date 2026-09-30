@@ -5,9 +5,7 @@
 -- applies the returned plan only after validating the requesting player.
 
 require "RailroaderRV/Common/RV_Constants"
-local CapturedTemplate = require "RailroaderRV/RoomTemplate/RV_Template"
 local RoomTemplate = require "RailroaderRV/RoomTemplate/RV_RoomTemplate"
-local ProtectionManifest = require "RailroaderRV/RoomTemplate/RV_ProtectionManifest"
 local TemplateGeometry = require "RailroaderRV/RoomTemplate/RV_TemplateGeometry"
 
 RailroaderRV = RailroaderRV or {}
@@ -17,49 +15,11 @@ local Layout = RailroaderRV.Layout
 local C = RailroaderRV.Constants
 local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local templateObjects = RoomTemplate.orderedObjects(Template)
-local walkAabbs = type(Template) == "table"
-    and type(Template.misc) == "table"
-    and Template.misc.walkAabbs or nil
+local walkAabbs = Template.misc.walkAabbs
 
-local templateValid, templateError = RoomTemplate.validate(Template)
-if not templateValid or type(templateObjects) ~= "table"
-    or Template.metadata.templateVersion ~= C.CAPTURED_TEMPLATE_VERSION
-    or Template.metadata.objectCount ~= #templateObjects
-    or type(Template.misc.buildCells) ~= "table"
-    or type(walkAabbs) ~= "table" then
-    error("RailroaderRV: current RoomTemplate contract is incomplete: "
-        .. tostring(templateError or "ordered object index is incomplete"))
-end
 -- The physical room/wall plan currently describes the primary rectangular
 -- shell. Queries use all walk regions and generation still emits every object.
 local walkGeometry = walkAabbs[1]
-local protectionManifestValid, protectionManifestError =
-    ProtectionManifest.validateTemplate(CapturedTemplate)
-if not protectionManifestValid then
-    error("RailroaderRV: captured protection ledger is invalid: "
-        .. tostring(protectionManifestError))
-end
-
-local buildCellSet = {}
-for i = 1, #Template.misc.buildCells do
-    local cell = Template.misc.buildCells[i]
-    local cellZ = cell.z == nil and Template.metadata.anchor.z or cell.z
-    if type(cell) ~= "table" or type(cell.x) ~= "number"
-        or type(cell.y) ~= "number" or math.floor(cell.x) ~= cell.x
-        or math.floor(cell.y) ~= cell.y
-        or cell.x < Template.metadata.minX
-        or cell.x >= Template.metadata.maxXExclusive
-        or cell.y < Template.metadata.minY
-        or cell.y >= Template.metadata.maxYExclusive then
-        error("RailroaderRV: captured build cell is outside the template region")
-    end
-    local key = tostring(cell.x) .. ":" .. tostring(cell.y) .. ":"
-        .. tostring(cellZ)
-    if buildCellSet[key] then
-        error("RailroaderRV: captured cab build cell is duplicated")
-    end
-    buildCellSet[key] = true
-end
 local roofZOffset = -math.huge
 for i = 1, #templateObjects do
     roofZOffset = math.max(roofZOffset, templateObjects[i].z)
@@ -70,15 +30,8 @@ function Layout.eachStructureCoordinate(bounds, callback)
             callback(x, y, bounds.z)
         end
     end
-    local anchorX, anchorY
-    if type(bounds.anchor) == "table" then
-        anchorX, anchorY = bounds.anchor.x, bounds.anchor.y
-    else
-        -- The client room-ownership payload carries the primary room bounds,
-        -- so recover its template anchor from the authored primary AABB.
-        anchorX = bounds.roomMinX - walkGeometry.minX
-        anchorY = bounds.roomMinY - walkGeometry.minY
-    end
+    local anchorX = bounds.roomMinX - walkGeometry.minX
+    local anchorY = bounds.roomMinY - walkGeometry.minY
     local seen = {}
     for i = 1, #templateObjects do
         local captured = templateObjects[i]
@@ -136,11 +89,10 @@ local function appendWall(result, x, y, z, north, sprite, role, corner)
 end
 
 local function isShellSprite(entry)
-    local sprite = tostring(entry.sprite or "")
-    return sprite:sub(1, 6) == "walls_"
-        or sprite:sub(1, 21) == "fixtures_railings_01_"
-        or sprite:sub(1, 17) == "fixtures_windows_"
-        or sprite:sub(1, 31) == "location_restaurant_pileocrepe_"
+    return entry.sprite:sub(1, 6) == "walls_"
+        or entry.sprite:sub(1, 21) == "fixtures_railings_01_"
+        or entry.sprite:sub(1, 17) == "fixtures_windows_"
+        or entry.sprite:sub(1, 31) == "location_restaurant_pileocrepe_"
 end
 
 local function shellPriority(entry)
@@ -235,9 +187,6 @@ local function annotateWallEdges(wallCoordinates, interior)
             side, cellX, cellY = "west", entry.x, entry.y
         end
         local edgeKey = TemplateGeometry.edgeForSide(side, cellX, cellY, entry.z)
-        if not edgeKey then
-            error("RailroaderRV: wall edge metadata is malformed")
-        end
         entry.edgeSide = side
         entry.edgeCellX, entry.edgeCellY = cellX, cellY
         entry.edgeHostX = side == "east" and cellX + 1 or cellX
@@ -332,10 +281,6 @@ function Layout.make(cx, cy, cz)
         local axis = (entry.edgeSide == "north" or entry.edgeSide == "south")
             and "N" or "W"
         local edgeKey = entry.edgeKey
-        if not edgeKey or shellEdges[edgeKey] then
-            error("RailroaderRV: duplicate or malformed shell edge "
-                .. tostring(edgeKey))
-        end
         entry.axis = axis
         shellEdges[edgeKey] = {
             edgeKey = edgeKey,
@@ -382,18 +327,13 @@ function Layout.make(cx, cy, cz)
     result.wallCornerCount = cornerCount
     for i = 1, #templateObjects do
         local captured = templateObjects[i]
-        local protection = ProtectionManifest.get(i)
-        if not protection then
-            error("RailroaderRV: static protection class is missing at index "
-                .. tostring(i))
-        end
         local copy = {
             templateIndex = i,
             class = captured.class,
             name = captured.name,
             sprite = captured.sprite,
             direction = captured.direction,
-            protectionClass = protection.protectionClass,
+            protected = captured.protected,
             x = cx + captured.x,
             y = cy + captured.y,
             z = cz + captured.z,

@@ -6,12 +6,7 @@ local Boundary = ctx.Boundary
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local ServerSchema = ctx.ServerSchema
-local CapturedTemplate = require("RailroaderRV/RoomTemplate/RV_Template")
-local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
-local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
-local capturedTemplateObjects = RoomTemplate.orderedObjects(Template)
 local ConstructionModule = require("RailroaderRV/Construction/RV_Construction")
-local ProtectionManifest = require("RailroaderRV/RoomTemplate/RV_ProtectionManifest")
 local safeErrorText
 local ensureRoofSquare = ctx.ensureRoofSquare
 local createCapturedTemplateObject = ctx.createCapturedTemplateObject
@@ -46,14 +41,7 @@ local function setManifestState(manifest, state, reason)
 end
 
 local function manifestTable()
-    if not ModData or type(ModData.getOrCreate) ~= "function" then
-        error("RailroaderRVTest: ModData.getOrCreate is unavailable")
-    end
-    local manifest = ModData.getOrCreate(MANIFEST_KEY)
-    if type(manifest) ~= "table" then
-        error("RailroaderRVTest: manifest is not a table")
-    end
-    return manifest
+    return ModData.getOrCreate(MANIFEST_KEY)
 end
 
 local function setGenerationPhase(manifest, generation, phase)
@@ -94,11 +82,11 @@ local function recalcAndCheckStructure(cell, bounds, layout)
             recalcAt(x, y, bounds.z, false)
         end
     end
-    for i = 1, #(layout.templateObjects or {}) do
+    for i = 1, #layout.templateObjects do
         local entry = layout.templateObjects[i]
         recalcAt(entry.x, entry.y, entry.z, true)
     end
-    for i = 1, #(bounds.wallCoordinates or {}) do
+    for i = 1, #bounds.wallCoordinates do
         local entry = bounds.wallCoordinates[i]
         recalcAt(entry.x, entry.y, bounds.z, true)
     end
@@ -129,131 +117,36 @@ end
 local function buildGeneration(player, layout, bounds, generation, manifest)
     local cell = ServerWorld.getCellForPlayer(player)
     local sprites = Constants.SPRITES
-    local generatorSprite = sprites and sprites.generator and sprites.generator.sprite
-    if not generatorSprite then
-        error("RailroaderRVTest: shared sprite contract is incomplete")
-    end
+    local generatorSprite = sprites.generator.sprite
 
     -- Every feature point is part of the current shared layout contract.
     local anchor = layout.anchor
-    local anchorX = ServerUtil.requiredInteger(anchor.x, "layout anchor.x")
-    local anchorY = ServerUtil.requiredInteger(anchor.y, "layout anchor.y")
-    local anchorZ = ServerUtil.requiredInteger(anchor.z, "layout anchor.z")
+    local anchorX, anchorY, anchorZ = anchor.x, anchor.y, anchor.z
     local tagContext = {
-        rvId = manifest and manifest.rvId,
+        rvId = manifest.rvId,
         anchorX = anchorX,
         anchorY = anchorY,
         anchorZ = anchorZ,
     }
-    if tagContext.rvId == nil or tostring(tagContext.rvId) == "" then
-        error("RailroaderRVTest: generation boundary identity is incomplete")
-    end
     local templateObjects = layout.templateObjects
-    local protectionManifestValid, protectionManifestError =
-        ProtectionManifest.validateTemplate(CapturedTemplate)
-    local roomTemplateValid, roomTemplateError = RoomTemplate.validate(Template)
-    if not roomTemplateValid or type(capturedTemplateObjects) ~= "table"
-        or type(templateObjects) ~= "table"
-        or #templateObjects ~= Template.metadata.objectCount
-        or Template.metadata.templateVersion ~= Constants.CAPTURED_TEMPLATE_VERSION
-        or Template.metadata.objectCount ~= 412 then
-        error("RailroaderRVTest: current RoomTemplate object list is invalid: "
-            .. tostring(roomTemplateError or "object count mismatch"))
-    end
-    if protectionManifestValid ~= true then
-        error("RailroaderRVTest: captured protection ledger is invalid: "
-            .. tostring(protectionManifestError))
-    end
     local shellByTemplateIndex = {}
-    for i = 1, #(bounds.wallCoordinates or {}) do
+    for i = 1, #bounds.wallCoordinates do
         local edge = bounds.wallCoordinates[i]
-        if type(edge.templateIndices) ~= "table" or #edge.templateIndices < 1
-            or edge.templateIndices[1] ~= edge.templateIndex then
-            error("RailroaderRVTest: captured shell parts are incomplete")
-        end
         for partPosition = 1, #edge.templateIndices do
-            local index = ServerUtil.requiredInteger(edge.templateIndices[partPosition],
-                "captured shell template part index")
-            if shellByTemplateIndex[index] then
-                error("RailroaderRVTest: duplicate captured shell template part index")
-            end
+            local index = edge.templateIndices[partPosition]
             shellByTemplateIndex[index] = edge
         end
     end
 
-    local function capturedObjectsAt(x, y, z)
-        local result = {}
-        for i = 1, #templateObjects do
-            local entry = templateObjects[i]
-            if entry.x == x and entry.y == y and entry.z == z then
-                result[#result + 1] = entry
-            end
-        end
-        return result
-    end
-    local function expectFloorOnly(point, role)
-        local entries = capturedObjectsAt(point.x, point.y, point.z)
-        if #entries ~= 1 or entries[1].class ~= "IsoObject" then
-            error("RailroaderRVTest: " .. role
-                .. " coordinate conflicts with a captured non-floor object")
-        end
-    end
-    local function expectCapturedRoofObject(point, role)
-        local entries = capturedObjectsAt(point.x, point.y, point.z)
-        local entry = entries[1]
-        local captured = entry and capturedTemplateObjects[entry.templateIndex]
-        if #entries ~= 1 or type(entry) ~= "table"
-            or entry.class ~= "IsoThumpable" or entry.z ~= bounds.roofZ
-            or type(captured) ~= "table" or captured.class ~= entry.class
-            or captured.sprite ~= entry.sprite then
-            error("RailroaderRVTest: " .. role
-                .. " coordinate is not a captured roof object square")
-        end
-    end
-    local generatorPoint = ServerUtil.copyPoint(layout.generator, "layout.generator")
-    if generatorPoint.z ~= bounds.roofZ then
-        error("RailroaderRVTest: generator must remain on the captured roof level")
-    end
-    expectCapturedRoofObject(generatorPoint, "generator")
-    local function sameCapturedState(actual, expected)
-        if type(actual) ~= "table" or type(expected) ~= "table" then return false end
-        for key, value in pairs(expected) do
-            if actual[key] ~= value then return false end
-        end
-        for key in pairs(actual) do
-            if expected[key] == nil then return false end
-        end
-        return true
-    end
+    local generatorPoint = layout.generator
 
     setGenerationPhase(manifest, generation, "CAPTURED_TEMPLATE")
     for i = 1, #templateObjects do
         local entry = templateObjects[i]
-        local captured = capturedTemplateObjects[i]
-        if type(entry) ~= "table" or type(captured) ~= "table"
-            or entry.templateIndex ~= i
-            or entry.class ~= captured.class or entry.name ~= captured.name
-            or entry.sprite ~= captured.sprite or entry.north ~= captured.north
-            or entry.direction ~= captured.direction
-            or not ProtectionManifest.matchesLayoutEntry(i, entry, anchor)
-            or not sameCapturedState(entry.state, captured.state)
-            or entry.x ~= anchorX + captured.x
-            or entry.y ~= anchorY + captured.y
-            or entry.z ~= anchorZ + captured.z then
-            error("RailroaderRVTest: captured object differs from the current template at "
-                .. tostring(i))
-        end
         local square
-        if entry.z == bounds.z or entry.z == bounds.roofZ then
-            square = ServerWorld.getSquare(cell, entry.x, entry.y, entry.z)
-            if not square then
-                if type(ensureRoofSquare) ~= "function" then
-                    error("RailroaderRVTest: template host square constructor is unavailable")
-                end
-                square = ensureRoofSquare(cell, entry.x, entry.y, entry.z)
-            end
-        else
-            error("RailroaderRVTest: captured object host is outside base/roof z layers")
+        square = ServerWorld.getSquare(cell, entry.x, entry.y, entry.z)
+        if not square and entry.z ~= bounds.z then
+            square = ensureRoofSquare(cell, entry.x, entry.y, entry.z)
         end
         if not square then
             error("RailroaderRVTest: captured object host square could not be created")
@@ -275,38 +168,9 @@ local function buildGeneration(player, layout, bounds, generation, manifest)
 end
 
 local function markGenerationFailed(manifest, errorText)
-    if not manifest then
-        return true, nil
-    end
-    local empty = true
-    for _ in pairs(manifest) do
-        empty = false
-        break
-    end
-    if empty then
-        return true, nil
-    end
-    local ok, failure = pcall(function()
-        manifest.phase = "FAILED"
-        setManifestState(manifest, "FAILED", errorText)
-    end)
-    if ok then
-        return true, nil
-    end
-    -- Keep a best-effort current-schema failure marker in memory/ModData.  No
-    -- relocation transaction state is written; a process restart intentionally
-    -- forgets all in-flight relocation state.
-    local fallbackOk, fallbackFailure = pcall(function()
-        manifest.phase = "FAILED"
-        manifest.state = "FAILED"
-        manifest.lastError = errorText
-        manifest.updatedAt = math.floor(os.time())
-    end)
-    if fallbackOk then
-        return false, safeErrorText(failure)
-    end
-    return false, safeErrorText(failure) .. " (fallback manifest update failed: "
-        .. safeErrorText(fallbackFailure) .. ")"
+    manifest.phase = "FAILED"
+    setManifestState(manifest, "FAILED", errorText)
+    return true, nil
 end
 
 local function finalizeGeneration(manifest, ok, resultOrError,

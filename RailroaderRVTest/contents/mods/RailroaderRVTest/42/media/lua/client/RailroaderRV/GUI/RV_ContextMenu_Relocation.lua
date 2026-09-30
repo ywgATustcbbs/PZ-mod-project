@@ -63,6 +63,12 @@ function Client.requestGenerate(playerObj)
     sendClientCommand(playerObj, C.MOD_ID, C.COMMAND_GENERATE, {})
 end
 
+function Client.requestTemplateCapture(playerObj)
+    if not playerObj then return end
+    sendClientCommand(playerObj, C.MOD_ID,
+        C.COMMAND_DUMP_TEMPLATE_CAPTURE, {})
+end
+
 function Client.onFillWorldObjectContextMenu(playerNum, context, worldObjects, test)
     local playerObj = getSpecificPlayer(playerNum)
     if not playerObj or playerObj:isDead() then return end
@@ -73,6 +79,8 @@ function Client.onFillWorldObjectContextMenu(playerNum, context, worldObjects, t
     -- discovery pass.
     if test then
         context:addOption(getText(MENU_KEY), playerObj, Client.requestGenerate)
+        context:addOption("输出当前模板捕获", playerObj,
+            Client.requestTemplateCapture)
         if ISWorldObjectContextMenu and ISWorldObjectContextMenu.setTest then
             return ISWorldObjectContextMenu.setTest()
         end
@@ -80,6 +88,8 @@ function Client.onFillWorldObjectContextMenu(playerNum, context, worldObjects, t
     end
 
     context:addOption(getText(MENU_KEY), playerObj, Client.requestGenerate)
+    context:addOption("输出当前模板捕获", playerObj,
+        Client.requestTemplateCapture)
 end
 
 local function tryFinalRelocationGuardScan(

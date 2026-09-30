@@ -178,37 +178,6 @@ local function onlinePlayersSnapshot()
 end
 
 local function authoritativePlayerCoordinates(player)
-    if type(ctx.serverTick) == "number"
-        and type(ctx.samplePlayerPosition) == "function"
-        and type(ctx.getPlayerPosition) == "function" then
-        local sampled, positionOrReason = ctx.samplePlayerPosition(player,
-            ctx.serverTick, 1)
-        local positionOk, position
-        if sampled then
-            positionOk, position = true, positionOrReason
-        elseif positionOrReason == "player sample is not due" then
-            positionOk, position = ctx.getPlayerPosition(player, {
-                now = ctx.serverTick,
-                maxAge = 0,
-            })
-        elseif positionOrReason == "player sample identity or interval is invalid" then
-            positionOk, position = ctx.getPlayerPosition(player, {
-                fresh = true,
-            })
-        else
-            return nil
-        end
-        if not positionOk or type(position) ~= "table" then return nil end
-        local x, y, z = ServerUtil.toNumber(position.x),
-            ServerUtil.toNumber(position.y), ServerUtil.toNumber(position.z)
-        if x == nil or y == nil or z == nil or x ~= x or y ~= y or z ~= z
-            or x <= -math.huge or x >= math.huge
-            or y <= -math.huge or y >= math.huge
-            or z <= -math.huge or z >= math.huge then
-            return nil
-        end
-        return math.floor(x), math.floor(y), math.floor(z)
-    end
     local xOk, x = ServerUtil.invoke(player, "getX")
     local yOk, y = ServerUtil.invoke(player, "getY")
     local zOk, z = ServerUtil.invoke(player, "getZ")

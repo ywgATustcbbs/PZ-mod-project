@@ -82,8 +82,6 @@ local ServerTeleport = require("RailroaderRV/Common/RV_ServerTeleport")
 local ServerWorld = require("RailroaderRV/Common/RV_ServerWorld")
 local ServerSchema = require("RailroaderRV/Common/RV_ServerSchema")
 local UtilityServer = require("RailroaderRV/Core/RV_UtilityServer")
-local Common = require("RailroaderRV/Common/RV_Common")
-local playerPositionCache = Common.newPlayerPositionCache()
 
 local pendingSerial = 0
 local serverTick = Core.getTick()
@@ -128,12 +126,6 @@ local ctx = {
     ServerWorld = ServerWorld,
     ServerSchema = ServerSchema,
     UtilityServer = UtilityServer,
-    samplePlayerPosition = function(player, tick, interval)
-        return playerPositionCache:samplePlayerPosition(player, tick, interval)
-    end,
-    getPlayerPosition = function(player, options)
-        return playerPositionCache:getPlayerPosition(player, options)
-    end,
     pendingSerial = pendingSerial,
     serverTick = serverTick,
     roomOwnershipGuards = roomOwnershipGuards,
@@ -143,8 +135,6 @@ local ctx = {
     WORLD_MAX_Z = Constants.WORLD_MAX_Z,
 }
 
-RV.Server.samplePlayerPosition = ctx.samplePlayerPosition
-RV.Server.getPlayerPosition = ctx.getPlayerPosition
 RV.Server.teleportToPosition = ServerTeleport.teleportToPosition
 RV.Server.teleportToRVSpawn = ServerTeleport.teleportToRVSpawn
 

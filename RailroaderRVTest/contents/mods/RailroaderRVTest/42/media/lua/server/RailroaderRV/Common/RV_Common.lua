@@ -1,5 +1,5 @@
--- Shared server helpers for identity, Java/Lua values, player snapshots, and
--- world-square access. This module has no event registrations or persistence.
+-- Shared server helpers for identity, Java/Lua values, and world-square access.
+-- This module has no event registrations or persistence.
 local unpackFn = (table and table.unpack) or unpack
 
 local Common = {}
@@ -77,25 +77,6 @@ function Common.integer(value)
     return numeric
 end
 
-function Common.exactKeys(value, expected, optional)
-    if type(value) ~= "table" or type(expected) ~= "table" then return false end
-    local count = 0
-    for key in pairs(value) do
-        if expected[key] ~= true and not (optional and optional[key] == true) then
-            return false
-        end
-        count = count + 1
-    end
-    local required = 0
-    for key, requiredValue in pairs(expected) do
-        if requiredValue == true and not (optional and optional[key] == true) then
-            required = required + 1
-            if value[key] == nil then return false end
-        end
-    end
-    return count >= required
-end
-
 function Common.identityKey(...)
     local parts = {}
     local count = select("#", ...)
@@ -106,113 +87,6 @@ function Common.identityKey(...)
         parts[index] = tostring(#part) .. ":" .. part
     end
     return table.concat(parts, "|")
-end
-
-function Common.getPlayerPosition(player)
-    local xOk, x = Common.invoke(player, "getX")
-    local yOk, y = Common.invoke(player, "getY")
-    local zOk, z = Common.invoke(player, "getZ")
-    x, y, z = xOk and Common.toNumber(x) or nil,
-        yOk and Common.toNumber(y) or nil,
-        zOk and Common.toNumber(z) or nil
-    if not Common.isFiniteNumber(x) or not Common.isFiniteNumber(y)
-        or not Common.isFiniteNumber(z) then
-        return false, "player position is unavailable"
-    end
-    return true, { x = x, y = y, z = z }
-end
-
-local function playerIdentity(player)
-    local nameOk, name = Common.invoke(player, "getUsername")
-    local idOk, onlineId = Common.invoke(player, "getOnlineID")
-    if not nameOk or type(name) ~= "string" or name == "" or not idOk then
-        return nil
-    end
-    onlineId = Common.integer(onlineId)
-    if onlineId == nil or onlineId < 0 then return nil end
-    return Common.identityKey(name, onlineId)
-end
-
-local function playerScopeKey(identity)
-    if identity == nil then return "<session>" end
-    if type(identity) ~= "table"
-        or not Common.exactKeys(identity, {
-            rvId = true, generation = true, slotIndex = true, anchor = true,
-        })
-        or type(identity.rvId) ~= "string" or identity.rvId == "" then
-        return nil
-    end
-    local generation = Common.integer(identity.generation)
-    local slotIndex = Common.integer(identity.slotIndex)
-    local anchor = identity.anchor
-    if generation == nil or generation < 1 or slotIndex == nil or slotIndex < 1
-        or not Common.exactKeys(anchor, { x = true, y = true, z = true }) then
-        return nil
-    end
-    local x, y, z = Common.integer(anchor.x), Common.integer(anchor.y),
-        Common.integer(anchor.z)
-    if x == nil or y == nil or z == nil then return nil end
-    return Common.identityKey(identity.rvId, generation, slotIndex, x, y, z)
-end
-
--- The logical server tick is only needed by getPlayerPosition when a caller
--- omits options.now, so resolve the Core owner lazily in that one branch.
-local function currentTick()
-    local Core = require("RailroaderRV/Core/RV_Server_Core")
-    return Core.getTick()
-end
-
-function Common.newPlayerPositionCache()
-    local entries = {}
-    local cache = {}
-
-    function cache:samplePlayerPosition(player, tick, interval, identity)
-        local key = playerIdentity(player)
-        local sampleInterval = Common.integer(interval)
-        local scopeKey = playerScopeKey(identity)
-        if key == nil or type(tick) ~= "number" or sampleInterval == nil
-            or sampleInterval < 1 or scopeKey == nil then
-            return false, "player sample identity or interval is invalid"
-        end
-        local previous = entries[key]
-        if previous ~= nil and previous.scopeKey ~= scopeKey then
-            entries[key] = nil
-            previous = nil
-        end
-        if previous ~= nil and tick - previous.tick < sampleInterval then
-            return false, "player sample is not due"
-        end
-        local positionOk, position = Common.getPlayerPosition(player)
-        if not positionOk then return false, position end
-        entries[key] = {
-            position = position,
-            tick = tick,
-            scopeKey = scopeKey,
-        }
-        return true, { x = position.x, y = position.y, z = position.z }
-    end
-
-    function cache:getPlayerPosition(player, options)
-        options = type(options) == "table" and options or {}
-        if options.fresh == true then return Common.getPlayerPosition(player) end
-        local key = playerIdentity(player)
-        local now = options.now or currentTick()
-        local maxAge = Common.integer(options.maxAge)
-        local scopeKey = playerScopeKey(options.identity)
-        local entry = key and entries[key] or nil
-        if entry == nil or type(now) ~= "number" or maxAge == nil or maxAge < 0
-            or scopeKey == nil or entry.scopeKey ~= scopeKey then
-            return false, "fresh player position is required"
-        end
-        if now > entry.tick + maxAge then
-            return false, "cached player position is stale"
-        end
-        return true, {
-            x = entry.position.x, y = entry.position.y, z = entry.position.z,
-        }
-    end
-
-    return cache
 end
 
 return Common

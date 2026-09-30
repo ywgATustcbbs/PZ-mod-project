@@ -95,17 +95,6 @@ function G.worldToTemplate(world, anchor)
     }
 end
 
-function G.templateToWorld(offset, anchor)
-    if not validPoint(offset) or not validAnchor(anchor) then return nil end
-    local world = {
-        x = anchor.x + offset.x,
-        y = anchor.y + offset.y,
-        z = anchor.z + offset.z,
-    }
-    if not sameRegion(world, anchor) then return nil end
-    return world
-end
-
 local function inBoxes(boxes, offset)
     if not offset then return false end
     for index = 1, #boxes do
@@ -207,12 +196,6 @@ function G.isWalkableInManagedRegion(world, managed, template)
     template = template or Template
     local anchor = G.anchorFromManaged(managed, template)
     return G.isWalkable(world, anchor, template)
-end
-
-function G.isBuildableInManagedRegion(world, managed, template)
-    template = template or Template
-    local anchor = G.anchorFromManaged(managed, template)
-    return G.isBuildable(world, anchor, template)
 end
 
 function G.edgeKey(axis, x, y, z)

@@ -24,7 +24,6 @@ end
 
 require "RailroaderRV/Common/RV_Constants"
 local Core = require "RailroaderRV/Core/RV_Server_Core"
-local StrictSchema = require "RailroaderRV/Common/RV_StrictSchema"
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.BoundaryServer = RailroaderRV.BoundaryServer or {}
@@ -32,7 +31,6 @@ RailroaderRV.BoundaryServer = RailroaderRV.BoundaryServer or {}
 local Boundary = RailroaderRV.BoundaryServer
 local C = RailroaderRV.Constants
 local OWNER = C.MOD_ID
-local exactKeys = StrictSchema.exactKeys
 
 Boundary._states = Boundary._states or {}
 Boundary._tick = Core.getTick()
@@ -44,7 +42,6 @@ local ctx = {
     C = C,
     Core = Core,
     OWNER = OWNER,
-    exactKeys = exactKeys,
 }
 
 require("RailroaderRV/BoundaryGuard/RV_BoundaryServer_Geometry")(ctx)

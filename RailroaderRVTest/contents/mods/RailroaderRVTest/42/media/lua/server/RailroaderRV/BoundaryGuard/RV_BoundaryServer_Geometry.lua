@@ -387,15 +387,6 @@ function Boundary.transitionActivitySnapshot(tick)
     return true, activity
 end
 
-function Boundary.hasActiveTransitionForIdentity(rvId, generation, tick)
-    local key = transitionIdentityKey(rvId, generation)
-    if not key or not Core.isTick(tick) then return false end
-    local snapshotOk, activity = Boundary.transitionActivitySnapshot(tick)
-    if not snapshotOk then return false end
-    local state = activity[key]
-    return state ~= nil and state.active == true
-end
-
 -- Small lifecycle interface for independent services that must yield while
 -- an authoritative player relocation is in flight. Listeners do not own or
 -- alter transition state; failures are contained so they cannot block travel.

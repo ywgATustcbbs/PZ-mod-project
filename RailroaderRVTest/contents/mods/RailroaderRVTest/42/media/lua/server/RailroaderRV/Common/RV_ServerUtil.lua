@@ -35,21 +35,6 @@ local function requiredInteger(value, label)
     return integerValue
 end
 
-local function floorInt(value)
-    return math.floor(toNumber(value) or 0)
-end
-
-local function copyPoint(value, label)
-    if type(value) ~= "table" then
-        error("RailroaderRVTest: " .. tostring(label) .. " is missing")
-    end
-    return {
-        x = requiredInteger(value.x, tostring(label) .. ".x"),
-        y = requiredInteger(value.y, tostring(label) .. ".y"),
-        z = requiredInteger(value.z, tostring(label) .. ".z"),
-    }
-end
-
 local function makeLayout(x, y, z)
     return LayoutContract.make(x, y, z)
 end
@@ -63,16 +48,12 @@ M.classInstance = classInstance
 M.toNumber = toNumber
 M.isFiniteNumber = isFiniteNumber
 M.integer = integer
-M.exactKeys = Common.exactKeys
-M.copyPlain = Common.copyPlain
 M.identityKey = Common.identityKey
 M.getPlayerPosition = Common.getPlayerPosition
 M.getSquare = Common.getSquare
 M.newPlayerPositionCache = Common.newPlayerPositionCache
 M.requiredNumber = requiredNumber
 M.requiredInteger = requiredInteger
-M.floorInt = floorInt
-M.copyPoint = copyPoint
 M.makeLayout = makeLayout
 
 return M

@@ -320,7 +320,6 @@ function Layout.make(cx, cy, cz)
         wallCoordinates = wallCoordinates,
         generator = offsetPoint(anchor, C.GENERATOR_OFFSET),
     }
-    result.wallCount = #wallCoordinates
     result.wallObjectCount = #wallCoordinates
     result.wallCoordinateCount = #wallCoordinates
     result.wallEdgeCounts = { north = northCount, west = #wallCoordinates - northCount }

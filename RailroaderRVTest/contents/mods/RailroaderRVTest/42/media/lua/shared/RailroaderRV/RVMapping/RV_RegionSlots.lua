@@ -19,7 +19,6 @@ Slots.REGION_SIZE = C.RV_REGION_SIZE
 
 local SIZE = Slots.REGION_SIZE
 local integer = StrictSchema.integer
-local exactKeys = StrictSchema.exactKeys
 local FIRST_MIN_X = C.TELEPORT_X + C.RV_REGION_MIN_OFFSET_X
 local FIRST_MIN_Y = C.TELEPORT_Y + C.RV_REGION_MIN_OFFSET_Y
 local FIRST_Z = C.TELEPORT_Z
@@ -83,9 +82,6 @@ local function denseRegionList(regions)
 end
 
 local function validatedRegion(region)
-    if not exactKeys(region, { "minX", "minY", "maxX", "maxY" }) then
-        return nil
-    end
     local minX, minY = integer(region.minX), integer(region.minY)
     local maxX, maxY = integer(region.maxX), integer(region.maxY)
     if not minX or not minY or not maxX or not maxY
@@ -125,7 +121,6 @@ function Slots.indexToRegion(index)
 end
 
 function Slots.indexForAnchor(anchor)
-    if not exactKeys(anchor, { "x", "y", "z" }) then return nil end
     local x, y, z = integer(anchor.x), integer(anchor.y), integer(anchor.z)
     if not x or not y or z ~= FIRST_Z then return nil end
 

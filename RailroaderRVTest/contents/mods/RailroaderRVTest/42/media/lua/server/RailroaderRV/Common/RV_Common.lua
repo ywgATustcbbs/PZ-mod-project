@@ -96,31 +96,6 @@ function Common.exactKeys(value, expected, optional)
     return count >= required
 end
 
-function Common.copyPlain(value, seen)
-    if type(value) ~= "table" then
-        if Common.isFiniteNumber(value) or type(value) == "string"
-            or type(value) == "boolean" or value == nil then
-            return value
-        end
-        error("RailroaderRV: cannot copy a non-plain value")
-    end
-    if getmetatable(value) ~= nil then
-        error("RailroaderRV: cannot copy a metatable-backed value")
-    end
-    seen = seen or {}
-    if seen[value] then error("RailroaderRV: cannot copy a cyclic table") end
-    seen[value] = true
-    local result = {}
-    for key, nested in pairs(value) do
-        if type(key) ~= "string" and Common.integer(key) == nil then
-            error("RailroaderRV: plain table key is not a string or integer")
-        end
-        result[key] = Common.copyPlain(nested, seen)
-    end
-    seen[value] = nil
-    return result
-end
-
 function Common.identityKey(...)
     local parts = {}
     local count = select("#", ...)

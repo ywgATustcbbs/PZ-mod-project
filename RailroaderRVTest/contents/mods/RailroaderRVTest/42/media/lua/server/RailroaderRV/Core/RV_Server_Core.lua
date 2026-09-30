@@ -323,22 +323,6 @@ local function registerEvent(eventName, name, callback)
     return true
 end
 
-local function sendToClient(player, command, payload)
-    if player == nil or type(command) ~= "string" or command == "" then
-        return false, "invalid-client-message"
-    end
-    local send = rawget(_G, "sendServerCommand")
-    if type(send) ~= "function" then
-        return false, "send-server-command-unavailable"
-    end
-    local constantsOk, constants = pcall(require, "RailroaderRV/Common/RV_Constants")
-    local module = constantsOk and type(constants) == "table"
-        and constants.MOD_ID or "RailroaderRVTest"
-    local ok, result = pcall(send, player, module, command, payload)
-    if not ok or result == false then return false, "send-server-command-failed" end
-    return true
-end
-
 Core.getTick = getTick
 Core.isTick = isTick
 Core.formatTick = formatTick
@@ -351,7 +335,6 @@ Core.tickModulo = tickModulo
 Core.registerTick = registerTick
 Core.registerCommand = registerCommand
 Core.registerEvent = registerEvent
-Core.sendToClient = sendToClient
 
 RV.Core = Core
 

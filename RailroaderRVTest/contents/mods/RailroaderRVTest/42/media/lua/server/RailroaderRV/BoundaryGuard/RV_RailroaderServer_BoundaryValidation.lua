@@ -25,7 +25,6 @@ local function invalidate()
     cache = {}
     pending = {}
     prewarmAfterTick = { hi32 = 0, lo32 = 0 }
-    Adapter._boundaryValidationWarmPending = true
 end
 
 local function roofRefreshBoundaryReadAllowed(server, record, identityKey)
@@ -112,13 +111,11 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
         cache[identityKey] = nil
         if forceRefresh or not deferCacheMiss then return nil end
         pending[identityKey] = true
-        Adapter._boundaryValidationWarmPending = true
         return nil, "validation-deferred"
     end
     if deferCacheMiss and not forceRefresh and not roofRefreshContextRead then
         cache[identityKey] = nil
         pending[identityKey] = true
-        Adapter._boundaryValidationWarmPending = true
         return nil, "validation-deferred"
     end
 
@@ -252,7 +249,6 @@ function Adapter.prewarmCurrentBoundaryPlayers(knownMap, knownPlayers)
     end
     if #candidates == 0 then
         pending = {}
-        Adapter._boundaryValidationWarmPending = false
         return true
     end
     local map = type(knownMap) == "table" and knownMap or mapData()
@@ -260,7 +256,6 @@ function Adapter.prewarmCurrentBoundaryPlayers(knownMap, knownPlayers)
         Adapter.prewarmCurrentBoundaryPlayer(candidates[i], map)
     end
     pending = {}
-    Adapter._boundaryValidationWarmPending = false
     return true
 end
 

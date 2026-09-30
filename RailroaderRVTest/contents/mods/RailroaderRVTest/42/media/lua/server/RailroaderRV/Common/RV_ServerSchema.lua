@@ -2,7 +2,6 @@
 --
 -- This module builds runtime bounds and reports world-coordinate/loading state.
 
-local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
 local ServerUtil = require("RailroaderRV/Common/RV_ServerUtil")
 local ServerWorld = require("RailroaderRV/Common/RV_ServerWorld")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
@@ -148,32 +147,10 @@ local function targetAreaLoadStatus(player, bounds, safeErrorText)
     return nil, "RailroaderRVTest: loaded-area preflight returned no status"
 end
 
-local function eachStructureSquare(cell, bounds, callback)
-    local scanBounds = {
-        wallMinX = bounds.wallMinX,
-        wallMaxX = bounds.wallMaxX,
-        wallMinY = bounds.wallMinY,
-        wallMaxY = bounds.wallMaxY,
-        z = bounds.z,
-        roofMinX = bounds.roofMinX,
-        roofMaxX = bounds.roofMaxX,
-        roofMinY = bounds.roofMinY,
-        roofMaxY = bounds.roofMaxY,
-        roofZ = bounds.roofZ,
-        anchor = { x = bounds.anchor.x, y = bounds.anchor.y },
-    }
-    Layout.eachStructureCoordinate(scanBounds, function(x, y, z)
-        local square = ServerWorld.getSquare(cell, x, y, z)
-        if square then
-            callback(square, x, y, z)
-        end
-    end)
-end
 M.boundsFor = boundsFor
 M.walkBounds = walkBounds
 M.validateTargetCoordinates = validateTargetCoordinates
 M.preflightLoaded = preflightLoaded
 M.targetAreaLoadStatus = targetAreaLoadStatus
-M.eachStructureSquare = eachStructureSquare
 
 return M

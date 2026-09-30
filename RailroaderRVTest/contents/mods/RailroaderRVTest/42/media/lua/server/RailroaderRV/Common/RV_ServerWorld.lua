@@ -172,7 +172,10 @@ local function objectModData(object)
     return nil
 end
 
-local function tagObject(object, generation, role, extraData)
+-- One canonical identity tag: exactly one namespace, one copy.  Template
+-- attributes are never copied onto the object; a reader resolves them through
+-- `templateIndex` against the compiled template.
+local function tagObject(object, generation, role, tagContext, extraData)
     local data = objectModData(object)
     if not data then
         error("RailroaderRVTest: generated object has no modData for role " .. tostring(role))
@@ -182,60 +185,29 @@ local function tagObject(object, generation, role, extraData)
         or generationNumber < 1 or role == nil then
         error("RailroaderRVTest: generated object tag is incomplete")
     end
-    generation = generationNumber
-    local rvId = extraData and extraData.rvId
+    local rvId = type(tagContext) == "table" and tagContext.rvId or nil
     if rvId == nil or tostring(rvId) == "" then
         error("RailroaderRVTest: generated object boundary identity is incomplete")
     end
-    data.owner = OWNER
-    data.rvId = tostring(rvId)
-    data.generation = generation
-    data.role = role
-    if data.RailroaderRVTest ~= nil and type(data.RailroaderRVTest) ~= "table" then
-        error("RailroaderRVTest: generated object tag namespace is not a table")
-    end
-    data.RailroaderRVTest = data.RailroaderRVTest or {}
-    data.RailroaderRVTest.owner = OWNER
-    data.RailroaderRVTest.rvId = tostring(rvId)
-    data.RailroaderRVTest.generation = generation
-    data.RailroaderRVTest.role = role
+    -- `extraData` may add only facts that the object itself owns and that no
+    -- reader can derive: the template entry index, the shell edge key, and the
+    -- floor rollback snapshot.  Identity is assigned last, so descriptor data
+    -- can never override the RV/generation tokens.
+    local tag = {}
     if type(extraData) == "table" then
         for key, value in pairs(extraData) do
-            data.RailroaderRVTest[key] = value
+            tag[key] = value
         end
     end
-    -- Re-assert all ownership identity after copying optional metadata.
-    -- `extraData` is only descriptive (edge/sprite state), never authority.
-    data.RailroaderRVTest.owner = OWNER
-    data.RailroaderRVTest.rvId = tostring(rvId)
-    data.RailroaderRVTest.generation = generation
-    data.RailroaderRVTest.role = role
+    tag.owner = OWNER
+    tag.rvId = tostring(rvId)
+    tag.generation = generationNumber
+    tag.role = role
+    data.RailroaderRVTest = tag
     -- New objects are not on the client yet.  Do not transmit an object-index
     -- modData delta here: the creator sends one complete object packet after
     -- attachment and all object-specific state is final.  Existing objects
     -- (notably replaced floors) explicitly send their deltas in createFloor.
-    local verify = objectModData(object)
-    if not verify or verify.owner ~= OWNER
-        or tostring(verify.rvId) ~= tostring(rvId)
-        or verify.role ~= role
-        or ServerUtil.toNumber(verify.generation) ~= generation then
-        error("RailroaderRVTest: generated object tag verification failed for role " .. tostring(role))
-    end
-end
-
-local function withTagIdentity(extraData, tagContext)
-    if type(tagContext) ~= "table" or tagContext.rvId == nil
-        or tostring(tagContext.rvId) == "" then
-        error("RailroaderRVTest: boundary tag identity is incomplete")
-    end
-    local result = {}
-    if type(extraData) == "table" then
-        for key, value in pairs(extraData) do result[key] = value end
-    end
-    -- Context identity is authoritative; per-object metadata must not be
-    -- able to overwrite the RV/generation snapshot tokens.
-    result.rvId = tostring(tagContext.rvId)
-    return result
 end
 
 local function isTaggedForGeneration(object, generation, rvId)
@@ -243,21 +215,10 @@ local function isTaggedForGeneration(object, generation, rvId)
         return false
     end
     local data = objectModData(object)
-    if not data then
-        return false
-    end
-    local function matches(tag)
-        if type(tag) ~= "table" or tag.owner ~= OWNER
-            or ServerUtil.toNumber(tag.generation) ~= ServerUtil.toNumber(generation) then
-            return false
-        end
-        return tostring(tag.rvId) == tostring(rvId)
-    end
-    if matches(data) then
-        return true
-    end
-    local nested = data.RailroaderRVTest
-    return matches(nested)
+    local tag = data and data.RailroaderRVTest or nil
+    return type(tag) == "table" and tag.owner == OWNER
+        and ServerUtil.toNumber(tag.generation) == ServerUtil.toNumber(generation)
+        and tostring(tag.rvId) == tostring(rvId)
 end
 
 local function isPlayerObject(object)
@@ -357,20 +318,14 @@ local function clearGenerationTag(object)
     if not data then
         error("RailroaderRVTest: generated object has no modData while clearing tag")
     end
-    if data.owner == OWNER then
-        data.owner = nil
-        data.rvId = nil
-        data.generation = nil
-        data.role = nil
-    end
-    local nested = data.RailroaderRVTest
-    if type(nested) == "table" and nested.owner == OWNER then
-        nested.owner = nil
-        nested.rvId = nil
-        nested.generation = nil
-        nested.role = nil
-        nested.previousSprite = nil
-        nested.createdByGeneration = nil
+    local tag = data.RailroaderRVTest
+    if type(tag) == "table" and tag.owner == OWNER then
+        tag.owner = nil
+        tag.rvId = nil
+        tag.generation = nil
+        tag.role = nil
+        tag.previousSprite = nil
+        tag.createdByGeneration = nil
         -- Keep the namespace itself.  The dedicated-server Kahlua runtime does
         -- not provide Lua's `next` primitive, and an empty namespace is safe;
         -- retaining it also avoids touching unrelated modData keys.
@@ -402,15 +357,17 @@ local function squareContainsObject(square, object)
     return false
 end
 
+-- The removal filter for a tagged floor: the rollback snapshot lives in the
+-- same canonical namespace as the identity.
 local function restoreTaggedFloor(square, object)
     local data = objectModData(object)
-    local nested = data and data.RailroaderRVTest or nil
-    if type(nested) ~= "table" or nested.owner ~= OWNER
-        or nested.createdByGeneration ~= false or not nested.previousSprite then
+    local tag = data and data.RailroaderRVTest or nil
+    if type(tag) ~= "table" or tag.owner ~= OWNER
+        or tag.createdByGeneration ~= false or not tag.previousSprite then
         return false
     end
 
-    local previousSprite = tostring(nested.previousSprite)
+    local previousSprite = tostring(tag.previousSprite)
     local currentSprite = getSpriteName(object)
     if not currentSprite then
         error("RailroaderRVTest: tagged floor has no current sprite during rollback")
@@ -511,7 +468,6 @@ M.squareSnapshot = squareSnapshot
 M.strictSquareSnapshot = strictSquareSnapshot
 M.objectModData = objectModData
 M.tagObject = tagObject
-M.withTagIdentity = withTagIdentity
 M.isTaggedForGeneration = isTaggedForGeneration
 M.isPlayerObject = isPlayerObject
 M.isVehicleObject = isVehicleObject

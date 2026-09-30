@@ -25,18 +25,6 @@ local function call(target, method, ...)
 end
 
 local objectCoordinates
--- The tag names the current template entry and role and stores no geometry; the
--- entry identity is re-read from the compiled template below.
-local function tagMatchesStaticIdentity(tag, expected, templateIndex)
-    return type(tag) == "table" and type(expected) == "table"
-        and C.finiteInteger(tag.templateIndex) == templateIndex
-        and tag.templateClass == expected.class
-        and tag.templateName == expected.name
-        and tag.templateSprite == expected.sprite
-        and tag.templateDirection == expected.direction
-        and (expected.north == "none" and tag.templateNorth == nil
-            or tag.templateNorth == expected.north)
-end
 
 objectCoordinates = function(object)
     local squareOk, square = call(object, "getSquare")
@@ -93,24 +81,15 @@ local function showInvalidRVData(character)
     pcall(function() character:setHaloNote(message, 255, 255, 255, 5000) end)
 end
 
-local function templateTagFailureReason(data, tag)
-    local function fail(reason)
-        return reason
+local function templateTagFailureReason(tag)
+    if type(tag) ~= "table" then return "template-tag-missing" end
+    if tag.owner ~= C.MOD_ID then return "template-tag-owner-mismatch" end
+    if type(tag.rvId) ~= "string" or tag.rvId == "" then
+        return "template-tag-rv-id-invalid"
     end
-    if type(tag) ~= "table" then return fail("template-tag-missing") end
-    if data.owner ~= C.MOD_ID then return fail("template-root-owner-mismatch") end
-    if tag.owner ~= C.MOD_ID then return fail("template-tag-owner-mismatch") end
-    if data.role ~= tag.role then return fail("template-role-mismatch") end
-    if type(data.rvId) ~= "string" or data.rvId == "" then
-        return fail("template-root-rv-id-invalid")
-    end
-    if data.rvId ~= tag.rvId then return fail("template-tag-rv-id-mismatch") end
-    local dataGeneration = C.finiteInteger(data.generation)
-    if dataGeneration == nil or dataGeneration < 1 then
-        return fail("template-root-generation-invalid")
-    end
-    if dataGeneration ~= C.finiteInteger(tag.generation) then
-        return fail("template-tag-generation-mismatch")
+    local generation = C.finiteInteger(tag.generation)
+    if generation == nil or generation < 1 then
+        return "template-tag-generation-invalid"
     end
     return nil
 end
@@ -127,8 +106,11 @@ local function objectMatchesStaticIdentity(object, tag, expected,
     local function fail(reason, detail)
         return false
     end
-    if not tagMatchesStaticIdentity(tag, expected, templateIndex) then
-        return fail("template-tag-static-fields-mismatch")
+    -- The tag names the template entry and stores no copy of its attributes;
+    -- `expected` is that entry, re-read from the compiled template.
+    if type(tag) ~= "table"
+        or C.finiteInteger(tag.templateIndex) ~= templateIndex then
+        return fail("template-tag-index-mismatch")
     end
     local indexOk, objectIndex = call(object, "getObjectIndex")
     local squareOk, square = call(object, "getSquare")
@@ -217,25 +199,26 @@ local function isCurrentProhibitedObject(object, character)
         return false
     end
     local tag = data.RailroaderRVTest
-    local owned = data.owner == C.MOD_ID
-        or type(tag) == "table" and tag.owner == C.MOD_ID
-    if not owned then
+    if tag == nil then
+        -- Ordinary world content: no owner, nothing to protect.
+        return false
+    end
+    if type(tag) ~= "table" then
+        return rejectInvalidRVData(character, "template-tag-unavailable")
+    end
+    if tag.owner ~= C.MOD_ID then
         return false
     end
 
-    local hasTemplateMarker = type(tag) == "table"
-        and (tag.templateIndex ~= nil or templateRoles[tag.role] == true)
-        or templateRoles[data.role] == true
+    local hasTemplateMarker = tag.templateIndex ~= nil
+        or templateRoles[tag.role] == true
     if not hasTemplateMarker then
         -- The native generator and other feature-owned objects have their own
         -- lifecycle and do not belong to the captured-template protection set.
         return false
     end
 
-    if type(tag) ~= "table" then
-        return rejectInvalidRVData(character, "template-tag-unavailable")
-    end
-    local tagFailure = templateTagFailureReason(data, tag)
+    local tagFailure = templateTagFailureReason(tag)
     if tagFailure then
         return rejectInvalidRVData(character, tagFailure)
     end

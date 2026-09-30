@@ -20,23 +20,15 @@ local function objectModData(object)
     return ok and type(data) == "table" and data or nil
 end
 
+-- The one canonical tag namespace owns the identity.  An object without it is
+-- ordinary world content; a foreign owner is not ours to act on.
 local function rvTag(object)
     local data = objectModData(object)
-    if not data then return nil end
-    local nested = data.RailroaderRVTest
-    -- A conflicting top-level/nested owner is ambiguous.  Do not let one
-    -- namespace override the other and accidentally authorize deletion of an
-    -- object another mod has claimed; the build/cleanup policy is fail-open
-    -- for this case.
-    if data.owner ~= nil and tostring(data.owner) ~= OWNER then return nil end
-    if type(nested) == "table" and nested.owner ~= nil
-        and tostring(nested.owner) ~= OWNER then
+    local tag = data and data.RailroaderRVTest or nil
+    if type(tag) ~= "table" or tostring(tag.owner) ~= OWNER then
         return nil
     end
-    if type(nested) == "table" and tostring(nested.owner) == OWNER then
-        return nested
-    end
-    return data.owner ~= nil and tostring(data.owner) == OWNER and data or nil
+    return tag
 end
 
 local function objectSquare(object)
@@ -92,42 +84,32 @@ local function shellEdgeAllowed(boundary, tag, objectX, objectY, objectZ)
     local originY = type(managed) == "table" and integer(managed.originY) or nil
     local anchor = TemplateGeometry.anchorFromManaged(managed, Template)
     if not originX or not originY or not anchor then return false end
-    local keys = {}
-    if type(tag.edgeKey) == "string" then keys[#keys + 1] = tag.edgeKey end
-    if type(tag.edgeKeys) == "table" then
-        for _, key in pairs(tag.edgeKeys) do
-            if type(key) == "string" then keys[#keys + 1] = key end
-        end
-    end
-    for i = 1, #keys do
-        local edge = boundary.shellEdges and boundary.shellEdges[keys[i]]
-        local captured = type(tag) == "table" and templateObjects[
-            integer(tag.templateIndex)] or nil
-        if type(edge) == "table"
-            and tag.owner == OWNER
-            and tag.rvId ~= nil
-            and tag.generation ~= nil
-            and tostring(edge.rvId) == tostring(boundary.rvId)
-            and integer(edge.generation) == boundary.generation
-            and tostring(tag.rvId) == tostring(boundary.rvId)
-            and integer(tag.generation) == boundary.generation
-            and edge.replacementAllowed ~= false
-            and shellEdgeHasTemplateIndex(edge, tag.templateIndex)
-            and captured ~= nil and captured.class == tag.templateClass
-            and captured.name == tag.templateName
-            and captured.sprite == tag.templateSprite
-            and captured.north == tag.templateNorth
-            and captured.direction == tag.templateDirection
-            and captured.north == edge.north
-            and edge.role == tag.role
-            and captured.x == objectX - anchor.x
-            and captured.y == objectY - anchor.y
-            and captured.z == objectZ - anchor.z
-            and integer(edge.objectX) == objectX
-            and integer(edge.objectY) == objectY
-            and integer(edge.objectZ or edge.z) == objectZ then
-            return true
-        end
+    -- The canonical tag names exactly one shell edge, and `captured` is the
+    -- compiled template entry named by `templateIndex`; the tag stores no copy
+    -- of the entry's attributes.
+    local edge = type(tag.edgeKey) == "string" and boundary.shellEdges
+        and boundary.shellEdges[tag.edgeKey] or nil
+    local captured = templateObjects[integer(tag.templateIndex)]
+    if type(edge) == "table"
+        and tag.owner == OWNER
+        and tag.rvId ~= nil
+        and tag.generation ~= nil
+        and tostring(edge.rvId) == tostring(boundary.rvId)
+        and integer(edge.generation) == boundary.generation
+        and tostring(tag.rvId) == tostring(boundary.rvId)
+        and integer(tag.generation) == boundary.generation
+        and edge.replacementAllowed ~= false
+        and shellEdgeHasTemplateIndex(edge, tag.templateIndex)
+        and captured ~= nil
+        and captured.north == edge.north
+        and edge.role == tag.role
+        and captured.x == objectX - anchor.x
+        and captured.y == objectY - anchor.y
+        and captured.z == objectZ - anchor.z
+        and integer(edge.objectX) == objectX
+        and integer(edge.objectY) == objectY
+        and integer(edge.objectZ or edge.z) == objectZ then
+        return true
     end
     return false
 end
@@ -163,42 +145,30 @@ function Boundary.isCurrentShellWall(object, boundary)
         return false
     end
 
-    local data = objectModData(object)
     local tag = rvTag(object)
-    local nested = data and data.RailroaderRVTest
-    if type(data) ~= "table" or type(nested) ~= "table"
-        or tag ~= nested
-        or tostring(data.owner) ~= OWNER
-        or tostring(nested.owner) ~= OWNER
-        or tostring(data.rvId) ~= current.rvId
-        or tostring(nested.rvId) ~= current.rvId
-        or integer(data.generation) ~= current.generation
-        or integer(nested.generation) ~= current.generation then
+    if tag == nil or tostring(tag.rvId) ~= current.rvId
+        or integer(tag.generation) ~= current.generation then
         return false
     end
 
-    local role = nested.role
+    local role = tag.role
     if role ~= "wall-north" and role ~= "wall-west"
         and role ~= "corner-nw" then
         return false
     end
-    if type(nested.edgeKey) ~= "string" or type(nested.axis) ~= "string"
-        or integer(nested.templateIndex) == nil then
+    if type(tag.edgeKey) ~= "string" or integer(tag.templateIndex) == nil then
         return false
     end
-    local captured = templateObjects[integer(nested.templateIndex)]
+    -- The compiled template entry named by `templateIndex` is the only source of
+    -- the authored attributes; the tag stores no copy of them.
+    local captured = templateObjects[integer(tag.templateIndex)]
     local expectedNorth = captured and captured.north
     local expectedSprite = captured and captured.sprite
     local expectedRole = expectedNorth and "wall-north" or "wall-west"
-    if nested.role == "corner-nw" then expectedRole = "corner-nw" end
+    if tag.role == "corner-nw" then expectedRole = "corner-nw" end
     if not captured
         or (captured.class ~= "IsoThumpable" and captured.class ~= "IsoWindow")
-        or captured.name ~= nested.templateName
-        or captured.sprite ~= nested.templateSprite
-        or captured.north ~= nested.templateNorth
-        or captured.direction ~= nested.templateDirection
-        or role ~= expectedRole
-        or nested.templateClass ~= captured.class then
+        or role ~= expectedRole then
         return false
     end
     local northOk, north = call(object, "getNorth")
@@ -215,18 +185,17 @@ function Boundary.isCurrentShellWall(object, boundary)
         or not expectedDirection or not directionOk or direction ~= expectedDirection then
         return false
     end
-    local edge = boundary.shellEdges and boundary.shellEdges[nested.edgeKey]
+    local edge = boundary.shellEdges and boundary.shellEdges[tag.edgeKey]
     if type(edge) ~= "table"
-        or edge.edgeKey ~= nested.edgeKey
+        or edge.edgeKey ~= tag.edgeKey
         or edge.role ~= role
-        or edge.axis ~= nested.axis
         or edge.corner ~= (role == "corner-nw")
-        or not shellEdgeHasTemplateIndex(edge, nested.templateIndex)
-        or edge.north ~= nested.templateNorth
+        or not shellEdgeHasTemplateIndex(edge, tag.templateIndex)
+        or edge.north ~= expectedNorth
         or edge.replacementAllowed ~= true then
         return false
     end
-    return shellEdgeAllowed(boundary, nested, x, y, z)
+    return shellEdgeAllowed(boundary, tag, x, y, z)
 end
 
 local function appendShellEdgeKey(result, seen, key)
@@ -312,18 +281,12 @@ local function actionMatchesObject(action, x, y, z)
     return false
 end
 
+-- A player build needs one fact only: whether it belongs to the current RV
+-- generation.  It carries no template entry, so its tag is written as one
+-- canonical namespace holding exactly that membership.
 local function markTagPlayerBuilt(object, builder, action)
     local data = objectModData(object)
     if not data then return false end
-    if data.owner ~= nil and tostring(data.owner) ~= OWNER then
-        return false
-    end
-    local existingNamespace = data.RailroaderRVTest
-    if type(existingNamespace) == "table"
-        and existingNamespace.owner ~= nil
-        and tostring(existingNamespace.owner) ~= OWNER then
-        return false
-    end
     if type(action) ~= "table" or action.rvId == nil
         or tostring(action.rvId) == "" or integer(action.generation) == nil
         or integer(action.generation) < 1 then
@@ -343,31 +306,18 @@ local function markTagPlayerBuilt(object, builder, action)
         -- its square.
         return false
     end
-    if type(data.RailroaderRVTest) ~= "table" then
-        data.RailroaderRVTest = {}
-    end
-    tag = data.RailroaderRVTest
-    tag.owner = OWNER
-    tag.playerBuilt = true
-    tag.role = nil
-    tag.templateIndex = nil
-    tag.templateClass = nil
-    tag.templateName = nil
-    tag.templateSprite = nil
-    tag.templateNorth = nil
-    tag.templateDirection = nil
-    tag.edgeKey = nil
-    tag.axis = nil
-    data.role = nil
-    tag.builder = builder and builder.key or nil
-    tag.rvId = action and action.rvId or tag.rvId
-    tag.generation = action and action.generation or tag.generation
-    -- Replace optional attribution fields exactly.  Retaining an old edge or
-    -- footprint after a generation swap could make unrelated metadata appear
-    -- authoritative for the current generation.
-    tag.edgeKey = action.edgeKey
-    tag.edgeKeys = action.edgeKeys
-    tag.footprint = action.footprint
+    data.RailroaderRVTest = {
+        owner = OWNER,
+        playerBuilt = true,
+        builder = builder and builder.key or nil,
+        rvId = action.rvId,
+        generation = action.generation,
+        -- Optional attribution of the accepted action, replaced exactly: a
+        -- stale edge or footprint must never appear authoritative.
+        edgeKey = action.edgeKey,
+        edgeKeys = action.edgeKeys,
+        footprint = action.footprint,
+    }
     return true
 end
 

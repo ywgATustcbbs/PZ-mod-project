@@ -258,20 +258,16 @@ local function applyCapturedIdentityAndState(object, entry, deferHealth)
     end
 end
 
-local function capturedTagData(entry, edge, tagContext)
-    -- Identity only: `templateIndex` names the template entry, and the world
-    -- transform is derived from the object's own square at read time.
-    local result = {
-        templateIndex = entry.templateIndex,
-        templateClass = entry.class,
-        templateName = entry.name,
-        templateSprite = entry.sprite,
-        templateNorth = entry.north,
-        templateDirection = entry.direction,
-    }
+local function capturedTagData(entry, edge)
+    -- Identity only: `templateIndex` names the template entry and the world
+    -- transform is derived from the object's own square at read time.  Every
+    -- template attribute (class, name, sprite, north, direction) is re-read from
+    -- the compiled template through that index instead of being copied here.
+    local result = { templateIndex = entry.templateIndex }
     if edge then
+        -- The shell edge key is not derivable from the object alone; the
+        -- protection ledger still resolves the owning edge through it.
         result.edgeKey = edge.edgeKey
-        result.axis = edge.axis
     end
     return result
 end
@@ -385,11 +381,11 @@ local function createFloor(square, sprite, generation, role, tagContext, capture
         applyCapturedIdentityAndState(floor, capturedEntry)
     end
     local floorTagData = capturedEntry
-        and capturedTagData(capturedEntry, edge, tagContext) or {}
+        and capturedTagData(capturedEntry, edge) or {}
     floorTagData.previousSprite = previousSprite
     floorTagData.createdByGeneration = createdByGeneration
     local tagged, tagError = pcall(ServerWorld.tagObject, floor, generation, role,
-        ServerWorld.withTagIdentity(floorTagData, tagContext))
+        tagContext, floorTagData)
     if not tagged then
         local removed, removeError = pcall(ServerWorld.removeGenericObject, square, floor)
         if not removed then
@@ -457,7 +453,7 @@ local function createWall(cell, square, sprite, north, generation, role, extraDa
     if not ServerUtil.callSucceeded(wall, "setIsThumpable", true) then
         error("RailroaderRVTest: wall initial state failed")
     end
-    ServerWorld.tagObject(wall, generation, role, ServerWorld.withTagIdentity(extraData, tagContext))
+    ServerWorld.tagObject(wall, generation, role, tagContext, extraData)
     addSpecialObject(square, wall)
     if not ServerUtil.callSucceeded(wall, "transmitCompleteItemToClients") then
         error("RailroaderRVTest: wall client transmission failed")
@@ -519,7 +515,7 @@ local function createGenerator(cell, square, sprite, generation, tagContext)
         or not ServerUtil.callSucceeded(generator, "setActivated", false) then
         error("RailroaderRVTest: generator initial state failed")
     end
-    ServerWorld.tagObject(generator, generation, "generator", ServerWorld.withTagIdentity(nil, tagContext))
+    ServerWorld.tagObject(generator, generation, "generator", tagContext)
     addSpecialObject(square, generator)
     if type(cls.updateGenerator) == "function" then
         pcall(cls.updateGenerator, square)
@@ -537,7 +533,7 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
         error("RailroaderRVTest: captured template object is malformed")
     end
     local role = edge and edge.role or "captured-template"
-    local tagData = capturedTagData(entry, edge, tagContext)
+    local tagData = capturedTagData(entry, edge)
     local object
     if isVisualCornerTemplateEntry(entry) then
         if entry.class ~= "IsoObject" then
@@ -553,7 +549,7 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
         end
         applyCapturedIdentityAndState(tileObject, entry)
         ServerWorld.tagObject(tileObject, generation, role,
-            ServerWorld.withTagIdentity(tagData, tagContext))
+            tagContext, tagData)
         if not ServerUtil.callSucceeded(square, "AddTileObject", tileObject) then
             error("RailroaderRVTest: captured corner trim attachment failed")
         end
@@ -594,7 +590,7 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
             configureCapturedDoorFrame(thumpable, entry)
         end
         ServerWorld.tagObject(thumpable, generation, role,
-            ServerWorld.withTagIdentity(tagData, tagContext))
+            tagContext, tagData)
         addSpecialObject(square, thumpable)
         -- The B42 health setter resolves the object through its square. Apply
         -- captured health after attachment, while the generation tag already
@@ -613,7 +609,7 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
         end
         applyCapturedIdentityAndState(door, entry)
         ServerWorld.tagObject(door, generation, role,
-            ServerWorld.withTagIdentity(tagData, tagContext))
+            tagContext, tagData)
         addSpecialObject(square, door)
         object = door
     elseif entry.class == "IsoWindow" then
@@ -630,7 +626,7 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
         end
         applyCapturedIdentityAndState(window, entry, true)
         ServerWorld.tagObject(window, generation, role,
-            ServerWorld.withTagIdentity(tagData, tagContext))
+            tagContext, tagData)
         addSpecialObject(square, window)
         applyCapturedHealthState(window, entry)
         object = window
@@ -651,7 +647,7 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
             error("RailroaderRVTest: captured light switch state failed")
         end
         ServerWorld.tagObject(light, generation, role,
-            ServerWorld.withTagIdentity(tagData, tagContext))
+            tagContext, tagData)
         addSpecialObject(square, light)
         if not ServerUtil.callSucceeded(light, "update") then
             error("RailroaderRVTest: captured light switch update failed")
@@ -669,17 +665,11 @@ end
 
 local function generatorObjectTag(object)
     local data = ServerWorld.objectModData(object)
-    if type(data) ~= "table" then return nil end
-    local nested = data.RailroaderRVTest
-    if type(nested) ~= "table"
-        or data.owner ~= Constants.MOD_ID
-        or nested.owner ~= Constants.MOD_ID
-        or tostring(data.rvId) ~= tostring(nested.rvId)
-        or integer(data.generation) ~= integer(nested.generation)
-        or data.role ~= nested.role then
+    local tag = data and data.RailroaderRVTest or nil
+    if type(tag) ~= "table" or tag.owner ~= Constants.MOD_ID then
         return nil
     end
-    return nested
+    return tag
 end
 
 local function isWhitelistedGenerator(object, boundary)

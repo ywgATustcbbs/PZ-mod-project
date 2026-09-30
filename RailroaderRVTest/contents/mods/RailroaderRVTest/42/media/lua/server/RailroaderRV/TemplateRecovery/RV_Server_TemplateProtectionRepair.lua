@@ -49,7 +49,39 @@ for index = 1, #templateObjects do
     entries[#entries + 1] = captured
 end
 
-local function entryAt(anchor, x, y, z)
+-- Shell edge ownership of one template entry, indexed by template index. The
+-- ledger is per RV generation, so this is rebuilt on every cell check and never
+-- cached at module load. An authored ledger that is internally inconsistent is
+-- this mod's own data being wrong, so it raises instead of degrading silently.
+local function shellEdgeMap(boundary)
+    local map = {}
+    for key, edge in pairs(boundary.shellEdges) do
+        if type(key) ~= "string" or type(edge) ~= "table"
+            or edge.edgeKey ~= key or type(edge.role) ~= "string" then
+            error("RailroaderRVTest: shell edge ledger entry is inconsistent for key "
+                .. tostring(key))
+        end
+        local parts = edge.templateIndices
+        if type(parts) ~= "table" or #parts < 1
+            or integer(parts[1]) ~= integer(edge.templateIndex) then
+            error("RailroaderRVTest: shell edge ledger entry has no template index list for key "
+                .. tostring(key))
+        end
+        for index = 1, #parts do
+            local templateIndex = integer(parts[index])
+            if not templateIndex or templateIndex < 1
+                or templateIndex > Template.metadata.objectCount
+                or map[templateIndex] ~= nil then
+                error("RailroaderRVTest: shell edge ledger entry is inconsistent for key "
+                    .. tostring(key))
+            end
+            map[templateIndex] = edge
+        end
+    end
+    return map
+end
+
+local function entryAt(anchor, edgeMap, x, y, z)
     local offset = TemplateGeometry.worldToTemplate({
         x = x, y = y, z = z,
     }, anchor)
@@ -75,6 +107,7 @@ local function entryAt(anchor, x, y, z)
                 direction = captured.direction,
                 state = captured.state,
                 protected = captured.protected,
+                edge = edgeMap[captured.templateIndex],
             }
         end
     end
@@ -83,10 +116,10 @@ end
 
 -- Every template object expected on the layers of one cell. An empty result
 -- means the template protects nothing there.
-local function templateEntriesAt(boundary, anchor, x, y)
+local function templateEntriesAt(boundary, anchor, edgeMap, x, y)
     local entries = {}
     for z = boundary.managed.minZ, boundary.managed.maxZ - 1 do
-        local entry = entryAt(anchor, x, y, z)
+        local entry = entryAt(anchor, edgeMap, x, y, z)
         if entry then entries[#entries + 1] = entry end
     end
     return entries
@@ -101,21 +134,15 @@ local function loadedLayerForCell(cell, x, y, z)
 end
 
 -- The trusted identity written by this mod when a captured object is created.
--- A player build carries none of these fields, which is what distinguishes it
+-- A player build carries no template entry index, which is what distinguishes it
 -- from the template object it replaces.
 local function objectTag(object)
     local data = ServerWorld.objectModData(object)
-    if type(data) ~= "table" or data.owner ~= Constants.MOD_ID then
+    local tag = data and data.RailroaderRVTest or nil
+    if type(tag) ~= "table" or tag.owner ~= Constants.MOD_ID then
         return nil
     end
-    local nested = data.RailroaderRVTest
-    if type(nested) ~= "table" or nested.owner ~= Constants.MOD_ID
-        or tostring(data.rvId) ~= tostring(nested.rvId)
-        or integer(data.generation) ~= integer(nested.generation)
-        or data.role ~= nested.role then
-        return nil
-    end
-    return nested
+    return tag
 end
 
 local function objectTemplateIndex(object)

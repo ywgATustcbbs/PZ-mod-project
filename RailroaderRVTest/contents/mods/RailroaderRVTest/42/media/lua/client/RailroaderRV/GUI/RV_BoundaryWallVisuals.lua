@@ -42,31 +42,24 @@ local function isTaggedBoundarySupportWall(object)
     local dataOk, data = call(object, "getModData")
     if not dataOk or type(data) ~= "table" then return false end
     local tag = data.RailroaderRVTest
-    local templateIndex = type(tag) == "table" and C.finiteInteger(tag.templateIndex) or nil
-    local expected = templateIndex and templateObjects[templateIndex] or nil
     if type(tag) ~= "table"
-        or data.owner ~= C.MOD_ID or tag.owner ~= C.MOD_ID
-        or type(data.rvId) ~= "string" or data.rvId == ""
-        or data.rvId ~= tag.rvId
-        or C.finiteInteger(data.generation) == nil or C.finiteInteger(data.generation) < 1
-        or C.finiteInteger(data.generation) ~= C.finiteInteger(tag.generation)
-        or data.role ~= tag.role or not boundaryRoles[tag.role]
-        or not expected then
+        or tag.owner ~= C.MOD_ID
+        or type(tag.rvId) ~= "string" or tag.rvId == ""
+        or C.finiteInteger(tag.generation) == nil or C.finiteInteger(tag.generation) < 1
+        or not boundaryRoles[tag.role] then
         return false
     end
+    local templateIndex = C.finiteInteger(tag.templateIndex)
+    local expected = templateIndex and templateObjects[templateIndex] or nil
+    if not expected then return false end
     -- The boundary role is exactly the set the server assigns to captured shell
-    -- edges; the rest of the entry is re-read from the template and the live
-    -- object, because the tag stores no geometry and no support-wall marker.
+    -- edges; every attribute below is re-read from the compiled template entry
+    -- named by `templateIndex`, because the tag stores no copy of it.
     if expected.class ~= "IsoThumpable"
         or expected.name ~= "Wooden Wall"
         or not supportWallSprites[expected.sprite]
         or type(expected.state) ~= "table"
-        or expected.state.doRender ~= false
-        or tag.templateClass ~= expected.class
-        or tag.templateName ~= expected.name
-        or tag.templateSprite ~= expected.sprite
-        or tag.templateDirection ~= expected.direction
-        or tag.templateNorth ~= expected.north then
+        or expected.state.doRender ~= false then
         return false
     end
     if tag.role == "wall-north" or tag.role == "corner-nw" then

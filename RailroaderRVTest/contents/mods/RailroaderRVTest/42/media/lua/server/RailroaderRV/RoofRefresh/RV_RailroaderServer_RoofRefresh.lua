@@ -473,21 +473,14 @@ local function cheapShellWallCandidate(object)
 
     local dataOk, data = call(object, "getModData")
     if not dataOk or type(data) ~= "table" then return false end
-    local nested = data.RailroaderRVTest
-    local rvId = data.rvId ~= nil and tostring(data.rvId) or nil
-    if type(nested) ~= "table"
-        or tostring(data.owner) ~= OWNER
-        or tostring(nested.owner) ~= OWNER
-        or rvId == nil or rvId == ""
-        or rvId ~= tostring(nested.rvId) then
-        return false
-    end
-    local generation = integer(data.generation)
-    if generation == nil or generation ~= integer(nested.generation) then
+    local tag = data.RailroaderRVTest
+    if type(tag) ~= "table" or tag.owner ~= OWNER
+        or tag.rvId == nil or tostring(tag.rvId) == ""
+        or integer(tag.generation) == nil then
         return false
     end
 
-    local role = nested.role
+    local role = tag.role
     return role == "wall-north" or role == "wall-west"
         or role == "corner-nw"
 end

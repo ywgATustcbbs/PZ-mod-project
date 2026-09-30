@@ -1,116 +1,115 @@
--- TemplateRecoveryWorldRepair: authoritative object safety and correction.
+-- TemplateProtectionRepair owns cell inspection and world correction for the
+-- current RV template. The live world is compared against one module-level map
+-- derived from the template, so world coordinates always come from the current
+-- boundary anchor and a rebuilt or relocated RV needs no per-RV cache.
+local instance = nil
 return function(ctx)
-local Core = ctx.Core
+if instance then return instance end
 local Constants = ctx.Constants
 local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
-local ensureRoofSquare = ctx.ensureRoofSquare
-local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local createCapturedTemplateObject = ctx.createCapturedTemplateObject
 local configureCapturedDoorFrame = ctx.configureCapturedDoorFrame
-local Index = require("RailroaderRV/TemplateRecovery/RV_TemplateRecoveryIndex")(ctx)
-local integer = Index.integer
-local sameIdentity = Index.sameIdentity
-local queueKey = Index.queueKey
-local coordinateKey = Index.coordinateKey
-local currentProtectedCoordinateTargets = Index.currentProtectedCoordinateTargets
-local validCurrentContext = Index.validCurrentContext
-local isCabSideHostCoordinate = Index.isCabSideHostCoordinate
-local templateEntry = Index.templateEntry
-local objectMatchesCapturedIdentity = Index.objectMatchesCapturedIdentity
-local isCapturedClassName = Index.isCapturedClassName
+local Boundary = ctx.Boundary
+local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
+local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
+local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
+local templateObjects = RoomTemplate.orderedObjects(Template)
 
-if type(ctx.Boundary) ~= "table" or type(ServerWorld) ~= "table"
-    or type(ServerWorld.objectModData) ~= "function"
-    or type(ServerWorld.removeGenericObject) ~= "function"
-    or type(ServerWorld.squareContainsObject) ~= "function"
-    or type(ensureRoofSquare) ~= "function"
-    or type(ServerWorld.isPlayerObject) ~= "function"
-    or type(ServerWorld.isVehicleObject) ~= "function"
-    or type(Index.validCurrentContext) ~= "function"
-    or type(Index.getOrBuildRepairIndex) ~= "function"
-    or type(Index.isCapturedClassName) ~= "function"
-    or type(createCapturedTemplateObject) ~= "function"
-    or type(configureCapturedDoorFrame) ~= "function" then
-    error("RailroaderRVTest: current template-protection-repair dependencies are incomplete")
-end
-
-local configuredDoorFrames = setmetatable({}, { __mode = "k" })
-local repairReportStateByIndex = setmetatable({}, { __mode = "k" })
-local function repairReportState(index)
-    local state = repairReportStateByIndex[index]
-    if not state then
-        state = {
-            safety = setmetatable({}, { __mode = "k" }),
-            identity = setmetatable({}, { __mode = "k" }),
-        }
-        repairReportStateByIndex[index] = state
+local function integer(value)
+    local number = ServerUtil.toNumber(value)
+    if type(number) ~= "number" or number ~= number
+        or number <= -math.huge or number >= math.huge
+        or math.floor(number) ~= number then
+        return nil
     end
-    return state
+    return number
 end
-local recentTemplateProtectionRemovals = setmetatable({}, { __mode = "k" })
-local recentTemplateProtectionRemovalsByPosition = {}
-local currentlyRemovingTemplateProtectionObject = nil
-local templateProtectionRemovalTraceRegistered = false
 
-local function removeTemplateProtectionRepairObject(square, object)
-    local server = RV and RV.Server
-    if type(server) ~= "table" then
-        return false, "template protection repair removal marker is unavailable"
+local function coordinateKey(x, y, z)
+    return tostring(x) .. "," .. tostring(y) .. "," .. tostring(z)
+end
+
+-- Template-derived protection map: one entry per template object, keyed by its
+-- template XY cell. The world transform of an entry is always derived from the
+-- current boundary anchor, so nothing here is bound to an RV or generation.
+local entriesByCell = {}
+local function templateCellKey(x, y)
+    return tostring(x) .. ":" .. tostring(y)
+end
+for index = 1, #templateObjects do
+    local captured = templateObjects[index]
+    local key = templateCellKey(captured.x, captured.y)
+    local entries = entriesByCell[key]
+    if not entries then
+        entries = {}
+        entriesByCell[key] = entries
     end
-    local xOk, x = ServerUtil.invoke(object, "getX")
-    local yOk, y = ServerUtil.invoke(object, "getY")
-    local zOk, z = ServerUtil.invoke(object, "getZ")
-    local position = (xOk and tostring(x) or "?") .. ","
-        .. (yOk and tostring(y) or "?") .. ","
-        .. (zOk and tostring(z) or "?")
-    local previousObject = currentlyRemovingTemplateProtectionObject
-    currentlyRemovingTemplateProtectionObject = object
-    local removalRecord = {
-        position = position,
-        expiresAt = Core.getTick() + 2,
-    }
-    recentTemplateProtectionRemovals[object] = removalRecord
-    recentTemplateProtectionRemovalsByPosition[position] = removalRecord
-    local removeOk, removeResult = pcall(ServerWorld.removeGenericObject,
-        square, object, false)
-    currentlyRemovingTemplateProtectionObject = previousObject
-    return removeOk, removeResult
+    entries[#entries + 1] = captured
 end
 
-local function isVisualCornerTemplate(entry)
-    return type(entry) == "table"
-        and entry.class == "IsoObject"
-        and entry.name == "Wooden Wall"
-        and entry.sprite == "walls_interior_house_02_35"
+local function entryAt(anchor, x, y, z)
+    local offset = TemplateGeometry.worldToTemplate({
+        x = x, y = y, z = z,
+    }, anchor)
+    if not offset then return nil end
+    local cellX, cellY, cellZ = math.floor(offset.x), math.floor(offset.y),
+        math.floor(offset.z)
+    if cellX ~= offset.x or cellY ~= offset.y or cellZ ~= offset.z then
+        return nil
+    end
+    local entries = entriesByCell[templateCellKey(cellX, cellY)]
+    for index = 1, #(entries or {}) do
+        local captured = entries[index]
+        if captured.z == cellZ then
+            return {
+                templateIndex = captured.templateIndex,
+                x = anchor.x + captured.x,
+                y = anchor.y + captured.y,
+                z = anchor.z + captured.z,
+                class = captured.class,
+                name = captured.name,
+                sprite = captured.sprite,
+                north = captured.north,
+                direction = captured.direction,
+                state = captured.state,
+                protected = captured.protected,
+            }
+        end
+    end
+    return nil
 end
 
-local function isTemplateFloorObject(entry)
-    return type(entry) == "table" and entry.class == "IsoObject"
-        and not isVisualCornerTemplate(entry)
+-- Every template object expected on the layers of one cell. An empty result
+-- means the template protects nothing there.
+local function templateEntriesAt(boundary, anchor, x, y)
+    local entries = {}
+    for z = boundary.managed.minZ, boundary.managed.maxZ - 1 do
+        local entry = entryAt(anchor, x, y, z)
+        if entry then entries[#entries + 1] = entry end
+    end
+    return entries
 end
-
 
 local function loadedLayerForCell(cell, x, y, z)
-    if not cell then return false, "cell unavailable" end
-    local chunkOk, chunk = ServerUtil.invoke(cell,
-        "getChunkForGridSquare", x, y, z)
-    if not chunkOk then return false, "chunk lookup failed" end
-    if not chunk then return false, "chunk missing" end
+    local chunkOk, chunk = ServerUtil.invoke(cell, "getChunkForGridSquare",
+        x, y, z)
+    if not chunkOk or not chunk then return false end
     local loadedOk, loaded = pcall(function() return chunk.loaded end)
-    if not loadedOk then return false, "loaded flag lookup failed" end
-    if loaded ~= true then return false, "chunk not loaded" end
-    return true
+    return loadedOk and loaded == true
 end
 
+-- The trusted identity written by this mod when a captured object is created.
+-- A player build carries none of these fields, which is what distinguishes it
+-- from the template object it replaces.
 local function objectTag(object)
     local data = ServerWorld.objectModData(object)
-    if type(data) ~= "table" then return nil end
+    if type(data) ~= "table" or data.owner ~= Constants.MOD_ID then
+        return nil
+    end
     local nested = data.RailroaderRVTest
-    if type(nested) ~= "table"
-        or data.owner ~= Constants.MOD_ID
-        or nested.owner ~= Constants.MOD_ID
+    if type(nested) ~= "table" or nested.owner ~= Constants.MOD_ID
         or tostring(data.rvId) ~= tostring(nested.rvId)
         or integer(data.generation) ~= integer(nested.generation)
         or data.role ~= nested.role then
@@ -119,63 +118,52 @@ local function objectTag(object)
     return nested
 end
 
-local function onTemplateProtectionObjectAboutToBeRemoved(object)
-    local tracked = recentTemplateProtectionRemovals[object]
+local function objectTemplateIndex(object)
+    local tag = objectTag(object)
+    return tag and integer(tag.templateIndex) or nil
+end
+
+local function objectCell(object)
     local xOk, x = ServerUtil.invoke(object, "getX")
     local yOk, y = ServerUtil.invoke(object, "getY")
     local zOk, z = ServerUtil.invoke(object, "getZ")
-    local eventPosition = (xOk and tostring(x) or "?") .. ","
-        .. (yOk and tostring(y) or "?") .. ","
-        .. (zOk and tostring(z) or "?")
-    local positionMatch = recentTemplateProtectionRemovalsByPosition[
-        eventPosition]
-    if tracked then recentTemplateProtectionRemovals[object] = nil end
-    if positionMatch then
-        recentTemplateProtectionRemovalsByPosition[eventPosition] = nil
+    return xOk and yOk and zOk and integer(x), integer(y), integer(z)
+end
+
+local function isOpenableClass(className)
+    return className == "IsoDoor" or className == "IsoWindow"
+end
+
+local function isVisualCorner(entry)
+    return entry.class == "IsoObject" and entry.name == "Wooden Wall"
+        and entry.sprite == "walls_interior_house_02_35"
+end
+
+local function isFloorEntry(entry)
+    return entry.class == "IsoObject" and not isVisualCorner(entry)
+end
+
+local function objectMatchesCaptured(object, expected)
+    if not ServerUtil.classInstance(object, expected.class) then return false end
+    local nameOk, name = ServerUtil.invoke(object, "getName")
+    local directionOk, direction = ServerUtil.invoke(object, "getDir")
+    local directionTable = rawget(_G, "IsoDirections")
+    local expectedDirection = directionTable and directionTable[expected.direction]
+    if not nameOk or tostring(name) ~= tostring(expected.name)
+        or not directionOk or not expectedDirection
+        or direction ~= expectedDirection
+        or tostring(ServerWorld.getSpriteName(object))
+            ~= tostring(expected.sprite) then
+        return false
     end
-end
-
-local function registerTemplateProtectionRemovalTrace()
-    if templateProtectionRemovalTraceRegistered then return end
-    Core.on("OnObjectAboutToBeRemoved",
-        onTemplateProtectionObjectAboutToBeRemoved)
-    templateProtectionRemovalTraceRegistered = true
-end
-
-registerTemplateProtectionRemovalTrace()
-
-local function pruneTemplateProtectionRemovalTrace(tick)
-    if type(tick) ~= "number" then return false end
-    for position, removalTrace in pairs(
-        recentTemplateProtectionRemovalsByPosition) do
-        if type(removalTrace.expiresAt) ~= "number"
-            or tick > removalTrace.expiresAt then
-            recentTemplateProtectionRemovalsByPosition[position] = nil
-        end
+    if expected.north ~= nil then
+        local northOk, north = ServerUtil.invoke(object, "getNorth")
+        if not northOk or north ~= expected.north then return false end
     end
     return true
 end
 
-ctx.pruneTemplateProtectionRemovalTrace = pruneTemplateProtectionRemovalTrace
-
-local function isRuntimeDoorOrWindow(object)
-    if ServerUtil.classInstance(object, "IsoDoor")
-        or ServerUtil.classInstance(object, "IsoWindow") then
-        return true
-    end
-    if not ServerUtil.classInstance(object, "IsoThumpable") then return false end
-    local doorOk, door = ServerUtil.invoke(object, "isDoor")
-    local windowOk, window = ServerUtil.invoke(object, "isWindow")
-    return doorOk and door == true or windowOk and window == true
-end
-
-local function isCabSideDoorOrWindow(object, x, y, z, index)
-    return isCabSideHostCoordinate(x, y, z, index)
-        and isRuntimeDoorOrWindow(object)
-end
-
-local function objectMatchesCaptured(object, entry)
-    if not objectMatchesCapturedIdentity(object, entry) then return false end
+local function objectMatchesStoredState(object, expected)
     local stateGetters = {
         health = "getHealth", maxHealth = "getMaxHealth",
         hoppable = "isHoppable", locked = "isLocked",
@@ -183,33 +171,67 @@ local function objectMatchesCaptured(object, entry)
         blockAllTheSquare = "isBlockAllTheSquare",
         doRender = "getDoRender", thumpable = "isThumpable",
     }
-    for key, expected in pairs(entry.state or {}) do
+    for key, value in pairs(expected.state or {}) do
         local getter = stateGetters[key]
         if not getter then return false end
         local stateOk, state = ServerUtil.invoke(object, getter)
-        if not stateOk or state ~= expected then return false end
+        if not stateOk or state ~= value then return false end
     end
     return true
 end
 
-local function objectClassName(object)
-    local classOk, class = ServerUtil.invoke(object, "getClass")
-    if not classOk or not class then return nil end
-    local textOk, text = pcall(tostring, class)
-    if not textOk or type(text) ~= "string" or text == "" then return nil end
-    text = string.gsub(text, "^class%s+", "")
-    return string.match(text, "([^%.]+)$") or text
+-- A door or window is opened, closed and locked by ordinary play, so only its
+-- identity is compared; every other template object must also still carry the
+-- state the template recorded.
+local function objectMatchesTemplate(object, expected)
+    if not objectMatchesCaptured(object, expected) then return false end
+    if isOpenableClass(expected.class) then return true end
+    return objectMatchesStoredState(object, expected)
 end
 
-local function isBloodOrSplat(object)
-    local className = objectClassName(object)
-    if type(className) == "string" then
-        local lowered = string.lower(className)
-        if string.find(lowered, "blood", 1, true)
-            or string.find(lowered, "splat", 1, true) then
+-- True when one of these objects is the tagged template object of the entry.
+local function objectIsTemplateEntry(objects, entry)
+    for index = 1, #objects do
+        local object = objects[index]
+        if objectTemplateIndex(object) == entry.templateIndex
+            and objectMatchesTemplate(object, entry) then
             return true
         end
     end
+    return false
+end
+
+-- Objects a protected template entry on this cell can legitimately replace: the
+-- captured object itself, a duplicate of it, or the build that took its place.
+-- An unrelated object on a protected tile is left untouched.
+local function isRepairTarget(object, entries, objectIsFloor)
+    for index = 1, #entries do
+        local expected = entries[index]
+        if expected.protected and (ServerUtil.classInstance(object, expected.class)
+            or objectIsFloor and isFloorEntry(expected)) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Only an object that still carries its entry identity is the template object;
+-- anything else left on a protected tile is the extra object this pass removes.
+local function isSpareObject(object, entries, objectIsFloor)
+    if not isRepairTarget(object, entries, objectIsFloor) then return false end
+    local templateIndex = objectTemplateIndex(object)
+    if not templateIndex then return true end
+    for index = 1, #entries do
+        local entry = entries[index]
+        if entry.templateIndex == templateIndex
+            and objectMatchesTemplate(object, entry) then
+            return false
+        end
+    end
+    return true
+end
+
+local function isBloodOrSplat(object)
     local sprite = ServerWorld.getSpriteName(object)
     if type(sprite) == "string"
         and string.find(string.lower(sprite), "blood", 1, true) then
@@ -221,8 +243,10 @@ local function isBloodOrSplat(object)
             or string.find(string.lower(name), "splat", 1, true) ~= nil)
 end
 
+-- Non-template world content is never a repair target.
 local function protectedWorldObject(object)
-    if ServerWorld.isPlayerObject(object) or ServerWorld.isVehicleObject(object) then
+    if ServerWorld.isPlayerObject(object)
+        or ServerWorld.isVehicleObject(object) then
         return true
     end
     local classes = { "IsoWorldInventoryObject", "IsoZombie", "IsoAnimal",
@@ -233,9 +257,10 @@ local function protectedWorldObject(object)
     return isBloodOrSplat(object)
 end
 
-local function hasStoredContainerItems(object, className)
-    local knownContainer = className == "IsoThumpable"
-        or ServerUtil.classInstance(object, "IsoThumpable")
+-- A container that holds items is never removed, and removal is skipped when
+-- the contents cannot be proven empty.
+local function hasStoredContainerItems(object)
+    local knownContainer = ServerUtil.classInstance(object, "IsoThumpable")
     local countOk, rawCount = ServerUtil.invoke(object, "getContainerCount")
     if countOk then
         local count = integer(rawCount)
@@ -254,681 +279,151 @@ local function hasStoredContainerItems(object, className)
     return not size or size > 0
 end
 
-local function hasTemplateFloorTarget(targets)
-    for i = 1, #targets do
-        if isTemplateFloorObject(targets[i].expected) then return true end
+local function squareContainsObject(square, object)
+    local containsOk, present = pcall(ServerWorld.squareContainsObject, square,
+        object)
+    if not containsOk then
+        error("RailroaderRVTest: template-protection repair square membership lookup failed")
     end
-    return false
+    return present == true
 end
 
-local function hasTemplateIsoObjectTarget(targets)
-    for i = 1, #targets do
-        if targets[i].expected.class == "IsoObject" then return true end
+-- The removal marker is read by the RoofRefresh removal filter; it stays set
+-- only for the synchronous removal call performed here.
+local function removeObject(square, object)
+    local server = RV.Server
+    local previous = server._templateProtectionRepairRemovalObject
+    server._templateProtectionRepairRemovalObject = object
+    local removeOk, removeError = pcall(ServerWorld.removeGenericObject, square,
+        object, false)
+    server._templateProtectionRepairRemovalObject = previous
+    if not removeOk then
+        error("RailroaderRVTest: template-protection repair removal failed: "
+            .. tostring(removeError))
     end
-    return false
-end
-
-local function objectAtCoordinate(object, x, y, z)
-    local xOk, objectX = ServerUtil.invoke(object, "getX")
-    local yOk, objectY = ServerUtil.invoke(object, "getY")
-    local zOk, objectZ = ServerUtil.invoke(object, "getZ")
-    return xOk and yOk and zOk and integer(objectX) == x
-        and integer(objectY) == y and integer(objectZ) == z
-end
-
-local function isCabEditableCoordinate(x, y, z, index)
-    return Index.isCabCoordinate(x, y, z, {
-        x = index.anchorX, y = index.anchorY, z = index.anchorZ,
-    })
-end
-
-local function isRemovalScopeCoordinate(boundary, index, x, y, z)
-    return TemplateGeometry.inManagedRegion({ x = x, y = y, z = z },
-        boundary.managed)
-        and not isCabEditableCoordinate(x, y, z, index)
-end
-
-local function footprintAllowsRemoval(tag, boundary, index, x, y, z, cell)
-    if type(tag) ~= "table" then return true end
-    local footprint = tag.footprint
-    if tag.multiTile == true and type(footprint) ~= "table" then return false end
-    if type(footprint) ~= "table" then return true end
-    local count, hostSeen, seen = 0, false, {}
-    for key, item in pairs(footprint) do
-        if type(key) ~= "number" or key < 1 or math.floor(key) ~= key
-            or key > #footprint or type(item) ~= "table" then
-            return false
-        end
-        local fx, fy = integer(item.x), integer(item.y)
-        local fz = integer(item.z == nil and z or item.z)
-        if not fx or not fy or not fz
-            or not isRemovalScopeCoordinate(boundary, index, fx, fy, fz) then
-            return false
-        end
-        if not loadedLayerForCell(cell, fx, fy, fz) then return false end
-        local coordinate = coordinateKey(fx, fy, fz)
-        if seen[coordinate] then return false end
-        seen[coordinate] = true
-        if fx == x and fy == y and fz == z then hostSeen = true end
-        count = count + 1
+    if squareContainsObject(square, object) then
+        error("RailroaderRVTest: template-protection repair removal was not observable")
     end
-    return count == #footprint and count > 0 and hostSeen
 end
 
-local function objectFootprintAllowsRemoval(object, boundary, index, x, y, z,
-    cell)
-    local data = ServerWorld.objectModData(object)
-    if type(data) ~= "table" then return true end
-    local nested = data.RailroaderRVTest
-    if not footprintAllowsRemoval(data, boundary, index, x, y, z, cell) then
+-- The object is removed instead of being rebuilt in place; the current template
+-- entry recreates it on the same cell during the restore pass.
+local function deleteCapturedObject(square, object, templateIndex)
+    local x, y, z = objectCell(object)
+    if not x or not y or not z then
+        error("RailroaderRVTest: template-protection repair target has no coordinate")
+    end
+    if hasStoredContainerItems(object) then
+        print("[RailroaderRVTest] template-protection repair retained "
+            .. coordinateKey(x, y, z)
+            .. ": container contents are present")
         return false
     end
-    return type(nested) ~= "table"
-        or footprintAllowsRemoval(nested, boundary, index, x, y, z, cell)
-end
-
-local function reportUnsafeRemoval(index, object, boundary, x, y, z, cell)
-    local className = objectClassName(object)
-    local reason
-    if hasStoredContainerItems(object, className) then
-        reason = "container contents are present or could not be verified"
-    elseif not objectFootprintAllowsRemoval(object, boundary, index, x, y, z,
-        cell) then
-        reason = "object footprint is invalid, unloaded, or leaves the RV removal scope"
-    else
-        return
-    end
-    local reportState = repairReportState(index)
-    if reportState.safety[object] then return end
-    reportState.safety[object] = true
-    print("[RailroaderRVTest] template-protection-repair retained object at "
-        .. coordinateKey(x, y, z) .. ": " .. reason)
-end
-
-local function isProtectedBuildingCandidate(object, x, y, z, boundary,
-    index, claimedTarget, cell)
-    if type(claimedTarget) ~= "table"
-        or type(claimedTarget.expected) ~= "table"
-        or type(boundary) ~= "table" or type(index) ~= "table"
-        or not sameIdentity(index, boundary) then
-        return false, "current-template-claim-unavailable"
-    end
-    local expected = claimedTarget.expected
-    local templateIndex = integer(expected.templateIndex)
-    if not templateIndex or expected.protected ~= true
-        or expected.x ~= x or expected.y ~= y or expected.z ~= z then
-        return false, "target-is-not-a-current-protected-template-entry"
-    end
-    local targets = currentProtectedCoordinateTargets(index, boundary,
-        x, y, z)
-    local targetIsCurrent = false
-    for i = 1, #(targets or {}) do
-        if targets[i] == claimedTarget then
-            targetIsCurrent = true
-            break
-        end
-    end
-    if not targetIsCurrent then
-        return false, "target-does-not-belong-to-current-coordinate-index"
-    end
-    local tag = objectTag(object)
-    if not tag or not sameIdentity(tag, boundary)
-        or currentTemplateTagMismatch(object, expected, claimedTarget.edge,
-            boundary) ~= nil
-        or not objectMatchesCapturedIdentity(object, expected) then
-        return false, "object-current-generation-template-identity-unproven"
-    end
-    if isCabSideDoorOrWindow(object, x, y, z, index) then
-        return false, "cab-side-opening"
-    end
-    if not isRemovalScopeCoordinate(boundary, index, x, y, z) then
-        return false, "outside-removal-scope"
-    end
-    if not objectAtCoordinate(object, x, y, z) then
-        return false, "object-coordinate-mismatch"
-    end
-    if protectedWorldObject(object) then
-        return false, "protected-world-object"
-    end
-    local className = objectClassName(object)
-    if className ~= expected.class then
-        return false, "object-class-does-not-match-current-template"
-    end
-    if not className then return false, "object-class-unavailable" end
-    if hasStoredContainerItems(object, className) then
-        return false, "container-not-empty-or-unverified"
-    end
-    if not objectFootprintAllowsRemoval(object, boundary, index, x, y, z,
-        cell) then
-        return false, "object-footprint-unsafe"
-    end
-    -- The current template tag and its live object identity jointly prove
-    -- ownership. A coordinate match alone never authorizes removal.
-    if not ServerUtil.classInstance(object, "IsoObject") then
-        return false, "object-class-not-IsoObject"
-    end
-    if isBloodOrSplat(object) then return false, "blood-or-splat" end
-    return true, "candidate"
-end
-
-local function isWhitelistedTemplateObject(object, boundary, edges,
-    objectIsFloor)
-    local tag = objectTag(object)
-    if not tag or not sameIdentity(tag, boundary) then return false end
-    local index = integer(tag.templateIndex)
-    -- The anchor is the template transform of the already validated managed
-    -- region; the world transform of the captured entry and the object's own
-    -- square are both derived, so nothing geometric is stored on the tag.
-    local anchor = TemplateGeometry.anchorFromManaged(boundary.managed)
-    if not index or type(anchor) ~= "table" then return false end
-    local expected = templateEntry(index, anchor)
-    if tag.templateClass ~= expected.class
-        or tag.templateName ~= expected.name
-        or tag.templateSprite ~= expected.sprite
-        or tag.templateDirection ~= expected.direction
-        or tag.templateNorth ~= expected.north then
-        return false
-    end
-    if expected.class == "IsoObject"
-        and isTemplateFloorObject(expected) ~= (objectIsFloor == true) then
-        return false
-    end
-    local xOk, x = ServerUtil.invoke(object, "getX")
-    local yOk, y = ServerUtil.invoke(object, "getY")
-    local zOk, z = ServerUtil.invoke(object, "getZ")
-    x, y, z = xOk and integer(x), yOk and integer(y), zOk and integer(z)
-    if not x or not y or not z
-        or x ~= expected.x or y ~= expected.y or z ~= expected.z then
-        return false
-    end
-    local openable = expected.class == "IsoDoor"
-        or expected.class == "IsoWindow"
-    if not openable and expected.protected
-        and not objectMatchesCaptured(object, expected) then
-        return false
-    end
-    local edge = edges and edges[index] or nil
-    if edge then
-        if tag.edgeKey ~= edge.edgeKey or tag.axis ~= edge.axis
-            or tag.role ~= edge.role
-            or integer(edge.objectX) ~= expected.x
-            or integer(edge.objectY) ~= expected.y
-            or integer(edge.objectZ) ~= expected.z then
-            return false
-        end
-    elseif tag.edgeKey ~= nil or tag.axis ~= nil
-        or tag.role ~= "captured-template" then
-        return false
-    end
-    return TemplateGeometry.contains({ x = x, y = y, z = z }, anchor) == true
-end
-
-local function isWhitelistedGenerator(object, boundary)
-    local tag = objectTag(object)
-    if not tag or not sameIdentity(tag, boundary) or tag.role ~= "generator"
-        or not ServerUtil.classInstance(object, "IsoGenerator") then
-        return false
-    end
-    local anchor = TemplateGeometry.anchorFromManaged(boundary.managed)
-    local xOk, x = ServerUtil.invoke(object, "getX")
-    local yOk, y = ServerUtil.invoke(object, "getY")
-    local zOk, z = ServerUtil.invoke(object, "getZ")
-    return type(anchor) == "table" and xOk and yOk and zOk
-        and integer(x) == integer(anchor.x) + Constants.GENERATOR_OFFSET.x
-        and integer(y) == integer(anchor.y) + Constants.GENERATOR_OFFSET.y
-        and integer(z) == integer(anchor.z) + Constants.GENERATOR_OFFSET.z
-end
-
-local function currentTemplateTagMismatch(object, expected, edge, boundary)
-    if not expected or type(boundary) ~= "table"
-        or type(boundary.managed) ~= "table" then
-        return "current template entry is missing"
-    end
-    local tag = objectTag(object)
-    if not tag then return "tag expected=current identity observed=missing" end
-    if not sameIdentity(tag, boundary) then
-        return "boundary identity expected=current observed=stale or incomplete"
-    end
-    local checks = {
-        { "templateIndex", expected.templateIndex, integer(tag.templateIndex) },
-        { "templateClass", expected.class, tag.templateClass },
-        { "templateName", expected.name, tag.templateName },
-        { "templateSprite", expected.sprite, tag.templateSprite },
-        { "templateDirection", expected.direction, tag.templateDirection },
-        { "templateNorth", expected.north, tag.templateNorth },
-    }
-    for i = 1, #checks do
-        local check = checks[i]
-        if check[2] ~= check[3] then
-            return "tag." .. check[1] .. " expected=" .. tostring(check[2])
-                .. " observed=" .. tostring(check[3])
-        end
-    end
-    local expectedEdgeKey = edge and edge.edgeKey or nil
-    local expectedAxis = edge and edge.axis or nil
-    local expectedRole = edge and edge.role or "captured-template"
-    if tag.edgeKey ~= expectedEdgeKey then
-        return "tag.edgeKey expected=" .. tostring(expectedEdgeKey)
-            .. " observed=" .. tostring(tag.edgeKey)
-    end
-    if tag.axis ~= expectedAxis then
-        return "tag.axis expected=" .. tostring(expectedAxis)
-            .. " observed=" .. tostring(tag.axis)
-    end
-    if tag.role ~= expectedRole then
-        return "tag.role expected=" .. tostring(expectedRole)
-            .. " observed=" .. tostring(tag.role)
-    end
-    return nil
-end
-
-local function exactExpectedTag(object, expected, edge, boundary)
-    if currentTemplateTagMismatch(object, expected, edge, boundary)
-        or not objectMatchesCaptured(object, expected) then
-        return false
-    end
+    removeObject(square, object)
+    print("[RailroaderRVTest] template-protection repair rebuilt templateIndex="
+        .. tostring(templateIndex) .. " at " .. coordinateKey(x, y, z))
     return true
 end
 
-local function reportIncompleteClaimedFloorTag(index, object, boundary,
-    expected, edge)
-    local reportState = repairReportState(index)
-    if reportState.identity[object] then return end
-    reportState.identity[object] = true
-    local mismatch = currentTemplateTagMismatch(object, expected, edge,
-        boundary) or "captured object state does not match the current template"
-    print("[RailroaderRVTest] captured floor identity blocked rvId="
-        .. tostring(boundary.rvId) .. " generation="
-        .. tostring(boundary.generation) .. " templateIndex="
-        .. tostring(expected.templateIndex) .. " failed=" .. mismatch)
-end
-
-local function currentTemplateTarget(object, boundary, targets)
-    local tag = objectTag(object)
-    if not tag or not sameIdentity(tag, boundary) then return nil end
-    local templateIndex = integer(tag.templateIndex)
-    if not templateIndex then return nil end
-    for i = 1, #targets do
-        if targets[i].expected.templateIndex == templateIndex then
-            return targets[i]
-        end
-    end
-    return nil
-end
-
-local function currentTemplateClaimIsSafe(object, target, boundary, index,
-    x, y, z, objectIsFloor, cell)
-    if not target then return false end
-    local expected = target.expected
-    local className = objectClassName(object)
-    if not objectAtCoordinate(object, expected.x, expected.y, expected.z)
-        or className ~= expected.class or protectedWorldObject(object)
-        or isBloodOrSplat(object)
-        or hasStoredContainerItems(object, className)
-        or not objectFootprintAllowsRemoval(object, boundary, index, x, y, z,
-            cell) then
-        return false
-    end
-    if expected.class == "IsoObject"
-        and isTemplateFloorObject(expected) ~= (objectIsFloor == true) then
-        return false
-    end
-    return true
-end
-
-local function markMatchingTargetsBlocked(object, targets, blocked, objectIsFloor)
-    if protectedWorldObject(object) then return end
-    local className = objectClassName(object)
-    for i = 1, #targets do
-        local expected = targets[i].expected
-        local slotMatches = expected.class ~= "IsoObject"
-            or isTemplateFloorObject(expected) == (objectIsFloor == true)
-        local classMatches = objectMatchesCapturedIdentity(object, expected)
-            or className == expected.class
-            or (expected.class ~= "IsoObject"
-                and ServerUtil.classInstance(object, expected.class))
-            or (expected.class == "IsoObject"
-                and ServerUtil.classInstance(object, "IsoObject"))
-        if slotMatches and classMatches then
-            blocked[expected.templateIndex] = true
-        end
-    end
-end
-
-local function collectCoordinate(cell, x, y, z, boundary, index)
-    local removals, removalSeen, blocked = {}, {}, {}
-    local targets = index.byCoordinate[coordinateKey(x, y, z)] or {}
-    local squareOk, square = pcall(ServerWorld.getSquare, cell, x, y, z)
-    if not squareOk then
-        return false, "template-protection-repair square lookup failed"
-    end
-    local squareInfo
-    if square then
-        local snapshotOk, objects = pcall(ServerWorld.squareSnapshot, square)
-        if not snapshotOk or type(objects) ~= "table" then
-            return false, "template-protection-repair object snapshot failed"
-        end
-        local floorOk, floor = ServerUtil.invoke(square, "getFloor")
-        if hasTemplateIsoObjectTarget(targets) and not floorOk then
-            return false, "captured floor slot could not be verified"
-        end
-        squareInfo = { square = square, objects = objects, floor = floor }
-        for i = 1, #objects do
-            local object = objects[i]
-            if not isCabSideDoorOrWindow(object, x, y, z, index)
-                and not isWhitelistedGenerator(object, boundary)
-                and not isWhitelistedTemplateObject(object, boundary,
-                    index.edges, floor == object) then
-                local objectIsFloor = floor == object
-                local floorTarget = objectIsFloor
-                    and hasTemplateFloorTarget(targets)
-                local claimedTarget = currentTemplateTarget(object,
-                    boundary, targets)
-                local safeClaimedTarget = currentTemplateClaimIsSafe(
-                    object, claimedTarget, boundary, index, x, y, z,
-                    objectIsFloor, cell)
-                local buildingCandidate, candidateReason =
-                    isProtectedBuildingCandidate(object, x, y, z, boundary,
-                        index, claimedTarget, cell)
-                local misplacedVisualCorner = objectIsFloor and claimedTarget
-                    and isVisualCornerTemplate(claimedTarget.expected)
-                local incompleteClaimedFloor = floorTarget and claimedTarget
-                    and currentTemplateTagMismatch(object,
-                        claimedTarget.expected, claimedTarget.edge,
-                        boundary) ~= nil
-                if misplacedVisualCorner then
-                    blocked[claimedTarget.expected.templateIndex] = true
-                elseif incompleteClaimedFloor then
-                    blocked[claimedTarget.expected.templateIndex] = true
-                    reportIncompleteClaimedFloorTag(index, object,
-                        boundary, claimedTarget.expected,
-                        claimedTarget.edge)
-                elseif (safeClaimedTarget or buildingCandidate) and floorTarget then
-                    if not protectedWorldObject(object)
-                        and not hasStoredContainerItems(object,
-                            objectClassName(object)) then
-                        removals[#removals + 1] = {
-                            object = object, square = square, inPlace = true,
-                        }
-                        removalSeen[object] = true
-                    else
-                        reportUnsafeRemoval(index, object, boundary, x, y, z,
-                            cell)
-                        if claimedTarget then
-                            blocked[claimedTarget.expected.templateIndex] = true
-                        end
-                        markMatchingTargetsBlocked(object, targets, blocked,
-                            objectIsFloor)
-                    end
-                elseif safeClaimedTarget or buildingCandidate then
-                    if not removalSeen[object] then
-                        removalSeen[object] = true
-                        removals[#removals + 1] = {
-                            object = object, square = square,
-                        }
-                    end
-                else
-                    if #targets > 0 then
-                        reportUnsafeRemoval(index, object, boundary,
-                            x, y, z, cell)
-                    end
-                    if claimedTarget then
-                        blocked[claimedTarget.expected.templateIndex] = true
-                    end
-                    markMatchingTargetsBlocked(object, targets, blocked,
-                        objectIsFloor)
-                end
-            end
-        end
-    end
-    return true, squareInfo, removals, blocked
-end
-
-local function removeCandidates(removals)
-    local removed, inPlace = {}, {}
-    for i = 1, #removals do
-        local item = removals[i]
-        local object = item.object
-        if item.inPlace then
-            inPlace[object] = true
-        else
-            local removeOk, removeError = removeTemplateProtectionRepairObject(
-                item.square, object)
-            if not removeOk then
-                return false, "template-protection-repair structure removal failed: "
-                    .. tostring(removeError)
-            end
-            local checkOk, stillPresent = pcall(ServerWorld.squareContainsObject,
-                item.square, object)
-            if not checkOk or stillPresent ~= false then
-                return false, "template-protection-repair structure removal was not observable"
-            end
-            removed[object] = true
-        end
-    end
-    return true, removed, inPlace
-end
-
-local function removeDuplicateTemplate(square, object)
-    local className = objectClassName(object)
-    if protectedWorldObject(object)
-        or not className or not isCapturedClassName(className)
-        or hasStoredContainerItems(object, className) then
-        return false
-    end
-    local removeOk, removeError = removeTemplateProtectionRepairObject(square, object)
-    if not removeOk then return false, removeError end
-    local checkOk, stillPresent = pcall(ServerWorld.squareContainsObject,
-        square, object)
-    if not checkOk or stillPresent ~= false then
-        return false, "duplicate template object removal was not observable"
-    end
-    return true
-end
-
-local function repairTemplateProtectionCoordinate(cell, x, y, z, squareInfo,
-    removed, inPlace, blocked, index, boundary)
-    local targets = index.byCoordinate[coordinateKey(x, y, z)] or {}
-    if #targets == 0 then return true end
-    local updatedFloors = {}
-    local anchor = TemplateGeometry.anchorFromManaged(boundary.managed)
-    if not anchor then return false, Constants.INVALID_RV_DATA end
+-- The template decides how many objects share a cell; an object tagged with the
+-- expected template index and still carrying the captured identity is that
+-- entry. A captured door frame whose pass-through state was lost is rebuilt.
+local function restoreEntry(cell, square, objects, entry, boundary)
     local tagContext = { rvId = boundary.rvId }
-    for i = 1, #targets do
-        local target = targets[i]
-        local expected, edge = target.expected, target.edge
-        if expected.x ~= x or expected.y ~= y or expected.z ~= z then
-            return false, Constants.INVALID_RV_DATA
-        end
-        if not squareInfo then
-            if not TemplateGeometry.contains({ x = expected.x, y = expected.y,
-                z = expected.z }, anchor) then
-                return false, Constants.INVALID_RV_DATA
+    for index = 1, #objects do
+        local object = objects[index]
+        if objectTemplateIndex(object) == entry.templateIndex
+            and objectMatchesCaptured(object, entry) then
+            if entry.name == "Wooden Door Frame" then
+                -- Re-applying the frame state keeps pass-through set on a frame
+                -- that survived, and reactivates a replaced one.
+                pcall(configureCapturedDoorFrame, object, entry)
             end
-            if not loadedLayerForCell(cell, expected.x, expected.y,
-                expected.z) then
-                return false, "protected template layer became unloaded before square creation"
-            end
-            local squareOk, square = pcall(ensureRoofSquare, cell,
-                expected.x, expected.y, expected.z)
-            if not squareOk or not square then
-                return false, "protected template grid square creation failed: "
-                    .. tostring(square)
-            end
-            local snapshotOk, objects = pcall(ServerWorld.squareSnapshot, square)
-            if not snapshotOk or type(objects) ~= "table" then
-                return false, "protected template grid square snapshot failed"
-            end
-            local floorOk, floor = ServerUtil.invoke(square, "getFloor")
-            local coordinateTargets = index.byCoordinate[
-                coordinateKey(expected.x, expected.y, expected.z)] or {}
-            if hasTemplateIsoObjectTarget(coordinateTargets) and not floorOk then
-                return false, "captured floor slot could not be verified"
-            end
-            squareInfo = { square = square, objects = objects, floor = floor }
-        end
-        if squareInfo then
-            local templateIndex = expected.templateIndex
-            local present, ambiguous = false, blocked[templateIndex] == true
-            for j = 1, #squareInfo.objects do
-                local object = squareInfo.objects[j]
-                if not removed[object] then
-                    if inPlace[object] and isTemplateFloorObject(expected) then
-                        if not updatedFloors[object] then
-                            local updateOk, updateError = pcall(
-                                createCapturedTemplateObject, cell,
-                                squareInfo.square, expected, boundary.generation,
-                                tagContext, edge)
-                            if not updateOk then
-                                return false, "captured floor repair failed: "
-                                    .. tostring(updateError)
-                            end
-                            updatedFloors[object] = templateIndex
-                        end
-                        if updatedFloors[object] == templateIndex then
-                            present = true
-                        end
-                    elseif updatedFloors[object] == templateIndex then
-                        present = true
-                    elseif isWhitelistedGenerator(object, boundary) then
-                        -- The retained generator can share a floor tile with
-                        -- a captured template object.
-                    elseif isWhitelistedTemplateObject(object, boundary,
-                            index.edges,
-                            squareInfo.floor == object) then
-                        local tag = objectTag(object)
-                        if integer(tag.templateIndex) == templateIndex then
-                            if present then
-                                local duplicateOk, duplicateError =
-                                    removeDuplicateTemplate(squareInfo.square, object)
-                                if not duplicateOk then
-                                    ambiguous = true
-                                    if duplicateError then
-                                        print("[RailroaderRVTest] duplicate template retained: "
-                                            .. tostring(duplicateError))
-                                    end
-                                else
-                                    removed[object] = true
-                                end
-                            else
-                                present = exactExpectedTag(object, expected,
-                                    edge, boundary)
-                                if present
-                                    and expected.name == "Wooden Door Frame"
-                                    and not configuredDoorFrames[object] then
-                                    local configureOk, configureError = pcall(
-                                        configureCapturedDoorFrame, object, expected)
-                                    if not configureOk then
-                                        return false, "captured door frame repair failed: "
-                                            .. tostring(configureError)
-                                    end
-                                    if not ServerUtil.callSucceeded(object,
-                                        "transmitCompleteItemToClients") then
-                                        return false, "captured door frame update transmission failed"
-                                    end
-                                    configuredDoorFrames[object] = true
-                                end
-                            end
-                        end
-                    elseif objectMatchesCapturedIdentity(object, expected) then
-                        ambiguous = true
-                    end
-                end
-            end
-            if not present and not ambiguous then
-                local createOk, createError = pcall(createCapturedTemplateObject,
-                    cell, squareInfo.square, expected, boundary.generation,
-                    tagContext, edge)
-                if not createOk then
-                    return false, "captured template protection repair failed: "
-                        .. tostring(createError)
-                end
-            end
+            return
         end
     end
-    return true
+    createCapturedTemplateObject(cell, square, entry, boundary.generation,
+        tagContext)
 end
 
-local function repairTemplateProtectionLayer(cell, x, y, z, boundary,
-    repairIndex)
-    if not TemplateGeometry.inManagedRegion({ x = x, y = y, z = z },
-        boundary.managed)
-        or isCabEditableCoordinate(x, y, z, repairIndex) then
-        return true
+local function repairTemplateProtectionCell(player, expectedBoundary, x, y)
+    local contextOk, boundary = pcall(Boundary.boundaryForPlayer, player)
+    if not contextOk or boundary ~= expectedBoundary then
+        return false, "queued RV generation is stale"
     end
-    local loaded = loadedLayerForCell(cell, x, y, z)
-    if not loaded then
-        return true
+    local anchor = TemplateGeometry.anchorFromManaged(boundary.managed, Template)
+    -- A build cell belongs to the player: normal building and removing there is
+    -- never corrected, and that is an ordinary outcome rather than a failure.
+    if TemplateGeometry.isBuildable({ x = x, y = y, z = anchor.z }, anchor,
+        Template) then
+        return false
     end
-    local scanOk, squareInfo, removals, blocked = collectCoordinate(cell,
-        x, y, z, boundary, repairIndex)
-    if not scanOk then return false, squareInfo end
-    local removeOk, removed, inPlace = removeCandidates(removals)
-    if not removeOk then return false, removed end
-    local repairOk, repairReason = repairTemplateProtectionCoordinate(cell,
-        x, y, z, squareInfo, removed, inPlace, blocked, repairIndex,
-        boundary)
-    if not repairOk then return false, repairReason end
-    if (squareInfo and #squareInfo.objects > 0)
-        or #removals > 0
-        or repairIndex.byCoordinate[coordinateKey(x, y, z)] then
-        local targets = repairIndex.byCoordinate[coordinateKey(x, y, z)] or {}
-    end
-    return true
-end
+    local entries = templateEntriesAt(boundary, anchor, x, y)
+    if #entries == 0 then return false end
 
-local function repairQueuedTemplateProtectionXY(player, boundary, expectedKey,
-    x, y)
-    local contextOk, currentBoundary, record = validCurrentContext(player, boundary)
-    local currentKey = contextOk and queueKey(currentBoundary, record) or nil
-    if not contextOk or currentKey ~= expectedKey then
-        return false, contextOk and "queued RV generation is stale"
-            or currentBoundary
-    end
-    local indexCallOk, repairIndex = pcall(Index.getOrBuildRepairIndex,
-        currentBoundary)
-    if not indexCallOk or type(repairIndex) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    if repairIndex.key ~= expectedKey then
-        return false, "queued template-protection index is stale"
+    local repairLayers = {}
+    for index = 1, #entries do
+        repairLayers[entries[index].z] = true
     end
     local cellOk, cell = pcall(ServerWorld.getCellForPlayer, player)
     if not cellOk or not cell then
-        return true
+        return false, "current player cell is unavailable"
     end
+
+    local repaired = false
     for z = boundary.managed.minZ, boundary.managed.maxZ - 1 do
-        pcall(repairTemplateProtectionLayer, cell, x, y, z, boundary,
-            repairIndex)
+        local squareOk, square = pcall(ServerWorld.getSquare, cell, x, y, z)
+        if not squareOk then
+            return false, "template-protection-repair square lookup failed"
+        end
+        if square and repairLayers[z] and loadedLayerForCell(cell, x, y, z) then
+            local objectsOk, objects = pcall(ServerWorld.squareSnapshot, square)
+            if not objectsOk or type(objects) ~= "table" then
+                return false, "template-protection-repair object snapshot failed"
+            end
+            local floorOk, floor = ServerUtil.invoke(square, "getFloor")
+            if not floorOk then
+                return false, "template-protection-repair floor lookup failed"
+            end
+            for index = 1, #objects do
+                local object = objects[index]
+                local objectIsFloor = floor == object
+                if not protectedWorldObject(object)
+                    and isSpareObject(object, entries, objectIsFloor) then
+                    repaired = deleteCapturedObject(square, object,
+                        objectTemplateIndex(object)) or repaired
+                end
+            end
+            for entryIndex = 1, #entries do
+                local entry = entries[entryIndex]
+                if entry.z == z
+                    and not objectIsTemplateEntry(objects, entry) then
+                    restoreEntry(cell, square, objects, entry, boundary)
+                    repaired = true
+                    -- Read the square again so an entry restored earlier on
+                    -- this layer is no longer seen as missing.
+                    local liveOk, live = pcall(ServerWorld.squareSnapshot, square)
+                    if not liveOk or type(live) ~= "table" then
+                        return false, "template-protection-repair object snapshot failed"
+                    end
+                    objects = live
+                end
+            end
+        end
     end
-    return true
+    return repaired
 end
-
-local function reconcileCurrentTemplateCell(player, expectedBoundary, x, y)
-    local contextOk, boundary, record = validCurrentContext(player,
-        expectedBoundary)
-    local ix, iy = integer(x), integer(y)
-    if not contextOk then return false, boundary end
-    if ix == nil or iy == nil
-        or not TemplateGeometry.inManagedRegion({ x = ix, y = iy,
-            z = boundary.managed.minZ }, boundary.managed) then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local expectedKey = queueKey(boundary, record)
-    if type(expectedKey) ~= "string" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    return repairQueuedTemplateProtectionXY(player, boundary, expectedKey,
-        ix, iy)
-end
-
-ctx.reconcileCurrentTemplateCell = reconcileCurrentTemplateCell
 
 local server = type(RV) == "table" and RV.Server or nil
 if type(server) == "table" then
     server.isTemplateProtectionRepairRemoval = function(object)
-        return object ~= nil and currentlyRemovingTemplateProtectionObject == object
+        return object ~= nil
+            and server._templateProtectionRepairRemovalObject == object
     end
 end
 
+instance = {
+    repairCell = repairTemplateProtectionCell,
+}
+return instance
 end

@@ -2,8 +2,6 @@
 --
 -- Transaction ownership and phase remain server checks. Template layouts,
 -- manifests and persisted fields are consumed according to their current contract.
-local Constants = require("RailroaderRV/Common/RV_Constants")
-
 local Construction = {}
 
 local function samePoint(left, right)
@@ -77,21 +75,6 @@ function Construction.new(context, operations)
             error("RailroaderRVTest: build requires the current clearing phase")
         end
         return operations.build(player, layout, bounds, generation)
-    end
-
-    function service.restoreCurrentCell(player, boundary, x, y)
-        local ix, iy = Constants.finiteInteger(x), Constants.finiteInteger(y)
-        local managed = boundary.managed
-        local generation = boundary.generation
-        if player == nil or generation < 1 or boundary.rvId == ""
-            or ix == nil or iy == nil
-            or ix < managed.originX or ix >= managed.originX + managed.width
-            or iy < managed.originY or iy >= managed.originY + managed.height then
-            return false, "outside current managed region"
-        end
-        local restored, reason = context.reconcileCurrentTemplateCell(
-            player, boundary, ix, iy)
-        return restored == true, reason
     end
 
     return service

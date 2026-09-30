@@ -560,72 +560,6 @@ local function validatePlayerLightSprite(spriteObject, spriteName)
     return properties
 end
 
-local function createLight(cell, square, sprite, generation, tagContext)
-    local cls = rawget(_G, "IsoLightSwitch")
-    local spriteOk, spriteObject = ServerUtil.callGlobal("getSprite", sprite)
-    if not spriteOk then
-        error("RailroaderRVTest: getSprite failed for player light")
-    end
-    validatePlayerLightSprite(spriteObject, sprite)
-    local roomOk, roomId = ServerUtil.invoke(square, "getRoomID")
-    if not roomOk or roomId == nil then
-        roomId = -1
-    end
-    roomId = ServerUtil.toNumber(roomId) or -1
-    local ok, light = ServerUtil.invokeClass(cls, {
-        -- B42.20: IsoLightSwitch(IsoCell, IsoGridSquare, IsoSprite, long).
-        { cell, square, spriteObject, roomId },
-    })
-    if not ok then
-        error("RailroaderRVTest: IsoLightSwitch construction failed")
-    end
-    -- This is the BuildCraft player-built-light sequence adapted to B42.20:
-    -- construct -> IsLighting/power -> sprite light source -> update -> add
-    -- to square -> recalc -> activate/sync only after getObjectIndex exists.
-    -- No hand-built independent light fallback is used; the sprite's RGB/radius
-    -- properties are the single source of truth and avoid duplicate lights.
-    local lightData = ServerWorld.objectModData(light)
-    if not lightData then
-        error("RailroaderRVTest: player light has no modData")
-    end
-    lightData.IsLighting = true
-    ServerWorld.tagObject(light, generation, "light", ServerWorld.withTagIdentity(nil, tagContext))
-    if not ServerUtil.callSucceeded(light, "setPower", 2) then
-        error("RailroaderRVTest: player light initial state failed")
-    end
-    local addedLightOk = ServerUtil.callSucceeded(light, "addLightSourceFromSprite")
-    if not addedLightOk then
-        error("RailroaderRVTest: addLightSourceFromSprite failed")
-    end
-    local lightsOk, lights = ServerUtil.invoke(light, "getLights")
-    local lightsSizeOk, lightsSize = ServerUtil.invoke(lights, "size")
-    if not lightsOk or not lights or not lightsSizeOk or (ServerUtil.toNumber(lightsSize) or 0) < 1 then
-        error("RailroaderRVTest: player light sprite produced no light source")
-    end
-    if not ServerUtil.callSucceeded(light, "update") then
-        error("RailroaderRVTest: player light update failed")
-    end
-    addSpecialObject(square, light)
-    -- The object is now attached, so setActive can pass the engine's object
-    -- index/electricity checks.  `ignoreSwitchCheck` is intentional for the
-    -- technical test: the roof generator is built first, but its vertical
-    -- power bridge is not an IsoRoom yet.
-    if not ServerUtil.callSucceeded(light, "setActivated", true) then
-        error("RailroaderRVTest: player light activation failed")
-    end
-    local activeOk, active = ServerUtil.invoke(light, "setActive", true, false, true)
-    if not activeOk or active ~= true then
-        if not ServerUtil.callSucceeded(light, "switchLight", true) then
-            error("RailroaderRVTest: player light switch failed")
-        end
-    end
-    if not ServerUtil.callSucceeded(light, "update")
-        or not ServerUtil.callSucceeded(light, "transmitCompleteItemToClients") then
-        error("RailroaderRVTest: player light synchronisation failed")
-    end
-    return light
-end
-
 local function createGenerator(cell, square, sprite, generation, tagContext)
     local cls = rawget(_G, "IsoGenerator")
     -- The cell-only constructor does not attach or transmit. Configure the
@@ -689,36 +623,6 @@ local function createGenerator(cell, square, sprite, generation, tagContext)
         error("RailroaderRVTest: generator client transmission failed")
     end
     return generator
-end
-
-local function createFurniture(cell, square, sprite, generation, role, tagContext)
-    local cls = rawget(_G, "IsoObject")
-    local ok, object = ServerUtil.invokeClass(cls, {
-        { cell, square, sprite },
-        { square, sprite },
-    })
-    if not ok then
-        error("RailroaderRVTest: furniture construction failed for " .. tostring(role))
-    end
-    -- Some B42.20 sprites (including fluid fixtures) carry an entity script;
-    -- attach it before AddTileObject so the engine initializes its components.
-    local entityCreated = createEntityFromSprite(object, sprite)
-    if entityCreated == false then
-        error("RailroaderRVTest: furniture entity creation failed for " .. tostring(role))
-    end
-    -- The vanilla sink sprite is ordinary furniture and may have no entity
-    -- script.  The utility catalog and authoritative water mirror both need
-    -- the public FluidContainer component, so attach the B42 component before
-    -- tagging, tile attachment, and the sink's unique full-object packet.
-    if role == "sink" and not ensureSinkFluidContainer(object) then
-        error("RailroaderRVTest: generated sink FluidContainer creation failed")
-    end
-    ServerWorld.tagObject(object, generation, role, ServerWorld.withTagIdentity(nil, tagContext))
-    addNormalObject(square, object)
-    -- Counter and sink callers own the complete packet.  The sink publishes
-    -- its initial object here at the call site, then sends plumbing deltas
-    -- only after that packet has made the object visible to the client.
-    return object
 end
 
 local function createCapturedTemplateObject(cell, square, entry, generation,

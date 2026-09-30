@@ -31,8 +31,6 @@ local function invalidateBoundaryValidationCache()
     validatedMapCache = nil
     if boundaryValidation then
         boundaryValidation.invalidate()
-    else
-        Adapter._boundaryValidationWarmPending = true
     end
 end
 

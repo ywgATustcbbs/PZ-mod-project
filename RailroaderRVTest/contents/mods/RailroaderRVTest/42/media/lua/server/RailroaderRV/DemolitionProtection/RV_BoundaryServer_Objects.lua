@@ -66,25 +66,6 @@ local function objectCell(object)
     return nil
 end
 
-local function footprint(tag, x, y, z)
-    if type(tag) ~= "table" or type(tag.footprint) ~= "table" then
-        if tag and tag.multiTile == true then return nil end
-        return { { x = x, y = y, z = z } }
-    end
-    local result, includesHost = {}, false
-    for _, item in pairs(tag.footprint) do
-        if type(item) ~= "table" then return nil end
-        local fx, fy, fz = integer(item.x), integer(item.y), integer(item.z or z)
-        if not fx or not fy or not fz then return nil end
-        if fx == x and fy == y and fz == z then includesHost = true end
-        result[#result + 1] = { x = fx, y = fy, z = fz }
-    end
-    -- A footprint that does not contain the object's own host cell is not
-    -- proven to be an absolute world-coordinate footprint.  Treat relative,
-    -- truncated, or otherwise ambiguous multi-tile metadata as fail-open.
-    return #result > 0 and includesHost and result or nil
-end
-
 local function shellEdgeHasTemplateIndex(edge, templateIndex)
     if type(edge) ~= "table" or type(edge.templateIndices) ~= "table" then
         return false

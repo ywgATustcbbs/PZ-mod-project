@@ -51,7 +51,6 @@ M.integer = integer
 M.identityKey = Common.identityKey
 M.getPlayerPosition = Common.getPlayerPosition
 M.getSquare = Common.getSquare
-M.newPlayerPositionCache = Common.newPlayerPositionCache
 M.requiredNumber = requiredNumber
 M.requiredInteger = requiredInteger
 M.makeLayout = makeLayout

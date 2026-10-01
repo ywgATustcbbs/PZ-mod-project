@@ -14,36 +14,6 @@ function Construction.new(context, operations)
         end
     end
 
-    local function preflightClearTarget(player, cell, bounds)
-        requireCurrentBuild(player)
-        local world = context.ServerWorld
-        local schema = context.ServerSchema
-
-        schema.walkBounds(cell, bounds, function(square)
-            local snapshotOk, objects, complete = pcall(
-                world.strictSquareSnapshot, square)
-            if not snapshotOk or type(objects) ~= "table" or complete ~= true then
-                error("RailroaderRVTest: Construction clear occupancy cannot be verified")
-            end
-            for index = 1, #objects do
-                local object = objects[index]
-                local playerOk, isPlayer = pcall(world.isPlayerObject, object)
-                if not playerOk or isPlayer == true then
-                    error("RailroaderRVTest: Construction clear scope contains a player")
-                end
-                error("RailroaderRVTest: Construction clear scope contains an object; "
-                    .. "clearing requires an empty scope because no complete undo "
-                    .. "snapshot is available")
-            end
-        end)
-    end
-
-    function service.preflightCurrentGeneration(player, cell, layout, bounds,
-        generation, identitySource)
-        preflightClearTarget(player, cell, bounds)
-        return true
-    end
-
     -- Phase ownership is process-local.  The record's stage is the single stage
     -- authority: the clear pass runs while the record is in BUILD, and the build
     -- pass runs exactly once, after the clear pass has completed.
@@ -59,7 +29,6 @@ function Construction.new(context, operations)
         local pending = generationTransaction.current()
         local player = pending.player
         requireCurrentMutation(player)
-        preflightClearTarget(player, cell, bounds)
         operations.setGenerationPhase(generation, "CLEARING")
         return operations.clear(cell, bounds, generation)
     end

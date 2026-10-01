@@ -508,7 +508,7 @@ local function commitGeneration(player, data, prepared)
     candidateRecord.locoId = locoId
     candidateRecord.generation = generation
     candidateRecord.slotIndex = slotIndex
-    candidateRecord.rvPosition = copyPosition(data.rvPosition)
+    candidateRecord.rvPosition = copyPosition(prepared.finalDestination)
     candidateRecord.locoPosition = train and trainPose(train)
         or copyPose(data.locoPosition)
     if not candidateRecord.slotIndex or not candidateRecord.rvPosition
@@ -535,25 +535,11 @@ local function commitGeneration(player, data, prepared)
     if not server or type(server.initializeUtilityRecord) ~= "function" then
         return false, C.INVALID_RV_DATA
     end
-    -- Publish this server-constructed current-schema candidate in one
-    -- synchronous table swap. Generation finalization performs no fallible
-    -- work after utility initialization.
-    local oldLocomotives, oldPlayers = map.locomotives, map.players
-    map.locomotives, map.players = candidateMap.locomotives,
-        candidateMap.players
-    local changedOk, changedError = pcall(markMappingChanged)
-    if not changedOk then
-        map.locomotives, map.players = oldLocomotives, oldPlayers
-        pcall(markMappingChanged)
-        return false, tostring(changedError)
-    end
-    -- Utility initialization commits a separate ModData record and applies
-    -- generator state. Keep Mapping first so a failed map publication cannot
-    -- leave an orphan utility record. A failed Utility init restores the exact
-    -- prior Mapping tables; GenerationFlow then rolls back this world generation.
-    -- Omitting player suppresses the pre-finalization client snapshot; the
-    -- server-cell fallback still resolves the just-built generator, while the
-    -- settled post-commit refresh below broadcasts only after Mapping is current.
+    -- Initialize the utility record against the server-constructed candidate
+    -- before making the RV available through Mapping. The candidate record and
+    -- its built generator are sufficient; utility initialization does not need
+    -- a published mapping. Omitting player suppresses the pre-finalization
+    -- client snapshot; the server-cell lookup resolves the just-built generator.
     local utilityOk, utilityAccepted, utilityReason = pcall(
         server.initializeUtilityRecord,
         { rvId = candidateRecord.locoId,
@@ -563,11 +549,14 @@ local function commitGeneration(player, data, prepared)
             generation = candidateRecord.generation,
         }, record = candidateRecord })
     if not utilityOk or utilityAccepted ~= true then
-        map.locomotives, map.players = oldLocomotives, oldPlayers
-        pcall(markMappingChanged)
         return false, utilityOk and (utilityReason or C.INVALID_RV_DATA)
             or tostring(utilityAccepted)
     end
+    -- Mapping is the final generation commit. Nothing that can reject creation
+    -- runs after this single table swap.
+    markMappingChanged()
+    map.locomotives, map.players = candidateMap.locomotives,
+        candidateMap.players
     if type(server.settleRVUtilityLoad) == "function" then
         local settleOk, settled, settleReason = pcall(server.settleRVUtilityLoad,
             { rvId = tostring(candidateRecord.locoId),

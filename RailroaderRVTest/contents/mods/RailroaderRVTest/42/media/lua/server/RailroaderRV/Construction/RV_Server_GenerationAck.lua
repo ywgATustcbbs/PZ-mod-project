@@ -3,12 +3,10 @@
 return function(ctx)
 local Constants = ctx.Constants
 local Boundary = ctx.Boundary
-local ServerWorld = ctx.ServerWorld
 local GenerationTransaction = ctx.GenerationTransaction
 local WallReload = require("RailroaderRV/WallReloadProtection/RV_WallReloadProtection")
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local notifyFailure = ctx.notifyFailure
-local removeGeneration = ctx.removeGeneration
 local generationPositionProof = ctx.generationPositionProof
 local playerIdentity = ctx.playerIdentity
 local resolvePendingPlayer = ctx.resolvePendingPlayer
@@ -87,10 +85,10 @@ local function acknowledgeFinalRelocation(player, args)
     return true
 end
 
--- The one abort path.  This operation failed: log it, undo what the build
--- already touched, return the owner if it is still online, close the boundary
--- lease and let the player press the button again.  Nothing here retries or
--- defers; every step is best-effort, so one failure cannot block the rest.
+-- The one abort path. A failed build leaves its world changes in place; the
+-- next request has no published mapping and starts with a full clear pass.
+-- Return the owner if it is still online, close the boundary lease and let the
+-- player press the button again. Nothing here retries or defers.
 local function abortGeneration(record, reason)
     if type(record) ~= "table" then return end
     local reasonText = safeErrorText(reason)
@@ -101,21 +99,6 @@ local function abortGeneration(record, reason)
     local resolved, livePlayerOrReason = resolvePendingPlayer(record)
     local livePlayer = resolved and livePlayerOrReason or record.player
     record.player = livePlayer
-    if record.stage == "BUILD" or record.stage == "WAIT_FINAL" then
-        -- The clear/build pass ran, so remove every object tagged for this
-        -- generation before reporting the failure.  removeGeneration raises on
-        -- any unverifiable rollback, so it is the one genuine protected step.
-        local cellOk, cellOrReason = pcall(ServerWorld.getCellForPlayer, livePlayer)
-        local rollbackOk, rollbackReason = false, cellOrReason
-        if cellOk and cellOrReason then
-            rollbackOk, rollbackReason = pcall(removeGeneration, cellOrReason,
-                record.bounds, record.generation, record.rvId)
-        end
-        if not rollbackOk then
-            print("[RailroaderRVTest] generation rollback failed: "
-                .. safeErrorText(rollbackReason))
-        end
-    end
     if livePlayer ~= nil and type(record.originalPosition) == "table" then
         local returned, returnReason = ctx.sendStagingRelocation(record, "return")
         if not returned then

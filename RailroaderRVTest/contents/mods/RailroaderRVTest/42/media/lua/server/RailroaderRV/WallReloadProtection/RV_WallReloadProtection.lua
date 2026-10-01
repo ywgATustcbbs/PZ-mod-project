@@ -9,7 +9,6 @@
 -- queue, no retry ledger, no persisted transaction, no per-member attempt
 -- counter.  It never requires RoofRefresh; the exterior-wall caller supplies
 -- the completion callback that runs once after every member is home.
-return function()
 local Constants = require("RailroaderRV/Common/RV_Constants")
 local ServerUtil = require("RailroaderRV/Common/RV_ServerUtil")
 local Boundary = require("RailroaderRV/BoundaryGuard/RV_BoundaryServer")
@@ -50,7 +49,10 @@ local function operationKey(rvId, generation)
 end
 
 function M.isWallReloadActive(rvId)
-    if rvId == nil then return next(operations) ~= nil end
+    if rvId == nil then
+        for _ in pairs(operations) do return true end
+        return false
+    end
     if type(rvId) ~= "string" or rvId == "" then return false end
     for _, op in pairs(operations) do
         if op.rvId == rvId then return true end
@@ -335,7 +337,7 @@ local function advanceReturn(op)
 end
 
 function M.onTick()
-    if next(operations) == nil then return end
+    if not M.isWallReloadActive() then return end
     local now = currentTick()
     if lastTick == now then return end
     lastTick = now
@@ -505,4 +507,3 @@ function M.begin(request, onComplete)
 end
 
 return M
-end

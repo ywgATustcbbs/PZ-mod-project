@@ -94,10 +94,6 @@ local function validateTargetCoordinates(bounds, destination)
             validWorldCoordinate(x, y, bounds.z, "base")
         end
     end
-    for i = 1, #bounds.wallCoordinates do
-        local entry = bounds.wallCoordinates[i]
-        validWorldCoordinate(entry.x, entry.y, entry.z, "wall")
-    end
     for y = bounds.roofMinY, bounds.roofMaxY do
         for x = bounds.roofMinX, bounds.roofMaxX do
             validWorldCoordinate(x, y, bounds.roofZ, "roof")
@@ -108,10 +104,17 @@ local function preflightLoaded(cell, bounds)
     if not cell then
         error("RailroaderRVTest: preflight has no IsoCell")
     end
-    -- Missing squares are valid for this sparse template. The clear pass
-    -- walks every managed coordinate but inspects only squares that exist;
-    -- the build pass creates and reads back each current template-object host.
-    -- Do not require the template base plane or any upper Z layer to pre-exist.
+    -- The cleanup scope is half-open and every base square must be visible
+    -- before any world mutation starts.
+    for y = bounds.clearMinY, bounds.clearMaxY - 1 do
+        for x = bounds.clearMinX, bounds.clearMaxX - 1 do
+            local square = ServerWorld.getSquare(cell, x, y, bounds.z)
+            if not square then
+                return false, "RailroaderRVTest: required base square is not loaded at "
+                    .. tostring(x) .. "," .. tostring(y) .. "," .. tostring(bounds.z)
+            end
+        end
+    end
     return true
 end
 
@@ -151,7 +154,6 @@ end
 M.boundsFor = boundsFor
 M.walkBounds = walkBounds
 M.validateTargetCoordinates = validateTargetCoordinates
-M.preflightLoaded = preflightLoaded
 M.targetAreaLoadStatus = targetAreaLoadStatus
 
 return M

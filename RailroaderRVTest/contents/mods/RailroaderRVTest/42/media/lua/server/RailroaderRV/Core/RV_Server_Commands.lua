@@ -210,9 +210,9 @@ local function processPendingGeneration()
                 .. tostring(stagingReason))
             return
         end
-        -- The relocation itself streams the remote target.  Wait for its cell,
-        -- then let the sparse preflight inspect only squares already present;
-        -- missing non-template squares do not block generation.
+        -- The relocation streams the remote target asynchronously. Wait until
+        -- every base square in the cleanup scope is visible before beginning
+        -- world mutation.
         local targetLoaded, targetLoadReason = ServerSchema.targetAreaLoadStatus(
             player, record.bounds, safeErrorText)
         if targetLoaded == nil then
@@ -295,6 +295,10 @@ function RV.Server.OnTick(tick)
     if not pendingOk then
         print("[RailroaderRVTest] generation tick error: "
             .. safeErrorText(pendingError))
+        local failedRecord = GenerationTransaction.current()
+        if failedRecord ~= nil then
+            runGenerationAbort(failedRecord, pendingError)
+        end
     end
 end
 

@@ -91,9 +91,8 @@ end
 
 local function clearGenerationArea(cell, bounds, generation)
     setGenerationPhase(generation, "CLEARING")
-    -- Scan the full managed bounds and clean only squares the cell currently
-    -- has. Construction preflight rejects occupants that lack a complete undo
-    -- path before this phase can mutate the world.
+    -- Scan the full managed bounds, including remnants from any failed earlier
+    -- attempt. A new unmapped generation starts with this complete clear pass.
     ServerSchema.walkBounds(cell, bounds, function(square)
         ServerWorld.clearSquare(square, nil)
     end)
@@ -124,13 +123,9 @@ local function buildGeneration(player, layout, bounds, generation)
     setGenerationPhase(generation, "CAPTURED_TEMPLATE")
     for i = 1, #templateObjects do
         local entry = templateObjects[i]
-        local square
-        square = ServerWorld.getSquare(cell, entry.x, entry.y, entry.z)
-        if not square and entry.z ~= bounds.z then
-            square = ensureRoofSquare(cell, entry.x, entry.y, entry.z)
-        end
+        local square = ServerWorld.getSquare(cell, entry.x, entry.y, entry.z)
         if not square then
-            error("RailroaderRVTest: captured object host square could not be created")
+            square = ensureRoofSquare(cell, entry.x, entry.y, entry.z)
         end
         createCapturedTemplateObject(cell, square, entry, generation, tagContext,
             shellByTemplateIndex[i])
@@ -171,7 +166,6 @@ buildGeneration = construction.buildCurrentGeneration
 ctx.setGenerationPhase = setGenerationPhase
 ctx.clearGenerationArea = clearGenerationArea
 ctx.buildGeneration = buildGeneration
-ctx.constructionService = construction
 if type(ctx.RV) == "table" and type(ctx.RV.Server) == "table" then
     ctx.RV.Server.Construction = construction
 end

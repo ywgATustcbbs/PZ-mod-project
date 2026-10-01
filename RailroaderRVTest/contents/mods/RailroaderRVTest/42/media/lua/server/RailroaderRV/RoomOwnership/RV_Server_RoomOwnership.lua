@@ -425,13 +425,12 @@ local function processServerRoomOwnershipGuards()
         end
     end
     -- Event-triggered structure scans, merged per tick by scheduleRoomOwnershipScan.
-    -- The due marker is cleared before the scan: a scan that raises is reported
-    -- once and stays unarmed, so it cannot repeat on every later tick. The next
-    -- object event or neighborhood probe re-schedules it through the normal path.
+    -- The due marker is cleared before the scan. Keep event cells until the
+    -- refresh completes; it clears pendingCells after using them. A scan that
+    -- raises is reported once and stays unarmed until the next event or probe.
     local scansOk, scansError = pcall(function()
         for _, guard in pairs(roomOwnershipGuards) do
             if guard.scanDueTick ~= nil and ctx.serverTick >= guard.scanDueTick then
-                guard.pendingCells = {}
                 guard.scanDueTick = nil
                 refreshServerRoomOwnershipGuard(guard, nil)
             end
@@ -475,49 +474,6 @@ local function armClientRoomOwnershipGuard(generation, oldBounds, newBounds,
     end
 end
 
-local function removeGeneration(cell, bounds, generation, rvId)
-    if not cell or type(bounds) ~= "table"
-        or ServerUtil.requiredInteger(generation, "rollback generation") < 1
-        or type(rvId) ~= "string" or rvId == "" then
-        error("RailroaderRVTest: rollback target identity or cell is unavailable")
-    end
-    local guard = roomOwnershipGuards[roomOwnershipGuardKey(rvId, generation)]
-    if not guard then
-        error("RailroaderRVTest: rollback room ownership guard is unavailable")
-    end
-    -- Failed builds are rolled back by the same owner+generation tag used by
-    -- repeat generation.  This includes roof floors, generators and fixtures
-    -- the final light, even when the failure occurs in the last phase.
-    ServerSchema.walkBounds(cell, bounds, function(square)
-        ServerWorld.clearSquare(square, generation, rvId)
-    end)
-
-    -- A successful pcall around ServerWorld.clearSquare is not enough on a dedicated
-    -- server: transmitRemoveItemFromSquare owns the packet, event, local
-    -- detach, and neighbour recalculation.  Verify the authoritative cell has
-    -- no tagged object left before reporting rollback=COMPLETE.
-    local remaining = 0
-    ServerSchema.walkBounds(cell, bounds, function(square)
-        local objects, complete, reason = ServerWorld.strictSquareSnapshot(square)
-        if type(objects) ~= "table" or complete ~= true then
-            error("RailroaderRVTest: rollback object verification is incomplete: "
-                .. tostring(reason or "square snapshot failed"))
-        end
-        for i = 1, #objects do
-            if ServerWorld.isTaggedForGeneration(objects[i], generation, rvId) then
-                remaining = remaining + 1
-            end
-        end
-    end)
-    if remaining > 0 then
-        error("RailroaderRVTest: rollback verification found " .. tostring(remaining)
-            .. " tagged objects still present")
-    end
-    -- Rollback removes walls and floors, so the whole structure footprint is
-    -- inspected again for a square that kept a retired room ID.
-    refreshServerRoomOwnershipGuard(guard, "after-rollback")
-end
-
 -- Existing-RV entry/reconnects do not run the generation broadcast below.  Arm
 -- only the corresponding client with the current manifest footprint so a fresh
 -- client cannot enter a room whose IsoRoom reference may be retired later.
@@ -550,7 +506,6 @@ end
 
 
 ctx.notifyFailure = notifyFailure
-ctx.removeGeneration = removeGeneration
 ctx.requestRoomOwnershipScan = requestRoomOwnershipScan
 ctx.requestRoomOwnershipRemovalScan = requestRoomOwnershipRemovalScan
 ctx.registerServerRoomOwnershipGuard = registerServerRoomOwnershipGuard

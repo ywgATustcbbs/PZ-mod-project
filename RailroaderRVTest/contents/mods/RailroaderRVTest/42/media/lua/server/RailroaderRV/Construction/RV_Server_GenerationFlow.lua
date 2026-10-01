@@ -131,9 +131,9 @@ local function generateForPlayer(player, prepared)
         return false, "generation already in progress"
     end
     prepared.stage = "BUILD"
-    -- B42 Kahlua exposes pcall; this is the world-mutation boundary.  A failure
-    -- returns its reason and the tick handler's single abort path removes
-    -- whatever the build already touched.
+    -- B42 Kahlua exposes pcall; this is the world-mutation boundary. A failure
+    -- returns its reason to the abort path. The next unmapped request performs
+    -- the full cleanup pass before it builds again.
     local ok, resultOrError = pcall(function()
         local playerOk, positionOrReason = validateAuthoritativePlayer(player)
         if not playerOk then
@@ -167,36 +167,18 @@ local function generateForPlayer(player, prepared)
         end
         local layout = prepared.layout
         local bounds = prepared.bounds
-        local anchor = prepared.anchor
         local cell = ServerWorld.getCellForPlayer(player)
         local atStaging, stagingReason = playerIsAtStagingDestination(player,
             prepared.stagingDestination, bounds)
         if not atStaging then
             error(stagingReason)
         end
-        -- Validate the full target geometry and world coordinates before any
-        -- mutation. Managed squares are sparse: cleanup inspects existing
-        -- squares, while the build pass creates only captured-object hosts.
-        ServerSchema.preflightLoaded(cell, bounds)
         local generation = prepared.generation
         if not Boundary then
             error("RailroaderRVTest: RV boundary service is unavailable")
         end
         local rvId = prepared.rvId
         prepared.rvId = tostring(rvId)
-        local construction = ctx.constructionService
-        local preflightAccepted, preflightReason =
-            construction.preflightCurrentGeneration(player, cell, layout,
-            bounds, generation, {
-                rvId = prepared.rvId,
-                generation = generation,
-                slotIndex = prepared.slotIndex,
-                anchor = anchor,
-            })
-        if preflightAccepted ~= true then
-            error(preflightReason
-                or "RailroaderRVTest: Construction target preflight was rejected")
-        end
         -- Arm every connected client before any old captured object is removed.
         -- Reliable packet order installs the guard before the following world
         -- deltas; the requester remains at the validated staging square,
@@ -360,12 +342,11 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     local targetX, targetY, targetZ = anchor.x, anchor.y, anchor.z
     local rvId = railroaderData and tostring(railroaderData.locoId)
         or ("technical:slot:" .. tostring(slotIndex))
-    -- A loco with a published mapping already has a complete generation in the
-    -- world; there is no complete undo snapshot for it, so a same-slot rebuild
-    -- is refused before any world mutation.
+    -- A published mapping means this locomotive already has a completed RV.
+    -- Unmapped requests select a free slot and always begin at the full clear
+    -- pass, which also removes objects left by a failed earlier attempt.
     if priorGeneration ~= nil then
-        return false, "RailroaderRVTest: same-slot rebuild is refused because "
-            .. "the previous generation has no complete undo snapshot"
+        return false, "RailroaderRVTest: locomotive already has a completed RV mapping"
     end
     local generation = 1
     if railroaderData then

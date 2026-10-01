@@ -294,34 +294,21 @@ local function configureCapturedDoorFrame(object, entry)
 end
 
 local function ensureRoofSquare(cell, x, y, z)
-    -- B42's player-building path creates a missing upper square with the
-    -- IsoGridSquare constructor, then connects it to the cell.  Keep this
-    -- operation idempotent so a retry reuses an existing square (including a
-    -- square left empty after a failed addFloor) instead of creating a
-    -- duplicate/unconnected object.
+    -- On GameServer, getGridSquare reads ServerMap. IsoCell:createNewGridSquare
+    -- registers a missing square in that map's loaded chunk. Keep this
+    -- idempotent so a retry reuses a square left empty after a failed addFloor
+    -- instead of creating a duplicate or a cell-cache-only square.
     local square = ServerWorld.getSquare(cell, x, y, z)
     if square then
         return square
     end
 
-    local cls = rawget(_G, "IsoGridSquare")
-    local constructed, created = ServerUtil.invokeClass(cls, {
-        -- Match official BuildRecipeCode/buildRecipeCode.lua exactly:
-        -- IsoGridSquare.new(cell, nil, x, y, z), followed by ConnectNewSquare.
-        { cell, nil, x, y, z },
-    })
-    if constructed then
-        if not ServerUtil.callSucceeded(cell, "ConnectNewSquare", created, false) then
-            error("RailroaderRVTest: unable to connect roof square")
-        end
-    else
-        -- Keep the official DebugIsoRegionsEdit construction API as a narrow
-        -- Alternate runtime API path for bindings that do not expose the class.
-        -- constructor.  This method connects the square itself.
-        local createdOk, fallback = ServerUtil.invoke(cell, "createNewGridSquare", x, y, z, true)
-        if not createdOk or not fallback then
-            error("RailroaderRVTest: unable to construct roof square")
-        end
+    -- The GameServer path checks that the coordinate is valid and its chunk is
+    -- loaded, then registers the new square directly in ServerMap.
+    local createdOk, created = ServerUtil.invoke(cell,
+        "createNewGridSquare", x, y, z, true)
+    if not createdOk or not created then
+        error("RailroaderRVTest: unable to construct roof square")
     end
 
     local connected = ServerWorld.getSquare(cell, x, y, z)

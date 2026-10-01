@@ -28,13 +28,10 @@ local function getSquare(cell, x, y, z)
     return nil
 end
 
-local function collectionSnapshot(collection, strict, required)
+local function collectionSnapshot(collection)
     local result = {}
     if collection == nil then
-        if strict and required then
-            return nil, false, "required square collection is unavailable"
-        end
-        return result, true
+        return result
     end
     local okSize, size = ServerUtil.invoke(collection, "size")
     local sizeNumber = ServerUtil.toNumber(size)
@@ -44,11 +41,9 @@ local function collectionSnapshot(collection, strict, required)
             local okItem, item = ServerUtil.invoke(collection, "get", i)
             if okItem and item then
                 result[#result + 1] = item
-            elseif strict then
-                return nil, false, "square collection could not be fully enumerated"
             end
         end
-        return result, true
+        return result
     end
     if type(collection) == "table" then
         for _, item in pairs(collection) do
@@ -56,12 +51,9 @@ local function collectionSnapshot(collection, strict, required)
                 result[#result + 1] = item
             end
         end
-        return result, true
+        return result
     end
-    if strict then
-        return nil, false, "square collection size is unavailable"
-    end
-    return result, true
+    return result
 end
 
 local function appendUnique(result, seen, object)
@@ -71,46 +63,24 @@ local function appendUnique(result, seen, object)
     end
 end
 
-local function squareSnapshotInternal(square, strict)
+local function squareSnapshot(square)
     local result, seen = {}, {}
     local listNames = {
         "getObjects", "getSpecialObjects", "getStaticMovingObjects",
         "getMovingObjects", "getWorldObjects", "getDeadBodys", "getCorpses",
     }
-    local optionalGetters = { getCorpses = true }
     local function getterAvailable(name)
         local accessOk, method = pcall(function() return square[name] end)
         if not accessOk then return nil end
         return type(method) == "function"
     end
-    local function failOrContinue(message)
-        if strict then return false, message end
-        return true
-    end
     for i = 1, #listNames do
         local name = listNames[i]
         local available = getterAvailable(name)
-        if available == nil then
-            if strict then
-                return nil, false, "square object-list API could not be inspected: " .. name
-            end
-        elseif not available and optionalGetters[name] then
-            -- Some engine revisions do not expose this supplemental list.
-            -- It remains optional in the cleanup and occupancy enumerators.
-        elseif not available then
-            local keepGoing, reason = failOrContinue(
-                "required square object list is unavailable: " .. name)
-            if not keepGoing then return nil, false, reason end
-        else
+        if available then
             local ok, collection = ServerUtil.invoke(square, name)
-            if not ok then
-                local keepGoing, reason = failOrContinue(
-                    "square object list could not be read: " .. name)
-                if not keepGoing then return nil, false, reason end
-            else
-                local snapshot, complete, reason = collectionSnapshot(
-                    collection, strict, not optionalGetters[name])
-                if not complete then return nil, false, reason end
+            if ok then
+                local snapshot = collectionSnapshot(collection)
                 for j = 1, #snapshot do
                     appendUnique(result, seen, snapshot[j])
                 end
@@ -119,25 +89,14 @@ local function squareSnapshotInternal(square, strict)
     end
 
     local okFloor, floor = ServerUtil.invoke(square, "getFloor")
-    if not okFloor and strict then
-        return nil, false, "square floor could not be inspected"
-    end
     if okFloor and floor then
         appendUnique(result, seen, floor)
     end
     local corpseMethods = { "getCorpse", "getDeadBody" }
     for i = 1, #corpseMethods do
         local name = corpseMethods[i]
-        local available = getterAvailable(name)
-        if available == nil and strict then
-            return nil, false, "square corpse API could not be inspected"
-        elseif not available then
-            -- These aliases supplement getDeadBodys() when exposed.
-        else
+        if getterAvailable(name) then
             local ok, corpse = ServerUtil.invoke(square, name)
-            if not ok and strict then
-                return nil, false, "square corpse object could not be inspected"
-            end
             if ok and corpse then
                 appendUnique(result, seen, corpse)
             end
@@ -146,22 +105,10 @@ local function squareSnapshotInternal(square, strict)
     -- Vehicles live in the chunk vehicle list rather than square:getObjects();
     -- getVehicleContainer() is the B42.20 bridge needed for permanent removal.
     local okVehicle, vehicle = ServerUtil.invoke(square, "getVehicleContainer")
-    if not okVehicle and strict then
-        return nil, false, "square vehicle container could not be inspected"
-    end
     if okVehicle and vehicle then
         appendUnique(result, seen, vehicle)
     end
-    return result, true
-end
-
-local function squareSnapshot(square)
-    local result = squareSnapshotInternal(square, false)
-    return result or {}
-end
-
-local function strictSquareSnapshot(square)
-    return squareSnapshotInternal(square, true)
+    return result
 end
 
 local function objectModData(object)
@@ -465,7 +412,6 @@ M.getCellForPlayer = getCellForPlayer
 M.getSquare = getSquare
 M.collectionSnapshot = collectionSnapshot
 M.squareSnapshot = squareSnapshot
-M.strictSquareSnapshot = strictSquareSnapshot
 M.objectModData = objectModData
 M.tagObject = tagObject
 M.isTaggedForGeneration = isTaggedForGeneration

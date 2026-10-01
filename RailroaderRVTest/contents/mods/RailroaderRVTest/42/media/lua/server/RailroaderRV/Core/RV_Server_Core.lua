@@ -79,6 +79,29 @@ local function onTick(callback)
     on("OnTick", callback)
 end
 
+local function scheduleAtTick(targetTick, callback, ...)
+    local arguments = { ... }
+    state.scheduledCallbacks[#state.scheduledCallbacks + 1] = {
+        targetTick = targetTick,
+        callback = callback,
+        arguments = arguments,
+        argumentCount = select("#", ...),
+    }
+end
+
+local function runScheduledCallbacks(now)
+    local index = 1
+    while index <= #state.scheduledCallbacks do
+        local task = state.scheduledCallbacks[index]
+        if tickReached(now, task.targetTick) then
+            table.remove(state.scheduledCallbacks, index)
+            task.callback(unpack(task.arguments, 1, task.argumentCount))
+        else
+            index = index + 1
+        end
+    end
+end
+
 -- Registration order is dispatch order.  RV_Server_Commands registers the "*"
 -- catch-all before the adapter registers its named commands, so the engine
 -- command is offered to "*" first and then to a named handler.
@@ -96,6 +119,7 @@ Core.tickElapsedAtLeast = tickElapsedAtLeast
 Core.tickModulo = tickModulo
 Core.on = on
 Core.onTick = onTick
+Core.scheduleAtTick = scheduleAtTick
 Core.onCommand = onCommand
 
 RV.Core = Core
@@ -104,6 +128,8 @@ RV.Core = Core
 -- A debugger reload of this file must not add a second listener; the handler
 -- lists in Core._state survive the reload and stay attached to this dispatcher.
 if not state.subscribed then
+    state.scheduledCallbacks = {}
+    onTick(runScheduledCallbacks)
     state.subscribed = true
     Events.OnTick.Add(function()
         state.tick = state.tick + 1

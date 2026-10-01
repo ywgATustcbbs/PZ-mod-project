@@ -241,10 +241,11 @@ local function finalizeGenerationAfterRelocate(player, prepared)
         or prepared.finalAcked ~= true then
         return false, "final relocation acknowledgement is still pending"
     end
-    local ok, result = pcall(function()
-        local target = prepared.finalDestination
-        local proofOk, proofOrPosition = generationPositionProof(player, target)
-        if not proofOk then
+    local target = prepared.finalDestination
+    local proofOk, proofOrPosition, positionMismatch =
+        generationPositionProof(player, target)
+    if not proofOk then
+        if positionMismatch == true then
             -- IsoPlayer.updateRemotePlayer runs immediately before OnTick and
             -- applies the last client PlayerPacket through realx/realy/realz.
             -- The final command can therefore be overwritten once by the stale
@@ -262,8 +263,11 @@ local function finalizeGenerationAfterRelocate(player, prepared)
             print("[RailroaderRVTest] final relocation target pending target="
                 .. tostring(target.x) .. "," .. tostring(target.y) .. ","
                 .. tostring(target.z) .. " state=" .. stateText)
-            error("final relocation authoritative target is still synchronizing")
+            return false, "final relocation authoritative target is still synchronizing"
         end
+        return false, proofOrPosition
+    end
+    local ok, result = pcall(function()
         if proofOrPosition == "target-cell" then
             print("[RailroaderRVTest] final relocation commit proof accepted target cell="
                 .. tostring(math.floor(target.x)) .. ","

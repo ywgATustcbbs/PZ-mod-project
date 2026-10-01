@@ -163,32 +163,11 @@ boundaryValidation = require("RailroaderRV/BoundaryGuard/RV_RailroaderServer_Bou
         return {}
     end,
 })
--- The roof/room refresh is deliberately best-effort: a missing target chunk must
--- not reject an otherwise valid RV entry.  The state machine behind a wall
--- removal belongs to WallReloadProtection; this is only the entry/reconnect
--- refresh, so the caller's own retry is the recovery path.
-local function refreshRoofForPlayer(player, record, _force, reason)
-    local server = RailroaderRV and RailroaderRV.Server
-    if not server or type(server.refreshRoofVisuals) ~= "function" then
-        return false, "roof refresh service is unavailable"
-    end
-    local ok, refreshed, detail = pcall(server.refreshRoofVisuals, player, record)
-    if not ok then
-        print("[RailroaderRVTest] roof refresh error: " .. tostring(refreshed))
-        return false, tostring(refreshed)
-    end
-    if refreshed == true then
-        -- This confirms the server-side room/roof neighbour synchronization;
-        -- it cannot prove that every client's rendered cache updated.
-        print("[RailroaderRVTest] roof room synchronization applied rvId="
-            .. tostring(record.locoId) .. " reason=" .. tostring(reason or "entry")
-            .. " detail=" .. tostring(detail or "ok"))
-        return true, detail
-    end
-    print("[RailroaderRVTest] roof refresh deferred rvId="
-        .. tostring(record.locoId) .. " reason=" .. tostring(reason or "entry")
-        .. ": " .. tostring(detail or "unknown"))
-    return false, detail
+-- Entry, generation-entry and wall-reload completion all register the same
+-- four RV-id-only attempts against the Core logical tick.
+local function refreshRoofForPlayer(_player, record, _force, _reason)
+    RailroaderRV.Server.scheduleRoofRefreshForRV(record.locoId)
+    return true
 end
 
 -- The generation transaction broadcasts a room guard, but an existing RV entry
@@ -287,6 +266,10 @@ local function currentMappingRecord(rvId, generation)
     return true, record
 end
 
+local function currentMappingRecordById(rvId)
+    return recordForLoco(mapData(), rvId)
+end
+
 -- Utility commands resolve the current RV exclusively from the authoritative
 -- mapping and player coordinate.  Client-supplied RV ids, generations and
 -- object coordinates never enter this result. Identity checks run when an
@@ -307,5 +290,6 @@ ctx.recordAtPlayerCoordinate = recordAtPlayerCoordinate
 ctx.recordForLoco = recordForLoco
 Adapter.allocateRVRegion = allocateRVRegion
 Adapter.currentMappingRecord = currentMappingRecord
+Adapter.currentMappingRecordById = currentMappingRecordById
 Adapter.invalidateBoundaryValidationCache = invalidateBoundaryValidationCache
 end

@@ -7,6 +7,7 @@ local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
 local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
+local RoofRefresh = require("RailroaderRV/RoofRefresh/RV_RoofRefresh")
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local armTargetedClientRoomOwnershipGuard = ctx.armTargetedClientRoomOwnershipGuard
 local playerIdentity = ctx.playerIdentity
@@ -103,52 +104,18 @@ function RV.Server.currentRVManifestForBoundary(rvId, generation)
     return manifestForIdentity(rvId, generation)
 end
 
--- Re-read the live boundary/mapping identity of an authoritative player before a
--- refresh mutates the world.  The expected rvId/generation come from the server's
--- own current manifest, never from a client payload or a stored copy.
-local function currentRoofRefreshContext(player, expected)
-    local boundary, _, relation = Boundary.boundaryForPlayer(player)
-    if type(boundary) ~= "table" or type(relation) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    if tostring(boundary.rvId) ~= tostring(expected.rvId)
-        or ServerUtil.integer(boundary.generation)
-            ~= ServerUtil.integer(expected.generation) then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local identityOk, identityOrReason = playerIdentity(player)
-    if not identityOk then return false, identityOrReason end
-    return true, {
-        boundary = boundary,
-        relation = relation,
-        identity = identityOrReason,
-    }
+-- Each scheduled attempt resolves the current authoritative mapping and
+-- rebuilds its geometry from the current template at execution time.
+function RV.Server.refreshRoofVisuals(rvId)
+    local adapter = RailroaderRV.RailroaderServer
+    local record = adapter.currentMappingRecordById(rvId)
+    local manifestOk, manifest = manifestViewForRecord(record)
+    if not manifestOk then error(manifest, 0) end
+    return RoofRefresh.run(manifest.bounds)
 end
 
--- Rebuild the captured south-window floor's room/roof neighbours after an
--- existing RV entry or reconnect.
-function RV.Server.refreshRoofVisuals(player, record)
-    local loaded, RoofRefresh = pcall(require,
-        "RailroaderRV/RoofRefresh/RV_RoofRefresh")
-    if not loaded or type(RoofRefresh) ~= "table"
-        or type(RoofRefresh.run) ~= "function" then
-        return false, "roof refresh module is unavailable"
-    end
-    if type(record) ~= "table" then return false, Constants.INVALID_RV_DATA end
-    local manifestOk, manifest = RV.Server.currentRVManifestForRelocation(
-        record.locoId, record.generation)
-    if not manifestOk or type(manifest) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local contextOk, contextOrReason = currentRoofRefreshContext(player, {
-        rvId = manifest.rvId,
-        generation = manifest.generation,
-    })
-    if not contextOk then return false, contextOrReason end
-    local bounds = manifest.bounds
-    local ok, result, reason = pcall(RoofRefresh.run, player, bounds)
-    if not ok then return false, safeErrorText(result) end
-    return result == true, reason
+function RV.Server.scheduleRoofRefreshForRV(rvId)
+    return RoofRefresh.schedule(rvId)
 end
 
 -- Re-arm a client's persistent stale-room monitor when it enters an already

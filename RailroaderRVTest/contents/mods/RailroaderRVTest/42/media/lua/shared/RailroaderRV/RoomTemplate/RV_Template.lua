@@ -24,11 +24,11 @@ return {
         { minX = -4, maxX = 2, minY = -6, maxY = 17,
             minZ = 0, maxZExclusive = 1 },
     },
-    -- Cells whose room/roof state must be refreshed once the RV exists in the
-    -- world.  Each point names the captured entry that owns the cell, so the
-    -- point and its entry can never drift apart.
+    -- Refresh this captured floor cell with a distinct temporary wood floor.
+    -- The temporary sprite is manually kept different from the captured floor.
     roofRefreshPoints = {
-        { x = -4, y = 3, z = 0, templateIndex = 34 },
+        { x = -4, y = 3, z = 0, templateIndex = 34,
+            temporaryFloorSprite = "floors_interior_tilesandwood_01_40" },
     },
     objects = {
     {x=-4, y=-6, z=0, class="IsoObject", name="IsoObject", sprite="industry_01_13", direction="N", state={hoppable=false}},

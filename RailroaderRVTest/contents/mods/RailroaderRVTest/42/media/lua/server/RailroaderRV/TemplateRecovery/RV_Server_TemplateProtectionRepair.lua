@@ -81,7 +81,7 @@ local function shellEdgeMap(boundary)
     return map
 end
 
-local function entryAt(anchor, edgeMap, x, y, z)
+local function templateCoordinates(anchor, x, y, z)
     local offset = TemplateGeometry.worldToTemplate({
         x = x, y = y, z = z,
     }, anchor)
@@ -91,46 +91,61 @@ local function entryAt(anchor, edgeMap, x, y, z)
     if cellX ~= offset.x or cellY ~= offset.y or cellZ ~= offset.z then
         return nil
     end
-    local entries = entriesByCell[templateCellKey(cellX, cellY)]
-    for index = 1, #(entries or {}) do
-        local captured = entries[index]
-        if captured.z == cellZ then
-            return {
-                templateIndex = captured.templateIndex,
-                x = anchor.x + captured.x,
-                y = anchor.y + captured.y,
-                z = anchor.z + captured.z,
-                class = captured.class,
-                name = captured.name,
-                sprite = captured.sprite,
-                north = captured.north,
-                direction = captured.direction,
-                state = captured.state,
-                protected = captured.protected,
-                edge = edgeMap[captured.templateIndex],
-            }
-        end
-    end
-    return nil
+    return cellX, cellY, cellZ
 end
 
--- Every template object expected on the layers of one cell. An empty result
--- means the template protects nothing there.
+local function entryForCaptured(anchor, edgeMap, captured)
+    return {
+        templateIndex = captured.templateIndex,
+        x = anchor.x + captured.x,
+        y = anchor.y + captured.y,
+        z = anchor.z + captured.z,
+        class = captured.class,
+        name = captured.name,
+        sprite = captured.sprite,
+        north = captured.north,
+        direction = captured.direction,
+        state = captured.state,
+        protected = captured.protected,
+        edge = edgeMap[captured.templateIndex],
+    }
+end
+
+-- Return every captured entry at this XY in template-index order. Callers use
+-- only protected entries for correction, while retaining all authored entries
+-- here makes same-cell, multi-layer template data complete.
 local function templateEntriesAt(boundary, anchor, edgeMap, x, y)
+    local templateX, templateY = templateCoordinates(anchor, x, y, anchor.z)
+    if templateX == nil then return {} end
+    local capturedEntries = entriesByCell[templateCellKey(templateX, templateY)]
     local entries = {}
-    for z = boundary.managed.minZ, boundary.managed.maxZ - 1 do
-        local entry = entryAt(anchor, edgeMap, x, y, z)
-        if entry then entries[#entries + 1] = entry end
+    for index = 1, #(capturedEntries or {}) do
+        local captured = capturedEntries[index]
+        local worldZ = anchor.z + captured.z
+        if worldZ >= boundary.managed.minZ
+            and worldZ < boundary.managed.maxZ then
+            entries[#entries + 1] = entryForCaptured(anchor, edgeMap, captured)
+        end
     end
     return entries
 end
 
-local function loadedLayerForCell(cell, x, y, z)
-    local chunkOk, chunk = ServerUtil.invoke(cell, "getChunkForGridSquare",
-        x, y, z)
-    if not chunkOk or not chunk then return false end
-    local loadedOk, loaded = pcall(function() return chunk.loaded end)
-    return loadedOk and loaded == true
+-- Candidate filtering uses only trusted captured protection flags.
+local function isProtectedCell(boundary, x, y)
+    local anchor = TemplateGeometry.anchorFromManaged(boundary.managed, Template)
+    for z = boundary.managed.minZ, boundary.managed.maxZ - 1 do
+        local cellX, cellY, cellZ = templateCoordinates(anchor, x, y, z)
+        if cellX ~= nil then
+            local entries = entriesByCell[templateCellKey(cellX, cellY)]
+            for index = 1, #(entries or {}) do
+                local captured = entries[index]
+                if captured.z == cellZ and captured.protected then
+                    return true
+                end
+            end
+        end
+    end
+    return false
 end
 
 -- The trusted identity written by this mod when a captured object is created.
@@ -161,13 +176,26 @@ local function isOpenableClass(className)
     return className == "IsoDoor" or className == "IsoWindow"
 end
 
-local function isVisualCorner(entry)
-    return entry.class == "IsoObject" and entry.name == "Wooden Wall"
-        and entry.sprite == "walls_interior_house_02_35"
+local function isRuntimeDoorOrWindow(object)
+    if ServerUtil.classInstance(object, "IsoDoor")
+        or ServerUtil.classInstance(object, "IsoWindow") then
+        return true
+    end
+    if ServerUtil.classInstance(object, "IsoThumpable") then
+        local doorOk, isDoor = ServerUtil.invoke(object, "isDoor")
+        local windowOk, isWindow = ServerUtil.invoke(object, "isWindow")
+        return doorOk and isDoor == true or windowOk and isWindow == true
+    end
+    return false
 end
 
-local function isFloorEntry(entry)
-    return entry.class == "IsoObject" and not isVisualCorner(entry)
+-- Side-host cells beside authored build cells permit ordinary door/window
+-- replacement even when the current object has no captured-template identity.
+local function isCabSideDoorOrWindow(object, x, y, z, anchor)
+    if not isRuntimeDoorOrWindow(object) then return false end
+    return TemplateGeometry.isBuildCellSideHost({
+        x = x, y = y, z = z,
+    }, anchor, Template)
 end
 
 local function objectMatchesCaptured(object, expected)
@@ -239,35 +267,22 @@ local function objectIsTemplateEntry(objects, entry)
     return false
 end
 
--- Objects a protected template entry on this cell can legitimately replace: the
--- captured object itself, a duplicate of it, or the build that took its place.
--- An unrelated object on a protected tile is left untouched.
-local function isRepairTarget(object, entries, objectIsFloor)
-    for index = 1, #entries do
-        local expected = entries[index]
-        if expected.protected and (ServerUtil.classInstance(object, expected.class)
-            or objectIsFloor and isFloorEntry(expected)) then
-            return true
-        end
-    end
-    return false
-end
-
--- Only an object that still carries its entry identity is the template object;
--- anything else left on a protected tile is the extra object this pass removes.
-local function isSpareObject(object, entries, objectIsFloor)
-    if not isRepairTarget(object, entries, objectIsFloor) then return false end
+-- Every ordinary object on a protected template layer is a correction
+-- candidate, regardless of its Java class. Captured template identity, shell
+-- identity, and the documented side-host door/window rule decide what remains.
+local function isSpareObject(object, entries, sideHostDoorOrWindow)
+    if sideHostDoorOrWindow then return false end
     local templateIndex = objectTemplateIndex(object)
     if not templateIndex then return true end
     for index = 1, #entries do
         local entry = entries[index]
-        if entry.templateIndex == templateIndex
+        if entry.protected and entry.templateIndex == templateIndex
             and objectMatchesTemplate(object, entry)
             and objectHasShellIdentity(object, entry.edge) then
-            return false
+            return false, templateIndex
         end
     end
-    return true
+    return true, templateIndex
 end
 
 local function isBloodOrSplat(object)
@@ -345,9 +360,9 @@ local function removeObject(square, object)
     end
 end
 
--- The object is removed instead of being rebuilt in place; the current template
--- entry recreates it on the same cell during the restore pass.
-local function deleteCapturedObject(square, object, templateIndex)
+-- Remove non-template objects from protected layers; the restore pass then
+-- recreates any missing protected template entries on this cell.
+local function removeRepairSpareObject(square, object, templateIndex)
     local x, y, z = objectCell(object)
     if not x or not y or not z then
         error("RailroaderRVTest: template-protection repair target has no coordinate")
@@ -359,8 +374,9 @@ local function deleteCapturedObject(square, object, templateIndex)
         return false
     end
     removeObject(square, object)
-    print("[RailroaderRVTest] template-protection repair rebuilt templateIndex="
-        .. tostring(templateIndex) .. " at " .. coordinateKey(x, y, z))
+    print("[RailroaderRVTest] template-protection repair removed non-template object "
+        .. "templateIndex=" .. tostring(templateIndex) .. " at "
+        .. coordinateKey(x, y, z))
     return true
 end
 
@@ -405,42 +421,43 @@ local function repairTemplateProtectionCell(player, expectedBoundary, x, y)
         x, y)
     if #entries == 0 then return false end
 
-    local repairLayers = {}
-    for index = 1, #entries do
-        repairLayers[entries[index].z] = true
-    end
     local cellOk, cell = pcall(ServerWorld.getCellForPlayer, player)
     if not cellOk or not cell then
         return false, "current player cell is unavailable"
     end
 
     local repaired = false
-    for z = boundary.managed.minZ, boundary.managed.maxZ - 1 do
+    for z = Constants.WORLD_MIN_Z, Constants.WORLD_MAX_Z do
         local squareOk, square = pcall(ServerWorld.getSquare, cell, x, y, z)
         if not squareOk then
             return false, "template-protection-repair square lookup failed"
         end
-        if square and repairLayers[z] and loadedLayerForCell(cell, x, y, z) then
+        if square then
             local objectsOk, objects = pcall(ServerWorld.squareSnapshot, square)
             if not objectsOk or type(objects) ~= "table" then
                 return false, "template-protection-repair object snapshot failed"
             end
-            local floorOk, floor = ServerUtil.invoke(square, "getFloor")
-            if not floorOk then
-                return false, "template-protection-repair floor lookup failed"
-            end
+            local removedOnLayer = false
             for index = 1, #objects do
                 local object = objects[index]
-                local objectIsFloor = floor == object
-                if not protectedWorldObject(object)
-                    and isSpareObject(object, entries, objectIsFloor) then
-                    repaired = deleteCapturedObject(square, object,
-                        objectTemplateIndex(object)) or repaired
+                if not protectedWorldObject(object) then
+                    local sideHostDoorOrWindow = isCabSideDoorOrWindow(object,
+                        x, y, z, anchor)
+                    local spare, templateIndex = isSpareObject(object,
+                        entries, sideHostDoorOrWindow)
+                    if spare and removeRepairSpareObject(square, object,
+                        templateIndex) then
+                        repaired = true
+                        removedOnLayer = true
+                    end
                 end
+            end
+            if removedOnLayer then
+                objects = ServerWorld.squareSnapshot(square)
             end
             for entryIndex = 1, #entries do
                 local entry = entries[entryIndex]
-                if entry.z == z
+                if entry.z == z and entry.protected
                     and not objectIsTemplateEntry(objects, entry) then
                     restoreEntry(cell, square, objects, entry, boundary)
                     repaired = true
@@ -467,6 +484,7 @@ if type(server) == "table" then
 end
 
 instance = {
+    isProtectedCell = isProtectedCell,
     repairCell = repairTemplateProtectionCell,
 }
 return instance

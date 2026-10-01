@@ -88,22 +88,24 @@ local function temporaryDestination(boundary)
     return true, { x = x, y = y, z = z }
 end
 
--- Identity facts are re-read from the live boundary service immediately before
--- every move.  A generation swap or a retired mapping makes the operation
--- stale, and a stale operation must not move anybody.
+-- Validate the live player boundary before moving out.  The transition lease
+-- blocks Boundary.boundaryForPlayer during the operation, so later phases
+-- re-read the current mapping and generation instead.
 local function currentContext(op, player, requireInside)
-    local boundary, record, relation = Boundary.boundaryForPlayer(player)
-    if type(boundary) ~= "table" or type(record) ~= "table"
-        or type(relation) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    if tostring(boundary.rvId) ~= op.rvId
-        or ServerUtil.integer(boundary.generation) ~= op.generation
-        or ServerUtil.integer(record.generation) ~= op.generation then
-        return false, "wall reload operation generation is stale"
-    end
-    if requireInside and relation.inside ~= true then
-        return false, Constants.INVALID_RV_DATA
+    if requireInside then
+        local boundary, record, relation = Boundary.boundaryForPlayer(player)
+        if type(boundary) ~= "table" or type(record) ~= "table"
+            or type(relation) ~= "table" then
+            return false, Constants.INVALID_RV_DATA
+        end
+        if tostring(boundary.rvId) ~= op.rvId
+            or ServerUtil.integer(boundary.generation) ~= op.generation
+            or ServerUtil.integer(record.generation) ~= op.generation then
+            return false, "wall reload operation generation is stale"
+        end
+        if relation.inside ~= true then
+            return false, Constants.INVALID_RV_DATA
+        end
     end
     local api = serverFacade()
     if not api or type(api.currentRVManifestForBoundary) ~= "function" then
@@ -114,7 +116,7 @@ local function currentContext(op, player, requireInside)
     if not manifestOk or accepted ~= true or type(manifest) ~= "table" then
         return false, Constants.INVALID_RV_DATA
     end
-    return true, boundary
+    return true
 end
 
 -- The departure proof.  A live IsoRegions rebuild retires the room on the

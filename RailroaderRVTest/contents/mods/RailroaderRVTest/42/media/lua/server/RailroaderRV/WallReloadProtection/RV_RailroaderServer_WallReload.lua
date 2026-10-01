@@ -8,7 +8,6 @@
 return function(ctx)
 local Core = require("RailroaderRV/Core/RV_Server_Core")
 local WallReload = require("RailroaderRV/WallReloadProtection/RV_WallReloadProtection")
-local RoofRefresh = require("RailroaderRV/RoofRefresh/RV_RoofRefresh")
 
 local processIsServer = ctx.processIsServer
 local Boundary = ctx.Boundary
@@ -28,6 +27,8 @@ local inRegion = ctx.inRegion
 local recordRegion = ctx.recordRegion
 local validRecord = ctx.validRecord
 local playerPositionInRegion = ctx.playerPositionInRegion
+local recordForLoco = ctx.recordForLoco
+local pendingWallReloads = {}
 
 local function surfaceError(text)
     local ok, message = pcall(tostring, text)
@@ -54,6 +55,17 @@ local function operationKeyFor(record)
     local generation = integer(record.generation)
     if generation == nil or generation < 1 then return nil end
     return tostring(record.locoId) .. ":" .. tostring(generation)
+end
+
+local function authoritativeRoomObservation(player)
+    local square = player:getCurrentSquare()
+    if square == nil then return nil end
+    return {
+        x = square:getX(),
+        y = square:getY(),
+        z = square:getZ(),
+        inRoom = square:isInARoom(),
+    }
 end
 
 -- Capture every live, current-schema player whose authoritative mapping says it
@@ -98,23 +110,79 @@ local function insidePlayersForRecord(map, record)
     return result
 end
 
--- Runs after every member is physically back inside the RV.  The temporary
--- occupant list is deliberately empty: the members are already home, so the
--- refresh must not refuse its own target square.
-local function runRoofRefresh(player, bounds)
-    if not player then
-        print("[RailroaderRVTest] wall reload completion has no representative player")
-        return
+-- Runs after every member is physically back inside the RV. The timer stores
+-- only its trusted RV id; each attempt re-reads current mapping and geometry.
+local function runRoofRefresh(_player, _bounds, identity)
+    RailroaderRV.Server.scheduleRoofRefreshForRV(identity.rvId)
+end
+
+local function startWallReload(key, pending, record)
+    print("[RailroaderRVTest] wall removal room loss matched room=" .. key
+        .. " role=" .. tostring(pending.tagRole)
+        .. " templateIndex=" .. tostring(pending.templateIndex)
+        .. " source=" .. tostring(pending.source)
+        .. " participants=" .. tostring(pending.participantCount))
+    local started, detail = WallReload.begin({
+        rvId = tostring(record.locoId),
+        generation = integer(record.generation),
+    }, runRoofRefresh)
+    if started ~= true then
+        print("[RailroaderRVTest] wall reload not started room=" .. key
+            .. " detail=" .. surfaceError(detail))
+        return false
     end
-    local refreshOk, refreshed, detail = pcall(RoofRefresh.run, player, bounds)
-    if not refreshOk then
-        print("[RailroaderRVTest] roof refresh error after wall reload: "
-            .. surfaceError(refreshed))
-        return
+    print("[RailroaderRVTest] wall reload started room=" .. key
+        .. " token=" .. tostring(detail))
+    return true
+end
+
+local function isEmptyMap(map)
+    for _ in pairs(map) do
+        return false
     end
-    if refreshed ~= true then
-        print("[RailroaderRVTest] roof refresh deferred after wall reload: "
-            .. surfaceError(detail))
+    return true
+end
+
+local function processPendingWallReloads()
+    if isEmptyMap(pendingWallReloads) then return end
+    local map = mapData()
+    for key, pending in pairs(pendingWallReloads) do
+        local record = recordForLoco(map, pending.rvId)
+        if not record or operationKeyFor(record) ~= key
+            or WallReload.isWallReloadActive(pending.rvId) then
+            pendingWallReloads[key] = nil
+        else
+            local live = insidePlayersForRecord(map, record)
+            local liveByIdentity = {}
+            for i = 1, #live do
+                liveByIdentity[live[i].identityKey] = live[i]
+            end
+            local roomLossObserved = false
+            for identityKey, originalSquare in pairs(pending.participants) do
+                local member = liveByIdentity[identityKey]
+                if not member then
+                    pending.participants[identityKey] = nil
+                else
+                    local current = authoritativeRoomObservation(member.player)
+                    if current then
+                        if current.x ~= originalSquare.x
+                            or current.y ~= originalSquare.y
+                            or current.z ~= originalSquare.z then
+                            pending.participants[identityKey] = nil
+                        elseif not current.inRoom then
+                            roomLossObserved = true
+                            break
+                        end
+                    end
+                end
+            end
+            if roomLossObserved then
+                pendingWallReloads[key] = nil
+                startWallReload(key, pending, record)
+            elseif isEmptyMap(pending.participants) then
+                pendingWallReloads[key] = nil
+            end
+        end
     end
 end
 
@@ -195,11 +263,30 @@ local function wallReloadForObject(object, source)
 
     local key = operationKeyFor(match)
     if key == nil then return false end
+    if pendingWallReloads[key] ~= nil
+        or WallReload.isWallReloadActive(tostring(match.locoId)) then return false end
     local captured = insidePlayersForRecord(map, match)
     if #captured == 0 then
         print("[RailroaderRVTest] wall removal matched room=" .. key
             .. " source=" .. tostring(source)
             .. " refresh=not-scheduled reason=no-authoritative-player-inside")
+        return false
+    end
+    local participants = {}
+    local participantCount = 0
+    for i = 1, #captured do
+        local observation = authoritativeRoomObservation(captured[i].player)
+        if observation and observation.inRoom then
+            participants[captured[i].identityKey] = {
+                x = observation.x, y = observation.y, z = observation.z,
+            }
+            participantCount = participantCount + 1
+        end
+    end
+    if participantCount == 0 then
+        print("[RailroaderRVTest] wall removal matched room=" .. key
+            .. " source=" .. tostring(source)
+            .. " refresh=not-scheduled reason=no-authoritative-player-in-room")
         return false
     end
     local tagRole, templateIndex
@@ -213,18 +300,17 @@ local function wallReloadForObject(object, source)
         .. " role=" .. tostring(tagRole)
         .. " templateIndex=" .. tostring(templateIndex)
         .. " source=" .. tostring(source)
-        .. " members=" .. tostring(#captured))
-    local started, detail = WallReload.begin({
+        .. " members=" .. tostring(#captured)
+        .. " roomParticipants=" .. tostring(participantCount)
+        .. " refresh=waiting-for-room-loss")
+    pendingWallReloads[key] = {
         rvId = tostring(match.locoId),
-        generation = integer(match.generation),
-    }, runRoofRefresh)
-    if started ~= true then
-        print("[RailroaderRVTest] wall reload not started room=" .. key
-            .. " detail=" .. surfaceError(detail))
-        return false
-    end
-    print("[RailroaderRVTest] wall reload started room=" .. key
-        .. " token=" .. tostring(detail))
+        participants = participants,
+        participantCount = participantCount,
+        source = source,
+        tagRole = tagRole,
+        templateIndex = templateIndex,
+    }
     return true
 end
 
@@ -308,4 +394,5 @@ function Adapter.rearmRoomOwnershipMonitors(tick)
     end
 end
 
+Core.onTick(processPendingWallReloads)
 end

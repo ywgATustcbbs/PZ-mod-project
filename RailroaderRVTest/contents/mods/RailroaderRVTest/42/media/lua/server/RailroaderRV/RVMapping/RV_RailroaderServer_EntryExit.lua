@@ -569,7 +569,7 @@ local function commitGeneration(player, data, prepared)
     -- RV_Server owns the transition close after FinalRelocateAck and the
     -- current-manifest readiness proof. Do not release the lease from this
     -- mapping commit hook before that final client proof.
-    pcall(refreshRoofForPlayer, player, candidateRecord, true, "generation-entry")
+    refreshRoofForPlayer(player, candidateRecord, true, "generation-entry")
     return true
 end
 

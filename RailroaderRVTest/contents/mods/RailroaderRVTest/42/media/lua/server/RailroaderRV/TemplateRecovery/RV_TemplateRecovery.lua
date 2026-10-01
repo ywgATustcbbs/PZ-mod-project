@@ -38,23 +38,17 @@ local function queuedWindowWraps()
 end
 
 local function enqueueCell(rvId, generation, x, y)
-    if queue.count == CAPACITY then
-        return false
-    end
+    if queue.count == CAPACITY then return false end
     local wrapped = queuedWindowWraps()
     local last = wrapped and CAPACITY or queue.tail
     for index = queue.head, last do
         local entry = queue.entries[index]
-        if entry.x == x and entry.y == y then
-            return false
-        end
+        if entry.x == x and entry.y == y then return false end
     end
     if wrapped then
         for index = 1, queue.tail do
             local entry = queue.entries[index]
-            if entry.x == x and entry.y == y then
-                return false
-            end
+            if entry.x == x and entry.y == y then return false end
         end
     end
     queue.tail = queue.tail % CAPACITY + 1
@@ -100,8 +94,11 @@ local function enqueuePlayerCells(item)
     local centerX, centerY = math.floor(x), math.floor(y)
     for offsetY = -1, 1 do
         for offsetX = -1, 1 do
-            enqueueCell(tostring(boundary.rvId), boundary.generation,
-                centerX + offsetX, centerY + offsetY)
+            local cellX, cellY = centerX + offsetX, centerY + offsetY
+            if Repair.isProtectedCell(boundary, cellX, cellY) then
+                enqueueCell(tostring(boundary.rvId), boundary.generation,
+                    cellX, cellY)
+            end
         end
     end
 end
@@ -125,29 +122,21 @@ end
 local function processQueuedCells(activePlayers)
     local budget = tickBudget()
     local checked = 0
-    local entry = dequeueCell()
-    while entry and checked < budget do
+    while checked < budget do
+        local entry = dequeueCell()
+        if not entry then break end
         local player, boundary = findQueuedPlayer(activePlayers, entry)
         if player then
             local x, y = entry.x, entry.y
-            -- The repair module raises by design on states it treats as
-            -- impossible or on a failed world edit. Catching that here reports
-            -- the cell and lets the rest of the sweep run; the periodic sample
-            -- queues the cell again, so nothing is retried or remembered.
-            local checkOk, repaired, reason = pcall(Repair.repairCell, player,
+            local repaired, reason = Repair.repairCell(player,
                 boundary, x, y)
-            if not checkOk then
-                print("[RailroaderRVTest] template-protection-repair failed "
-                    .. "cell " .. tostring(x) .. "," .. tostring(y) .. ": "
-                    .. tostring(repaired))
-            elseif repaired == false and reason ~= nil then
+            if repaired == false and reason ~= nil then
                 print("[RailroaderRVTest] template-protection-repair skipped "
                     .. "cell " .. tostring(x) .. "," .. tostring(y) .. ": "
                     .. tostring(reason))
             end
             checked = checked + 1
         end
-        entry = dequeueCell()
     end
 end
 

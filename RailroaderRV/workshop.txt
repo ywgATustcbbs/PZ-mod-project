@@ -1,0 +1,5 @@
+version=1
+title=RailroaderRV
+description=Server-authoritative procedural Railroader RV generation and vehicle utility systems for Project Zomboid Build 42. Requires Railroader.
+tags=Build 42;Vehicles;Building;Multiplayer;
+visibility=public

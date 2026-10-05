@@ -1,0 +1,15 @@
+# Project-local exclusions
+/.github/
+/.vs/
+/.rv-lua-parse/
+/.venv/
+.tmp-railroader-2.1/
+/game-decompiled/
+/official lua scripts/
+/reference mods/
+/steamcmd/
+/testserver/
+/modinfos.json
+__pycache__/
+TEMP/
+investigation-downloads/

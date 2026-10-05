@@ -1,0 +1,9 @@
+name=RailroaderRV
+id=RailroaderRV
+authors=RailroaderRV contributors
+description=Server-authoritative procedural RV generation and utility systems for Project Zomboid Build 42.
+versionMin=42.0.0
+modversion=1.0
+require=\Railroader
+url=
+versionurl=

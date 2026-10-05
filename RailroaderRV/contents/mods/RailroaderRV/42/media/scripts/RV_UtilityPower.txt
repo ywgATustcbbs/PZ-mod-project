@@ -1,0 +1,232 @@
+module RailroaderRV
+{
+	imports
+	{
+		Base
+	}
+
+	item RVCharger
+	{
+		DisplayCategory = Electronics,
+		Weight = 2.0,
+		ItemType = base:normal,
+		DisplayName = RV Battery Charger,
+		Icon = RailroaderRV_RVCharger,
+		ConditionMax = 1000,
+		ConditionLowerChanceOneIn = 0,
+	}
+
+	item RVInverter
+	{
+		DisplayCategory = Electronics,
+		Weight = 1.5,
+		ItemType = base:normal,
+		DisplayName = RV Power Inverter,
+		Icon = RailroaderRV_RVInverter,
+		ConditionMax = 1000,
+		ConditionLowerChanceOneIn = 0,
+	}
+
+	item RVCircuitBreaker
+	{
+		DisplayCategory = Electronics,
+		Weight = 1.0,
+		ItemType = base:normal,
+		DisplayName = RV Circuit Breaker,
+		Icon = RailroaderRV_RVCircuitBreaker,
+	}
+
+	item RVPowerController
+	{
+		DisplayCategory = Electronics,
+		Weight = 1.0,
+		ItemType = base:normal,
+		DisplayName = RV Smart Controller,
+		Icon = RailroaderRV_RVPowerController,
+		ConditionMax = 100,
+		ConditionLowerChanceOneIn = 0,
+	}
+
+	item WindTurbine
+	{
+		DisplayCategory = Electronics,
+		Weight = 20.0,
+		ItemType = base:normal,
+		DisplayName = RV Wind Turbine,
+		Icon = RailroaderRV_WindTurbine,
+		ConditionMax = 100,
+		ConditionLowerChanceOneIn = 0,
+	}
+
+	item Motor
+	{
+		DisplayCategory = Electronics,
+		Weight = 10.0,
+		ItemType = base:normal,
+		DisplayName = RV Motor,
+		Icon = RailroaderRV_Motor,
+	}
+
+	item SolarPanel
+	{
+		DisplayCategory = Electronics,
+		Weight = 5.0,
+		ItemType = base:normal,
+		DisplayName = RV Solar Panel,
+		Icon = RailroaderRV_SolarPanel,
+		ConditionMax = 100,
+		ConditionLowerChanceOneIn = 0,
+	}
+
+	craftRecipe Assemble RV Battery Charger
+	{
+		time = 300,
+		timedAction = Making,
+		Tags = InHandCraft,
+		category = RailroaderRV,
+		SkillRequired = Electricity:3,
+		OnCreate = Recipe.OnCreate.RVUtilityCharger,
+		inputs
+		{
+			item 20 [Base.ElectronicsScrap],
+			item 10 [Base.ElectricWire],
+			item 6 [Base.SmallSheetMetal],
+			item 10 [Base.ScrapMetal],
+			item 10 [Base.CopperScrap],
+			item 10 [Base.AluminumScrap],
+			item 1 tags[base:screwdriver] mode:keep,
+			item 1 tags[base:pliers] mode:keep,
+		}
+		outputs
+		{
+			item 1 RailroaderRV.RVCharger,
+		}
+	}
+
+	craftRecipe Assemble RV Power Inverter
+	{
+		time = 300,
+		timedAction = Making,
+		Tags = InHandCraft,
+		category = RailroaderRV,
+		SkillRequired = Electricity:3,
+		OnCreate = Recipe.OnCreate.RVUtilityInverter,
+		inputs
+		{
+			item 30 [Base.ElectronicsScrap],
+			item 5 [Base.ElectricWire],
+			item 6 [Base.SmallSheetMetal],
+			item 10 [Base.ScrapMetal],
+			item 10 [Base.CopperScrap],
+			item 10 [Base.AluminumScrap],
+			item 1 tags[base:screwdriver] mode:keep,
+			item 1 tags[base:pliers] mode:keep,
+		}
+		outputs
+		{
+			item 1 RailroaderRV.RVInverter,
+		}
+	}
+
+	craftRecipe Assemble RV Circuit Breaker
+	{
+		time = 600,
+		timedAction = Making,
+		Tags = InHandCraft,
+		category = RailroaderRV,
+		SkillRequired = Electricity:5,
+		inputs
+		{
+			item 5 [Base.ElectronicsScrap],
+			item 2 [Base.ScrapMetal],
+			item 1 tags[base:screwdriver] mode:keep,
+			item 1 tags[base:pliers] mode:keep,
+			item 1 tags[base:scissors] mode:keep,
+		}
+		outputs
+		{
+			item 1 RailroaderRV.RVCircuitBreaker,
+		}
+	}
+
+	craftRecipe Assemble RV Smart Power Controller
+	{
+		time = 900,
+		timedAction = Making,
+		Tags = InHandCraft,
+		category = RailroaderRV,
+		SkillRequired = Electricity:7,
+		OnTest = Recipe.OnTest.AssembleRVSmartPowerController,
+		inputs
+		{
+			item 20 [Base.ElectricWire],
+			item 100 [Base.ElectronicsScrap],
+			item 1 [Base.LightBulbRed],
+			item 1 [Base.LightBulbGreen],
+			item 6 [Base.SmallSheetMetal],
+			item 10 [Base.CopperScrap],
+			item 10 [Base.AluminumScrap],
+			item 1 [Base.Mov_DesktopComputer;Base.Moveable],
+			item 1 [Base.Screwdriver] mode:keep,
+		}
+		outputs
+		{
+			item 1 RailroaderRV.RVPowerController,
+		}
+	}
+
+	craftRecipe Assemble RV Motor
+	{
+		/* CraftRecipe.time is multiplied by 5 by ISHandcraftAction; 864 yields
+		   90 seconds at the normal 48 action-units-per-second rate. */
+		time = 864,
+		timedAction = Making,
+		Tags = InHandCraft,
+		category = RailroaderRV,
+		SkillRequired = MetalWelding:1,
+		OnTest = Recipe.OnTest.AssembleRVMotor,
+		inputs
+		{
+			item 1 [Base.Mov_BlueComboWasherDryer;Base.Mov_ExtractorHood;Base.Moveable],
+			item 1 tags[base:screwdriver] mode:keep,
+			item 1 tags[base:pliers] mode:keep,
+			item 1 [Base.Wrench] mode:keep,
+		}
+		outputs
+		{
+			item 1 RailroaderRV.Motor,
+		}
+	}
+
+	craftRecipe Assemble RV Wind Turbine
+	{
+		/* CraftRecipe.time is multiplied by 5 by ISHandcraftAction; 2304 yields
+		   240 seconds at the normal 48 action-units-per-second rate. */
+		time = 2304,
+		timedAction = Making,
+		Tags = InHandCraft,
+		category = RailroaderRV,
+		SkillRequired = MetalWelding:3;Electricity:5,
+		inputs
+		{
+			item 3 [Base.SmallSheetMetal],
+			item 15 [Base.Screws],
+			item 1 [RailroaderRV.Motor],
+			item 10 [Base.ElectricWire],
+			item 20 [Base.AluminumScrap],
+			item 5 [Base.MetalBar],
+			item 5 [Base.ScrapMetal],
+			item 1 tags[base:screwdriver] mode:keep,
+			item 1 tags[base:pliers] mode:keep,
+			item 1 [Base.SheetMetalSnips] mode:keep,
+			item 1 [Base.SmallPunchSet] mode:keep,
+			item 1 tags[base:hammer] mode:keep,
+			item 1 [Base.BlowTorch] mode:keep,
+			item 1 [Base.WeldingMask] mode:keep,
+		}
+		outputs
+		{
+			item 1 RailroaderRV.WindTurbine,
+		}
+	}
+}

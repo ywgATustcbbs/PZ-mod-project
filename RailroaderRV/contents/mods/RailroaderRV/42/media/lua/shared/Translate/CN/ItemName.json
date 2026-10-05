@@ -1,0 +1,13 @@
+{
+    "RailroaderRV.RVCharger": "房车电池充电器",
+    "RailroaderRV.RVInverter": "房车电池逆变器",
+    "RailroaderRV.RVPowerController": "房车智能控制器",
+    "RailroaderRV.RVCircuitBreaker": "房车空气开关",
+    "RailroaderRV.WindTurbine": "房车风力发电机",
+    "RailroaderRV.Motor": "电动机",
+    "RailroaderRV.SolarPanel": "太阳能面板",
+    "RailroaderRV.WaterPumpSmall": "小型水泵",
+    "RailroaderRV.WaterPumpIndustrial": "工业水泵",
+    "RailroaderRV.WaterTank": "房车水箱",
+    "RailroaderRV.WaterFilter": "房车水过滤器"
+}

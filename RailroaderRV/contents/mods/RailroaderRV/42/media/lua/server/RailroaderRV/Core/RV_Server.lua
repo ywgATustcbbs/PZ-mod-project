@@ -1,0 +1,156 @@
+-- RailroaderRV server-side generation transaction.
+--
+-- This file deliberately owns no client UI and does not depend on a legacy adapter.
+-- The shared RV_Constants/RV_Layout modules are required at request time. A
+-- missing or malformed shared contract rejects the request before world I/O.
+
+local OWNER = "RailroaderRV"
+local COMMAND_MODULE = "RailroaderRV"
+local COMMAND = "Generate"
+local COMMAND_RELOCATE = "Relocate"
+local COMMAND_RELOCATE_ACK = "RelocateAck"
+local COMMAND_FINAL_RELOCATE = "FinalRelocate"
+local COMMAND_FINAL_RELOCATE_ACK = "FinalRelocateAck"
+local COMMAND_REFRESH_ROOM_OWNERSHIP = "RefreshRoomOwnership"
+local COMMAND_RV_ENTER = "EnterRV"
+local COMMAND_RV_EXIT = "ExitRV"
+local COMMAND_RV_TELEPORT = "RVTeleport"
+
+-- Railroader entry/exit is implemented by RV_RailroaderServer.lua.  These
+-- callbacks keep the long-running generation transaction authoritative without
+-- making the generic Generate command depend on Railroader being installed.
+local railroaderValidationHook = nil
+local railroaderCommitHook = nil
+local railroaderFailureHook = nil
+
+local function loadModule(name, globalName)
+    local ok, result = pcall(require, name)
+    if ok and type(result) == "table" then
+        return result
+    end
+    local value = rawget(_G, globalName)
+    if type(value) == "table" then
+        return value
+    end
+    local rv = rawget(_G, "RailroaderRV")
+    if type(rv) == "table" then
+        local nestedName = globalName == "RV_Constants" and "Constants"
+            or globalName == "RV_Layout" and "Layout" or nil
+        if nestedName and type(rv[nestedName]) == "table" then
+            return rv[nestedName]
+        end
+    end
+    return {}
+end
+
+-- PZ's Lua loader uses slash-separated media paths (the same contract used by
+-- RV_Layout.lua and the utility modules).  Keep the global fallback
+-- only for a debugger reload; normal loading must return the actual tables.
+local Constants = loadModule("RailroaderRV/Common/RV_Constants", "RV_Constants")
+local Core = require("RailroaderRV/Core/RV_Server_Core")
+local GenerationTransaction = require(
+    "RailroaderRV/Construction/RV_Server_GenerationTransaction")()
+local boundaryLoaded, Boundary = pcall(require, "RailroaderRV/BoundaryGuard/RV_BoundaryServer")
+if not boundaryLoaded or type(Boundary) ~= "table" then
+    Boundary = nil
+    print("[RailroaderRV] RV boundary service unavailable; boundary hooks disabled")
+end
+
+-- The Railroader adapter owns the mapping, the entry/exit gate and the wall
+-- reload operation service.  It is loaded here, before the internal modules are
+-- assembled, because RoomOwnership asks it whether a wall reload is holding the
+-- RV's players outside their room geometry.
+local railroaderOk, RailroaderServer = pcall(require,
+    "RailroaderRV/Core/RV_RailroaderServer")
+if not railroaderOk or type(RailroaderServer) ~= "table" then
+    RailroaderServer = nil
+    print("[RailroaderRV] Railroader RV adapter unavailable: "
+        .. tostring(railroaderOk and "module did not return a table"
+            or RailroaderServer))
+end
+
+local RV = rawget(_G, "RailroaderRV") or {}
+rawset(_G, "RailroaderRV", RV)
+RV.Server = RV.Server or {}
+RV.Server.isGenerationTransactionActive = GenerationTransaction.isActive
+RV.Server.isGenerationTransactionActiveForRV = GenerationTransaction.isActiveForRV
+
+-- Generic invocation, numeric validation, and shared layout checks live in a
+-- separate require chunk.  Keeping this facade focused on the transaction and
+-- event lifecycle avoids Kahlua's 200-local limit without changing the public
+-- RV.Server API.
+local ServerUtil = require("RailroaderRV/Common/RV_ServerUtil")
+local ServerTeleport = require("RailroaderRV/Common/RV_ServerTeleport")
+local ServerWorld = require("RailroaderRV/Common/RV_ServerWorld")
+local ServerSchema = require("RailroaderRV/Common/RV_ServerSchema")
+local UtilityServer = require("RailroaderRV/Core/RV_UtilityServer")
+
+local pendingSerial = 0
+local serverTick = Core.getTick()
+local roomOwnershipGuards = {}
+local safeErrorText
+
+-- The one budget the generation transaction uses for a staging wait, a final
+-- wait and its single abort path.
+local RELOCATION_TIMEOUT_TICKS = 600
+
+if UtilityServer and type(UtilityServer.initializeRecord) == "function" then
+    RV.Server.initializeUtilityRecord = UtilityServer.initializeRecord
+end
+if UtilityServer and type(UtilityServer.settleAndRefreshLoad) == "function" then
+    RV.Server.settleRVUtilityLoad = UtilityServer.settleAndRefreshLoad
+end
+
+-- IsoRegions does not expose a Lua callback for completion of its asynchronous
+-- dynamic-room rebuild. Room ownership guards use nearby-player probes and
+-- bounded, event-triggered rechecks instead of periodic full-footprint scans.
+local ctx = {
+    OWNER = OWNER,
+    COMMAND_MODULE = COMMAND_MODULE,
+    COMMAND = COMMAND,
+    COMMAND_RELOCATE = COMMAND_RELOCATE,
+    COMMAND_RELOCATE_ACK = COMMAND_RELOCATE_ACK,
+    COMMAND_FINAL_RELOCATE = COMMAND_FINAL_RELOCATE,
+    COMMAND_FINAL_RELOCATE_ACK = COMMAND_FINAL_RELOCATE_ACK,
+    COMMAND_REFRESH_ROOM_OWNERSHIP = COMMAND_REFRESH_ROOM_OWNERSHIP,
+    COMMAND_RV_ENTER = COMMAND_RV_ENTER,
+    COMMAND_RV_EXIT = COMMAND_RV_EXIT,
+    COMMAND_RV_TELEPORT = COMMAND_RV_TELEPORT,
+    railroaderValidationHook = railroaderValidationHook,
+    railroaderCommitHook = railroaderCommitHook,
+    railroaderFailureHook = railroaderFailureHook,
+    Constants = Constants,
+    Core = Core,
+    GenerationTransaction = GenerationTransaction,
+    Boundary = Boundary,
+    RV = RV,
+    ServerUtil = ServerUtil,
+    ServerWorld = ServerWorld,
+    ServerSchema = ServerSchema,
+    UtilityServer = UtilityServer,
+    pendingSerial = pendingSerial,
+    serverTick = serverTick,
+    roomOwnershipGuards = roomOwnershipGuards,
+    safeErrorText = safeErrorText,
+    RELOCATION_TIMEOUT_TICKS = RELOCATION_TIMEOUT_TICKS,
+    WORLD_MIN_Z = Constants.WORLD_MIN_Z,
+    WORLD_MAX_Z = Constants.WORLD_MAX_Z,
+}
+
+RV.Server.teleportToPosition = ServerTeleport.teleportToPosition
+RV.Server.teleportToRVSpawn = ServerTeleport.teleportToRVSpawn
+
+require("RailroaderRV/RoomOwnership/RV_Server_RoomOwnership")(ctx)
+require("RailroaderRV/Construction/RV_Server_WorldObjects")(ctx)
+require("RailroaderRV/Construction/RV_Server_GenerationBuild")(ctx)
+require("RailroaderRV/Construction/RV_Server_PlayerValidation")(ctx)
+require("RailroaderRV/TemplateRecovery/RV_Server_TemplateProtectionRepair")(ctx)
+require("RailroaderRV/TemplateRecovery/RV_TemplateRecovery")(ctx)
+require("RailroaderRV/Construction/RV_Server_GenerationFlow")(ctx)
+require("RailroaderRV/RVMapping/RV_Server_RecordValidation")(ctx)
+require("RailroaderRV/Construction/RV_Server_GenerationAck")(ctx)
+local SafehouseServer = require("RailroaderRV/Safehouse/RV_Server_Safehouse")
+RV.Server.handleSafehouseClaim = SafehouseServer.handleClaim
+require("RailroaderRV/Core/RV_Server_Commands")(ctx)
+
+return RV.Server

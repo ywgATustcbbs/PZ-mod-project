@@ -1,0 +1,12 @@
+{
+    "ContextMenu_RailroaderRV_Generate": "Generate RV",
+    "ContextMenu_RailroaderRV_BuildLayout": "Prepare RV layout",
+    "ContextMenu_RailroaderRV_FinishLayout": "Finish RV layout",
+    "ContextMenu_RailroaderRV_Enter": "Enter RV",
+    "ContextMenu_RailroaderRV_Exit": "Exit RV",
+    "ContextMenu_RailroaderRV_ClaimSafehouse": "Claim RV safehouse",
+    "ContextMenu_RailroaderRV_UtilityDashboard": "RV utility panel",
+    "ContextMenu_RailroaderRV_ConnectWaterSink": "Connect sink to water",
+    "ContextMenu_RailroaderRV_DisconnectWaterSink": "Disconnect sink from water",
+    "ContextMenu_RailroaderRV_AddFuel": "Add fuel to RV"
+}

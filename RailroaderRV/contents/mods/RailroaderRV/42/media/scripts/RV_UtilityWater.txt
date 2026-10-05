@@ -1,0 +1,108 @@
+module RailroaderRV
+{
+	imports
+	{
+		Base
+	}
+
+	item WaterPumpSmall
+	{
+		Weight = 1.0,
+		ItemType = base:normal,
+		DisplayName = RV Water Supply Pump,
+		Icon = RailroaderRV_WaterPumpSmall,
+	}
+
+	item WaterPumpIndustrial
+	{
+		Weight = 8.0,
+		ItemType = base:normal,
+		DisplayName = Industrial Water Pump,
+		Icon = RailroaderRV_WaterPumpIndustrial,
+	}
+
+	item WaterTank
+	{
+		Weight = 20.0,
+		ItemType = base:normal,
+		DisplayName = RV Water Tank,
+		Icon = RailroaderRV_WaterTank,
+	}
+
+	item WaterFilter
+	{
+		Weight = 35.0,
+		ItemType = base:normal,
+		DisplayName = RV Water Filter,
+		Icon = RailroaderRV_WaterFilter,
+		ConditionMax = 127,
+		ConditionLowerChanceOneIn = 0,
+	}
+
+	craftRecipe Assemble RV Water Tank
+	{
+		time = 900,
+		timedAction = Making,
+		Tags = InHandCraft,
+		category = RailroaderRV,
+		Icon = RailroaderRV_WaterTank,
+		SkillRequired = MetalWelding:3,
+		inputs
+		{
+			item 5 [Base.BlowTorch],
+			item 1 [Base.WeldingMask] mode:keep,
+			item 6 [Base.SheetMetal],
+			item 1 [Base.MetalPipe],
+		}
+		outputs
+		{
+			item 1 RailroaderRV.WaterTank,
+		}
+	}
+
+	craftRecipe Assemble RV Water Filter
+	{
+		time = 900,
+		timedAction = Making,
+		Tags = InHandCraft,
+		category = RailroaderRV,
+		SkillRequired = MetalWelding:3,
+		inputs
+		{
+			item 5 [Base.BlowTorch],
+			item 1 [Base.WeldingMask] mode:keep,
+			item 1 [Base.MetalDrum],
+			item 10 [Base.CharcoalCrafted],
+			item 20 [Base.RippedSheets],
+			item 2 [Base.Sandbag] flags[ItemCount],
+			item 2 [Base.Gravelbag] flags[ItemCount],
+			item 1 [Base.MetalPipe],
+			item 1 [Base.ScrapMetal],
+		}
+		outputs
+		{
+			item 1 RailroaderRV.WaterFilter,
+		}
+	}
+
+	craftRecipe Assemble RV Water Supply Pump
+	{
+		time = 1152,
+		timedAction = Making,
+		Tags = InHandCraft,
+		category = RailroaderRV,
+		SkillRequired = Electricity:3;MetalWelding:2,
+		OnTest = Recipe.OnTest.AssembleRVWaterPump,
+		inputs
+		{
+			item 1 [Base.Mov_BlueComboWasherDryer;Base.Mov_BrownDishwasher;Base.Mov_MetalDishwasher;Base.Moveable],
+			item 1 [Base.Screwdriver] mode:keep,
+			item 1 [Base.Pliers] mode:keep,
+			item 1 [Base.Wrench] mode:keep,
+		}
+		outputs
+		{
+			item 1 RailroaderRV.WaterPumpSmall,
+		}
+	}
+}

@@ -1,0 +1,13 @@
+{
+    "RailroaderRV.RVCharger": "RV Battery Charger",
+    "RailroaderRV.RVInverter": "RV Battery Inverter",
+    "RailroaderRV.RVPowerController": "RV Smart Controller",
+    "RailroaderRV.RVCircuitBreaker": "RV Circuit Breaker",
+    "RailroaderRV.WindTurbine": "RV Wind Turbine",
+    "RailroaderRV.Motor": "Electric Motor",
+    "RailroaderRV.SolarPanel": "Solar Panel",
+    "RailroaderRV.WaterPumpSmall": "Small Water Pump",
+    "RailroaderRV.WaterPumpIndustrial": "Industrial Water Pump",
+    "RailroaderRV.WaterTank": "RV Water Tank",
+    "RailroaderRV.WaterFilter": "RV Water Filter"
+}

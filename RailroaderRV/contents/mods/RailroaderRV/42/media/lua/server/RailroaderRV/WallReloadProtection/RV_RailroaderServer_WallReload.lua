@@ -25,36 +25,20 @@ local mapData = ctx.mapData
 local rvRegion = ctx.rvRegion
 local inRegion = ctx.inRegion
 local recordRegion = ctx.recordRegion
-local validRecord = ctx.validRecord
 local playerPositionInRegion = ctx.playerPositionInRegion
 local recordForLoco = ctx.recordForLoco
 local pendingWallReloads = {}
 
-local function surfaceError(text)
-    local ok, message = pcall(tostring, text)
-    return ok and message or "unprintable detail"
-end
-
 local function armRoomOwnership(player, record)
-    local server = RailroaderRV and RailroaderRV.Server or nil
-    if not server or type(server.armCurrentRoomOwnershipMonitor) ~= "function" then
-        return false
-    end
-    local ok, armed = pcall(server.armCurrentRoomOwnershipMonitor, player, record)
-    return ok and armed == true
+    return RailroaderRV.Server.armCurrentRoomOwnershipMonitor(player, record)
+        == true
 end
 
 -- `record.locoId:generation` is the one current RV identity.  A generation change
 -- makes an in-flight operation stale, and the operation service re-reads this
 -- identity before every move.
 local function operationKeyFor(record)
-    if type(record) ~= "table" or type(record.locoId) ~= "string"
-        or record.locoId == "" then
-        return nil
-    end
-    local generation = integer(record.generation)
-    if generation == nil or generation < 1 then return nil end
-    return tostring(record.locoId) .. ":" .. tostring(generation)
+    return record.locoId .. ":" .. tostring(record.generation)
 end
 
 local function authoritativeRoomObservation(player)
@@ -73,13 +57,10 @@ end
 -- operation service re-validates each member before arming the remote move.
 local function insidePlayersForRecord(map, record)
     local result = {}
-    if type(map) ~= "table" or type(record) ~= "table"
-        or type(record.players) ~= "table" then
-        return result
-    end
-    local wanted = tostring(record.locoId or "")
+    local wanted = tostring(record.locoId)
     local region = recordRegion(record)
-    local players = Adapter.onlinePlayersSnapshot()
+    local players, snapshotOk = Adapter.onlinePlayersSnapshot()
+    if not snapshotOk then return nil, false end
     local area = rvRegion()
     for i = 1, #players do
         local player = players[i]
@@ -102,7 +83,7 @@ local function insidePlayersForRecord(map, record)
             end
         end
     end
-    return result
+    return result, true
 end
 
 -- Runs after every member is physically back inside the RV. The timer stores
@@ -111,12 +92,7 @@ local function runRoofRefresh(_player, _bounds, identity)
     RailroaderRV.Server.scheduleRoofRefreshForRV(identity.rvId)
 end
 
-local function startWallReload(key, pending, record)
-    print("[RailroaderRV] wall removal room loss matched room=" .. key
-        .. " role=" .. tostring(pending.tagRole)
-        .. " templateIndex=" .. tostring(pending.templateIndex)
-        .. " source=" .. tostring(pending.source)
-        .. " participants=" .. tostring(pending.participantCount))
+local function startWallReload(key, record)
     local started, detail = WallReload.begin({
         rvId = tostring(record.locoId),
         generation = integer(record.generation),
@@ -126,8 +102,6 @@ local function startWallReload(key, pending, record)
             .. " detail=" .. surfaceError(detail))
         return false
     end
-    print("[RailroaderRV] wall reload started room=" .. key
-        .. " token=" .. tostring(detail))
     return true
 end
 
@@ -147,35 +121,37 @@ local function processPendingWallReloads()
             or WallReload.isWallReloadActive(pending.rvId) then
             pendingWallReloads[key] = nil
         else
-            local live = insidePlayersForRecord(map, record)
-            local liveByIdentity = {}
-            for i = 1, #live do
-                liveByIdentity[live[i].identityKey] = live[i]
-            end
-            local roomLossObserved = false
-            for identityKey, originalSquare in pairs(pending.participants) do
-                local member = liveByIdentity[identityKey]
-                if not member then
-                    pending.participants[identityKey] = nil
-                else
-                    local current = authoritativeRoomObservation(member.player)
-                    if current then
-                        if current.x ~= originalSquare.x
-                            or current.y ~= originalSquare.y
-                            or current.z ~= originalSquare.z then
-                            pending.participants[identityKey] = nil
-                        elseif not current.inRoom then
-                            roomLossObserved = true
-                            break
+            local live, snapshotOk = insidePlayersForRecord(map, record)
+            if snapshotOk then
+                local liveByIdentity = {}
+                for i = 1, #live do
+                    liveByIdentity[live[i].identityKey] = live[i]
+                end
+                local roomLossObserved = false
+                for identityKey, originalSquare in pairs(pending.participants) do
+                    local member = liveByIdentity[identityKey]
+                    if not member then
+                        pending.participants[identityKey] = nil
+                    else
+                        local current = authoritativeRoomObservation(member.player)
+                        if current then
+                            if current.x ~= originalSquare.x
+                                or current.y ~= originalSquare.y
+                                or current.z ~= originalSquare.z then
+                                pending.participants[identityKey] = nil
+                            elseif not current.inRoom then
+                                roomLossObserved = true
+                                break
+                            end
                         end
                     end
                 end
-            end
-            if roomLossObserved then
-                pendingWallReloads[key] = nil
-                startWallReload(key, pending, record)
-            elseif isEmptyMap(pending.participants) then
-                pendingWallReloads[key] = nil
+                if roomLossObserved then
+                    pendingWallReloads[key] = nil
+                    startWallReload(key, record)
+                elseif isEmptyMap(pending.participants) then
+                    pendingWallReloads[key] = nil
+                end
             end
         end
     end
@@ -217,7 +193,7 @@ local function cheapShellWallCandidate(object)
         or role == "corner-nw"
 end
 
-local function wallReloadForObject(object, source)
+local function wallReloadForObject(object)
     local server = RailroaderRV and RailroaderRV.Server or nil
     if object ~= nil and type(server) == "table"
         and type(server.isTemplateProtectionRepairRemoval) == "function" then
@@ -238,18 +214,10 @@ local function wallReloadForObject(object, source)
 
     local map = mapData()
     local match
-    for _, record in pairs(map.locomotives or {}) do
-        local wallOk, isCurrentWall = false, false
-        if type(record) == "table" and type(record.locoId) == "string"
-            and validRecord(record) then
-            wallOk, isCurrentWall = pcall(Boundary.isCurrentShellWall,
-                object, Boundary.boundaryFor(record))
-        end
-        if wallOk and isCurrentWall == true then
+    for _, record in pairs(map.locomotives) do
+        if Boundary.isCurrentShellWall(object, Boundary.boundaryFor(record)) then
             if match then
-                -- A duplicate current identity is not a reason to guess which
-                -- mapping owns the object.  Leave the removal untouched.
-                return false
+                error("world object matches multiple trusted RV mappings")
             end
             match = record
         end
@@ -260,11 +228,9 @@ local function wallReloadForObject(object, source)
     if key == nil then return false end
     if pendingWallReloads[key] ~= nil
         or WallReload.isWallReloadActive(tostring(match.locoId)) then return false end
-    local captured = insidePlayersForRecord(map, match)
+    local captured, snapshotOk = insidePlayersForRecord(map, match)
+    if not snapshotOk then return false end
     if #captured == 0 then
-        print("[RailroaderRV] wall removal matched room=" .. key
-            .. " source=" .. tostring(source)
-            .. " refresh=not-scheduled reason=no-authoritative-player-inside")
         return false
     end
     local participants = {}
@@ -279,45 +245,24 @@ local function wallReloadForObject(object, source)
         end
     end
     if participantCount == 0 then
-        print("[RailroaderRV] wall removal matched room=" .. key
-            .. " source=" .. tostring(source)
-            .. " refresh=not-scheduled reason=no-authoritative-player-in-room")
         return false
     end
-    local tagRole, templateIndex
-    local dataOk, data = call(object, "getModData")
-    local tag = dataOk and type(data) == "table" and data.RailroaderRV or nil
-    if type(tag) == "table" then
-        tagRole = tag.role
-        templateIndex = integer(tag.templateIndex)
-    end
-    print("[RailroaderRV] wall removal matched room=" .. key
-        .. " role=" .. tostring(tagRole)
-        .. " templateIndex=" .. tostring(templateIndex)
-        .. " source=" .. tostring(source)
-        .. " members=" .. tostring(#captured)
-        .. " roomParticipants=" .. tostring(participantCount)
-        .. " refresh=waiting-for-room-loss")
     pendingWallReloads[key] = {
         rvId = tostring(match.locoId),
         participants = participants,
-        participantCount = participantCount,
-        source = source,
-        tagRole = tagRole,
-        templateIndex = templateIndex,
     }
     return true
 end
 
 function Adapter.onObjectAboutToBeRemoved(object)
-    wallReloadForObject(object, "object-about-to-be-removed")
+    wallReloadForObject(object)
 end
 
 -- Some direct IsoThumpable destruction paths expose the object through the
 -- OnDestroyIsoThumpable event.  The normal 42.20.4 sledgehammer packet is
 -- covered above; this second hook is a strict supplement, never a client path.
 function Adapter.onDestroyIsoThumpable(object)
-    wallReloadForObject(object, "destroy-iso-thumpable")
+    wallReloadForObject(object)
 end
 
 -- Cross-module mutex query.  It exposes only live process state: the operation
@@ -359,9 +304,9 @@ Adapter.installWallReload()
 -- reference was retired while it was away.  That repair is a different bug class
 -- from the wall reload and does not need a queue, a cache or a state machine, so
 -- it stays here as one bounded per-RV re-arm.  armRoomOwnershipMonitor already
--- refuses a rvId:generation whose validation cache is cold, and
--- prewarmCurrentBoundaryPlayers warms at most one rvId:generation per tick, so
--- this converges instead of re-sending a footprint every tick.
+-- checks the player's current mapping and relation before sending. The
+-- per-player identity cache makes this a reconnect/new-identity synchronization,
+-- not a periodic footprint resend.
 local MONITOR_REARM_INTERVAL_TICKS = 60
 local nextMonitorRearmTick = 0
 
@@ -369,22 +314,14 @@ function Adapter.rearmRoomOwnershipMonitors(tick)
     local now = tick or Core.getTick()
     if now < nextMonitorRearmTick then return end
     nextMonitorRearmTick = now + MONITOR_REARM_INTERVAL_TICKS
-    if not Boundary or type(Boundary.boundaryForPlayer) ~= "function" then return end
-    local seen = {}
-    for _, player in pairs(Adapter.onlinePlayersSnapshot()) do
-        -- boundaryForPlayer is the current-schema gate: it returns only a
-        -- validated mapping, relation and manifest for this player right now.
+    local players, snapshotOk = Adapter.onlinePlayersSnapshot()
+    if not snapshotOk then return end
+    RailroaderRV.Server.pruneRoomOwnershipMonitorConnections(players)
+    for _, player in pairs(players) do
+        -- Resolve the player's current RV from authoritative server state.
         local boundary, record = Boundary.boundaryForPlayer(player)
-        if type(boundary) == "table" and validRecord(record) then
-            local key = tostring(record.locoId) .. ":"
-                .. tostring(integer(record.generation))
-            if not seen[key] then
-                seen[key] = true
-                if not armRoomOwnership(player, record) then
-                    print("[RailroaderRV] room ownership monitor deferred rvId="
-                        .. key)
-                end
-            end
+        if boundary ~= nil then
+            armRoomOwnership(player, record)
         end
     end
 end

@@ -1,4 +1,6 @@
 -- RV_Server: Commands responsibilities.
+local ClientDebug = require("RailroaderRV/Core/RV_Server_ClientDebug")
+
 return function(ctx)
 local Core = ctx.Core
 local COMMAND_MODULE = ctx.COMMAND_MODULE
@@ -172,8 +174,8 @@ local function runGenerationAbort(record, reason)
     GenerationTransaction.cancel(reason)
     local abortOk, abortError = pcall(abortGeneration, record, reason)
     if not abortOk then
-        print("[RailroaderRV] generation abort failed: "
-            .. safeErrorText(abortError))
+        GenerationTransaction.release()
+        error(abortError, 0)
     end
 end
 
@@ -185,29 +187,26 @@ local function processPendingGeneration()
     if record == nil then
         return
     end
-    -- `keepGenerationTransitionAlive` already ran this tick and extended
-    -- deadlineTick for a missing IsoPlayer; a disconnected identity never
-    -- cancels the generation.
-    local resolved, playerOrReason = resolvePendingPlayer(record)
-    if not resolved then
-        return
-    end
-    local player = playerOrReason
     if ctx.serverTick > record.deadlineTick then
         runGenerationAbort(record, "generation transaction timed out in stage "
             .. tostring(record.stage))
         return
     end
+    -- A missing player can no longer prevent the fixed acknowledgement timeout
+    -- from closing this transaction.
+    local resolved, playerOrReason = resolvePendingPlayer(record)
+    if not resolved then
+        return
+    end
+    local player = playerOrReason
 
     if record.stage == "WAIT_STAGING" then
         if record.stagingAcked ~= true then
             return
         end
-        local atStaging, stagingReason = playerIsAtStagingDestination(player,
+        local atStaging = playerIsAtStagingDestination(player,
             record.stagingDestination, record.bounds)
         if not atStaging then
-            print("[RailroaderRV] generation staging not settled: "
-                .. tostring(stagingReason))
             return
         end
         -- The relocation streams the remote target asynchronously. Wait until
@@ -248,7 +247,6 @@ local function processPendingGeneration()
             player, record)
         if committed then
             GenerationTransaction.release()
-            print("[RailroaderRV] generation committed READY")
         elseif commitReason == "final relocation authoritative target is still synchronizing" then
             -- The commit step re-asserted the server-selected target and will
             -- require a fresh post-update proof on the next tick, until the
@@ -267,38 +265,22 @@ local function processPendingGeneration()
 end
 
 function RV.Server.OnTick(tick)
-    ctx.serverTick = tick or Core.getTick()
-    -- The wall reload operation advances every tick.  A failure inside it is
-    -- reported and the rest of the generic tick still runs: one stalled RV
-    -- operation must never stop the boundary sweep, the utility tick, the
-    -- generation tick or the room-ownership sweep.
-    local wallOk, wallError = pcall(WallReload.onTick)
-    if not wallOk then
-        print("[RailroaderRV] wall reload tick error: "
-            .. safeErrorText(wallError))
-    end
+    ctx.serverTick = tick
+    WallReload.onTick()
     local generationRecord = GenerationTransaction.current()
     if generationRecord ~= nil then
         keepGenerationTransitionAlive(generationRecord)
     end
-    if Boundary and type(Boundary.onTick) == "function" then
-        pcall(Boundary.onTick)
-    end
+    Boundary.onTick()
     processServerRoomOwnershipGuards()
-    if UtilityServer and type(UtilityServer.onTick) == "function" then
-        local utilityOk, utilityError = pcall(UtilityServer.onTick, ctx.serverTick)
-        if not utilityOk then
-            print("[RailroaderRV] utility tick error: " .. safeErrorText(utilityError))
-        end
-    end
+    UtilityServer.onTick(ctx.serverTick)
     local pendingOk, pendingError = pcall(processPendingGeneration)
     if not pendingOk then
-        print("[RailroaderRV] generation tick error: "
-            .. safeErrorText(pendingError))
         local failedRecord = GenerationTransaction.current()
         if failedRecord ~= nil then
             runGenerationAbort(failedRecord, pendingError)
         end
+        error(pendingError, 0)
     end
 end
 
@@ -309,15 +291,15 @@ function RV.Server.OnClientCommand(module, command, player, args)
     if module ~= COMMAND_MODULE then
         return
     end
+    if command == Constants.COMMAND_RV_CLIENT_DEBUG then
+        ClientDebug.handle(player, args)
+        return
+    end
     if command == Constants.COMMAND_RV_UTILITY then
         local operation = type(args) == "table" and args.operation or nil
-        local utilityOk, utilityAccepted, utilityReason = pcall(
-            UtilityServer.handleCommand, player, args)
-        if not utilityOk then
-            print("[RailroaderRV] utility command error operation="
-                .. tostring(operation) .. " entry=command phase=handle "
-                .. safeErrorText(utilityAccepted))
-        elseif utilityAccepted ~= true then
+        local utilityAccepted, utilityReason = UtilityServer.handleCommand(
+            player, args)
+        if utilityAccepted ~= true then
             print("[RailroaderRV] utility command rejected operation="
                 .. tostring(operation) .. " entry=command phase=handle reason="
                 .. safeErrorText(utilityReason))
@@ -325,12 +307,8 @@ function RV.Server.OnClientCommand(module, command, player, args)
         return
     end
     if command == Constants.COMMAND_RV_SAFEHOUSE_CLAIM then
-        local claimOk, accepted, reason = pcall(
-            RV.Server.handleSafehouseClaim, player, args)
-        if not claimOk then
-            print("[RailroaderRV] safehouse claim error: "
-                .. safeErrorText(accepted))
-        elseif accepted ~= true then
+        local accepted, reason = RV.Server.handleSafehouseClaim(player, args)
+        if accepted ~= true then
             print("[RailroaderRV] safehouse claim rejected reason="
                 .. safeErrorText(reason))
         end
@@ -353,12 +331,7 @@ function RV.Server.OnClientCommand(module, command, player, args)
         return
     end
     if module == COMMAND_MODULE and command == COMMAND_FINAL_RELOCATE_ACK then
-        local ackOk, accepted, reason = pcall(acknowledgeFinalRelocation,
-            player, args)
-        if not ackOk then
-            reason = safeErrorText(accepted)
-            accepted = false
-        end
+        local accepted, reason = acknowledgeFinalRelocation(player, args)
         if not accepted then
             if isInvalidRVData(reason) then
                 -- A final ACK that cannot belong to the record's current stage
@@ -374,22 +347,14 @@ function RV.Server.OnClientCommand(module, command, player, args)
         return
     end
     if module == COMMAND_MODULE and command == COMMAND_RELOCATE_ACK then
-        local ackOk, accepted, reason = pcall(acknowledgeRelocation, player, args)
-        if not ackOk then
-            reason = safeErrorText(accepted)
-            accepted = false
-        end
+        local accepted, reason = acknowledgeRelocation(player, args)
         if not accepted then
             print("[RailroaderRV] relocation acknowledgement rejected: "
                 .. safeErrorText(reason))
         end
         return
     end
-    local checkOk, accepted, reason = pcall(validateRequest, module, command, player)
-    if not checkOk then
-        reason = safeErrorText(accepted)
-        accepted = false
-    end
+    local accepted, reason = validateRequest(module, command, player)
     if not accepted then
         if isInvalidRVData(reason) then notifyFailure(player, reason) end
         print("[RailroaderRV] command rejected: " .. safeErrorText(reason))
@@ -407,10 +372,8 @@ end
 
 Core.onCommand("*", RV.Server.OnClientCommand)
 Core.onTick(RV.Server.OnTick)
-if Boundary then
-    Core.on("OnProcessAction", Boundary.onProcessAction)
-    Core.on("OnObjectAdded", Boundary.onObjectAdded)
-end
+Core.on("OnProcessAction", Boundary.onProcessAction)
+Core.on("OnObjectAdded", Boundary.onObjectAdded)
 Core.on("OnObjectAboutToBeRemoved", requestRoomOwnershipRemovalScan)
 Core.on("OnObjectAdded", requestRoomOwnershipScan)
 
@@ -420,33 +383,16 @@ Core.on("OnObjectAdded", requestRoomOwnershipScan)
 -- generation transaction.  It was already evaluated before RV.Server existed, so its event and
 -- command registrations are installed now, once the public facade and its
 -- transaction queries are available.
-local railroaderAdapterOk, railroaderAdapterOrError = pcall(require,
-    "RailroaderRV/Core/RV_RailroaderServer")
-if not railroaderAdapterOk then
-    print("[RailroaderRV] Railroader RV adapter unavailable: "
-        .. safeErrorText(railroaderAdapterOrError))
-elseif type(railroaderAdapterOrError) == "table" then
-    if type(railroaderAdapterOrError.installWallReload) == "function"
-        and railroaderAdapterOrError.installWallReload() then
-        print("[RailroaderRV] wall reload protection installed.")
-    end
-    if type(railroaderAdapterOrError.installTransactionGate) == "function"
-        and railroaderAdapterOrError.installTransactionGate() then
-        print("[RailroaderRV] Railroader RV transaction gate installed.")
-    end
-    -- The optional adapter is loaded in its own module table, so expose its
-    -- current utility resolver on the server facade.
-    if type(railroaderAdapterOrError.resolveCurrentUtilityRV) == "function" then
-        RV.Server.resolveCurrentUtilityRV =
-            railroaderAdapterOrError.resolveCurrentUtilityRV
-    end
-    if type(railroaderAdapterOrError.installTransactionHooks) == "function" then
-        if railroaderAdapterOrError.installTransactionHooks() then
-            print("[RailroaderRV] Railroader RV transaction hooks installed.")
-        else
-            print("[RailroaderRV] Railroader RV transaction hooks unavailable.")
-        end
-    end
+local railroaderAdapter = RV.RailroaderServer
+if not railroaderAdapter.installWallReload() then
+    error("RailroaderRV: wall reload service was not installed")
+end
+if not railroaderAdapter.installTransactionGate() then
+    error("RailroaderRV: Railroader transaction gate was not installed")
+end
+RV.Server.resolveCurrentUtilityRV = railroaderAdapter.resolveCurrentUtilityRV
+if not railroaderAdapter.installTransactionHooks() then
+    print("[RailroaderRV] Railroader RV transaction hooks unavailable.")
 end
 
 

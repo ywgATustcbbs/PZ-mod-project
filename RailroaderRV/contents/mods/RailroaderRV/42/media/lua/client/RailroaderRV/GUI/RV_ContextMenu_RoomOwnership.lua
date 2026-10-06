@@ -5,22 +5,14 @@ local Layout = ctx.Layout
 local roomOwnershipGuards = {}
 
 local function roomOwnershipGuardKey(rvId, generation)
-    return tostring(rvId) .. ":" .. tostring(generation)
+    return rvId .. ":" .. generation
 end
 
 local finiteNumber = C.finiteNumber
 local finiteInteger = C.finiteInteger
 
-local function validRailroaderFinalHint(args)
-    local generation = type(args) == "table" and finiteInteger(args.generation)
-    return type(args) == "table" and args.railroaderTransition == true
-        and type(args.token) == "string" and args.token ~= ""
-        and args.locoId ~= nil and tostring(args.locoId) ~= ""
-        and args.rvId ~= nil and tostring(args.rvId) ~= ""
-        and generation ~= nil and generation >= 1
-end
-
 local function localPlayerByOnlineId(onlineId)
+    assert(onlineId ~= nil, "RailroaderRV: onlineId is missing")
     local count = getNumActivePlayers()
     for playerNum = 0, count - 1 do
         local playerObj = getSpecificPlayer(playerNum)
@@ -40,28 +32,13 @@ local function readRoomRefreshBounds(args, prefix)
     local bounds = {}
     for i = 1, #fields do
         local field = fields[i]
-        local value = finiteInteger(args[prefix .. field])
-        if value == nil then
-            return nil
-        end
-        bounds[field] = value
-    end
-    if bounds.wallMinX > bounds.wallMaxX or bounds.wallMinY > bounds.wallMaxY
-        or bounds.roomMinX > bounds.roomMaxX or bounds.roomMinY > bounds.roomMaxY
-        or bounds.roofMinX > bounds.roofMaxX or bounds.roofMinY > bounds.roofMaxY
-        or bounds.roomMinX < bounds.wallMinX
-        or bounds.roomMaxX > bounds.wallMaxX
-        or bounds.roomMinY < bounds.wallMinY
-        or bounds.roomMaxY > bounds.wallMaxY then
-        return nil
+        bounds[field] = args[prefix .. field]
     end
     return bounds
 end
 
 local function eachStructureSquare(cell, bounds, callback)
-    if not cell or not bounds then
-        return
-    end
+    if not cell or bounds == nil then return end
     Layout.eachStructureCoordinate(bounds, function(x, y, z)
         local squareOk, square = pcall(function()
             return cell:getGridSquare(x, y, z)
@@ -83,12 +60,11 @@ local function squareCoordinates(square)
 end
 
 local function coordinatesInBounds(x, y, z, bounds)
-    return type(bounds) == "table"
-        and x >= bounds.wallMinX and x <= bounds.wallMaxX
+    if bounds == nil then return false end
+    return x >= bounds.wallMinX and x <= bounds.wallMaxX
         and y >= bounds.wallMinY and y <= bounds.wallMaxY
         and z == bounds.z
-        or type(bounds) == "table"
-        and x >= bounds.roofMinX and x <= bounds.roofMaxX
+        or x >= bounds.roofMinX and x <= bounds.roofMaxX
         and y >= bounds.roofMinY and y <= bounds.roofMaxY
         and z == bounds.roofZ
 end
@@ -203,17 +179,11 @@ end
 
 local function beginRoomOwnershipRefresh(args)
     local rvId = args.rvId
-    local generation = finiteInteger(args.generation)
+    local generation = args.generation
     local newBounds = readRoomRefreshBounds(args, "new")
-    if rvId == nil or tostring(rvId) == "" or generation == nil
-        or generation < 1 or newBounds == nil
-        or args.hasOld ~= true and args.hasOld ~= false then
-        return
-    end
     local oldBounds = nil
     if args.hasOld == true then
         oldBounds = readRoomRefreshBounds(args, "old")
-        if oldBounds == nil then return end
     end
     local key = roomOwnershipGuardKey(rvId, generation)
     -- A current generation packet contains the authoritative previous/current
@@ -222,13 +192,13 @@ local function beginRoomOwnershipRefresh(args)
     -- been accepted; that would turn old bounds into a permanent client path.
     for existingKey, existingGuard in pairs(roomOwnershipGuards) do
         if existingKey ~= key
-            and tostring(existingGuard.rvId) == tostring(rvId) then
+            and existingGuard.rvId == rvId then
             roomOwnershipGuards[existingKey] = nil
         end
     end
     roomOwnershipGuards[key] = {
         key = key,
-        rvId = tostring(rvId),
+        rvId = rvId,
         generation = generation,
         oldBounds = oldBounds,
         newBounds = newBounds,
@@ -272,17 +242,12 @@ local function updateRoomOwnershipGuards()
         local dueTick = guard.nextScanTick
         if dueTick ~= nil and ctx.clientTick >= dueTick then
             guard.nextScanTick = nil
-            local cleared = refreshInvalidRoomOwnership(guard)
-            if cleared > 0 then
-                print("[RailroaderRV] client room ownership refresh generation="
-                    .. tostring(generation) .. " cleared=" .. tostring(cleared))
-            end
+            refreshInvalidRoomOwnership(guard)
         end
     end
 end
 
 
-ctx.validRailroaderFinalHint = validRailroaderFinalHint
 ctx.localPlayerByOnlineId = localPlayerByOnlineId
 ctx.requestRoomOwnershipScan = requestRoomOwnershipScan
 ctx.beginRoomOwnershipRefresh = beginRoomOwnershipRefresh

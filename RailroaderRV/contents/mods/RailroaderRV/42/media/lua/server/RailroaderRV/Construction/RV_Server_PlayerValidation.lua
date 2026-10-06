@@ -15,10 +15,6 @@ local RELOCATION_TIMEOUT_TICKS = ctx.RELOCATION_TIMEOUT_TICKS
 local WORLD_MIN_Z = ctx.WORLD_MIN_Z
 local WORLD_MAX_Z = ctx.WORLD_MAX_Z
 
--- One bounded resend cadence shared by both acknowledged stages.  A resend is
--- idempotent on the client and only re-states a server-selected destination.
-local GENERATION_RESEND_TICKS = 30
-
 local function readPlayerCoordinate(player, methodName, label)
     local ok, value = ServerUtil.invoke(player, methodName)
     if not ok then
@@ -121,10 +117,6 @@ end
 -- object is reported as a reason; this never rebinds a transaction, never
 -- writes record state and never runs a side effect.
 local function resolvePendingPlayer(record)
-    if type(record) ~= "table" or type(record.identity) ~= "table"
-        or not ServerUtil.isFiniteNumber(record.identity.onlineId) then
-        return false, "relocation player identity is unavailable"
-    end
     local foundOk, current = ServerUtil.callGlobal("getPlayerByOnlineID",
         record.identity.onlineId)
     if not foundOk or current == nil then
@@ -165,10 +157,6 @@ local function generationPositionProof(player, target)
         return true, "target-cell"
     end
     return false, position, true
-end
-
-local function earlierTick(left, right)
-    return left <= right and left or right
 end
 
 local function sendRelocate(player, payload)
@@ -227,7 +215,6 @@ local function sendStagingRelocation(record, phase)
             return false, "authoritative return relocation failed"
         end
     end
-    record.lastSentTick = ctx.serverTick
     return true
 end
 
@@ -274,42 +261,21 @@ local function sendFinalRelocation(record, deadline)
         return false, "final authoritative server relocation failed"
     end
     if deadline ~= nil then record.deadlineTick = deadline end
-    record.lastSentTick = ctx.serverTick
     return true
 end
 
--- Keep the token-scoped Boundary lease armed and re-state the current stage's
--- relocation while the record waits for its client acknowledgement.  The send
--- cadence is bounded so a transient failure cannot flood the network, and a
--- missing IsoPlayer only extends the deadline: the next tick after reconnect
--- re-sends naturally on the same token.
+-- Keep the token-scoped Boundary lease armed while the server waits for the
+-- client action and its acknowledgement. Reliable ordered transport carries
+-- each stage relocation once; the recorded deadline owns timeout behavior.
 local function keepGenerationTransitionAlive(record)
-    if type(record) ~= "table"
-        or (record.stage ~= "WAIT_STAGING" and record.stage ~= "WAIT_FINAL") then
-        return
-    end
-    if not Boundary or type(Boundary.extendTransition) ~= "function" then
+    if record.stage ~= "WAIT_STAGING" and record.stage ~= "WAIT_FINAL" then
         return
     end
     local resolved, playerOrReason = resolvePendingPlayer(record)
-    if not resolved then
-        record.deadlineTick = ctx.serverTick + RELOCATION_TIMEOUT_TICKS
-        return
-    end
+    if not resolved then return end
     record.player = playerOrReason
-    local leaseUntil = earlierTick(record.deadlineTick,
-        ctx.serverTick + GENERATION_RESEND_TICKS)
-    pcall(Boundary.extendTransition, playerOrReason, record.token, leaseUntil)
-    local lastSentTick = record.lastSentTick
-    if lastSentTick ~= nil
-        and (ctx.serverTick - lastSentTick) < GENERATION_RESEND_TICKS then
-        return
-    end
-    if record.stage == "WAIT_STAGING" then
-        sendStagingRelocation(record, "temporary")
-    else
-        sendFinalRelocation(record)
-    end
+    Boundary.extendTransition(playerOrReason, record.token,
+        record.deadlineTick)
 end
 
 ctx.keepGenerationTransitionAlive = keepGenerationTransitionAlive

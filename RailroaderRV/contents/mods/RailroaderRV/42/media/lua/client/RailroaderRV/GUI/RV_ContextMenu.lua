@@ -9,12 +9,6 @@ require "RailroaderRV/Common/RV_Constants"
 require "RailroaderRV/GUI/RV_BoundaryWallVisuals"
 require "RailroaderRV/GUI/RV_WardrobeVisuals"
 require "RailroaderRV/GUI/RV_ProtectedDemolition"
-local boundaryClientLoaded, BoundaryClient = pcall(require,
-    "RailroaderRV/GUI/RV_BoundaryClient")
-if not boundaryClientLoaded then
-    print("[RailroaderRV] RV boundary client unavailable: "
-        .. tostring(BoundaryClient))
-end
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.Client = RailroaderRV.Client or {}
@@ -25,14 +19,12 @@ local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
 local MENU_KEY = "ContextMenu_RailroaderRV_Generate"
 local COMMAND_RELOCATE = "Relocate"
 local COMMAND_RELOCATE_ACK = "RelocateAck"
-local COMMAND_FINAL_RELOCATE = C.COMMAND_FINAL_RELOCATE or "FinalRelocate"
+local COMMAND_FINAL_RELOCATE = C.COMMAND_FINAL_RELOCATE
 local COMMAND_FINAL_RELOCATE_ACK = C.COMMAND_FINAL_RELOCATE_ACK
-    or "FinalRelocateAck"
 local ROOF_REFRESH_HALO_TEXT = getText("UI_RailroaderRV_RoofRefreshHalo")
 local GENERATION_HALO_TEXT = getText("UI_RailroaderRV_GenerationHalo")
 local GENERATION_HALO_RENDER_TEXT = GENERATION_HALO_TEXT
 local COMMAND_REFRESH_ROOM_OWNERSHIP = C.COMMAND_REFRESH_ROOM_OWNERSHIP
-    or "RefreshRoomOwnership"
 local pendingRelocation = nil
 local RELOCATION_TIMEOUT_TICKS = 600
 local GENERATION_HALO_REFRESH_TICKS = 10

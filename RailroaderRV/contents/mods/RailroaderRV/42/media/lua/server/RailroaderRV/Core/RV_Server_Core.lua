@@ -10,15 +10,23 @@
 local RV = rawget(_G, "RailroaderRV") or {}
 rawset(_G, "RailroaderRV", RV)
 
-local Core = type(RV.Core) == "table" and RV.Core or {}
+local Core = RV.Core
+if Core == nil then
+    Core = {}
+    RV.Core = Core
+end
 
-local state = type(Core._state) == "table" and Core._state or {}
-Core._state = state
-state.tick = type(state.tick) == "number" and state.tick or 0
-state.tickCallbacks = type(state.tickCallbacks) == "table" and state.tickCallbacks or {}
-state.commandCallbacks = type(state.commandCallbacks) == "table"
-    and state.commandCallbacks or {}
-state.subscribed = state.subscribed == true
+local state = Core._state
+if state == nil then
+    state = {
+        tick = 0,
+        tickCallbacks = {},
+        commandCallbacks = {},
+        scheduledCallbacks = {},
+        subscribed = false,
+    }
+    Core._state = state
+end
 
 local handlers = {
     OnTick = state.tickCallbacks,
@@ -58,12 +66,7 @@ local function dispatch(eventName, ...)
         error("RailroaderRV: unknown engine event " .. tostring(eventName), 0)
     end
     for index = 1, #callbacks do
-        local ok, err = pcall(callbacks[index], ...)
-        if not ok then
-            print("[RailroaderRV] " .. eventName .. " handler failed: "
-                .. tostring(err))
-            return
-        end
+        callbacks[index](...)
     end
 end
 
@@ -127,8 +130,7 @@ RV.Core = Core
 -- One direct engine subscription per event name, evaluated once per process.
 -- A debugger reload of this file must not add a second listener; the handler
 -- lists in Core._state survive the reload and stay attached to this dispatcher.
-if not state.subscribed then
-    state.scheduledCallbacks = {}
+if state.subscribed == false then
     onTick(runScheduledCallbacks)
     state.subscribed = true
     Events.OnTick.Add(function()
@@ -150,6 +152,8 @@ if not state.subscribed then
     Events.OnDestroyIsoThumpable.Add(function(object)
         dispatch("OnDestroyIsoThumpable", object)
     end)
+elseif state.subscribed ~= true then
+    error("RailroaderRV: Core subscription state is invalid", 0)
 end
 
 return Core

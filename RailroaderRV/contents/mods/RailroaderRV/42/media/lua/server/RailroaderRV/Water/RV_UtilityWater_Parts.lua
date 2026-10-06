@@ -115,13 +115,6 @@ function M.perform(context, operation, itemId, record)
     return true, { record = record, transaction = transaction }
 end
 
-local function remainingFilterL(water)
-    return water.filter
-        and W.FILTER_CAPACITY_L * water.filter.condition
-            / W.FILTER_CONDITION_MAX
-        or 0
-end
-
 function M.validateContainerSource(player, itemId, record)
     local water = record.water
     if water.tankCount <= 0 or not water.supplyPumpInstalled then
@@ -137,7 +130,8 @@ function M.validateContainerSource(player, itemId, record)
         return false, U.REASONS.SOURCE_INVALID
     end
     local kind = Sources.exactWaterKind(fluidContainer)
-    if not kind or (kind == "tainted" and remainingFilterL(water) <= 0) then
+    if not kind or (kind == "tainted"
+        and W.remainingFilterLiters(water) <= 0) then
         return false, U.REASONS.SOURCE_INVALID
     end
     return true, { item = found.item, kind = kind }
@@ -160,7 +154,8 @@ function M.validateDrawSource(player, sourceHint, water)
     local resolved, sourceOrReason = Sources.resolveNaturalSource(player,
         sourceHint)
     if not resolved then return false, sourceOrReason end
-    if sourceOrReason.kind == "tainted" and remainingFilterL(water) <= 0 then
+    if sourceOrReason.kind == "tainted"
+        and W.remainingFilterLiters(water) <= 0 then
         return false, U.REASONS.SOURCE_INVALID
     end
     return true, sourceOrReason

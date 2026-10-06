@@ -26,8 +26,7 @@ if processIsClient() and not processIsServer() then
 end
 
 require("RailroaderRV/Common/RV_Constants")
-local boundaryLoaded, Boundary = pcall(require, "RailroaderRV/BoundaryGuard/RV_BoundaryServer")
-if not boundaryLoaded or type(Boundary) ~= "table" then Boundary = nil end
+local Boundary = require("RailroaderRV/BoundaryGuard/RV_BoundaryServer")
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.RailroaderServer = RailroaderRV.RailroaderServer or {}

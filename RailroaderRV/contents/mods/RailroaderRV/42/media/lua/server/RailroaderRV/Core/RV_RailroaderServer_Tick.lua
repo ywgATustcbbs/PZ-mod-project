@@ -19,13 +19,9 @@ Adapter._ticks = Core.getTick()
 -- keep the boundary validation cache warm for the players standing in the RV
 -- scope, so the guard never pays a cold validation on the tick it must correct.
 local function prewarmBoundaryPlayersInScope(map)
-    local adapter = RailroaderRV and RailroaderRV.RailroaderServer or nil
-    if not adapter or type(adapter.onlinePlayersSnapshot) ~= "function"
-        or type(adapter.prewarmCurrentBoundaryPlayers) ~= "function" then
-        return
-    end
-    local ok, players = pcall(adapter.onlinePlayersSnapshot)
-    if not ok or type(players) ~= "table" then return end
+    local adapter = RailroaderRV.RailroaderServer
+    local players, snapshotOk = adapter.onlinePlayersSnapshot()
+    if not snapshotOk then return end
     local area = rvRegion()
     local candidates = {}
     for i = 1, #players do
@@ -46,25 +42,21 @@ function Adapter.OnTick(tick)
     local map = mapData()
     local changed = false
     if Core.tickModulo(120) then
-        for _, record in pairs(map.locomotives or {}) do
-            if type(record) == "table" and record.locoId ~= nil then
-                local train = findTrain(record.locoId)
-                local position = train and trainPose(train)
-                if position then
-                    local old = record.locoPosition
-                    if not old or old.x ~= position.x or old.y ~= position.y
-                        or old.z ~= position.z then
-                        record.locoPosition = position
-                        changed = true
-                    end
+        for _, record in pairs(map.locomotives) do
+            local train = findTrain(record.locoId)
+            local position = train and trainPose(train)
+            if position then
+                local old = record.locoPosition
+                if old.x ~= position.x or old.y ~= position.y
+                    or old.z ~= position.z then
+                    record.locoPosition = position
+                    changed = true
                 end
             end
         end
     end
     prewarmBoundaryPlayersInScope(map)
-    if type(Adapter.rearmRoomOwnershipMonitors) == "function" then
-        Adapter.rearmRoomOwnershipMonitors(tick)
-    end
+    Adapter.rearmRoomOwnershipMonitors(tick)
     if changed then markMappingChanged(false) end
 end
 

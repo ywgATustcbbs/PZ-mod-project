@@ -51,17 +51,15 @@ local function isTaggedWardrobe(object)
     local tag = data.RailroaderRV
     if type(tag) ~= "table"
         or tag.owner ~= C.MOD_ID
-        or type(tag.rvId) ~= "string" or tag.rvId == ""
-        or C.finiteInteger(tag.generation) == nil or C.finiteInteger(tag.generation) < 1
         or tag.role ~= "captured-template" then
         return false
     end
 
-    local templateIndex = C.finiteInteger(tag.templateIndex)
-    if templateIndex == nil or templateIndex < 1 then return false end
+    local templateIndex = tag.templateIndex
+    local entry = assert(templateObjects[templateIndex],
+        "RailroaderRV: tagged wardrobe template index is unknown")
     -- Every template attribute comes from the compiled entry named by
     -- `templateIndex`; the tag stores no copy of them.
-    local entry = templateObjects[templateIndex]
     if not isWardrobeTemplateEntry(entry)
         or tag.edgeKey ~= nil then
         return false

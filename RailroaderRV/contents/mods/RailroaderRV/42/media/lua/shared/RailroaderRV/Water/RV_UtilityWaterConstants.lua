@@ -30,4 +30,10 @@ M.INDUSTRIAL_PUMP_WATTS = 100
 M.SUPPLY_PUMP_WATTS = 20
 M.NATURAL_SOURCE_RADIUS = 10
 
+function M.remainingFilterLiters(water)
+    if water.filter == nil then return 0 end
+    return M.FILTER_CAPACITY_L * water.filter.condition
+        / M.FILTER_CONDITION_MAX
+end
+
 return M

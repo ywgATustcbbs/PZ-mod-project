@@ -1,7 +1,7 @@
 -- Block demolition only for generation-tagged objects classified as category 3.
 
 local C = require "RailroaderRV/Common/RV_Constants"
-local BoundaryClient = require "RailroaderRV/GUI/RV_BoundaryClient"
+require "RailroaderRV/GUI/RV_BoundaryClient"
 local RoomTemplate = require "RailroaderRV/RoomTemplate/RV_RoomTemplate"
 local TemplateGeometry = require "RailroaderRV/RoomTemplate/RV_TemplateGeometry"
 require "TimedActions/ISDestroyStuffAction"
@@ -60,59 +60,14 @@ local function isDoorOrWindow(object)
     return false
 end
 
-local function showInvalidRVData(character)
-    if not character then return end
-    if type(character.setHaloNote) ~= "function" then return end
-    local message = "RV data is invalid. Delete this save and recreate it."
-    if type(getText) == "function" then
-        local ok, translated = pcall(getText,
-            "UI_RailroaderRV_InvalidRVData")
-        if ok and type(translated) == "string" and translated ~= ""
-            and translated ~= "UI_RailroaderRV_InvalidRVData" then
-            message = translated
-        end
-    end
-    pcall(function() character:setHaloNote(message, 255, 255, 255, 5000) end)
-end
-
-local function templateTagFailureReason(tag)
-    if type(tag) ~= "table" then return "template-tag-missing" end
-    if tag.owner ~= C.MOD_ID then return "template-tag-owner-mismatch" end
-    if type(tag.rvId) ~= "string" or tag.rvId == "" then
-        return "template-tag-rv-id-invalid"
-    end
-    local generation = C.finiteInteger(tag.generation)
-    if generation == nil or generation < 1 then
-        return "template-tag-generation-invalid"
-    end
-    return nil
-end
-
-local function rejectInvalidRVData(character, reason)
-    print("[RailroaderRV] demolition fail-closed reason="
-        .. tostring(reason or "unknown"))
-    showInvalidRVData(character)
-    return true
-end
-
-local function objectMatchesStaticIdentity(object, tag, expected,
-    templateIndex)
-    local function fail(reason, detail)
-        return false
-    end
+local function objectMatchesStaticIdentity(object, expected)
     -- The tag names the template entry and stores no copy of its attributes;
     -- `expected` is that entry, re-read from the compiled template.
-    if type(tag) ~= "table"
-        or C.finiteInteger(tag.templateIndex) ~= templateIndex then
-        return fail("template-tag-index-mismatch")
-    end
     local indexOk, objectIndex = call(object, "getObjectIndex")
     local squareOk, square = call(object, "getSquare")
     if not indexOk or C.finiteInteger(objectIndex) == nil
         or C.finiteInteger(objectIndex) < 0 or not squareOk or not square then
-        return fail("object-index-or-square-invalid", "objectIndex="
-            .. tostring(objectIndex) .. " indexOk=" .. tostring(indexOk)
-            .. " squareOk=" .. tostring(squareOk) .. " square=" .. tostring(square))
+        return false
     end
 
     local classOk = false
@@ -121,8 +76,7 @@ local function objectMatchesStaticIdentity(object, tag, expected,
         local ok, result = pcall(instanceOf, object, expected.class)
         classOk = ok and result == true
     end
-    if not classOk then return fail("object-class-mismatch",
-        "expectedClass=" .. tostring(expected.class)) end
+    if not classOk then return false end
 
     local nameOk, name = call(object, "getName")
     local spriteOk, sprite = call(object, "getSprite")
@@ -133,34 +87,26 @@ local function objectMatchesStaticIdentity(object, tag, expected,
     if not nameOk or name ~= expected.name
         or not spriteNameOk or tostring(spriteName) ~= expected.sprite
         or not directionOk or not expectedDirection or direction ~= expectedDirection then
-        return fail("object-live-identity-mismatch", "nameOk="
-            .. tostring(nameOk) .. " name=" .. tostring(name)
-            .. " spriteNameOk=" .. tostring(spriteNameOk) .. " sprite="
-            .. tostring(spriteName) .. " directionOk=" .. tostring(directionOk)
-            .. " direction=" .. tostring(direction) .. " expectedDirection="
-            .. tostring(expectedDirection))
+        return false
     end
 
     if expected.north ~= "none" then
         local northOk, north = call(object, "getNorth")
         if not northOk or north ~= expected.north then
-            return fail("object-north-mismatch", "northOk=" .. tostring(northOk)
-                .. " north=" .. tostring(north) .. " expected="
-                .. tostring(expected.north))
+            return false
         end
     end
     return true
 end
 
 local function resolveTemplateObject(object, tag)
-    local index = C.finiteInteger(tag and tag.templateIndex)
-    if index == nil then return nil, "template-index-unavailable" end
-    local template = RoomTemplate.get(tag.templateId)
+    local index = tag.templateIndex
+    local template = assert(RoomTemplate.get(tag.templateId),
+        "RailroaderRV: tagged template ID is unknown")
     local indexedObject, indexedAt =
         TemplateGeometry.lookupObjectByIndex(index, template)
-    if type(indexedObject) ~= "table" or indexedAt ~= index then
-        return nil, "template-index-unrecognized"
-    end
+    assert(type(indexedObject) == "table" and indexedAt == index,
+        "RailroaderRV: tagged template index is unknown")
 
     local x, y, z = objectCoordinates(object)
     if x == nil then return nil, "object-world-coordinate-unavailable" end
@@ -188,7 +134,7 @@ local function cabDoorWindowHost(world, anchor, template)
     return TemplateGeometry.isBuildCellSideHost(world, anchor, template)
 end
 
-local function isCurrentProhibitedObject(object, character)
+local function isCurrentProhibitedObject(object)
     local dataOk, data = call(object, "getModData")
     if not dataOk or type(data) ~= "table" then
         return false
@@ -198,9 +144,7 @@ local function isCurrentProhibitedObject(object, character)
         -- Ordinary world content: no owner, nothing to protect.
         return false
     end
-    if type(tag) ~= "table" then
-        return rejectInvalidRVData(character, "template-tag-unavailable")
-    end
+    if type(tag) ~= "table" then return false end
     if tag.owner ~= C.MOD_ID then
         return false
     end
@@ -209,27 +153,13 @@ local function isCurrentProhibitedObject(object, character)
         return true
     end
 
-    local hasTemplateMarker = tag.templateIndex ~= nil
-        or templateRoles[tag.role] == true
-    if not hasTemplateMarker then
-        -- The native generator and other feature-owned objects have their own
-        -- lifecycle and do not belong to the captured-template protection set.
-        return false
-    end
-
-    local tagFailure = templateTagFailureReason(tag)
-    if tagFailure then
-        return rejectInvalidRVData(character, tagFailure)
-    end
+    if not templateRoles[tag.role] then return false end
 
     local expected, index, anchor, world, template =
         resolveTemplateObject(object, tag)
-    if not expected then
-        return rejectInvalidRVData(character,
-            index or "template-object-unrecognized")
-    end
-    if not objectMatchesStaticIdentity(object, tag, expected, index) then
-        return rejectInvalidRVData(character, "template-static-identity-mismatch")
+    if not expected then return false end
+    if not objectMatchesStaticIdentity(object, expected) then
+        return false
     end
     if TemplateGeometry.isBuildable(world, anchor, template) then
         return false
@@ -243,13 +173,9 @@ local function isCurrentProhibitedObject(object, character)
     return true
 end
 
-local function actionIsBlocked(actionName, character, object)
+local function actionIsBlocked(object)
     local clientCall = type(isClient) == "function" and isClient()
-    local blocked = clientCall and isCurrentProhibitedObject(object, character)
-    if blocked then
-        return true
-    end
-    return false
+    return clientCall and isCurrentProhibitedObject(object)
 end
 
 local function wrapDestroyAction(action)
@@ -259,7 +185,7 @@ local function wrapDestroyAction(action)
     end
     local originalNew = action.new
     action.new = function(self, character, item, cornerCounter)
-        if actionIsBlocked("ISDestroyStuffAction", character, item) then
+        if actionIsBlocked(item) then
             return { ignoreAction = true }
         end
         return originalNew(self, character, item, cornerCounter)
@@ -274,7 +200,7 @@ local function wrapDismantleAction(action)
     end
     local originalNew = action.new
     action.new = function(self, character, thumpable)
-        if actionIsBlocked("ISDismantleAction", character, thumpable) then
+        if actionIsBlocked(thumpable) then
             return { ignoreAction = true }
         end
         return originalNew(self, character, thumpable)
@@ -289,7 +215,7 @@ local function wrapTakeGeneratorAction(action)
     end
     local originalNew = action.new
     action.new = function(self, character, generator)
-        if actionIsBlocked("ISTakeGenerator", character, generator) then
+        if actionIsBlocked(generator) then
             return { ignoreAction = true }
         end
         return originalNew(self, character, generator)

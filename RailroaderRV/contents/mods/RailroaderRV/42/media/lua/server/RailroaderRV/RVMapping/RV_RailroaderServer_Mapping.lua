@@ -1,6 +1,5 @@
 -- RV_RailroaderServer: Mapping responsibilities.
 return function(ctx)
-local Core = require("RailroaderRV/Core/RV_Server_Core")
 local Boundary = ctx.Boundary
 local Adapter = ctx.Adapter
 local C = ctx.C
@@ -100,47 +99,18 @@ local function inRegion(position, region)
     return x >= minX and x < maxX and y >= minY and y < maxY
 end
 
-local function validRegion(region)
-    if type(region) ~= "table" then return false end
-    local size = integer(C.RV_REGION_SIZE)
-    local minX, minY = integer(region.minX), integer(region.minY)
-    local minZ, maxZ = integer(region.minZ), integer(region.maxZ)
-    return minX ~= nil and minY ~= nil and integer(region.maxX) == minX + size
-        and integer(region.maxY) == minY + size
-        and minZ == integer(C.RV_IDENTITY_MIN_Z)
-        and maxZ == integer(C.RV_IDENTITY_MAX_Z)
-        and minZ >= WORLD_MIN_Z and maxZ <= WORLD_MAX_Z + 1
-end
-
 local function recordRegion(record)
-    local region = RegionSlots.indexToRegion(integer(record and record.slotIndex))
+    local region = RegionSlots.indexToRegion(integer(record.slotIndex))
     region.minZ = integer(C.RV_IDENTITY_MIN_Z)
     region.maxZ = integer(C.RV_IDENTITY_MAX_Z)
     return region
 end
 
-local function validMappingRecord(record)
-    return type(record) == "table"
-        and record.generated == true
-        and type(record.locoId) == "string" and record.locoId ~= ""
-        and integer(record.slotIndex) ~= nil
-        and integer(record.generation) ~= nil and integer(record.generation) >= 1
-end
-
-local function validRecord(record)
-    return validMappingRecord(record)
-end
-
 recordForLoco = function(map, locoId)
-    if not map or not map.locomotives or locoId == nil then return nil, nil end
-    local wanted = tostring(locoId)
-    for key, record in pairs(map.locomotives) do
-        if type(record) == "table" and record.locoId ~= nil
-            and tostring(record.locoId) == wanted then
-            return record, key
-        end
-    end
-    return nil, nil
+    if locoId == nil then return nil, nil end
+    local key = tostring(locoId)
+    local record = map.locomotives[key]
+    return record, record and key or nil
 end
 
 boundaryValidation = require("RailroaderRV/BoundaryGuard/RV_RailroaderServer_BoundaryValidation")({
@@ -150,7 +120,6 @@ boundaryValidation = require("RailroaderRV/BoundaryGuard/RV_RailroaderServer_Bou
     rvRegion = rvRegion,
     playerPositionInRegion = playerPositionInRegion,
     recordForLoco = recordForLoco,
-    validRecord = validRecord,
     serverTransactionMutexStatus = function()
         return ctx.serverTransactionMutexStatus()
     end,
@@ -174,24 +143,12 @@ end
 -- or a newly connected player does not pass through that transaction.  Ask the
 -- generic server layer to validate the current manifest/mapping identity and
 -- send the current footprint only to this player.
-local function armRoomOwnershipMonitor(player, record, reason)
-    local server = RailroaderRV and RailroaderRV.Server
-    if not server or type(server.armCurrentRoomOwnershipMonitor) ~= "function" then
-        return false, "room ownership monitor service is unavailable"
-    end
-    local ok, armed, detail = pcall(server.armCurrentRoomOwnershipMonitor,
+local function armRoomOwnershipMonitor(player, record)
+    local armed, detail = RailroaderRV.Server.armCurrentRoomOwnershipMonitor(
         player, record)
-    if not ok then
-        print("[RailroaderRV] room ownership monitor error: " .. tostring(armed))
-        return false, C.INVALID_RV_DATA
-    end
     if armed ~= true then
-        print("[RailroaderRV] room ownership monitor deferred reason="
-            .. tostring(reason or "entry") .. ": " .. tostring(detail or "unknown"))
         return false, detail or "room ownership monitor could not be armed"
     end
-    print("[RailroaderRV] room ownership monitor ready reason="
-        .. tostring(reason or "entry"))
     return true
 end
 
@@ -204,11 +161,8 @@ end
 local function recordAtPlayerCoordinate(map, player)
     local position = playerPositionInRegion(player, rvRegion())
     if not position then return nil, nil, nil, "outside-rv" end
-    for key, record in pairs(map.locomotives or {}) do
-        if type(record) == "table" and inRegion(position, recordRegion(record)) then
-            if not validMappingRecord(record) then
-                error(C.INVALID_RV_DATA)
-            end
+    for key, record in pairs(map.locomotives) do
+        if inRegion(position, recordRegion(record)) then
             local train = findTrain(record.locoId)
             if train and trainPosition(train) then
                 return record, key, train, "active-mapped"
@@ -224,22 +178,17 @@ local function allocateRVRegion(locoId)
     if locoId ~= nil then
         local existing = recordForLoco(map, tostring(locoId))
         if existing then
-            if not validMappingRecord(existing) then
-                return false, C.INVALID_RV_DATA
-            end
-            local slotIndex = integer(existing.slotIndex)
+            local slotIndex = existing.slotIndex
             local anchor = RegionSlots.indexToAnchor(slotIndex)
-            if not anchor then return false, C.INVALID_RV_DATA end
-            return true, slotIndex, anchor, integer(existing.generation)
+            return true, slotIndex, anchor, existing.generation
         end
     end
     local occupied, occupiedSlots = {}, {}
-    for _, record in pairs(map.locomotives or {}) do
-        if not validMappingRecord(record) then return false, C.INVALID_RV_DATA end
+    for _, record in pairs(map.locomotives) do
         local region = recordRegion(record)
-        local slotIndex = integer(record.slotIndex)
-        if type(region) ~= "table" or occupiedSlots[slotIndex] then
-            return false, C.INVALID_RV_DATA
+        local slotIndex = record.slotIndex
+        if occupiedSlots[slotIndex] then
+            error("duplicate RV region slot in trusted mapping")
         end
         occupiedSlots[slotIndex] = tostring(record.locoId)
         occupied[#occupied + 1] = { minX = integer(region.minX),
@@ -250,17 +199,20 @@ local function allocateRVRegion(locoId)
     -- unmapped technical generation reserves nothing across a restart; its
     -- concurrency is owned by the in-memory generation transaction.
     local slotIndex, anchor = RegionSlots.findFirstFree(occupied)
-    if not slotIndex or type(anchor) ~= "table" then
-        return false, slotIndex == nil and "no free RV region slot" or C.INVALID_RV_DATA
-    end
+    if slotIndex == nil then return false, "no free RV region slot" end
     return true, slotIndex, anchor
 end
 
 local function currentMappingRecord(rvId, generation)
     local map = mapData()
     local record = recordForLoco(map, rvId)
-    if not record or not validMappingRecord(record)
-        or integer(record.generation) ~= integer(generation) then
+    if not record then
+        return false, C.INVALID_RV_DATA
+    end
+    if record.generation == nil then
+        error("current RV mapping has no generation")
+    end
+    if record.generation ~= integer(generation) then
         return false, C.INVALID_RV_DATA
     end
     return true, record
@@ -279,9 +231,6 @@ ctx.mapData = mapData
 ctx.markMappingChanged = markMappingChanged
 ctx.rvRegion = rvRegion
 ctx.inRegion = inRegion
-ctx.validRegion = validRegion
-ctx.validMappingRecord = validMappingRecord
-ctx.validRecord = validRecord
 ctx.recordRegion = recordRegion
 ctx.playerPositionInRegion = playerPositionInRegion
 ctx.refreshRoofForPlayer = refreshRoofForPlayer

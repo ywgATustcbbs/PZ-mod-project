@@ -4,13 +4,10 @@
 -- identity. Native plumbing capability is checked separately.
 
 require "RailroaderRV/Common/RV_Constants"
-local StrictSchema = require "RailroaderRV/Common/RV_StrictSchema"
-local RegionSlots = require "RailroaderRV/RVMapping/RV_RegionSlots"
 
 RailroaderRV = RailroaderRV or {}
 local C = RailroaderRV.Constants
 local M = {}
-local integer = StrictSchema.integer
 
 -- The tag names the owning RV generation and the slot allocation that fixes
 -- the sink's position in the slot matrix.  `anchor` is deliberately absent:
@@ -20,15 +17,16 @@ M.WATER_TAG_KEY = "RailroaderRVWater"
 local function tagForObject(object)
     if object == nil then return nil end
     local data = object:getModData()
-    if type(data) ~= "table" then return nil end
     local tag = data[M.WATER_TAG_KEY]
-    if type(tag) ~= "table"
-        or tag.owner ~= C.MOD_ID or tag.role ~= "sink"
-        or type(tag.rvId) ~= "string" or tag.rvId == ""
-        or integer(tag.generation) == nil or tag.generation < 1
-        or integer(tag.slotIndex) == nil then
-        return nil
+    if tag == nil then return nil end
+    if type(tag) ~= "table" then
+        error("RailroaderRV: water sink tag is not a table")
     end
+    if tag.owner ~= C.MOD_ID or tag.role ~= "sink" then return nil end
+    assert(type(tag.rvId) == "string" and tag.rvId ~= ""
+        and type(tag.generation) == "number" and tag.generation >= 1
+        and type(tag.slotIndex) == "number",
+        "RailroaderRV: water sink identity is incomplete")
     return tag
 end
 
@@ -54,13 +52,10 @@ function M.isCurrentWaterSink(object, identity, mappingRecord)
     local tag = tagForObject(object)
     if not tag then return false end
     if identity == nil and mappingRecord == nil then return true end
-    if type(identity) ~= "table" or type(mappingRecord) ~= "table"
-        or type(identity.rvId) ~= "string" or identity.rvId == ""
-        or integer(identity.generation) == nil then
-        return false
-    end
     return tostring(tag.rvId) == tostring(identity.rvId)
-        and integer(tag.generation) == integer(identity.generation)
+        and tag.generation == identity.generation
+        and tostring(mappingRecord.locoId) == tostring(identity.rvId)
+        and mappingRecord.generation == identity.generation
 end
 
 local function hasWaterPipedFlag(object)

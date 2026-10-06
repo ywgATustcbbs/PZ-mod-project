@@ -128,13 +128,7 @@ local function processQueuedCells(activePlayers)
         local player, boundary = findQueuedPlayer(activePlayers, entry)
         if player then
             local x, y = entry.x, entry.y
-            local repaired, reason = Repair.repairCell(player,
-                boundary, x, y)
-            if repaired == false and reason ~= nil then
-                print("[RailroaderRV] template-protection-repair skipped "
-                    .. "cell " .. tostring(x) .. "," .. tostring(y) .. ": "
-                    .. tostring(reason))
-            end
+            Repair.repairCell(player, boundary, x, y)
             checked = checked + 1
         end
     end

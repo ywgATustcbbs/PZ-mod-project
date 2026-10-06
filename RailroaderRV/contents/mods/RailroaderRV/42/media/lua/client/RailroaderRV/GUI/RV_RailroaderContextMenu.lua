@@ -12,6 +12,7 @@ RailroaderRV.RailroaderContextMenu = RailroaderRV.RailroaderContextMenu or {}
 
 local Menu = RailroaderRV.RailroaderContextMenu
 local C = RailroaderRV.Constants
+local UtilityClient = require("RailroaderRV/GUI/RV_UtilityClient")
 
 local ICON_ENTER_RV = "media/ui/RailroaderRV/enterrv.png"
 local ICON_EXIT_RV = "media/ui/RailroaderRV/exitrv.png"
@@ -36,6 +37,7 @@ local function localPlayer(playerNum)
 end
 
 local function localPlayerByOnlineId(onlineId)
+    assert(onlineId ~= nil, "RailroaderRV: onlineId is missing")
     local count = 0
     if type(getNumActivePlayers) == "function" then
         local ok, value = pcall(getNumActivePlayers)
@@ -96,26 +98,15 @@ local function mapContainsPlayer(player)
     return true
 end
 
-local function validUtilityMapping(value)
-    return type(value) == "table"
-        and type(value.rvId) == "string" and value.rvId ~= ""
-        and type(value.locoId) == "string" and value.locoId ~= ""
-        and finiteInteger(value.generation) ~= nil
-        and finiteInteger(value.generation) >= 1
-end
-
-local function rememberUtilityMapping(args)
-    if type(args) ~= "table" then return end
-    local action = tostring(args.action or "")
+local function rememberUtilityMapping(args, action)
+    if action == nil then action = args.action end
     if action ~= "enter" and action ~= "exit" then return end
     local mapping = {
-        rvId = tostring(args.rvId or ""),
-        locoId = tostring(args.locoId or ""),
-        generation = finiteInteger(args.generation),
+        rvId = args.rvId,
+        locoId = args.locoId,
+        generation = args.generation,
     }
-    if validUtilityMapping(mapping) then
-        Menu._rvUtilityMapping = mapping
-    end
+    Menu._rvUtilityMapping = mapping
 end
 
 local function isIsoAnimal(animal)
@@ -163,7 +154,6 @@ end
 
 local function requestEnter(player, locoId)
     if not player or locoId == nil then return end
-    print("[RailroaderRV] sending EnterRV loco=" .. tostring(locoId))
     sendClientCommand(player, C.MOD_ID, C.COMMAND_RV_ENTER, {
         locoId = locoId,
     })
@@ -173,13 +163,52 @@ local function requestExit(player)
     if not player then
         return
     end
-    print("[RailroaderRV] sending ExitRV")
     sendClientCommand(player, C.MOD_ID, C.COMMAND_RV_EXIT, {})
 end
 
+local function safehouseWaterUnavailable(water)
+    return water.tankCount <= 0
+        or not water.supplyPumpInstalled
+        or not water.filter
+        or not water.supplyPumpPowered
+        or water.filterRemainingL <= 0
+end
+
+local function safehouseClaimState(snapshot)
+    local mapping = Menu.getUtilityMapping()
+    if not snapshot
+            or UtilityClient.mappingKey(snapshot)
+                ~= UtilityClient.mappingKey(mapping) then
+        return "waiting"
+    end
+    if safehouseWaterUnavailable(snapshot.water) then return "water" end
+    return nil
+end
+
+local function updateSafehouseClaimOption(option, snapshot)
+    local state = safehouseClaimState(snapshot)
+    option.notAvailable = state ~= nil
+    if state == "water" then
+        option.toolTip = ISWorldObjectContextMenu.addToolTip()
+        option.toolTip.description = text(
+            "ContextMenu_RailroaderRV_ClaimSafehouse_WaterUnavailable",
+            "认领安全屋需要房车供水系统正常运转")
+    elseif state == "waiting" then
+        option.toolTip = ISWorldObjectContextMenu.addToolTip()
+        option.toolTip.description = text(
+            "UI_RailroaderRV_Utility_Waiting", "等待服务器快照")
+    else
+        option.toolTip = nil
+    end
+    return state
+end
+
 local function requestSafehouseClaim(player)
-    if not player then return end
+    if not player or safehouseClaimState(UtilityClient.getSnapshot()) then
+        return false
+    end
     sendClientCommand(player, C.MOD_ID, C.COMMAND_RV_SAFEHOUSE_CLAIM, {})
+    return true
 end
 
 local function addExit(playerNum, context, test)
@@ -204,8 +233,13 @@ local function addSafehouseClaim(playerNum, context, test)
     local claimLabel = text("ContextMenu_RailroaderRV_ClaimSafehouse",
         "Claim RV Safehouse")
     if optionAlreadyExists(context, claimLabel) then return true end
-    context:addOption(claimLabel, player, requestSafehouseClaim)
+    local option = context:addOption(claimLabel, player, requestSafehouseClaim)
     if test then return markTest() end
+    Menu._safehouseClaimOption = option
+    Menu._safehouseClaimPlayer = player
+    local state = updateSafehouseClaimOption(option,
+        UtilityClient.getSnapshot())
+    if state == "waiting" then UtilityClient.requestSnapshot(player) end
     return true
 end
 
@@ -230,7 +264,7 @@ end
 
 function Menu.getUtilityMapping()
     local mapping = Menu._rvUtilityMapping
-    if not validUtilityMapping(mapping) then return nil end
+    if mapping == nil then return nil end
     return {
         rvId = mapping.rvId, locoId = mapping.locoId,
         generation = mapping.generation,
@@ -241,15 +275,13 @@ end
 -- not grant permission or carry coordinates. Every utility command still
 -- performs the complete server-side mapping/range gate.
 function Menu.acceptUtilityMapping(args)
-    if type(args) ~= "table" or args.ok ~= true then return false end
-    local onlineId = finiteInteger(args.onlineId)
-    if onlineId == nil or not localPlayerByOnlineId(onlineId) then return false end
+    if args.ok ~= true then return false end
+    if not localPlayerByOnlineId(args.onlineId) then return false end
     local mapping = {
-        rvId = tostring(args.rvId or ""),
-        locoId = tostring(args.locoId or ""),
-        generation = finiteInteger(args.generation),
+        rvId = args.rvId,
+        locoId = args.locoId,
+        generation = args.generation,
     }
-    if not validUtilityMapping(mapping) then return false end
     Menu._rvUtilityMapping = mapping
     return true
 end
@@ -345,23 +377,18 @@ local GENERATION_TRANSITION_TTL_MS = 300000
 local CURRENT_SQUARE_REFRESH_TICKS = 120
 
 local function generationTransitionMatches(pending, args)
-    if type(pending) ~= "table" or type(args) ~= "table" then return false end
-    local generation = finiteInteger(args.generation)
-    if pending.rvId == nil or args.rvId == nil
-        or tostring(pending.rvId) ~= tostring(args.rvId)
-        or pending.generation == nil or generation ~= pending.generation then
-        return false
-    end
-    if pending.token ~= nil and args.token ~= nil then
-        return tostring(pending.token) == tostring(args.token)
-    end
-    return pending.locoId ~= nil and args.locoId ~= nil
-        and tostring(pending.locoId) == tostring(args.locoId)
+    assert(args.token ~= nil and args.locoId ~= nil
+        and args.rvId ~= nil and args.generation ~= nil,
+        "RailroaderRV: generation transition identity is incomplete")
+    if pending == nil then return false end
+    return pending.rvId == args.rvId
+        and pending.generation == args.generation
+        and pending.token == args.token
 end
 
 local function activeGenerationTransition()
     local pending = Menu._rvGenerationTransition
-    if type(pending) == "table" and pending.expiresAt ~= nil
+    if pending and pending.expiresAt ~= nil
         and nowMs() > pending.expiresAt then
         Menu._rvGenerationTransition = nil
         return nil
@@ -390,8 +417,9 @@ end
 -- Let the official Ride API clear a local seat before the RV coordinate write;
 -- Ride.dismount(true) also arms Railroader's documented stale-snapshot grace,
 -- preventing RR_MPClient from calling placePlayerBeside after this teleport.
-local function prepareRideTransition(args)
-    local action = tostring(args.action or "")
+local function prepareRideTransition(args, action)
+    if action == nil then action = args.action end
+    assert(action ~= nil, "RailroaderRV: ride transition action is missing")
     local rr = rawget(_G, "RR")
     local ride = rr and rr.Ride
     local record = localTrainRecord(args.locoId)
@@ -484,7 +512,7 @@ local function playerStillAtTargetSquare(player, x, y, z)
         and math.floor(currentZ) == math.floor(z)
 end
 
-local function scheduleCurrentSquareRefresh(player, x, y, z, relation)
+local function scheduleCurrentSquareRefresh(player, x, y, z)
     if not player then return end
     Menu._rvCurrentSquareRefresh = {
         player = player,
@@ -492,9 +520,6 @@ local function scheduleCurrentSquareRefresh(player, x, y, z, relation)
         y = y,
         z = z,
         ticks = 0,
-        rvId = type(relation) == "table" and relation.rvId or nil,
-        generation = type(relation) == "table"
-            and finiteInteger(relation.generation) or nil,
     }
     refreshCurrentSquare(player, x, y, z)
     if currentSquareMatches(player, x, y, z) then
@@ -543,74 +568,56 @@ local function finishRideTransition(args, record, player)
     -- the authoritative teleport, never by fabricating rider/seat fields.
     if record and (args.role == "driver" or args.role == "passenger")
         and type(ride.mountRecord) == "function" then
-        pcall(ride.mountRecord, record, true, finiteInteger(args.seat) or 0)
+        assert(args.seat ~= nil, "RailroaderRV: seat is missing from exit sync")
+        pcall(ride.mountRecord, record, true, args.seat)
     end
-end
-
-local function validGenerationFinalHint(args)
-    local generation = type(args) == "table" and finiteInteger(args.generation)
-    return type(args) == "table" and args.railroaderTransition == true
-        and type(args.token) == "string" and args.token ~= ""
-        and args.locoId ~= nil and tostring(args.locoId) ~= ""
-        and args.rvId ~= nil and tostring(args.rvId) ~= ""
-        and generation ~= nil and generation >= 1
 end
 
 -- Called by RV_ContextMenu's generic FinalRelocate bridge.  It shares the
 -- exact enter ordering with RVTeleport, including Railroader's stale-snapshot
 -- dismount grace, while leaving final coordinates under the server command.
 function Menu.prepareGenerationRelocation(args)
-    if type(args) ~= "table" then return false end
     local pending = activeGenerationTransition()
-    if pending and generationTransitionMatches(pending, args) then
+    if generationTransitionMatches(pending, args) then
         -- The staging handler already performed the only Ride dismount for
         -- this token.  Keep the marker through duplicate command callbacks;
         -- the final coordinates are still applied by RV_ContextMenu from the
         -- server payload immediately below this hook.
         pending.finalSeen = true
         pending.expiresAt = nowMs() + GENERATION_TRANSITION_TTL_MS
-        rememberUtilityMapping(args)
-        return true
+        rememberUtilityMapping(args, "enter")
+        return
     end
-    -- Never infer Railroader state from the generic technical FinalRelocate.
-    -- A marker must be server-created and carry the same token/loco identity
-    -- used by the staging transition.
-    if not validGenerationFinalHint(args) then return false end
-    args.action = args.action or "enter"
-    rememberUtilityMapping(args)
-    prepareRideTransition(args)
+    -- The server-created marker carries the identity used by the staging
+    -- transition; generic technical FinalRelocate never enters this method.
+    rememberUtilityMapping(args, "enter")
+    prepareRideTransition(args, "enter")
     Menu._rvGenerationTransition = {
         token = args.token,
         locoId = args.locoId,
-        rvId = tostring(args.rvId),
-        generation = finiteInteger(args.generation),
+        rvId = args.rvId,
+        generation = args.generation,
         finalSeen = true,
         expiresAt = nowMs() + GENERATION_TRANSITION_TTL_MS,
     }
-    return true
 end
 
 -- Called only for the server-created Relocate marker.  This is intentionally
 -- separate from generic Generate so a technical generation can never touch a
 -- local Railroader Ride state by accident.
 function Menu.prepareGenerationStaging(args)
-    if not validGenerationFinalHint(args) then
-        return false
-    end
     local pending = activeGenerationTransition()
-    if pending and generationTransitionMatches(pending, args) then
-        return true
+    if generationTransitionMatches(pending, args) then
+        return
     end
-    args.action = "enter"
-    prepareRideTransition(args)
+    prepareRideTransition(args, "enter")
     Menu._rvGenerationTransition = {
         token = args.token,
         locoId = args.locoId,
-        rvId = tostring(args.rvId),
-        generation = finiteInteger(args.generation),
+        rvId = args.rvId,
+        generation = args.generation,
         expiresAt = nowMs() + GENERATION_TRANSITION_TTL_MS,
     }
-    return true
 end
 
 function Menu.OnFillWorldObjectContextMenu(playerNum, context, worldObjects, test)
@@ -659,10 +666,25 @@ function Menu.OnPreFillWorldObjectContextMenu(playerNum, context, worldObjects, 
 end
 
 function Menu.OnServerCommand(module, command, args)
-    if module ~= C.MOD_ID or type(args) ~= "table" then return end
+    if module ~= C.MOD_ID then return end
+    if command == C.COMMAND_RV_UTILITY_MAPPING then
+        if Menu._safehouseClaimOption then
+            local state = updateSafehouseClaimOption(
+                Menu._safehouseClaimOption, UtilityClient.getSnapshot())
+            if state == "waiting" and Menu._safehouseClaimPlayer then
+                UtilityClient.requestSnapshot(Menu._safehouseClaimPlayer)
+            end
+        end
+        return
+    elseif command == C.COMMAND_RV_UTILITY_SNAPSHOT then
+        if Menu._safehouseClaimOption then
+            updateSafehouseClaimOption(Menu._safehouseClaimOption, args)
+        end
+        return
+    end
     if command == C.COMMAND_RV_SAFEHOUSE_SYNC then
         SafeHouse.addSafeHouse(args.x, args.y, args.w, args.h, args.owner)
-        local player = localPlayerByOnlineId(finiteInteger(args.onlineId))
+        local player = localPlayerByOnlineId(args.onlineId)
         if player then
             local message = text("UI_RailroaderRV_Safehouse_Claimed",
                 "The RV driver's cab is now your safehouse.")
@@ -685,7 +707,7 @@ function Menu.OnServerCommand(module, command, args)
             ["water-filter-exhausted"] = "UI_RailroaderRV_Safehouse_Reject_FilterExhausted",
             ["safehouse-overlap"] = "UI_RailroaderRV_Safehouse_Reject_Overlap",
         }
-        local player = localPlayerByOnlineId(finiteInteger(args.onlineId))
+        local player = localPlayerByOnlineId(args.onlineId)
         if player then
             local key = assert(reasonKeys[args.reason],
                 "RailroaderRV: unknown safehouse claim result")
@@ -695,10 +717,10 @@ function Menu.OnServerCommand(module, command, args)
         return
     end
     if command ~= C.COMMAND_RV_TELEPORT then return end
-    local onlineId = finiteInteger(args.onlineId)
+    local onlineId = args.onlineId
     if args.ok == false then
         if args.reason == C.INVALID_RV_DATA then
-            local player = onlineId and localPlayerByOnlineId(onlineId) or nil
+            local player = localPlayerByOnlineId(onlineId)
             if player and type(player.setHaloNote) == "function" then
                 local message = text("UI_RailroaderRV_InvalidRVData",
                     "RV data is invalid. Delete this save and recreate it.")
@@ -711,16 +733,12 @@ function Menu.OnServerCommand(module, command, args)
         return
     end
     rememberUtilityMapping(args)
-    local x, y, z = finiteNumber(args.x), finiteNumber(args.y), finiteNumber(args.z)
-    if onlineId == nil or x == nil or y == nil or z == nil
-        or z < -32 or z > 31 then return end
+    local x, y, z = args.x, args.y, args.z
     local player = localPlayerByOnlineId(onlineId)
     if not player then return end
     local record = prepareRideTransition(args)
-    local teleported = pcall(function() player:teleportTo(x, y, z) end)
-    if teleported then
-        scheduleCurrentSquareRefresh(player, x, y, z, args)
-    end
+    player:teleportTo(x, y, z)
+    scheduleCurrentSquareRefresh(player, x, y, z)
     finishRideTransition(args, record, player)
 end
 

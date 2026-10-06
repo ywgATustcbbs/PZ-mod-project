@@ -44,17 +44,14 @@ local function isTaggedBoundarySupportWall(object)
     local tag = data.RailroaderRV
     if type(tag) ~= "table"
         or tag.owner ~= C.MOD_ID
-        or type(tag.rvId) ~= "string" or tag.rvId == ""
-        or C.finiteInteger(tag.generation) == nil or C.finiteInteger(tag.generation) < 1
         or not boundaryRoles[tag.role] then
         return false
     end
-    local templateIndex = C.finiteInteger(tag.templateIndex)
-    local expected = templateIndex and templateObjects[templateIndex] or nil
-    if not expected then return false end
+    local expected = assert(templateObjects[tag.templateIndex],
+        "RailroaderRV: tagged boundary template index is unknown")
     -- The boundary role is exactly the set the server assigns to captured shell
     -- edges; every attribute below is re-read from the compiled template entry
-    -- named by `templateIndex`, because the tag stores no copy of it.
+    -- named by `tag.templateIndex`, because the tag stores no copy of it.
     if expected.class ~= "IsoThumpable"
         or expected.name ~= "Wooden Wall"
         or not supportWallSprites[expected.sprite]

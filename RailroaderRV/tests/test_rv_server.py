@@ -293,6 +293,9 @@ local repairWorldX, repairWorldY = engineAnchor.x - 4,
 local repairSquareLayers = { [0] = true }
 local repairSquare = {}
 local repairCellWorld = {}
+local repairSquareObjects = {}
+local repairRemovalCount = 0
+local repairRemovalTargets = {}
 local restoredTemplateEntries = 0
 local repairServerWorld = {
     getCellForPlayer = function() return repairCellWorld end,
@@ -302,8 +305,26 @@ local repairServerWorld = {
             return repairSquare
         end
     end,
-    squareSnapshot = function() return {} end,
-    objectModData = function() return nil end,
+    squareSnapshot = function() return repairSquareObjects end,
+    objectModData = function(object) return object.modData end,
+    isPlayerObject = function() return false end,
+    isVehicleObject = function() return false end,
+    getSpriteName = function() return nil end,
+    removeGenericObject = function(_, object)
+        repairRemovalCount = repairRemovalCount + 1
+        repairRemovalTargets[#repairRemovalTargets + 1] = object
+        for index = #repairSquareObjects, 1, -1 do
+            if repairSquareObjects[index] == object then
+                table.remove(repairSquareObjects, index)
+            end
+        end
+    end,
+    squareContainsObject = function(_, object)
+        for index = 1, #repairSquareObjects do
+            if repairSquareObjects[index] == object then return true end
+        end
+        return false
+    end,
 }
 local repair = RepairFactory({
     Constants = {
@@ -311,8 +332,18 @@ local repair = RepairFactory({
         WORLD_MIN_Z = -32,
         WORLD_MAX_Z = 32,
     },
-    RV = {},
-    ServerUtil = { toNumber = function(value) return tonumber(value) or value end },
+    RV = { Server = {} },
+    ServerUtil = {
+        toNumber = function(value) return tonumber(value) or value end,
+        classInstance = function(object, className)
+            return object.class == className
+        end,
+        invoke = function(object, methodName, ...)
+            local method = object[methodName]
+            if type(method) ~= "function" then return false, nil end
+            return true, method(object, ...)
+        end,
+    },
     ServerWorld = repairServerWorld,
     createCapturedTemplateObject = function()
         restoredTemplateEntries = restoredTemplateEntries + 1
@@ -351,6 +382,100 @@ local roofProjectionRestoreCalls = restoredTemplateEntries
 local roofBuildCellSkipsTemplateRestore = roofBuildSquaresAvailable
     and roofRepairChanged == false
     and restoredTemplateEntries == 0
+repairWorldX, repairWorldY = engineAnchor.x - 4,
+    engineAnchor.y - 6
+local function repairPlayerBuiltAt(boundary, x, y, layers)
+    repairBoundary = boundary
+    repairWorldX, repairWorldY = x, y
+    repairSquareLayers = layers
+    repairRemovalCount = 0
+    repairRemovalTargets = {}
+    local playerBuiltObject = {
+        class = "IsoObject",
+        modData = { RailroaderRV = {
+            owner = "RailroaderRV", playerBuilt = true,
+            rvId = boundary.rvId, generation = boundary.generation,
+        } },
+    }
+    repairSquareObjects = { playerBuiltObject }
+    local protectedCell = repair.isProtectedCell(boundary, x, y)
+    local repairOk = pcall(function()
+        repair.repairCell({}, boundary, x, y)
+    end)
+    return {
+        protectedCell = protectedCell,
+        repairOk = repairOk,
+        removalCount = repairRemovalCount,
+        remainingCount = #repairSquareObjects,
+        removalIdentityMatched = repairRemovalTargets[1] == playerBuiltObject,
+        preservedIdentityMatched = repairSquareObjects[1] == playerBuiltObject,
+    }
+end
+local corridorHeadPlayerBuilt = repairPlayerBuiltAt(engineBoundary,
+    engineAnchor.x - 4, engineAnchor.y - 6, { [engineAnchor.z] = true })
+local corridorTailPlayerBuilt = repairPlayerBuiltAt(engineBoundary,
+    engineAnchor.x - 4, engineAnchor.y + 16,
+    { [engineAnchor.z] = true })
+local baseBuildCell = base.misc.buildCells[1]
+local baseBuildX, baseBuildY = baseAnchor.x + baseBuildCell.x,
+    baseAnchor.y + baseBuildCell.y
+local baseBuildable = Geometry.isBuildable({ x = baseBuildX, y = baseBuildY,
+    z = baseAnchor.z }, baseAnchor, base)
+local baseLegalPlayerBuilt = repairPlayerBuiltAt(baseBoundary,
+    baseBuildX, baseBuildY,
+    { [baseAnchor.z] = true, [baseAnchor.z + 1] = true })
+local engineLegalPlayerBuilt = repairPlayerBuiltAt(engineBoundary,
+    engineAnchor.x - 3, engineAnchor.y + 3,
+    { [engineAnchor.z] = true, [engineAnchor.z + 1] = true })
+local corpseInventoryItem = { type = "Base.KitchenKnife" }
+local corpseInventoryBag = { type = "Base.Bag", items = { corpseInventoryItem } }
+local playerCorpse = { class = "IsoDeadBody", isPlayerCorpse = true,
+    inventory = { items = { corpseInventoryBag } } }
+local droppedBagItem = { type = "Base.Bag" }
+local droppedBag = { class = "IsoWorldInventoryObject", item = droppedBagItem }
+local liveZombie = { class = "IsoZombie" }
+local zombieGiblets = { class = "IsoZombieGiblets" }
+repairBoundary = engineBoundary
+repairWorldX, repairWorldY = engineAnchor.x - 4, engineAnchor.y - 6
+repairSquareLayers = { [engineAnchor.z] = true }
+repairSquareObjects = { playerCorpse, droppedBag, liveZombie, zombieGiblets }
+repairRemovalCount = 0
+repairRemovalTargets = {}
+local templateRecoveryProtectedObjectsOk = pcall(function()
+    repair.repairCell({}, engineBoundary, repairWorldX, repairWorldY)
+end)
+local templateRecoveryProtectedObjectsPreserved =
+    templateRecoveryProtectedObjectsOk
+    and repairRemovalCount == 0
+    and #repairSquareObjects == 4
+    and repairSquareObjects[1] == playerCorpse
+    and repairSquareObjects[2] == droppedBag
+    and repairSquareObjects[3] == liveZombie
+    and repairSquareObjects[4] == zombieGiblets
+    and playerCorpse.inventory.items[1] == corpseInventoryBag
+    and corpseInventoryBag.items[1] == corpseInventoryItem
+    and droppedBag.item == droppedBagItem
+repairSquareObjects = { {
+    class = engineCorridorHeadObjects[1].class,
+    modData = { RailroaderRV = {
+        owner = "RailroaderRV", role = "captured-template",
+        templateId = engineBoundary.templateId,
+        rvId = engineBoundary.rvId, generation = engineBoundary.generation,
+    } },
+} }
+repairBoundary = engineBoundary
+repairWorldX, repairWorldY = engineAnchor.x - 4, engineAnchor.y - 6
+repairSquareLayers = { [engineAnchor.z] = true }
+repairRemovalCount = 0
+repairRemovalTargets = {}
+local generatedObjectMissingTemplateIndexOk, generatedObjectMissingTemplateIndexError =
+    pcall(function()
+        repair.repairCell({}, engineBoundary, repairWorldX, repairWorldY)
+    end)
+local generatedObjectMissingTemplateIndexRejected =
+    not generatedObjectMissingTemplateIndexOk
+    and string.find(tostring(generatedObjectMissingTemplateIndexError),
+        "generated template object has no template index", 1, true) ~= nil
 
 local Devices = require "RailroaderRV/Power/RV_UtilityPowerDevices"
 local function scanEngineFloor(templateId, rvId)
@@ -394,6 +519,16 @@ end
 local baseScan = scanEngineFloor(baseId, "offline-base-scan")
 local engineScan = scanEngineFloor(engineId, "offline-engine-scan")
 
+local clientDebugReports = {}
+sendClientCommand = function(player, module, command, args)
+    clientDebugReports[#clientDebugReports + 1] = {
+        player = player,
+        module = module,
+        command = command,
+        args = args,
+    }
+    return true
+end
 package.preload["RailroaderRV/GUI/RV_BoundaryClient"] = function()
     return {}
 end
@@ -414,7 +549,7 @@ isClient = function() return true end
 package.loaded["RailroaderRV/GUI/RV_ProtectedDemolition"] = nil
 require "RailroaderRV/GUI/RV_ProtectedDemolition"
 
-local function demolitionIsBlocked(expected, templateId, anchor)
+local function demolitionIsBlocked(expected, templateId, anchor, tagged, action)
     local square = {
         getX = function() return anchor.x + expected.x end,
         getY = function() return anchor.y + expected.y end,
@@ -423,9 +558,22 @@ local function demolitionIsBlocked(expected, templateId, anchor)
     local sprite = { getName = function() return expected.sprite end }
     local object = {
         class = expected.class,
+        getClass = function()
+            return setmetatable({}, {
+                __index = function(_, method)
+                    error("attempted index: " .. method
+                        .. " of non-table: class zombie.iso.objects."
+                        .. expected.class)
+                end,
+                __tostring = function()
+                    return "class zombie.iso.objects." .. expected.class
+                end,
+            })
+        end,
         getSquare = function() return square end,
         getObjectIndex = function() return 0 end,
         getModData = function()
+            if tagged == false then return {} end
             return { RailroaderRV = {
                 owner = "RailroaderRV",
                 rvId = "offline-demolition-contract",
@@ -442,14 +590,20 @@ local function demolitionIsBlocked(expected, templateId, anchor)
         isDoor = function() return false end,
         isWindow = function() return false end,
     }
-    local result = ISDestroyStuffAction:new({}, object)
-    return type(result) == "table" and result.ignoreAction == true
+    local identity = tagged == false and "unmanaged" or templateId
+    local character = { diagnosticPlayer = identity .. ":" .. expected.templateIndex }
+    local result = (action or ISDestroyStuffAction):new(character, object)
+    return type(result) == "table" and result.ignoreAction == true, character
 end
 
-local corridorDemolitionBlocked = demolitionIsBlocked(
+local corridorDemolitionBlocked, corridorDemolitionCharacter = demolitionIsBlocked(
     engineCorridorHeadObjects[1], engineId, engineAnchor)
-local roofDemolitionBlocked = demolitionIsBlocked(
+local roofDemolitionBlocked, roofDemolitionCharacter = demolitionIsBlocked(
     engineRoofAdditionObjects[1], engineId, engineAnchor)
+local baseTemplateRoofDemolitionBlocked, baseTemplateRoofDemolitionCharacter =
+    demolitionIsBlocked(engineRoofAdditionObjects[1], baseId, engineAnchor)
+local unmanagedRoofDemolitionBlocked, unmanagedRoofDemolitionCharacter =
+    demolitionIsBlocked(engineRoofAdditionObjects[1], engineId, engineAnchor, false)
 local boundaryWindowExpected = nil
 for i = 1, #boundaryWindowObjects do
     local object = boundaryWindowObjects[i]
@@ -458,8 +612,19 @@ for i = 1, #boundaryWindowObjects do
         break
     end
 end
-local boundaryWindowDemolitionBlocked = demolitionIsBlocked(
+local boundaryWindowDemolitionBlocked, boundaryWindowDemolitionCharacter = demolitionIsBlocked(
     boundaryWindowExpected, engineId, engineAnchor)
+local dismantleDemolitionBlocked, dismantleDemolitionCharacter = demolitionIsBlocked(
+    engineRoofAdditionObjects[1], baseId, engineAnchor, true, ISDismantleAction)
+local generatorDemolitionBlocked, generatorDemolitionCharacter = demolitionIsBlocked(
+    engineRoofAdditionObjects[1], engineId, engineAnchor, true, ISTakeGenerator)
+local demolitionReportIdentityMatched = #clientDebugReports == 6
+    and clientDebugReports[1].player == corridorDemolitionCharacter
+    and clientDebugReports[2].player == roofDemolitionCharacter
+    and clientDebugReports[3].player == baseTemplateRoofDemolitionCharacter
+    and clientDebugReports[4].player == boundaryWindowDemolitionCharacter
+    and clientDebugReports[5].player == dismantleDemolitionCharacter
+    and clientDebugReports[6].player == generatorDemolitionCharacter
 
 local sameManaged = baseLayout.managed.originX == engineLayout.managed.originX
     and baseLayout.managed.originY == engineLayout.managed.originY
@@ -522,11 +687,167 @@ return {
     roofBuildSquaresAvailable = roofBuildSquaresAvailable,
     roofProjectionRestoreCalls = roofProjectionRestoreCalls,
     roofBuildCellSkipsTemplateRestore = roofBuildCellSkipsTemplateRestore,
+    corridorHeadPlayerBuilt = corridorHeadPlayerBuilt,
+    corridorTailPlayerBuilt = corridorTailPlayerBuilt,
+    templateRecoveryProtectedObjectsPreserved =
+        templateRecoveryProtectedObjectsPreserved,
+    baseBuildable = baseBuildable,
+    baseLegalPlayerBuilt = baseLegalPlayerBuilt,
+    engineLegalPlayerBuilt = engineLegalPlayerBuilt,
+    playerBuiltRepairRemovalCount = repairRemovalCount,
+    generatedObjectMissingTemplateIndexRejected = generatedObjectMissingTemplateIndexRejected,
     corridorDemolitionBlocked = corridorDemolitionBlocked,
     roofDemolitionBlocked = roofDemolitionBlocked,
+    baseTemplateRoofDemolitionBlocked = baseTemplateRoofDemolitionBlocked,
+    unmanagedRoofDemolitionBlocked = unmanagedRoofDemolitionBlocked,
     boundaryWindowDemolitionBlocked = boundaryWindowDemolitionBlocked,
+    dismantleDemolitionBlocked = dismantleDemolitionBlocked,
+    generatorDemolitionBlocked = generatorDemolitionBlocked,
+    demolitionReports = clientDebugReports,
+    demolitionReportIdentityMatched = demolitionReportIdentityMatched,
     baseScan = baseScan,
     engineScan = engineScan,
+}
+'''
+    )
+
+
+def exercise_server_world_removal_contract(server_lua_root: Path) -> dict[str, object]:
+    """Exercise the real world-removal code against offline square/object mocks."""
+
+    from lupa import LuaRuntime
+
+    lua = LuaRuntime(unpack_returned_tuples=True)
+    lua.globals().rvServerLuaRoot = str(server_lua_root.resolve()).replace("\\", "/")
+    lua.execute("package.path = rvServerLuaRoot .. '/?.lua;' .. package.path")
+    return lua.execute(
+        r'''
+local World = require "RailroaderRV/Common/RV_ServerWorld"
+
+local function collection(items)
+    return {
+        size = function() return #items end,
+        get = function(_, index) return items[index + 1] end,
+    }
+end
+
+local function removalCase(mode, initiallyPresent)
+    local items = {}
+    local object = {}
+    if initiallyPresent then items[1] = object end
+    local list = collection(items)
+    local square = {}
+    local function indexOf(target)
+        for index = 1, #items do
+            if items[index] == target then return index end
+        end
+        return -1
+    end
+    function square:getObjects() return list end
+    function square:getFloor() return nil end
+    function square:getX() return 20 end
+    function square:getY() return 30 end
+    function square:getZ() return 0 end
+    function square:transmitRemoveItemFromSquare(target)
+        if mode == "throws" then error("synthetic removal exception") end
+        local index = indexOf(target)
+        if index < 0 then return -1 end
+        if mode == "remove" then table.remove(items, index) end
+        if mode == "negative-stays" then return -1 end
+        return index - 1
+    end
+    function object:getObjectName() return "TestObject" end
+    function object:getObjectIndex() return indexOf(self) end
+    function object:getSquare() return square end
+    local ok, reason = pcall(World.removeGenericObject, square, object, false, false)
+    return {
+        ok = ok,
+        reason = tostring(reason),
+        itemCount = #items,
+    }
+end
+
+local successfulRemoval = removalCase("remove", true)
+local absentNegative = removalCase("api-absent", false)
+local stillPresentNegative = removalCase("negative-stays", true)
+local invocationThrows = removalCase("throws", true)
+
+instanceof = function(object, className)
+    return object ~= nil and object.class == className
+end
+
+local function generationSquare(movingObjects, deadBodies)
+    local tileObjects, genericRemoveCalls, corpseRemoveTargets = {}, 0, {}
+    local square = {}
+    function square:getObjects() return collection(tileObjects) end
+    function square:getSpecialObjects() return collection({}) end
+    function square:getStaticMovingObjects() return collection({}) end
+    function square:getMovingObjects() return collection(movingObjects) end
+    function square:getWorldObjects() return collection({}) end
+    function square:getDeadBodys() return collection(deadBodies) end
+    function square:getCorpses() return collection({}) end
+    function square:getFloor() return nil end
+    function square:getCorpse() return nil end
+    function square:getDeadBody() return nil end
+    function square:getVehicleContainer() return nil end
+    function square:getX() return 20 end
+    function square:getY() return 30 end
+    function square:getZ() return 0 end
+    function square:removeCorpse(corpse, remote)
+        corpseRemoveTargets[#corpseRemoveTargets + 1] = corpse
+    end
+    function square:transmitRemoveItemFromSquare(object)
+        genericRemoveCalls = genericRemoveCalls + 1
+        return -1
+    end
+    function square:RecalcProperties() end
+    function square:RecalcAllWithNeighbours() end
+    return square, function() return genericRemoveCalls end,
+        function() return corpseRemoveTargets end
+end
+
+local corpseFromZombie = { class = "IsoDeadBody" }
+local zombieDieCalls = 0
+local generationZombie = {
+    class = "IsoZombie",
+    dieNetwork = function()
+        zombieDieCalls = zombieDieCalls + 1
+        return corpseFromZombie
+    end,
+}
+local zombieSquare, zombieGenericRemoveCalls, zombieCorpseRemoveTargets =
+    generationSquare({ generationZombie }, {})
+World.clearSquare(zombieSquare)
+
+local playerCorpse = { class = "IsoDeadBody" }
+local corpseSquare, corpseGenericRemoveCalls, corpseRemoveTargets =
+    generationSquare({}, { playerCorpse })
+World.clearSquare(corpseSquare)
+
+local giblets = { class = "IsoZombieGiblets" }
+local gibletSquare, gibletGenericRemoveCalls = generationSquare({ giblets }, {})
+World.clearSquare(gibletSquare)
+
+return {
+    successfulRemoval = successfulRemoval.ok and successfulRemoval.itemCount == 0,
+    absentNegativeRejected = not absentNegative.ok
+        and string.find(absentNegative.reason, "result=-1", 1, true) ~= nil
+        and string.find(absentNegative.reason, "stillPresent=false", 1, true) ~= nil,
+    stillPresentNegativeRejected = not stillPresentNegative.ok
+        and stillPresentNegative.itemCount == 1
+        and string.find(stillPresentNegative.reason, "stillPresent=true", 1, true) ~= nil,
+    invocationExceptionSurfaced = not invocationThrows.ok
+        and string.find(invocationThrows.reason, "synthetic removal exception", 1, true) ~= nil,
+    generationUsesZombieDeathAndCorpseRemoval = zombieDieCalls == 1
+        and #zombieCorpseRemoveTargets() == 1
+        and zombieCorpseRemoveTargets()[1] == corpseFromZombie
+        and zombieGenericRemoveCalls() == 0,
+    generationUsesCorpseRemoval = #corpseRemoveTargets() == 1
+        and corpseRemoveTargets()[1] == playerCorpse
+        and corpseGenericRemoveCalls() == 0,
+    generationLeavesTransientGibletsToExpire =
+        gibletSquare:getMovingObjects():size() > 0
+        and gibletGenericRemoveCalls() == 0,
 }
 '''
     )
@@ -1001,6 +1322,9 @@ def main() -> int:
             variant_contracts = compile_template_variant_contracts(
                 shared_root.parent, server_root.parent
             )
+            removal_contracts = exercise_server_world_removal_contract(
+                server_root.parent
+            )
         except Exception as error:
             # The embedded Lua runtime and the shared template compiler are
             # external dependencies of this harness: a broken template must be
@@ -1014,6 +1338,7 @@ def main() -> int:
                 "currentTemplateVersion": None,
             }
             variant_contracts = None
+            removal_contracts = None
             checks.true(
                 False,
                 "shared RoomTemplate/layout and server consumers cannot be loaded "
@@ -1180,6 +1505,105 @@ def main() -> int:
                 and not bool(variant_contracts["boundaryWindowDemolitionBlocked"]),
                 "build/demolition permission does not follow the selected roof projection while retaining only the door/window side-host exception",
             )
+            demolition_reports = variant_contracts["demolitionReports"]
+            demolition_messages = [
+                str(demolition_reports[index]["args"]["message"])
+                for index in range(1, len(demolition_reports) + 1)
+            ]
+            def demolition_field(message: str, field: str) -> str | None:
+                match = re.search(
+                    rf'(?:^|\s){re.escape(field)}=("(?:\\.|[^"\\])*"|[^\s]+)',
+                    message,
+                )
+                return match.group(1) if match else None
+
+            checks.true(
+                bool(variant_contracts["demolitionReportIdentityMatched"])
+                and len(demolition_reports) == 6
+                and not bool(variant_contracts["roofDemolitionBlocked"])
+                and bool(variant_contracts["baseTemplateRoofDemolitionBlocked"])
+                and not bool(variant_contracts["unmanagedRoofDemolitionBlocked"])
+                and bool(variant_contracts["dismantleDemolitionBlocked"])
+                and not bool(variant_contracts["generatorDemolitionBlocked"])
+                and all(
+                    report["module"] == "RailroaderRV"
+                    and report["command"] == "clientDebug"
+                    and set(report["args"].keys()) == {"message"}
+                    for report in (
+                        demolition_reports[index]
+                        for index in range(1, len(demolition_reports) + 1)
+                    )
+                )
+                and all(
+                    all(
+                        field in message
+                        for field in (
+                            "topic=demolition",
+                            "phase=condition-result",
+                            "playerPermissionCheck=none",
+                            "before.objectClass=",
+                            "before.classReadable=",
+                            "before.objectIndex=",
+                            "before.name=",
+                            "before.sprite=",
+                            "before.north=",
+                            "before.square=",
+                            "before.tagOwner=",
+                            "before.tagRvId=",
+                            "before.tagGeneration=",
+                            "before.tagRole=",
+                            "before.tagTemplateId=",
+                            "before.tagTemplateIndex=",
+                            "result.expectedTemplate=",
+                            "result.expectedIndex=",
+                            "result.expectedProtected=",
+                            "result.anchor=",
+                            "result.offset=",
+                            "result.isBuildable=",
+                            "result.sideHost=",
+                            "result.staticMatch=",
+                            "result.blocked=",
+                            "result.reason=",
+                            "result.actionBranch=",
+                        )
+                    )
+                    for message in demolition_messages
+                )
+                and 'result.blocked=true' in demolition_messages[0]
+                and 'result.actionBranch="ignoreAction"' in demolition_messages[0]
+                and 'before.objectClass="class zombie.iso.objects.IsoObject"' in demolition_messages[0]
+                and 'before.classReadable=true' in demolition_messages[0]
+                and 'before.tagRvId="offline-demolition-contract"' in demolition_messages[0]
+                and 'before.tagGeneration="1"' in demolition_messages[0]
+                and 'result.blocked=false' in demolition_messages[1]
+                and 'result.actionBranch="originalNew"' in demolition_messages[1]
+                and 'result.reason="buildable-cell"' in demolition_messages[1]
+                and 'result.blocked=true' in demolition_messages[2]
+                and 'result.actionBranch="ignoreAction"' in demolition_messages[2]
+                and 'before.tagTemplateId="railroader-rv"' in demolition_messages[2]
+                and 'result.blocked=false' in demolition_messages[3]
+                and 'result.actionBranch="originalNew"' in demolition_messages[3]
+                and 'action="ISDismantleAction"' in demolition_messages[4]
+                and 'result.blocked=true' in demolition_messages[4]
+                and 'result.actionBranch="ignoreAction"' in demolition_messages[4]
+                and 'action="ISTakeGenerator"' in demolition_messages[5]
+                and 'result.blocked=false' in demolition_messages[5]
+                and 'result.actionBranch="originalNew"' in demolition_messages[5]
+                and all(
+                    demolition_field(demolition_messages[0], field)
+                    == demolition_field(demolition_messages[1], field)
+                    == demolition_field(demolition_messages[2], field)
+                    for field in (
+                        "before.objectClass",
+                        "before.objectIndex",
+                        "before.name",
+                        "before.sprite",
+                        "before.north",
+                        "before.square",
+                    )
+                ),
+                "client demolition reports omit object/template decision evidence or change the action branch",
+            )
             checks.true(
                 bool(variant_contracts["corridorRepairChanged"])
                 and bool(variant_contracts["corridorTemplateRestoreRequested"])
@@ -1192,12 +1616,68 @@ def main() -> int:
                 "template protection repair does not restore corridor objects and skip selected-template build cells",
             )
             checks.true(
+                bool(variant_contracts[
+                    "templateRecoveryProtectedObjectsPreserved"
+                ]),
+                "template recovery removed a zombie, giblet, player corpse, corpse inventory item, or dropped world item",
+            )
+            corridor_head = variant_contracts["corridorHeadPlayerBuilt"]
+            corridor_tail = variant_contracts["corridorTailPlayerBuilt"]
+            base_legal_build = variant_contracts["baseLegalPlayerBuilt"]
+            engine_legal_build = variant_contracts["engineLegalPlayerBuilt"]
+            checks.true(
+                not bool(variant_contracts["engineCorridorHeadBuildable"])
+                and bool(corridor_head["protectedCell"])
+                and bool(corridor_head["repairOk"])
+                and int(corridor_head["removalCount"]) == 1
+                and int(corridor_head["remainingCount"]) == 0
+                and bool(corridor_head["removalIdentityMatched"])
+                and not bool(variant_contracts["engineCorridorTailBuildable"])
+                and bool(corridor_tail["protectedCell"])
+                and bool(corridor_tail["repairOk"])
+                and int(corridor_tail["removalCount"]) == 1
+                and int(corridor_tail["remainingCount"]) == 0
+                and bool(corridor_tail["removalIdentityMatched"])
+                and bool(variant_contracts["baseBuildable"])
+                and bool(base_legal_build["protectedCell"])
+                and bool(base_legal_build["repairOk"])
+                and int(base_legal_build["removalCount"]) == 0
+                and int(base_legal_build["remainingCount"]) == 1
+                and bool(base_legal_build["preservedIdentityMatched"])
+                and bool(variant_contracts["engineRoofBuildable"])
+                and bool(engine_legal_build["protectedCell"])
+                and bool(engine_legal_build["repairOk"])
+                and int(engine_legal_build["removalCount"]) == 0
+                and int(engine_legal_build["remainingCount"]) == 1
+                and bool(engine_legal_build["preservedIdentityMatched"])
+                and int(variant_contracts["playerBuiltRepairRemovalCount"]) == 0
+                and bool(variant_contracts[
+                    "generatedObjectMissingTemplateIndexRejected"
+                ]),
+                "template recovery must clear unbuildable corridors, preserve both template build masks, and reject malformed captured-template tags",
+            )
+            checks.true(
                 bool(variant_contracts["baseScan"]["scanned"])
                 and bool(variant_contracts["engineScan"]["scanned"])
                 and int(variant_contracts["baseScan"]["buildDeviceCount"]) == 0
                 and int(variant_contracts["engineScan"]["buildDeviceCount"]) == 1,
                 "power-device scan does not sample only the selected template's build mask",
             )
+        checks.true(
+            removal_contracts is not None
+            and bool(removal_contracts["successfulRemoval"])
+            and bool(removal_contracts["absentNegativeRejected"])
+            and bool(removal_contracts["stillPresentNegativeRejected"])
+            and bool(removal_contracts["invocationExceptionSurfaced"])
+            and bool(removal_contracts[
+                "generationUsesZombieDeathAndCorpseRemoval"
+            ])
+            and bool(removal_contracts["generationUsesCorpseRemoval"])
+            and bool(removal_contracts[
+                "generationLeavesTransientGibletsToExpire"
+            ]),
+            "server world removal must preserve API failure signals and restrict zombie/corpse removal to generation cleanup",
+        )
         compiled_protected_by_index = {
             int(obj["index"]): bool(obj["protected"])
             for obj in compiled_template_objects
@@ -4261,8 +4741,8 @@ def main() -> int:
             final_ack is not None
             and 'record.stage ~= "WAIT_FINAL"' in final_ack
             and "resolvePendingPlayer(record)" in final_ack
-            and "generationPositionProof(" in final_ack
-            and "final relocation target proof mismatch" in final_ack
+            and "playerIdentity(player)" in final_ack
+            and "generationPositionProof(" not in final_ack
             and "record.finalAcked = true" in final_ack
             and "sendFinalRelocation(prepared)" in generation_flow
             and "final relocation authoritative target is still synchronizing"

@@ -114,12 +114,7 @@ function M.snapshot(record)
         connectedSinkCount = connectedSinkCount + 1
     end
     water.autoCapacityL = autoCapacityL
-    if water.filter == nil then
-        water.filterRemainingL = 0
-    else
-        water.filterRemainingL = W.FILTER_CAPACITY_L * water.filter.condition
-            / W.FILTER_CONDITION_MAX
-    end
+    water.filterRemainingL = W.remainingFilterLiters(water)
     assert(type(water.supplyPumpInstalled) == "boolean",
         "RailroaderRV: Water supply-pump installation state is invalid")
     assert(power.circuitState == U.CIRCUIT_ON

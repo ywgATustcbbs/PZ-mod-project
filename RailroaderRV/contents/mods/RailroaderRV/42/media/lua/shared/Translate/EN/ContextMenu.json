@@ -5,6 +5,7 @@
     "ContextMenu_RailroaderRV_Enter": "Enter RV",
     "ContextMenu_RailroaderRV_Exit": "Exit RV",
     "ContextMenu_RailroaderRV_ClaimSafehouse": "Claim RV safehouse",
+    "ContextMenu_RailroaderRV_ClaimSafehouse_WaterUnavailable": "Claiming a safehouse requires the RV water system to function normally",
     "ContextMenu_RailroaderRV_UtilityDashboard": "RV utility panel",
     "ContextMenu_RailroaderRV_ConnectWaterSink": "Connect sink to water",
     "ContextMenu_RailroaderRV_DisconnectWaterSink": "Disconnect sink from water",

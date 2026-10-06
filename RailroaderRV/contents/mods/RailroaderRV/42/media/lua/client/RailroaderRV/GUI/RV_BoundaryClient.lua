@@ -45,7 +45,8 @@ local function onlineId(player)
 end
 
 local function localPlayerByOnlineId(id)
-    if id == nil or type(getNumActivePlayers) ~= "function"
+    assert(id ~= nil, "RailroaderRV: onlineId is missing")
+    if type(getNumActivePlayers) ~= "function"
         or type(getSpecificPlayer) ~= "function" then return nil end
     local okCount, count = pcall(getNumActivePlayers)
     if not okCount or type(count) ~= "number" then return nil end
@@ -78,14 +79,7 @@ local function applyPosition(player, target)
 end
 
 function Client.onCorrection(args)
-    if type(args) ~= "table" then return end
-    local online = integer(args.onlineId)
-    local generation = integer(args.generation)
-    local rvId = args.rvId
-    local x, y, z = number(args.x), number(args.y), number(args.z)
-    if online == nil or not generation or generation < 1
-        or rvId == nil
-        or tostring(rvId) == "" or not x or not y or not z then return end
+    local online, x, y, z = args.onlineId, args.x, args.y, args.z
     local player = localPlayerByOnlineId(online)
     if not player or (type(player.isDead) == "function" and player:isDead()) then return end
     if not applyPosition(player, { x = x, y = y, z = z }) then return end

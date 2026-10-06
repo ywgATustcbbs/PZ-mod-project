@@ -235,7 +235,7 @@ return {
     {x=-2, y=-5, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_02_32", north=false, direction="N", state={health=350,hoppable=false,locked=false,maxHealth=350}},
     {x=-2, y=-5, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_02_33", north=true, direction="N", state={health=200,hoppable=false,locked=false,maxHealth=200}},
     {x=-2, y=-4, z=0, class="IsoObject", name="IsoObject", sprite="industry_01_39", direction="N", state={hoppable=false}},
-    {x=-2, y=-4, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_02_35", north=false, direction="N", state={health=350,hoppable=false,locked=false,maxHealth=350}},
+    {x=-2, y=-4, z=0, class="IsoObject", name="Wooden Wall", sprite="walls_interior_house_02_35", direction="N", state={}},
     {x=-2, y=-3, z=0, class="IsoObject", name="IsoObject", sprite="industry_01_39", direction="N", state={hoppable=false}},
     {x=-2, y=-2, z=0, class="IsoObject", name="IsoObject", sprite="industry_01_39", direction="N", state={hoppable=false}},
     {x=-2, y=-2, z=0, class="IsoThumpable", name="Wooden Wall", sprite="walls_interior_house_02_33", north=true, direction="N", state={health=200,hoppable=false,locked=false,maxHealth=200}},

@@ -149,6 +149,34 @@ def load_client_menu(lua: LuaRuntime) -> None:
 
 
 class RVSafehouseClaimTests(unittest.TestCase):
+    def test_payload_free_client_command_accepts_nil_serialized_empty_table(self) -> None:
+        lua = make_lua()
+        lua.execute(
+            r"""
+            local accepted, reason = SafehouseClaimModule.handleClaim(player, nil)
+            assert(accepted == true and reason == nil)
+            assert(#SafeHouse.entries == 1)
+            assert(resolvedPlayer == player)
+            assert(serverCommands[1][2] == C.COMMAND_RV_SAFEHOUSE_SYNC)
+            """
+        )
+
+    def test_non_table_claim_payloads_are_rejected(self) -> None:
+        lua = make_lua()
+        lua.execute(
+            r"""
+            for _, args in ipairs({ "unexpected", true }) do
+                local accepted, reason = SafehouseClaimModule.handleClaim(player, args)
+                assert(accepted == false and reason == "invalid-request")
+            end
+            assert(#SafeHouse.entries == 0)
+            assert(resolvedPlayer == nil)
+            assert(#serverCommands == 2)
+            assert(serverCommands[1][4].reason == "invalid-request")
+            assert(serverCommands[2][4].reason == "invalid-request")
+            """
+        )
+
     def test_native_rectangle_is_created_and_broadcast_with_owner(self) -> None:
         lua = make_lua()
         lua.execute(
@@ -416,6 +444,14 @@ class RVSafehouseClaimTests(unittest.TestCase):
             function sendClientCommand(...)
                 sentClientCommands[#sentClientCommands + 1] = { ... }
             end
+            package.loaded["RailroaderRV/GUI/RV_UtilityClient"] = {
+                getSnapshot = function() return nil end,
+                mappingKey = function(value)
+                    if value == nil then return nil end
+                    return value.rvId .. ":" .. value.generation
+                end,
+                requestSnapshot = function() end,
+            }
             """
         )
         load_client_menu(lua)
@@ -483,7 +519,10 @@ class RVSafehouseClaimTests(unittest.TestCase):
                 ContextMenu_RailroaderRV_Enter = "Enter RV",
                 ContextMenu_RailroaderRV_Exit = "Exit RV",
                 ContextMenu_RailroaderRV_ClaimSafehouse = "Claim RV Safehouse",
+                ContextMenu_RailroaderRV_ClaimSafehouse_WaterUnavailable =
+                    "认领安全屋需要房车供水系统正常运转",
                 ContextMenu_RailroaderRV_UtilityDashboard = "RV utility panel",
+                UI_RailroaderRV_Utility_Waiting = "Waiting for server snapshot",
             }
             function getText(key) return translations[key] or key end
             function getTexture(path) return { path = path } end
@@ -510,7 +549,10 @@ class RVSafehouseClaimTests(unittest.TestCase):
             testMarks = 0
             ISWorldObjectContextMenu = {
                 setTest = function() testMarks = testMarks + 1 end,
+                addToolTip = function() return {} end,
             }
+            utilitySnapshot = nil
+            snapshotRequestCount = 0
 
             menuPaused = false
             singleOffer = false
@@ -565,6 +607,12 @@ class RVSafehouseClaimTests(unittest.TestCase):
             package.loaded["RailroaderRV/GUI/RV_UtilityClient"] = {
                 requestAddFuel = function() end,
                 requestWaterConnection = function() end,
+                getSnapshot = function() return utilitySnapshot end,
+                mappingKey = function(value)
+                    if value == nil then return nil end
+                    return value.rvId .. ":" .. value.generation
+                end,
+                requestSnapshot = function() snapshotRequestCount = snapshotRequestCount + 1 end,
             }
             package.loaded["RailroaderRV/GUI/RV_UtilityDashboard"] = {
                 show = function(player) dashboardPlayer = player end,
@@ -665,6 +713,12 @@ class RVSafehouseClaimTests(unittest.TestCase):
 
             assert(ClientMenu.acceptUtilityMapping({ ok = true, onlineId = 41,
                 rvId = "rv-17", locoId = "loco-17", generation = 1 }))
+            utilitySnapshot = {
+                rvId = "rv-17", generation = 1,
+                water = { tankCount = 2, supplyPumpInstalled = true,
+                    filter = { condition = 1 }, supplyPumpPowered = true,
+                    filterRemainingL = 100 },
+            }
             local generatedContext = context()
             for _, callback in ipairs(Events.OnPreFillWorldObjectContextMenu.handlers) do
                 callback(0, generatedContext, { locomotive }, false)
@@ -766,6 +820,76 @@ class RVSafehouseClaimTests(unittest.TestCase):
             assert(countNamed(internalContext, "Enter RV") == 0)
             assert(countNamed(internalContext, "RV utility panel") == 1)
             assert(countNamed(internalContext, "Claim RV Safehouse") == 1)
+
+            utilitySnapshot = nil
+            local pendingContext = context()
+            ClientMenu.OnPreFillWorldObjectContextMenu(0,
+                pendingContext, {}, false)
+            local pendingClaim = findNamed(pendingContext, "Claim RV Safehouse")
+            assert(pendingClaim.notAvailable == true)
+            assert(pendingClaim.toolTip.description == "Waiting for server snapshot")
+            assert(snapshotRequestCount == 1)
+            local sentBeforePendingClaim = #sentClientCommands
+            pendingClaim.callback(pendingClaim.target)
+            assert(#sentClientCommands == sentBeforePendingClaim)
+            local function receiveUtilitySnapshot(snapshot)
+                utilitySnapshot = snapshot
+                for _, listener in ipairs(Events.OnServerCommand.handlers) do
+                    listener(C.MOD_ID, C.COMMAND_RV_UTILITY_SNAPSHOT, snapshot)
+                end
+            end
+
+            local unavailableWater = {
+                { tankCount = 0, supplyPumpInstalled = true,
+                    filter = { condition = 1 }, supplyPumpPowered = true,
+                    filterRemainingL = 100 },
+                { tankCount = 2, supplyPumpInstalled = false,
+                    filter = { condition = 1 }, supplyPumpPowered = true,
+                    filterRemainingL = 100 },
+                { tankCount = 2, supplyPumpInstalled = true,
+                    filter = nil, supplyPumpPowered = true,
+                    filterRemainingL = 100 },
+                { tankCount = 2, supplyPumpInstalled = true,
+                    filter = { condition = 1 }, supplyPumpPowered = false,
+                    filterRemainingL = 100 },
+                { tankCount = 2, supplyPumpInstalled = true,
+                    filter = { condition = 1 }, supplyPumpPowered = true,
+                    filterRemainingL = 0 },
+            }
+            for _, water in ipairs(unavailableWater) do
+                receiveUtilitySnapshot({
+                    rvId = "rv-17", generation = 1, water = water,
+                })
+                assert(pendingClaim.notAvailable == true)
+                assert(pendingClaim.toolTip.description
+                    == "认领安全屋需要房车供水系统正常运转")
+                pendingClaim.callback(pendingClaim.target)
+                assert(#sentClientCommands == sentBeforePendingClaim)
+            end
+
+            receiveUtilitySnapshot({
+                rvId = "different-rv", generation = 1,
+                water = { tankCount = 2, supplyPumpInstalled = true,
+                    filter = { condition = 1 }, supplyPumpPowered = true,
+                    filterRemainingL = 100 },
+            })
+            assert(pendingClaim.notAvailable == true)
+            assert(pendingClaim.toolTip.description == "Waiting for server snapshot")
+            pendingClaim.callback(pendingClaim.target)
+            assert(#sentClientCommands == sentBeforePendingClaim)
+
+            receiveUtilitySnapshot({
+                rvId = "rv-17", generation = 1,
+                water = { tankCount = 2, supplyPumpInstalled = true,
+                    filter = { condition = 1 }, supplyPumpPowered = true,
+                    filterRemainingL = 100 },
+            })
+            assert(pendingClaim.notAvailable == false)
+            assert(pendingClaim.toolTip == nil)
+            pendingClaim.callback(pendingClaim.target)
+            assert(#sentClientCommands == sentBeforePendingClaim + 1)
+            assert(sentClientCommands[#sentClientCommands][3]
+                == C.COMMAND_RV_SAFEHOUSE_CLAIM)
             """
         )
 

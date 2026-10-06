@@ -7,17 +7,12 @@ local GenerationTransaction = ctx.GenerationTransaction
 local WallReload = require("RailroaderRV/WallReloadProtection/RV_WallReloadProtection")
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local notifyFailure = ctx.notifyFailure
-local generationPositionProof = ctx.generationPositionProof
 local playerIdentity = ctx.playerIdentity
 local resolvePendingPlayer = ctx.resolvePendingPlayer
 
 local function acknowledgeRelocation(player, args)
     -- A wall reload relocation shares this command name; its own acknowledgement
     -- runs first so it is never mistaken for a generation one.
-    if type(WallReload) ~= "table"
-        or type(WallReload.acknowledge) ~= "function" then
-        return false, "wall reload acknowledgement owner is unavailable"
-    end
     local token = type(args) == "table" and args.token or nil
     local wallHandled, wallAccepted, wallReason = WallReload.acknowledge(player,
         token)
@@ -60,26 +55,11 @@ local function acknowledgeFinalRelocation(player, args)
     end
     local resolved, livePlayerOrReason = resolvePendingPlayer(record)
     if not resolved then return false, livePlayerOrReason end
-    local target = record.finalDestination
-    local proofOk, proofOrPosition = generationPositionProof(
-        livePlayerOrReason, target)
-    if not proofOk then
-        local stateText = type(proofOrPosition) == "table"
-            and (tostring(proofOrPosition.x) .. ","
-                .. tostring(proofOrPosition.y) .. ","
-                .. tostring(proofOrPosition.z))
-            or safeErrorText(proofOrPosition)
-        print("[RailroaderRV] final relocation target proof mismatch target="
-            .. tostring(target.x) .. "," .. tostring(target.y) .. ","
-            .. tostring(target.z) .. " state=" .. stateText)
-        return false, "final relocation acknowledgement has no authoritative target proof"
-    end
-    if proofOrPosition == "target-cell" then
-        print("[RailroaderRV] final relocation proof accepted target cell="
-            .. tostring(math.floor(target.x)) .. ","
-            .. tostring(math.floor(target.y)) .. ","
-            .. tostring(target.z) .. " after B42 half-cell normalization")
-    end
+    -- The client ACK only closes its asynchronous teleport action. Its Player
+    -- packet can arrive before the server's player object reflects the new
+    -- position, so the ACK must not be rejected on that transient position.
+    -- finalizeGenerationAfterRelocate performs the authoritative position
+    -- proof on OnTick and reasserts this server-selected target if needed.
     record.player = livePlayerOrReason
     record.finalAcked = true
     return true
@@ -90,33 +70,28 @@ end
 -- Return the owner if it is still online, close the boundary lease and let the
 -- player press the button again. Nothing here retries or defers.
 local function abortGeneration(record, reason)
-    if type(record) ~= "table" then return end
     local reasonText = safeErrorText(reason)
     print("[RailroaderRV] generation aborted identity="
-        .. tostring(record.identity and record.identity.key or "unknown")
+        .. tostring(record.identity.key)
         .. " stage=" .. tostring(record.stage) .. " generation="
         .. tostring(record.generation) .. " reason=" .. reasonText)
     local resolved, livePlayerOrReason = resolvePendingPlayer(record)
     local livePlayer = resolved and livePlayerOrReason or record.player
     record.player = livePlayer
-    if livePlayer ~= nil and type(record.originalPosition) == "table" then
+    if livePlayer ~= nil then
         local returned, returnReason = ctx.sendStagingRelocation(record, "return")
         if not returned then
             print("[RailroaderRV] generation return relocation failed: "
                 .. safeErrorText(returnReason))
         end
     end
-    if livePlayer ~= nil and Boundary
-        and type(Boundary.completeTransition) == "function" then
-        pcall(Boundary.completeTransition, livePlayer, record.token)
+    if livePlayer ~= nil then
+        Boundary.completeTransition(livePlayer, record.token)
     end
-    if livePlayer ~= nil and record.railroader ~= nil
-        and ctx.railroaderFailureHook then
-        pcall(ctx.railroaderFailureHook, livePlayer, record.railroader,
-            reason, record)
+    if livePlayer ~= nil and record.railroader ~= nil then
+        ctx.railroaderFailureHook(livePlayer, record.railroader, reason, record)
     end
-    if type(reason) == "string" and Constants
-        and type(Constants.INVALID_RV_DATA) == "string"
+    if type(reason) == "string"
         and string.find(reason, Constants.INVALID_RV_DATA, 1, true) then
         notifyFailure(livePlayer, reason)
     end

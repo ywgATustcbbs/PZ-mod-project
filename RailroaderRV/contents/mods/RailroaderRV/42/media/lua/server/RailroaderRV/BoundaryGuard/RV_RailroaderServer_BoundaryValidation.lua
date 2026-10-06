@@ -7,7 +7,6 @@ local mapData = ctx.mapData
 local rvRegion = ctx.rvRegion
 local playerPositionInRegion = ctx.playerPositionInRegion
 local recordForLoco = ctx.recordForLoco
-local validRecord = ctx.validRecord
 local serverTransactionMutexStatus = ctx.serverTransactionMutexStatus
 local integer = ctx.integer
 local playerId = ctx.playerId
@@ -31,59 +30,38 @@ end
 -- The boundary service does not care which phase it is in, only that the scope
 -- it must not fight over is owned by somebody else.
 local function wallReloadActive(server, rvId)
-    if type(server) ~= "table"
-        or type(server.isWallReloadTransactionActive) ~= "function" then
-        return true
-    end
-    local callOk, active = pcall(server.isWallReloadTransactionActive, rvId)
-    return not callOk or type(active) ~= "boolean" or active
+    return server.isWallReloadTransactionActive(rvId)
 end
 
 local function validatePlayer(player, suppliedIdentity, knownMap,
     forceRefresh, deferCacheMiss)
-    local identityId, name, identityKey
-    if type(suppliedIdentity) == "table"
-        and type(suppliedIdentity.key) == "string"
-        and type(suppliedIdentity.username) == "string"
-        and integer(suppliedIdentity.onlineId) ~= nil then
-        identityId = integer(suppliedIdentity.onlineId)
-        name = suppliedIdentity.username
-        identityKey = suppliedIdentity.key
-    else
-        identityId, name = playerId(player), playerName(player)
-        if identityId ~= nil and name then
-            identityKey = tostring(identityId) .. ":" .. name
-        end
-    end
-    if identityId == nil or not name
-        or identityKey ~= tostring(identityId) .. ":" .. name then
-        return nil
+    if suppliedIdentity == nil then return nil end
+    local identityId = integer(suppliedIdentity.onlineId)
+    local name = suppliedIdentity.username
+    local identityKey = suppliedIdentity.key
+    if identityId == nil or not name then return nil end
+    if identityKey ~= tostring(identityId) .. ":" .. name then
+        error("RailroaderRV: boundary identity key is inconsistent")
     end
 
-    local server = RailroaderRV and RailroaderRV.Server
+    local server = RailroaderRV.Server
     local generationBusy, wallBusy = serverTransactionMutexStatus()
-    local transactionStateValid = type(generationBusy) == "boolean"
-        and type(wallBusy) == "boolean"
-    local state = Boundary and Boundary._states
-        and Boundary._states[identityKey]
-    local transitionActive = state ~= nil
-        and type(state.leaseToken) == "string"
-        and type(Boundary._tick) == "number"
-        and type(state.leaseUntil) == "number"
-        and state.leaseUntil >= Boundary._tick
+    local state = Boundary._states[identityKey]
+    local transitionActive = false
+    if state ~= nil and state.leaseToken ~= nil then
+        transitionActive = state.leaseUntil >= Boundary._tick
+    end
     local now = Adapter._ticks or Core.getTick()
     local cached = cache[identityKey]
     if not forceRefresh
-        and transactionStateValid
         and generationBusy == false and not transitionActive
-        and type(cached) == "table"
-        and type(cached.validatedAtTick) == "number"
+        and cached ~= nil
         and now >= cached.validatedAtTick
         and (now - cached.validatedAtTick) < CACHE_TTL_TICKS then
         return cached.boundary, cached.record, cached.relation,
             cached.validatedIdentity, cached.manifest
     end
-    if generationBusy ~= false or not transactionStateValid or transitionActive then
+    if generationBusy ~= false or transitionActive then
         cache[identityKey] = nil
         if forceRefresh or not deferCacheMiss then return nil end
         pending[identityKey] = true
@@ -95,48 +73,44 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
         return nil, "validation-deferred"
     end
 
-    local map = type(knownMap) == "table" and knownMap or mapData()
+    local map = knownMap
+    if map == nil then map = mapData() end
     local relation = map.players[name]
-    local record = type(relation) == "table" and relation.locoId ~= nil
+    local record = relation ~= nil and relation.locoId ~= nil
         and recordForLoco(map, relation.locoId) or nil
     local validatedIdentity = {
         username = name, onlineId = identityId, key = identityKey,
     }
     local function diagnose(reason)
-        if type(Boundary.diagnoseGuardState) == "function" then
-            Boundary.diagnoseGuardState(player, validatedIdentity,
-                playerPositionInRegion(player, rvRegion()), relation, record,
-                reason)
-        end
+        Boundary.diagnoseGuardState(player, validatedIdentity,
+            playerPositionInRegion(player, rvRegion()), relation, record,
+            reason)
     end
-    if type(relation) ~= "table" or relation.inside ~= true then
+    if relation == nil or relation.inside ~= true then
         diagnose("mapping-relation-rejected")
         cache[identityKey] = nil
         return nil
     end
-    if not record or not validRecord(record) then
+    if record == nil then
         diagnose("mapping-record-rejected")
         cache[identityKey] = nil
         return nil
     end
-    local rider = type(record.players) == "table" and record.players[name] or nil
-    if type(rider) ~= "table" or rider.inside ~= true then
+    local rider = record.players[name]
+    if rider == nil or rider.inside ~= true then
         diagnose("record-rider-rejected")
         cache[identityKey] = nil
         return nil
     end
-    if not server
-        or type(server.currentRVManifestForBoundary) ~= "function" then
-        cache[identityKey] = nil
-        return nil
-    end
-    local manifestCallOk, manifestAccepted, manifest = pcall(
-        server.currentRVManifestForBoundary, record.locoId, record.generation)
-    if not manifestCallOk or manifestAccepted ~= true
-        or type(manifest) ~= "table" then
+    local manifestAccepted, manifest = server.currentRVManifestForBoundary(
+        record.locoId, record.generation)
+    if manifestAccepted == false then
         diagnose("manifest-rejected")
         cache[identityKey] = nil
         return nil
+    end
+    if manifestAccepted ~= true then
+        error("RailroaderRV: current RV manifest query returned invalid state")
     end
     if wallBusy == true and wallReloadActive(server, record.locoId) then
         diagnose("roof-refresh-transaction-rejected")
@@ -145,12 +119,7 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
     end
     pending[identityKey] = nil
     now = Adapter._ticks or Core.getTick()
-    local boundary = Boundary and Boundary.boundaryFor(record) or nil
-    if not boundary then
-        diagnose("geometry-rejected")
-        cache[identityKey] = nil
-        return nil
-    end
+    local boundary = Boundary.boundaryFor(record)
     if not transitionActive then
         cache[identityKey] = {
             boundary = boundary,
@@ -174,8 +143,7 @@ local function needsRefresh(identityKey, forceRefresh)
     if forceRefresh then return true end
     local cached = cache[identityKey]
     local now = Adapter._ticks or Core.getTick()
-    return type(cached) ~= "table"
-        or type(cached.validatedAtTick) ~= "number"
+    return cached == nil
         or now < cached.validatedAtTick
         or (now - cached.validatedAtTick) >= REFRESH_TICKS
 end
@@ -190,15 +158,17 @@ function Adapter.prewarmCurrentBoundaryPlayer(player, knownMap, forceRefresh)
 end
 
 function Adapter.prewarmCurrentBoundaryPlayers(knownMap, knownPlayers)
-    local generationBusy, roofBusy = serverTransactionMutexStatus()
-    if generationBusy ~= false or type(roofBusy) ~= "boolean" then return false end
+    local generationBusy = serverTransactionMutexStatus()
+    if generationBusy ~= false then return false end
     local now = Adapter._ticks or Core.getTick()
     if now < prewarmAfterTick then return false end
     prewarmAfterTick = now + PREWARM_RETRY_TICKS
     local candidates = knownPlayers
-    if type(candidates) ~= "table" then
+    if candidates == nil then
         candidates = {}
-        local players, region = onlinePlayersSnapshot(), rvRegion()
+        local players, snapshotOk = onlinePlayersSnapshot()
+        if not snapshotOk then return false end
+        local region = rvRegion()
         for i = 1, #players do
             local player = players[i]
             if playerPositionInRegion(player, region) then

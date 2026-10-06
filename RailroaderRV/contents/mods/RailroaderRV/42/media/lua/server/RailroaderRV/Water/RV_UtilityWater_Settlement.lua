@@ -12,12 +12,6 @@ local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 
 local M = {}
 
-local function filterLiters(water)
-    if water.filter == nil then return 0 end
-    return W.FILTER_CAPACITY_L * water.filter.condition
-        / W.FILTER_CONDITION_MAX
-end
-
 local function findProxy(square, identity, role)
     local matches = {}
     local objects = World.squareSnapshot(square)
@@ -103,7 +97,7 @@ local function addContainerDelta(water, intent, supplyOpen, capacityL,
         fluidContainer:getAmount(),
         math.max(0, capacityL - water.centralL))
     if kind == "tainted" then
-        requestL = math.min(requestL, filterLiters(water))
+        requestL = math.min(requestL, W.remainingFilterLiters(water))
     end
     if requestL <= 0 then return end
 
@@ -133,7 +127,7 @@ local function addNaturalDelta(water, intent, supplyOpen, capacityL,
         source:getFluidAmount(),
         math.max(0, capacityL - water.centralL))
     if kind == "tainted" then
-        requestL = math.min(requestL, filterLiters(water))
+        requestL = math.min(requestL, W.remainingFilterLiters(water))
     end
     if requestL <= 0 then return end
 
@@ -152,7 +146,7 @@ end
 
 local function updateFilter(water, acceptedL)
     if acceptedL <= 0 then return end
-    local beforeL = filterLiters(water)
+    local beforeL = W.remainingFilterLiters(water)
     water.filter.condition = (beforeL - acceptedL)
         * W.FILTER_CONDITION_MAX / W.FILTER_CAPACITY_L
 end
@@ -163,13 +157,15 @@ local function settleManualAndAuto(water, capacityL, supplyOpen, manual)
     water.centralL = water.centralL + cleanAcceptedL
 
     local taintedAcceptedL = math.min(manual.tainted,
-        math.max(0, capacityL - water.centralL), filterLiters(water))
+        math.max(0, capacityL - water.centralL),
+        W.remainingFilterLiters(water))
     water.centralL = water.centralL + taintedAcceptedL
     updateFilter(water, taintedAcceptedL)
 
     if supplyOpen and water.filter then
         local autoAcceptedL = math.min(water.autoTankL,
-            math.max(0, capacityL - water.centralL), filterLiters(water))
+            math.max(0, capacityL - water.centralL),
+            W.remainingFilterLiters(water))
         water.centralL = water.centralL + autoAcceptedL
         water.autoTankL = water.autoTankL - autoAcceptedL
         updateFilter(water, autoAcceptedL)

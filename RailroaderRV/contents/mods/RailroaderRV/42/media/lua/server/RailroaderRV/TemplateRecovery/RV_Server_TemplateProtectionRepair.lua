@@ -26,10 +26,6 @@ local function integer(value)
     return number
 end
 
-local function coordinateKey(x, y, z)
-    return tostring(x) .. "," .. tostring(y) .. "," .. tostring(z)
-end
-
 -- Template-derived protection map: one entry per template object, keyed by its
 -- template XY cell. The world transform of an entry is always derived from the
 -- current boundary anchor, so nothing here is bound to an RV or generation.
@@ -125,7 +121,8 @@ local function templateEntriesAt(boundary, anchor, edgeMap, x, y, template)
     local entriesByCell = entriesByCellByTemplate[template.metadata.id]
     local capturedEntries = entriesByCell[templateCellKey(templateX, templateY)]
     local entries = {}
-    for index = 1, #(capturedEntries or {}) do
+    if capturedEntries == nil then return entries end
+    for index = 1, #capturedEntries do
         local captured = capturedEntries[index]
         local worldZ = anchor.z + captured.z
         if worldZ >= boundary.managed.minZ
@@ -178,10 +175,12 @@ local function isProtectedCell(boundary, x, y)
                 return true
             end
             local entries = entriesByCell[templateCellKey(cellX, cellY)]
-            for index = 1, #(entries or {}) do
-                local captured = entries[index]
-                if captured.z == cellZ and captured.protected then
-                    return true
+            if entries ~= nil then
+                for index = 1, #entries do
+                    local captured = entries[index]
+                    if captured.z == cellZ and captured.protected then
+                        return true
+                    end
                 end
             end
         end
@@ -194,29 +193,35 @@ end
 -- from the template object it replaces.
 local function objectTag(object)
     local data = ServerWorld.objectModData(object)
-    local tag = data and data.RailroaderRV or nil
-    if type(tag) ~= "table" or tag.owner ~= Constants.MOD_ID then
-        return nil
+    if data == nil then return nil end
+    local tag = data.RailroaderRV
+    if tag == nil then return nil end
+    if type(tag) ~= "table" then
+        error("RailroaderRV: generated object tag is not a table")
     end
+    if tag.owner ~= Constants.MOD_ID then return nil end
     return tag
 end
 
 local function objectTemplateIndex(object)
     local tag = objectTag(object)
-    return tag and integer(tag.templateIndex) or nil
+    if tag == nil or tag.playerBuilt == true
+        or tag.role == RoomTemplate.PROXY_ROLES.power
+        or tag.role == RoomTemplate.PROXY_ROLES.water then
+        return nil
+    end
+    local templateIndex = tag.templateIndex
+    if type(templateIndex) ~= "number" or templateIndex < 1
+        or math.floor(templateIndex) ~= templateIndex then
+        error("RailroaderRV: generated template object has no template index")
+    end
+    return templateIndex
 end
 
 local function isUtilityProxyObject(object)
     local tag = objectTag(object)
     return tag and (tag.role == RoomTemplate.PROXY_ROLES.power
         or tag.role == RoomTemplate.PROXY_ROLES.water)
-end
-
-local function objectCell(object)
-    local xOk, x = ServerUtil.invoke(object, "getX")
-    local yOk, y = ServerUtil.invoke(object, "getY")
-    local zOk, z = ServerUtil.invoke(object, "getZ")
-    return xOk and yOk and zOk and integer(x), integer(y), integer(z)
 end
 
 local function isOpenableClass(className)
@@ -273,7 +278,7 @@ local function objectMatchesStoredState(object, expected)
         blockAllTheSquare = "isBlockAllTheSquare",
         doRender = "getDoRender", thumpable = "isThumpable",
     }
-    for key, value in pairs(expected.state or {}) do
+    for key, value in pairs(expected.state) do
         local getter = stateGetters[key]
         if not getter then return false end
         local stateOk, state = ServerUtil.invoke(object, getter)
@@ -326,10 +331,10 @@ local function isSpareObject(object, entries, sideHostDoorOrWindow)
         if entry.protected and entry.templateIndex == templateIndex
             and objectMatchesTemplate(object, entry)
             and objectHasShellIdentity(object, entry.edge) then
-            return false, templateIndex
+            return false
         end
     end
-    return true, templateIndex
+    return true
 end
 
 local function isBloodOrSplat(object)
@@ -350,8 +355,9 @@ local function protectedWorldObject(object)
         or ServerWorld.isVehicleObject(object) then
         return true
     end
+    -- Zombie giblets are transient IsoPhysicsObjects, not removable tile objects.
     local classes = { "IsoWorldInventoryObject", "IsoZombie", "IsoAnimal",
-        "IsoDeadBody" }
+        "IsoDeadBody", "IsoZombieGiblets" }
     for i = 1, #classes do
         if ServerUtil.classInstance(object, classes[i]) then return true end
     end
@@ -381,12 +387,7 @@ local function hasStoredContainerItems(object)
 end
 
 local function squareContainsObject(square, object)
-    local containsOk, present = pcall(ServerWorld.squareContainsObject, square,
-        object)
-    if not containsOk then
-        error("RailroaderRV: template-protection repair square membership lookup failed")
-    end
-    return present == true
+    return ServerWorld.squareContainsObject(square, object) == true
 end
 
 -- The removal marker is read by the RoofRefresh removal filter; it stays set
@@ -402,8 +403,7 @@ local function removeObject(square, object)
         object, false, false)
     server._templateProtectionRepairRemovalObject = previous
     if not removeOk then
-        error("RailroaderRV: template-protection repair removal failed: "
-            .. tostring(removeError))
+        error(removeError, 0)
     end
     if squareContainsObject(square, object) then
         error("RailroaderRV: template-protection repair removal was not observable")
@@ -412,21 +412,11 @@ end
 
 -- Remove non-template objects from protected layers; the restore pass then
 -- recreates any missing protected template entries on this cell.
-local function removeRepairSpareObject(square, object, templateIndex)
-    local x, y, z = objectCell(object)
-    if not x or not y or not z then
-        error("RailroaderRV: template-protection repair target has no coordinate")
-    end
+local function removeRepairSpareObject(square, object)
     if hasStoredContainerItems(object) then
-        print("[RailroaderRV] template-protection repair retained "
-            .. coordinateKey(x, y, z)
-            .. ": container contents are present")
         return false
     end
     removeObject(square, object)
-    print("[RailroaderRV] template-protection repair removed non-template object "
-        .. "templateIndex=" .. tostring(templateIndex) .. " at "
-        .. coordinateKey(x, y, z))
     return true
 end
 
@@ -447,7 +437,7 @@ local function restoreEntry(cell, square, objects, entry, boundary)
             if entry.name == "Wooden Door Frame" then
                 -- Re-applying the frame state keeps pass-through set on a frame
                 -- that survived, and reactivates a replaced one.
-                pcall(configureCapturedDoorFrame, object, entry)
+                configureCapturedDoorFrame(object, entry)
             end
             return
         end
@@ -457,8 +447,8 @@ local function restoreEntry(cell, square, objects, entry, boundary)
 end
 
 local function repairTemplateProtectionCell(player, expectedBoundary, x, y)
-    local contextOk, boundary = pcall(Boundary.boundaryForPlayer, player)
-    if not contextOk or boundary ~= expectedBoundary then
+    local boundary = Boundary.boundaryForPlayer(player)
+    if boundary ~= expectedBoundary then
         return false, "queued RV generation is stale"
     end
     local template = RoomTemplate.get(boundary.templateId)
@@ -471,22 +461,13 @@ local function repairTemplateProtectionCell(player, expectedBoundary, x, y)
         shellEdgeMap(boundary, template), x, y, template)
     if #entries == 0 and not proxyColumn then return false end
 
-    local cellOk, cell = pcall(ServerWorld.getCellForPlayer, player)
-    if not cellOk or not cell then
-        return false, "current player cell is unavailable"
-    end
+    local cell = ServerWorld.getCellForPlayer(player)
 
     local repaired = false
     for z = Constants.WORLD_MIN_Z, Constants.WORLD_MAX_Z do
-        local squareOk, square = pcall(ServerWorld.getSquare, cell, x, y, z)
-        if not squareOk then
-            return false, "template-protection-repair square lookup failed"
-        end
+        local square = ServerWorld.getSquare(cell, x, y, z)
         if square then
-            local objectsOk, objects = pcall(ServerWorld.squareSnapshot, square)
-            if not objectsOk or type(objects) ~= "table" then
-                return false, "template-protection-repair object snapshot failed"
-            end
+            local objects = ServerWorld.squareSnapshot(square)
             local layerBuildable = TemplateGeometry.isBuildable({ x = x,
                 y = y, z = z }, anchor, template)
             local preserveOrdinaryObjects = buildable or layerBuildable
@@ -499,10 +480,9 @@ local function repairTemplateProtectionCell(player, expectedBoundary, x, y)
                     and not protectedWorldObject(object) then
                     local sideHostDoorOrWindow = isCabSideDoorOrWindow(object,
                         x, y, z, anchor, template)
-                    local spare, templateIndex = isSpareObject(object,
-                        entries, sideHostDoorOrWindow)
-                    if spare and removeRepairSpareObject(square, object,
-                        templateIndex) then
+                    local spare = isSpareObject(object, entries,
+                        sideHostDoorOrWindow)
+                    if spare and removeRepairSpareObject(square, object) then
                         repaired = true
                         removedOnLayer = true
                     end
@@ -520,11 +500,7 @@ local function repairTemplateProtectionCell(player, expectedBoundary, x, y)
                         repaired = true
                         -- Read the square again so an entry restored earlier on
                         -- this layer is no longer seen as missing.
-                        local liveOk, live = pcall(ServerWorld.squareSnapshot, square)
-                        if not liveOk or type(live) ~= "table" then
-                            return false, "template-protection-repair object snapshot failed"
-                        end
-                        objects = live
+                        objects = ServerWorld.squareSnapshot(square)
                     end
                 end
             end

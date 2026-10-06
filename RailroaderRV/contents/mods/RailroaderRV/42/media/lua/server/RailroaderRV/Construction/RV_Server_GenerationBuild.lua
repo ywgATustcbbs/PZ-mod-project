@@ -31,14 +31,6 @@ safeErrorText = function(err)
     return text
 end
 
--- Generation has no durable mutation record.  Concurrency, phase and failure
--- state live in the process-local transaction (RV_Server_GenerationTransaction);
--- every geometric or schema fact is derived from the compiled template.
-local function setGenerationPhase(generation, phase)
-    print("[RailroaderRV] generation=" .. tostring(generation)
-        .. " phase=" .. tostring(phase))
-end
-
 local function recalcAndCheckStructure(cell, bounds, layout)
     local seen = {}
     local checked = 0
@@ -89,8 +81,7 @@ local function recalcAndCheckStructure(cell, bounds, layout)
     return checked
 end
 
-local function clearGenerationArea(cell, bounds, generation)
-    setGenerationPhase(generation, "CLEARING")
+local function clearGenerationArea(cell, bounds)
     -- Scan the full managed bounds, including remnants from any failed earlier
     -- attempt. A new unmapped generation starts with this complete clear pass.
     ServerSchema.walkBounds(cell, bounds, function(square)
@@ -119,7 +110,6 @@ local function buildGeneration(player, layout, bounds, generation)
 
     local powerProxyPoint = layout.powerProxy
 
-    setGenerationPhase(generation, "CAPTURED_TEMPLATE")
     for i = 1, #templateObjects do
         local entry = templateObjects[i]
         local square = ServerWorld.getSquare(cell, entry.x, entry.y, entry.z)
@@ -130,10 +120,8 @@ local function buildGeneration(player, layout, bounds, generation)
             shellByTemplateIndex[i])
     end
 
-    setGenerationPhase(generation, "STRUCTURE_RECALC")
     recalcAndCheckStructure(cell, bounds, layout)
 
-    setGenerationPhase(generation, "UTILITY_PROXIES")
     local proxySquare = ServerWorld.getSquare(cell, powerProxyPoint.x,
         powerProxyPoint.y, powerProxyPoint.z)
     if not proxySquare then
@@ -157,7 +145,6 @@ local rawBuildGeneration = buildGeneration
 local construction = ConstructionModule.new(ctx, {
     clear = rawClearGenerationArea,
     build = rawBuildGeneration,
-    setGenerationPhase = setGenerationPhase,
 })
 clearGenerationArea = construction.clearCurrentGeneration
 buildGeneration = construction.buildCurrentGeneration
@@ -166,11 +153,8 @@ buildGeneration = construction.buildCurrentGeneration
 -- coordinates and stable identities only while this process is alive; no
 -- intermediate relocation record is read from or written to ModData.
 
-ctx.setGenerationPhase = setGenerationPhase
 ctx.clearGenerationArea = clearGenerationArea
 ctx.buildGeneration = buildGeneration
-if type(ctx.RV) == "table" and type(ctx.RV.Server) == "table" then
-    ctx.RV.Server.Construction = construction
-end
+ctx.RV.Server.Construction = construction
 ctx.safeErrorText = safeErrorText
 end

@@ -38,7 +38,7 @@ local function currentTick()
 end
 
 local function serverFacade()
-    return RailroaderRV and RailroaderRV.Server or nil
+    return RailroaderRV.Server
 end
 
 local function operationKey(rvId, generation)
@@ -108,13 +108,10 @@ local function currentContext(op, player, requireInside)
         end
     end
     local api = serverFacade()
-    if not api or type(api.currentRVManifestForBoundary) ~= "function" then
-        return false, "RV manifest service is unavailable"
-    end
-    local manifestOk, accepted, manifest = pcall(
-        api.currentRVManifestForBoundary, op.rvId, op.generation)
-    if not manifestOk or accepted ~= true or type(manifest) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
+    local accepted, manifest = api.currentRVManifestForBoundary(op.rvId,
+        op.generation)
+    if accepted == false then
+        return false, manifest
     end
     return true
 end
@@ -135,11 +132,9 @@ end
 -- packet, so an authoritative move is always teleportTo plus the official
 -- setters.
 local function applyTeleport(player, target, temporary)
-    if type(target) ~= "table" then return false end
     local x = temporary and target.x + 0.5 or target.x
     local y = temporary and target.y + 0.5 or target.y
     local api = serverFacade()
-    if not api or type(api.teleportToPosition) ~= "function" then return false end
     return api.teleportToPosition(player, { x = x, y = y, z = target.z }) == true
         and ServerUtil.callSucceeded(player, "setX", x)
         and ServerUtil.callSucceeded(player, "setY", y)
@@ -162,22 +157,17 @@ local function sendRelocate(op, member, target, phase)
 end
 
 local function armLease(op, member)
-    if type(Boundary.beginTransition) ~= "function" then return false end
-    local ok, armed = pcall(Boundary.beginTransition, member.player, op.rvId,
+    local armed = Boundary.beginTransition(member.player, op.rvId,
         op.generation, op.token, "wall-reload")
-    if not ok or armed ~= true then return false end
+    if armed ~= true then return false end
     member.leaseArmed = true
-    if type(Boundary.extendTransition) == "function" then
-        pcall(Boundary.extendTransition, member.player, op.token, op.deadlineTick)
-    end
+    Boundary.extendTransition(member.player, op.token, op.deadlineTick)
     return true
 end
 
 local function completeLease(op, member)
-    if type(Boundary.completeTransition) ~= "function" then return false end
-    local ok, completed = pcall(Boundary.completeTransition, member.player,
-        op.token)
-    if not ok or completed ~= true then return false end
+    local completed = Boundary.completeTransition(member.player, op.token)
+    if completed ~= true then return false end
     member.leaseArmed = false
     return true
 end
@@ -186,12 +176,12 @@ end
 -- whose stable identity is no longer present has disconnected or died.
 local function livePlayersByKey()
     local result = {}
-    local adapter = RailroaderRV and RailroaderRV.RailroaderServer or nil
-    if not adapter or type(adapter.onlinePlayersSnapshot) ~= "function" then
-        return result
+    local adapter = RailroaderRV.RailroaderServer
+    local players, snapshotOk = adapter.onlinePlayersSnapshot()
+    if snapshotOk == false then return nil end
+    if snapshotOk ~= true then
+        error("RailroaderRV: online player snapshot returned invalid status")
     end
-    local ok, players = pcall(adapter.onlinePlayersSnapshot)
-    if not ok or type(players) ~= "table" then return result end
     for i = 1, #players do
         local player = players[i]
         if player ~= nil then
@@ -230,8 +220,7 @@ end
 
 -- Every member still online is put back on its captured coordinate as best
 -- effort; the operation is then cleared and no completion callback runs.
-local function finishFailure(op, reason)
-    local live = livePlayersByKey()
+local function finishFailure(op, reason, live)
     local returned, unreturned = 0, 0
     for i = 1, #op.members do
         local member = op.members[i]
@@ -260,49 +249,39 @@ end
 local function finishDone(op)
     local completed = op.onComplete
     local representative = op.members[1] and op.members[1].player or nil
-    local bounds = op.manifest and op.manifest.bounds or nil
-    local memberCount = #op.members
+    local bounds = op.manifest.bounds
     clearOperation(op)
-    print("[RailroaderRV] wall reload operation complete rvId=" .. op.rvId
-        .. " generation=" .. tostring(op.generation) .. " members="
-        .. tostring(memberCount))
-    if type(completed) == "function" then
-        -- The completion callback is the exterior-wall caller's own follow-up
-        -- step; a failure inside it belongs to that caller.
-        completed(representative, bounds, {
-            rvId = op.rvId,
-            generation = op.generation,
-        })
-    end
+    -- The completion callback is the exterior-wall caller's own follow-up
+    -- step; a failure inside it belongs to that caller.
+    completed(representative, bounds, {
+        rvId = op.rvId,
+        generation = op.generation,
+    })
 end
 
-local function advanceMoveOut(op)
+local function advanceMoveOut(op, live)
     for i = 1, #op.members do
         local member = op.members[i]
         local contextOk, contextOrReason = currentContext(op, member.player, true)
-        if not contextOk then return finishFailure(op, contextOrReason) end
+        if not contextOk then return finishFailure(op, contextOrReason, live) end
         local target = {
             x = op.destination.x, y = op.destination.y, z = op.destination.z,
         }
         if not armLease(op, member) then
             return finishFailure(op,
-                "wall reload boundary lease could not be armed")
+                "wall reload boundary lease could not be armed", live)
         end
         if not sendRelocate(op, member, target, "temporary")
             or not applyTeleport(member.player, target, true) then
-            return finishFailure(op, "wall reload move-out teleport failed")
+            return finishFailure(op, "wall reload move-out teleport failed", live)
         end
     end
     op.phase = PHASE_WAIT_RELOAD
-    print("[RailroaderRV] wall reload move-out queued rvId=" .. op.rvId
-        .. " members=" .. tostring(#op.members) .. " target="
-        .. tostring(op.destination.x) .. "," .. tostring(op.destination.y) .. ","
-        .. tostring(op.destination.z))
 end
 
 -- One client "applied" signal plus the departure proof per member.  The single
 -- operation deadline covers the whole wait.
-local function advanceWaitReload(op)
+local function advanceWaitReload(op, live)
     for i = 1, #op.members do
         local member = op.members[i]
         if member.applied ~= true then return end
@@ -311,28 +290,26 @@ local function advanceWaitReload(op)
     for i = 1, #op.members do
         local member = op.members[i]
         local contextOk, contextOrReason = currentContext(op, member.player, false)
-        if not contextOk then return finishFailure(op, contextOrReason) end
+        if not contextOk then return finishFailure(op, contextOrReason, live) end
         local target = {
             x = member.captured.x, y = member.captured.y, z = member.captured.z,
         }
         if not sendRelocate(op, member, target, "return")
             or not applyTeleport(member.player, target, false) then
-            return finishFailure(op, "wall reload return teleport failed")
+            return finishFailure(op, "wall reload return teleport failed", live)
         end
     end
     op.phase = PHASE_RETURN
-    print("[RailroaderRV] wall reload return queued rvId=" .. op.rvId
-        .. " members=" .. tostring(#op.members))
 end
 
-local function advanceReturn(op)
+local function advanceReturn(op, live)
     for i = 1, #op.members do
         local member = op.members[i]
         local contextOk, contextOrReason = currentContext(op, member.player, false)
-        if not contextOk then return finishFailure(op, contextOrReason) end
+        if not contextOk then return finishFailure(op, contextOrReason, live) end
         if not completeLease(op, member) then
             return finishFailure(op,
-                "wall reload boundary transition could not be completed")
+                "wall reload boundary transition could not be completed", live)
         end
     end
     finishDone(op)
@@ -344,36 +321,37 @@ function M.onTick()
     if lastTick == now then return end
     lastTick = now
     local live = livePlayersByKey()
+    if live == nil then return end
     for _, op in pairs(operations) do
         if operations[op.key] == op then
             local removed = rebindMembers(op, live)
             if #op.members == 0 then
                 clearOperation(op)
-                print("[RailroaderRV] wall reload operation abandoned rvId="
-                    .. op.rvId .. " reason=no-member-online")
             elseif #removed > 0 then
                 finishFailure(op, "wall reload member left the operation: "
-                    .. table.concat(removed, ","))
+                    .. table.concat(removed, ","), live)
             elseif now > op.deadlineTick then
                 finishFailure(op, "wall reload operation timed out in phase "
-                    .. op.phase)
+                    .. op.phase, live)
             else
                 for i = 1, #op.members do
                     local member = op.members[i]
-                    if member.leaseArmed
-                        and type(Boundary.extendTransition) == "function" then
-                        pcall(Boundary.extendTransition, member.player, op.token,
+                    if member.leaseArmed then
+                        Boundary.extendTransition(member.player, op.token,
                             op.deadlineTick)
                     end
                 end
                 if op.phase == PHASE_MOVE_OUT then
-                    advanceMoveOut(op)
+                    advanceMoveOut(op, live)
                 elseif op.phase == PHASE_WAIT_RELOAD then
-                    advanceWaitReload(op)
+                    advanceWaitReload(op, live)
                 elseif op.phase == PHASE_RETURN then
-                    advanceReturn(op)
+                    advanceReturn(op, live)
                 else
-                    finishFailure(op, "wall reload phase is invalid")
+                    local phaseError = "RailroaderRV: unknown wall reload phase "
+                        .. tostring(op.phase)
+                    finishFailure(op, phaseError, live)
+                    error(phaseError, 0)
                 end
             end
         end
@@ -456,28 +434,19 @@ function M.begin(request, onComplete)
         return false, "a wall reload operation is already active for this RV"
     end
     local api = serverFacade()
-    if not api then return false, "RV server facade is unavailable" end
-    if type(api.isGenerationTransactionActive) ~= "function" then
-        return false, "RV generation transaction state is unavailable"
-    end
-    local generationOk, generationActive = pcall(
-        api.isGenerationTransactionActive)
-    if not generationOk or generationActive ~= false then
+    local generationActive = api.isGenerationTransactionActive()
+    if generationActive == true then
         return false, "RV generation transaction is in progress"
     end
-    if type(api.currentRVManifestForBoundary) ~= "function" then
-        return false, Constants.INVALID_RV_DATA
+    if generationActive ~= false then
+        error("RailroaderRV: generation transaction query returned invalid state")
     end
-    local manifestCallOk, accepted, manifest = pcall(
-        api.currentRVManifestForBoundary, request.rvId,
+    local accepted, manifest = api.currentRVManifestForBoundary(request.rvId,
         ServerUtil.integer(request.generation))
-    if not manifestCallOk or accepted ~= true or type(manifest) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
+    if accepted == false then
+        return false, manifest
     end
     local boundary = manifest.boundary
-    if type(boundary) ~= "table" or type(boundary.managed) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
     local destinationOk, destination = temporaryDestination(boundary)
     if not destinationOk then return false, destination end
     local capturedOk, members = captureMembers(boundary)
@@ -501,10 +470,6 @@ function M.begin(request, onComplete)
             .. tostring(generation) .. ":" .. tostring(currentTick()),
     }
     operations[key] = op
-    print("[RailroaderRV] wall reload operation begin rvId=" .. op.rvId
-        .. " generation=" .. tostring(generation) .. " members="
-        .. tostring(#members) .. " target=" .. tostring(destination.x) .. ","
-        .. tostring(destination.y) .. "," .. tostring(destination.z))
     return true, op.token
 end
 

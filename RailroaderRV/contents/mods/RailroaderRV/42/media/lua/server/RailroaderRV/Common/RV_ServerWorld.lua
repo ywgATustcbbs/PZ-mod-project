@@ -185,13 +185,6 @@ local function isVehicleObject(object)
     return ok and result == true
 end
 
-local function deregisterSpecialSystems(object)
-    -- Utility objects are ordinary IsoObject/IsoThumpable instances and do
-    -- not participate in any global collection system.  Object removal is
-    -- owned by transmitRemoveItemFromSquare below.
-    return object
-end
-
 local function removeCorpse(square, corpse)
     -- B42.20's signature is removeCorpse(IsoDeadBody, boolean).  Passing
     -- false lets the server emit RemoveCorpseFromMap; the old one-argument
@@ -340,7 +333,6 @@ local function removeGenericObject(square, object, restoreTaggedFloors,
     if restoreTaggedFloors and floor == object and restoreTaggedFloor(square, object) then
         return
     end
-    deregisterSpecialSystems(object)
     if safelyRemoveMultiSquare == nil then safelyRemoveMultiSquare = true end
     local removeOk, removeIndex = ServerUtil.invoke(square,
         "transmitRemoveItemFromSquare", object, safelyRemoveMultiSquare)
@@ -396,6 +388,11 @@ local function removeObject(square, object, restoreTaggedFloors)
     end
     if ServerUtil.classInstance(object, "IsoDeadBody") then
         removeCorpse(square, object)
+        return
+    end
+    -- Transient giblets are moving physics effects, not square tile objects;
+    -- IsoGridSquare.transmitRemoveItemFromSquare rejects them from its tile list.
+    if ServerUtil.classInstance(object, "IsoZombieGiblets") then
         return
     end
     -- clearSquare already visits each square in the managed bounds. Remove

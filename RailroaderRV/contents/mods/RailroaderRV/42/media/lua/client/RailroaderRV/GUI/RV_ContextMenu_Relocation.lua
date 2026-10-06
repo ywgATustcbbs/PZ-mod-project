@@ -12,13 +12,11 @@ local GENERATION_HALO_RENDER_TEXT = ctx.GENERATION_HALO_RENDER_TEXT
 local COMMAND_REFRESH_ROOM_OWNERSHIP = ctx.COMMAND_REFRESH_ROOM_OWNERSHIP
 local RELOCATION_TIMEOUT_TICKS = ctx.RELOCATION_TIMEOUT_TICKS
 local GENERATION_HALO_REFRESH_TICKS = ctx.GENERATION_HALO_REFRESH_TICKS
-local validRailroaderFinalHint = ctx.validRailroaderFinalHint
 local localPlayerByOnlineId = ctx.localPlayerByOnlineId
 local requestRoomOwnershipScan = ctx.requestRoomOwnershipScan
 local beginRoomOwnershipRefresh = ctx.beginRoomOwnershipRefresh
 local updateRoomOwnershipGuards = ctx.updateRoomOwnershipGuards
 local finiteNumber = ctx.finiteNumber
-local finiteInteger = ctx.finiteInteger
 local pendingFinalRelocation = nil
 
 function Client.requestGenerate(playerObj)
@@ -64,34 +62,24 @@ end
 -- streaming from teleporting to and acknowledging a destination square it has
 -- not loaded yet; the server's relocation timeout bounds the wait.
 local function destinationSquareIsLoaded(x, y, z)
-    local targetX = finiteNumber(x)
-    local targetY = finiteNumber(y)
-    local targetZ = finiteInteger(z)
-    if targetX == nil or targetY == nil or targetZ == nil then
-        return false
-    end
+    local targetX = math.floor(x)
+    local targetY = math.floor(y)
     local cellCallOk, cell = pcall(getCell)
     if not cellCallOk or not cell then
         return false
     end
     local squareCallOk, square = pcall(function()
-        return cell:getGridSquare(math.floor(targetX), math.floor(targetY), targetZ)
+        return cell:getGridSquare(targetX, targetY, z)
     end)
     return squareCallOk and square ~= nil
 end
 
 local function tryApplyFinalRelocation(args, pending)
-    if type(args) ~= "table" then return false end
-    if type(pending) ~= "table" or pending.failed then return false end
+    assert(args.token ~= nil,
+        "RailroaderRV: final relocation token is missing")
     local token = args.token
-    local onlineId = finiteInteger(args.onlineId)
-    local x = finiteNumber(args.x)
-    local y = finiteNumber(args.y)
-    local z = finiteNumber(args.z)
-    if type(token) ~= "string" or token == "" or onlineId == nil
-        or x == nil or y == nil or z == nil or z < -32 or z > 31 then
-        return false
-    end
+    local onlineId = args.onlineId
+    local x, y, z = args.x, args.y, args.z
     local playerObj = localPlayerByOnlineId(onlineId)
     if not playerObj or playerObj:isDead() then
         return false
@@ -105,40 +93,27 @@ local function tryApplyFinalRelocation(args, pending)
             -- because the server owns the relocation timeout.
             return false
         end
-        local teleported, teleportResult = pcall(function()
-            return playerObj:teleportTo(x, y, z)
-        end)
-        if not teleported or teleportResult == false then
-            pending.failed = true
-            return false
-        end
+        playerObj:teleportTo(x, y, z)
         pending.teleported = true
         -- IsoGameCharacter:teleportTo(float,float,int) floors x/y in B42.20.
         -- Restore the server-selected half-cell center with the official
         -- setters before checking the transaction's post-move proof.
-        local exactCallOk = pcall(function()
-            playerObj:setX(x)
-            playerObj:setY(y)
-            playerObj:setZ(z)
-            playerObj:setLastX(x)
-            playerObj:setLastY(y)
-        end)
-        if not exactCallOk then
-            pending.failed = true
-            return false
-        end
+        playerObj:setX(x)
+        playerObj:setY(y)
+        playerObj:setZ(z)
+        playerObj:setLastX(x)
+        playerObj:setLastY(y)
         if type(playerObj.setCurrentSquareFromPosition) == "function" then
             -- teleportTo updates coordinates only. Use the official three-
             -- argument IsoMovingObject overload to refresh the client cache.
-            pcall(function() playerObj:setCurrentSquareFromPosition(x, y, z) end)
+            playerObj:setCurrentSquareFromPosition(x, y, z)
         end
     end
 
-    local xOk, currentX = pcall(function() return playerObj:getX() end)
-    local yOk, currentY = pcall(function() return playerObj:getY() end)
-    local zOk, currentZ = pcall(function() return playerObj:getZ() end)
-    if not xOk or not yOk or not zOk
-        or finiteNumber(currentX) ~= x
+    local currentX = playerObj:getX()
+    local currentY = playerObj:getY()
+    local currentZ = playerObj:getZ()
+    if finiteNumber(currentX) ~= x
         or finiteNumber(currentY) ~= y
         or finiteNumber(currentZ) ~= z then
         return false
@@ -148,12 +123,8 @@ local function tryApplyFinalRelocation(args, pending)
 end
 
 local function sendFinalRelocationAck(playerObj, token)
-    if not playerObj or type(token) ~= "string" or token == "" then
-        return false
-    end
-    local ok = pcall(sendClientCommand, playerObj, C.MOD_ID,
-        COMMAND_FINAL_RELOCATE_ACK, { token = token })
-    return ok
+    sendClientCommand(playerObj, C.MOD_ID, COMMAND_FINAL_RELOCATE_ACK,
+        { token = token })
 end
 
 local function applyFinalRelocation(args)
@@ -171,15 +142,16 @@ local function applyFinalRelocation(args)
     -- OnTick retries while the player remains at staging.
     if tryApplyFinalRelocation(args, pendingFinalRelocation) then
         pendingFinalRelocation.applied = true
-        if sendFinalRelocationAck(localPlayerByOnlineId(
-                finiteInteger(args.onlineId)), args.token) then
+        local playerObj = localPlayerByOnlineId(args.onlineId)
+        if playerObj then
             pendingFinalRelocation = nil
+            sendFinalRelocationAck(playerObj, args.token)
         end
     end
 end
 
 function Client.onServerCommand(module, command, args)
-    if module ~= C.MOD_ID or args == nil then
+    if module ~= C.MOD_ID then
         return
     end
     if command == COMMAND_REFRESH_ROOM_OWNERSHIP then
@@ -190,64 +162,46 @@ function Client.onServerCommand(module, command, args)
         -- Only a server-marked Railroader generation may touch Ride state.
         -- Ordinary technical Generate still uses this generic final teleport,
         -- but must not dismount a locomotive the player happens to occupy.
-        local rv = rawget(_G, "RailroaderRV")
-        local railroaderMenu = rv and rv.RailroaderContextMenu
-        local marked = validRailroaderFinalHint(args)
-        if marked and railroaderMenu
-            and type(railroaderMenu.prepareGenerationRelocation) == "function" then
-            local preparedOk, prepared = pcall(
-                railroaderMenu.prepareGenerationRelocation, args)
-            if not preparedOk or prepared ~= true then return end
+        if args.railroaderTransition == true then
+            RailroaderRV.RailroaderContextMenu.prepareGenerationRelocation(args)
         end
         applyFinalRelocation(args)
         return
     end
     if command ~= COMMAND_RELOCATE then return end
-    print("[RailroaderRV] client relocation command received phase="
-        .. tostring(args.wallReloadPhase or args.generationPhase or "none")
-        .. " onlineId=" .. tostring(args.onlineId)
-        .. " target=" .. tostring(args.x) .. "," .. tostring(args.y)
-        .. "," .. tostring(args.z))
     local token = args.token
-    local onlineId = finiteInteger(args.onlineId)
-    -- Staging targets are integer contract points, but a wall reload return must
-    -- preserve the server-captured fractional x/y/z exactly.  Validate all
-    -- coordinates as finite numbers and use the phase to choose the engine
-    -- call below; never round a return coordinate on the client.
-    local x = finiteNumber(args.x)
-    local y = finiteNumber(args.y)
-    local z = finiteNumber(args.z)
-    local rvId = args.rvId
-    local generation = finiteInteger(args.generation)
+    local onlineId = args.onlineId
+    assert(token ~= nil, "RailroaderRV: relocation token is missing")
+    -- A wall reload return preserves the server-captured fractional x/y/z
+    -- exactly; phase selects the engine call without rounding return values.
+    local x, y, z = args.x, args.y, args.z
     local wallReloadTransition = args.wallReloadTransition == true
     local wallReloadPhase = args.wallReloadPhase
     local generationTransition = args.generationTransition == true
     local generationPhase = args.generationPhase
-    if type(token) ~= "string" or token == "" or onlineId == nil
-        or rvId == nil or tostring(rvId) == "" or generation == nil
-        or generation < 1
-        or x == nil or y == nil or z == nil or z < -32 or z > 31 then
-        return
-    end
-    if wallReloadTransition
-        and wallReloadPhase ~= "temporary" and wallReloadPhase ~= "return" then
-        return
-    end
-    if not wallReloadTransition and wallReloadPhase ~= nil then
-        return
-    end
-    if generationTransition
-        and (generationPhase ~= "temporary" and generationPhase ~= "return"
-            or wallReloadTransition) then
-        return
-    end
-    if not generationTransition and generationPhase ~= nil then
-        return
-    end
     local playerObj = localPlayerByOnlineId(onlineId)
     if not playerObj or playerObj:isDead() then
-        print("[RailroaderRV] client relocation command ignored: local player unavailable")
         return
+    end
+    assert(not (wallReloadTransition and generationTransition),
+        "RailroaderRV: relocation has conflicting transition markers")
+    local exactReturn = false
+    if wallReloadTransition then
+        if wallReloadPhase == "temporary" then
+            exactReturn = false
+        elseif wallReloadPhase == "return" then
+            exactReturn = true
+        else
+            error("RailroaderRV: unknown wall reload relocation phase")
+        end
+    elseif generationTransition then
+        if generationPhase == "temporary" then
+            exactReturn = false
+        elseif generationPhase == "return" then
+            exactReturn = true
+        else
+            error("RailroaderRV: unknown generation relocation phase")
+        end
     end
     if wallReloadTransition and wallReloadPhase == "temporary"
         and type(playerObj.setHaloNote) == "function" then
@@ -270,18 +224,7 @@ function Client.onServerCommand(module, command, args)
     -- server-created marker; ordinary technical Generate must keep this
     -- bridge completely Railroader-agnostic.
     if args.railroaderTransition == true then
-        local rv = rawget(_G, "RailroaderRV")
-        local railroaderMenu = rv and rv.RailroaderContextMenu
-        if railroaderMenu
-            and type(railroaderMenu.prepareGenerationStaging) == "function" then
-            local preparedOk, prepared = pcall(
-                railroaderMenu.prepareGenerationStaging, args)
-            if not preparedOk or prepared ~= true then return end
-        else
-            -- Do not acknowledge a Railroader staging move if its Ride
-            -- transition hook was not loaded; the server will cancel safely.
-            return
-        end
+        RailroaderRV.RailroaderContextMenu.prepareGenerationStaging(args)
     end
     -- The wallReload* names below are the existing Relocate wire fields for the
     -- wall reload operation; keep their wire spelling synchronized with the
@@ -289,18 +232,9 @@ function Client.onServerCommand(module, command, args)
     -- build coordinate.  Do not inspect the target square here: teleportTo is
     -- the streaming trigger for a remote destination, and the server waits for
     -- its complete footprint before mutating the world.
-    local exactReturn = (wallReloadTransition and wallReloadPhase == "return")
-        or (generationTransition and generationPhase == "return")
     local teleportX = exactReturn and x or x + 0.5
     local teleportY = exactReturn and y or y + 0.5
-    local relocated = pcall(function()
-        playerObj:teleportTo(teleportX, teleportY, z)
-    end)
-    if not relocated then
-        print("[RailroaderRV] client relocation teleport failed phase="
-            .. tostring(wallReloadPhase or generationPhase or "none"))
-        return
-    end
+    playerObj:teleportTo(teleportX, teleportY, z)
     -- teleportTo updates coordinates immediately, while IsoMovingObject's
     -- current square is refreshed by a later game update.  Delay the single
     -- applied acknowledgement until OnTick observes that refresh; an immediate
@@ -308,8 +242,6 @@ function Client.onServerCommand(module, command, args)
     ctx.pendingRelocation = {
         token = token,
         onlineId = onlineId,
-        rvId = tostring(rvId),
-        generation = generation,
         x = x,
         y = y,
         z = z,
@@ -319,9 +251,6 @@ function Client.onServerCommand(module, command, args)
         generationPhase = generationPhase,
         ticks = 0,
     }
-    print("[RailroaderRV] client relocation staged phase="
-        .. tostring(wallReloadPhase or generationPhase or "none")
-        .. " target=" .. tostring(x) .. "," .. tostring(y) .. "," .. tostring(z))
 end
 
 function Client.onTick()
@@ -342,9 +271,10 @@ function Client.onTick()
             end
             if finalPending.applied then
                 local args = finalPending.args
-                local playerObj = localPlayerByOnlineId(finiteInteger(args.onlineId))
-                if sendFinalRelocationAck(playerObj, args.token) then
+                local playerObj = localPlayerByOnlineId(args.onlineId)
+                if playerObj then
                     pendingFinalRelocation = nil
+                    sendFinalRelocationAck(playerObj, args.token)
                 end
             end
         end
@@ -410,15 +340,9 @@ function Client.onTick()
     -- missing floor is not a client-side reason to discard the relocation ack.
     -- This is the one applied signal the server waits for; the operation has a
     -- single deadline and no client-side retry.
-    local ackOk = pcall(function()
-        sendClientCommand(playerObj, C.MOD_ID, COMMAND_RELOCATE_ACK,
-            { token = pending.token })
-    end)
-    if ackOk then
-        print("[RailroaderRV] client relocation ACK sent phase="
-            .. tostring(pending.wallReloadPhase or pending.generationPhase or "none"))
-        ctx.pendingRelocation = nil
-    end
+    ctx.pendingRelocation = nil
+    sendClientCommand(playerObj, C.MOD_ID, COMMAND_RELOCATE_ACK,
+        { token = pending.token })
 end
 
 Events.OnServerCommand.Add(Client.onServerCommand)
@@ -437,18 +361,8 @@ end
 -- but the live world/animal menu is owned by the Railroader adapter.  Loading it
 -- here guarantees RV_Server/RV_ContextMenu can keep their existing relocation
 -- handshake while the new menu remains a separate, bounded module.
-local railroaderMenuOk, railroaderMenuError = pcall(require, "RailroaderRV/GUI/RV_RailroaderContextMenu")
-if not railroaderMenuOk then
-    print("[RailroaderRV] Railroader RV context menu unavailable: "
-        .. tostring(railroaderMenuError))
-end
-
-local utilityMenuOk, utilityMenuError = pcall(require,
-    "RailroaderRV/GUI/RV_UtilityContextMenu")
-if not utilityMenuOk then
-    print("[RailroaderRV] utility context menu unavailable: "
-        .. tostring(utilityMenuError))
-end
+require "RailroaderRV/GUI/RV_RailroaderContextMenu"
+require "RailroaderRV/GUI/RV_UtilityContextMenu"
 
 
 end

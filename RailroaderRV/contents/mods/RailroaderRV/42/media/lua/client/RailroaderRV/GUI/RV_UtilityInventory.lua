@@ -24,6 +24,27 @@ function Inventory.appendItems(inventory, result, seen)
     end
 end
 
+function Inventory.addItemOptions(menu, inventory, target, matches, choose,
+        emptyText, labelFor)
+    local items = {}
+    Inventory.appendItems(inventory, items, {})
+    local found = 0
+    for _, item in ipairs(items) do
+        if matches(item) then
+            found = found + 1
+            local selectedItem = item
+            menu:addOption(labelFor(item), target, function(currentTarget)
+                choose(currentTarget, selectedItem)
+            end)
+        end
+    end
+    if found == 0 then
+        local option = menu:addOption(emptyText)
+        option.notAvailable = true
+    end
+    menu:addToUIManager()
+end
+
 function Inventory.waterKind(item)
     if not item then return nil end
     local fluidContainer = item:getFluidContainer()

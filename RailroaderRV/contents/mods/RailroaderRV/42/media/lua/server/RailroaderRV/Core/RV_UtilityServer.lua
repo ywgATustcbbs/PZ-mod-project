@@ -556,17 +556,10 @@ function M.handleCommand(player, args)
 end
 
 local function syncUtilityMappings()
-    local rv = rawget(_G, "RailroaderRV")
-    local adapter = rv and rv.RailroaderServer
-    if not adapter or type(adapter.onlinePlayersSnapshot) ~= "function"
-        or type(adapter.syncUtilityMapping) ~= "function" then
-        return
-    end
-    local listOk, list = pcall(adapter.onlinePlayersSnapshot)
-    if not listOk or type(list) ~= "table" then return end
-    if type(adapter.currentMappingEpoch) ~= "function" then return end
+    local adapter = RailroaderRV.RailroaderServer
+    local list, snapshotOk = adapter.onlinePlayersSnapshot()
+    if not snapshotOk then return end
     local epoch = adapter.currentMappingEpoch()
-    if type(epoch) ~= "number" then return end
     local present = {}
     for i = 1, #list do
         local player = list[i]
@@ -574,11 +567,15 @@ local function syncUtilityMappings()
         if recipientKey then
             present[recipientKey] = true
             local previous = mappingSyncState[recipientKey]
-            if not previous or previous.player ~= player or previous.epoch ~= epoch then
-                local syncOk, accepted, identity = pcall(adapter.syncUtilityMapping, player)
-                if syncOk and accepted == true and type(identity) == "table" then
-                    mappingSyncState[recipientKey] = { player = player, epoch = epoch }
-                end
+            local sameRecipient = previous ~= nil
+                and previous.player == player and previous.epoch == epoch
+            local accepted, identity = adapter.syncUtilityMapping(player,
+                sameRecipient and previous.identity or nil)
+            if accepted == true then
+                mappingSyncState[recipientKey] = {
+                    player = player, epoch = epoch,
+                    identity = identity,
+                }
             end
         end
     end
@@ -588,7 +585,6 @@ local function syncUtilityMappings()
 end
 
 function M.onTick(tick)
-    if type(tick) ~= "number" then return end
     if lastTick == tick then
         return
     end
@@ -625,8 +621,6 @@ function M.settleAndRefreshLoad(identity, player, mappingRecord)
 end
 
 function M.initializeRecord(identity, context)
-    print("[RailroaderRV] utility init begin rv=" .. tostring(identity and identity.rvId)
-        .. " generation=" .. tostring(identity and identity.generation))
     local initialized, recordOrReason = Power.initializeRecord(identity, context)
     if not initialized then
         print("[RailroaderRV] utility init failed stage=power-init reason="
@@ -639,8 +633,6 @@ function M.initializeRecord(identity, context)
     Store.commit(recordOrReason, identity)
     local _, settledRecord = M.settleUtilities(identity, context.record,
         nil, context.player, recordOrReason)
-    print("[RailroaderRV] utility init committed rv=" .. tostring(identity.rvId)
-        .. " generation=" .. tostring(identity.generation))
     if context and context.player then broadcast(context, settledRecord) end
     return true, settledRecord
 end

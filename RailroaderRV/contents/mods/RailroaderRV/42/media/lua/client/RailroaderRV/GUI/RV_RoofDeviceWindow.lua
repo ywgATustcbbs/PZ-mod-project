@@ -33,46 +33,20 @@ local DEVICE_LABELS = {
     WIND = "UI_RailroaderRV_Roof_WindTurbine",
 }
 
-local function mappingKey(value)
-    return Client.mappingKey(value)
-end
-
-local function currentMapping()
-    return RailroaderRV.RailroaderContextMenu.getUtilityMapping()
-end
-
-local function hasCurrentUtilityContext(player, expectedMappingKey)
-    local menu = RailroaderRV.RailroaderContextMenu
-    local mapping = menu.getUtilityMapping()
-    return mapping ~= nil
-        and mappingKey(mapping) == expectedMappingKey
-        and menu.hasUtilityDashboardCandidate(player)
-end
+local mappingKey = Client.mappingKey
 
 local function itemMenu(window, anchor, matches, choose, emptyText)
-    local inventoryItems = {}
-    Inventory.appendItems(window.player:getInventory(), inventoryItems, {})
-    local menu = ISContextMenu.get(window.player:getPlayerNum(), anchor.x, anchor.y)
-    local found = 0
-    for _, item in ipairs(inventoryItems) do
-        if matches(item) then
-            found = found + 1
-            local selectedItem = item
+    Inventory.addItemOptions(
+        ISContextMenu.get(window.player:getPlayerNum(), anchor.x, anchor.y),
+        window.player:getInventory(), window, matches, choose, emptyText,
+        function(item)
             local label = item:getName()
             if Roof.typeForItem(item) == Roof.DEVICE_RAIN then
                 label = label .. " ("
                     .. string.format("%.1f L", item:getFluidContainer():getCapacity()) .. ")"
             end
-            menu:addOption(label, window, function(target)
-                choose(target, selectedItem)
-            end)
-        end
-    end
-    if found == 0 then
-        local option = menu:addOption(emptyText)
-        option.notAvailable = true
-    end
-    menu:addToUIManager()
+            return label
+        end)
 end
 
 local function sameCell(first, second)
@@ -298,11 +272,11 @@ end
 function Window:prerender()
     local dashboardWindow = RailroaderRV.UtilityDashboard.instance
     if dashboardWindow and dashboardWindow.player == self.player
-            and not hasCurrentUtilityContext(dashboardWindow.player,
+            and not Client.hasCurrentUtilityContext(dashboardWindow.player,
                 dashboardWindow.mappingKey) then
         dashboardWindow:close(false)
     end
-    if not hasCurrentUtilityContext(self.player, self.mappingKey) then
+    if not Client.hasCurrentUtilityContext(self.player, self.mappingKey) then
         self:close()
         return
     end
@@ -563,7 +537,8 @@ function Window:new(x, y, width, height, player)
     setmetatable(o, self)
     self.__index = self
     o.player = player
-    o.mappingKey = mappingKey(currentMapping())
+    o.mappingKey = mappingKey(
+        RailroaderRV.RailroaderContextMenu.getUtilityMapping())
     o.templateId = nil
     o.template = nil
     o.roofCells = nil
@@ -582,7 +557,8 @@ function RoofWindow.show(player)
     if RoofWindow.instance then
         local window = RoofWindow.instance
         window.player = player
-        window.mappingKey = mappingKey(currentMapping())
+        window.mappingKey = mappingKey(
+            RailroaderRV.RailroaderContextMenu.getUtilityMapping())
         window:refresh()
         window:setVisible(true)
         window:bringToTop()

@@ -25,12 +25,11 @@ function Construction.new(context, operations)
         end
     end
 
-    function service.clearCurrentGeneration(cell, bounds, generation)
+    function service.clearCurrentGeneration(cell, bounds)
         local pending = generationTransaction.current()
         local player = pending.player
         requireCurrentMutation(player)
-        operations.setGenerationPhase(generation, "CLEARING")
-        return operations.clear(cell, bounds, generation)
+        return operations.clear(cell, bounds)
     end
 
     function service.buildCurrentGeneration(player, layout, bounds, generation)

@@ -5,6 +5,7 @@
     "ContextMenu_RailroaderRV_Enter": "进入房车",
     "ContextMenu_RailroaderRV_Exit": "退出房车",
     "ContextMenu_RailroaderRV_ClaimSafehouse": "认领房车安全屋",
+    "ContextMenu_RailroaderRV_ClaimSafehouse_WaterUnavailable": "认领安全屋需要房车供水系统正常运转",
     "ContextMenu_RailroaderRV_UtilityDashboard": "房车水电系统面板",
     "ContextMenu_RailroaderRV_ConnectWaterSink": "连接水槽供水",
     "ContextMenu_RailroaderRV_DisconnectWaterSink": "断开水槽供水",

@@ -19,7 +19,15 @@ Client.snapshot = nil
 
 function Client.mappingKey(value)
     if value == nil then return nil end
-    return tostring(value.rvId) .. ":" .. tostring(value.generation)
+    return value.rvId .. ":" .. value.generation
+end
+
+function Client.hasCurrentUtilityContext(player, expectedMappingKey)
+    local menu = RailroaderRV.RailroaderContextMenu
+    local mapping = menu.getUtilityMapping()
+    return mapping ~= nil
+        and Client.mappingKey(mapping) == expectedMappingKey
+        and menu.hasUtilityDashboardCandidate(player)
 end
 
 function Client.showFeedback(player, message)
@@ -271,7 +279,7 @@ function Client.clearConnectionState()
 end
 
 function Client.onServerCommand(module, command, args)
-    if module ~= C.MOD_ID or type(args) ~= "table" then return end
+    if module ~= C.MOD_ID then return end
     if command == C.COMMAND_RV_UTILITY_MAPPING then
         local previousKey = Client.mappingKey(
             RailroaderRV.RailroaderContextMenu.getUtilityMapping())

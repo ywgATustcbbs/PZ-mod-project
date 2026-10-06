@@ -38,21 +38,7 @@ local function itemDisplayName(fullType)
     return getItemNameFromFullType(fullType)
 end
 
-local function mappingKey(value)
-    return Client.mappingKey(value)
-end
-
-local function currentUtilityMapping()
-    return RailroaderRV.RailroaderContextMenu.getUtilityMapping()
-end
-
-local function hasCurrentUtilityContext(player, expectedMappingKey)
-    local menu = RailroaderRV.RailroaderContextMenu
-    local mapping = menu.getUtilityMapping()
-    return mapping ~= nil
-        and mappingKey(mapping) == expectedMappingKey
-        and menu.hasUtilityDashboardCandidate(player)
-end
+local mappingKey = Client.mappingKey
 
 local function fluidFuel(item)
     if type(item.getFluidContainer) ~= "function" then return false end
@@ -107,24 +93,10 @@ end
 
 local function itemMenu(window, anchor, matches, choose, emptyText, labelFor)
     local player = window.player
-    local inventoryItems = {}
-    Inventory.appendItems(player:getInventory(), inventoryItems, {})
-    local menu = ISContextMenu.get(player:getPlayerNum(), anchor.x, anchor.y)
-    local found = 0
-    for _, item in ipairs(inventoryItems) do
-        if matches(item) then
-            found = found + 1
-            local selectedItem = item
-            menu:addOption(labelFor and labelFor(item) or itemLabel(item), window, function(target)
-                choose(target, selectedItem)
-            end)
-        end
-    end
-    if found == 0 then
-        local option = menu:addOption(emptyText)
-        option.notAvailable = true
-    end
-    menu:addToUIManager()
+    Inventory.addItemOptions(
+        ISContextMenu.get(player:getPlayerNum(), anchor.x, anchor.y),
+        player:getInventory(), window, matches, choose, emptyText,
+        labelFor or itemLabel)
 end
 
 local PowerList = ISScrollingListBox:derive("RVUtilityPowerList")
@@ -1040,7 +1012,7 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
     end
 
     function Window:prerender()
-        if not hasCurrentUtilityContext(self.player, self.mappingKey) then
+        if not Client.hasCurrentUtilityContext(self.player, self.mappingKey) then
             self:close(false)
             return
         end
@@ -1338,7 +1310,8 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
         self.__index = self
         o.player = player
         o.activeWaterAction = nil
-        o.mappingKey = mappingKey(currentUtilityMapping())
+        o.mappingKey = mappingKey(
+            RailroaderRV.RailroaderContextMenu.getUtilityMapping())
         o:setResizable(false)
         o:setTitle(getText("UI_RailroaderRV_Utility_Title"))
         return o
@@ -1362,7 +1335,8 @@ function Dashboard.show(player)
     if not player then return false end
     if Dashboard.instance then
         Dashboard.instance.player = player
-        Dashboard.instance.mappingKey = mappingKey(currentUtilityMapping())
+        Dashboard.instance.mappingKey = mappingKey(
+            RailroaderRV.RailroaderContextMenu.getUtilityMapping())
         Dashboard.instance:setVisible(true)
         Dashboard.instance:bringToTop()
         Dashboard.instance:clearLocalStatus()

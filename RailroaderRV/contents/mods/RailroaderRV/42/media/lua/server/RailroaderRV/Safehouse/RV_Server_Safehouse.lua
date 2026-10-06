@@ -21,6 +21,9 @@ local function sendRejection(player, reason)
 end
 
 local function validRequest(args)
+    -- Project Zomboid omits empty argument tables from client-command packets,
+    -- so a payload-free claim arrives here as nil.
+    if args == nil then return true end
     if type(args) ~= "table" then return false end
     for _ in pairs(args) do return false end
     return true

@@ -148,27 +148,22 @@ end
 
 local function encodeShellEdges(source, rvId, generation)
     local result = {}
-    if type(source) ~= "table" then return result end
     for key, edge in pairs(source) do
-        if type(edge) == "table" and type(key) == "string" then
-            result[key] = {
-                edgeKey = key,
-                rvId = tostring(rvId), generation = generation,
-                hostX = integer(edge.hostX), hostY = integer(edge.hostY),
-                z = integer(edge.z), axis = edge.axis, side = edge.side,
-                objectX = integer(edge.objectX), objectY = integer(edge.objectY),
-                objectZ = integer(edge.objectZ),
-                role = edge.role, corner = edge.corner == true,
-                replacementAllowed = edge.replacementAllowed ~= false,
-                templateIndex = integer(edge.templateIndex),
-                templateIndices = {},
-                sprite = edge.sprite, north = edge.north,
-            }
-            if type(edge.templateIndices) == "table" then
-                for i = 1, #edge.templateIndices do
-                    result[key].templateIndices[i] = integer(edge.templateIndices[i])
-                end
-            end
+        result[key] = {
+            edgeKey = key,
+            rvId = tostring(rvId), generation = generation,
+            hostX = edge.hostX, hostY = edge.hostY,
+            z = edge.z, axis = edge.axis, side = edge.side,
+            objectX = edge.objectX, objectY = edge.objectY,
+            objectZ = edge.objectZ,
+            role = edge.role, corner = edge.corner == true,
+            replacementAllowed = edge.replacementAllowed ~= false,
+            templateIndex = edge.templateIndex,
+            templateIndices = {},
+            sprite = edge.sprite, north = edge.north,
+        }
+        for i = 1, #edge.templateIndices do
+            result[key].templateIndices[i] = edge.templateIndices[i]
         end
     end
     return result
@@ -177,14 +172,6 @@ end
 -- Derive only the managed region bounds and the authored shell edge ledger.
 -- Walkability and buildability are queried from the captured template.
 local function makeBoundary(layout, rvId, generation)
-    if type(layout) ~= "table" or type(layout.managed) ~= "table"
-        or type(layout.shellEdges) ~= "table" then
-        return nil, "layout geometry is unavailable"
-    end
-    if rvId == nil or tostring(rvId) == ""
-        or integer(generation) == nil or integer(generation) < 1 then
-        return nil, "boundary identity is incomplete"
-    end
     local source = layout.managed
     local managed = {
         originX = integer(source.originX), originY = integer(source.originY),
@@ -192,9 +179,8 @@ local function makeBoundary(layout, rvId, generation)
         minZ = integer(source.minZ), maxZ = integer(source.maxZ),
     }
     if not TemplateGeometry.anchorFromManaged(managed,
-        RoomTemplate.get(layout.templateId))
-        or managed.maxZ <= managed.minZ then
-        return nil, "managed region bounds are invalid"
+        RoomTemplate.get(layout.templateId)) or managed.maxZ <= managed.minZ then
+        error("RailroaderRV: generated boundary layout is invalid")
     end
     return {
         rvId = tostring(rvId), generation = integer(generation),
@@ -210,16 +196,17 @@ end
 -- memoized boundary per slot and template ID serves each current identity.
 local boundariesBySlot = {}
 local function boundaryFor(record)
-    if type(record) ~= "table" then return nil end
-    local rvId = type(record.locoId) == "string" and record.locoId or nil
-    local generation = integer(record.generation)
-    local slotIndex = integer(record.slotIndex)
-    if not rvId or rvId == "" or not generation or generation < 1
-        or not slotIndex then
-        return nil
+    local rvId = record.locoId
+    local generation = record.generation
+    local slotIndex = record.slotIndex
+    if rvId == nil or tostring(rvId) == ""
+        or generation < 1 or math.floor(generation) ~= generation then
+        error("RailroaderRV: current mapping identity is invalid")
     end
     local anchor = RegionSlots.indexToAnchor(slotIndex)
-    if not anchor then return nil end
+    if not anchor then
+        error("RailroaderRV: current mapping slot index is invalid")
+    end
     -- One template layout per anchor; the compiled template never changes at
     -- runtime, so the derived boundary may be reused for this identity.
     local cached = boundariesBySlot[slotIndex]
@@ -230,7 +217,6 @@ local function boundaryFor(record)
     local layout = Layout.make(anchor.x, anchor.y, anchor.z,
         record.templateId)
     local derived = makeBoundary(layout, rvId, generation)
-    if type(derived) ~= "table" then return nil end
     boundariesBySlot[slotIndex] = derived
     return derived
 end
@@ -242,33 +228,11 @@ function Boundary.boundaryForPlayer(player, knownIdentity, deferValidationMiss,
     if not id then return nil end
     -- The Railroader adapter checks the player's current mapping and manifest
     -- identity; this module validates only the managed bounds it needs locally.
-    local rv = rawget(_G, "RailroaderRV")
-    local adapter = rv and rv.RailroaderServer
-    local validator = adapter and adapter.validateCurrentBoundaryPlayer
-    if type(validator) ~= "function" then return nil end
-    local hookOk, boundary, record, relation, validatedIdentity, manifest = pcall(
-        validator, player, id, deferValidationMiss == true,
+    local adapter = RailroaderRV.RailroaderServer
+    local boundary, record, relation, validatedIdentity, manifest =
+        adapter.validateCurrentBoundaryPlayer(player, id, deferValidationMiss == true,
         forceValidationRefresh == true)
-    if hookOk and boundary == nil and record == "validation-deferred" then
-        return nil, record
-    end
-    local current = hookOk and boundary or nil
-    local anchor = current and TemplateGeometry.anchorFromManaged(current.managed,
-        RoomTemplate.get(current.templateId)) or nil
-    -- The manifest only carries the current identity; its geometry comes from
-    -- the template, so compare the derived anchor rather than a stored copy.
-    if not current or type(record) ~= "table" or type(relation) ~= "table"
-        or type(validatedIdentity) ~= "table"
-        or validatedIdentity.key ~= id.key
-        or type(manifest) ~= "table"
-        or tostring(manifest.rvId) ~= tostring(record.locoId)
-        or integer(manifest.generation) ~= integer(record.generation)
-        or tostring(current.rvId) ~= tostring(record.locoId)
-        or current.generation ~= integer(record.generation)
-        or not anchor then
-        return nil
-    end
-    return current, record, relation, validatedIdentity, manifest
+    return boundary, record, relation, validatedIdentity, manifest
 end
 
 local function stateFor(player, knownIdentity)
@@ -293,9 +257,8 @@ function Boundary.beginTransition(player, rvId, generation, token, kind)
     if not state then return false end
     state.rvId = tostring(rvId)
     state.generation = integer(generation)
-    state.leaseToken = type(token) == "string" and token or nil
-    state.leaseUntil = Boundary._tick
-        + (integer(C.BOUNDARY_TRANSITION_TIMEOUT_TICKS) or 120)
+    state.leaseToken = token
+    state.leaseUntil = Boundary._tick + C.BOUNDARY_TRANSITION_TIMEOUT_TICKS
     return true
 end
 

@@ -8,14 +8,12 @@
 -- query through `serverTransactionMutexStatus`.
 return function(ctx)
 local Core = require("RailroaderRV/Core/RV_Server_Core")
-local WallReload = require("RailroaderRV/WallReloadProtection/RV_WallReloadProtection")
 local Adapter = ctx.Adapter
 local C = ctx.C
 local integer = ctx.integer
 local call = ctx.call
 local callGlobal = ctx.callGlobal
 local playerId = ctx.playerId
-local playerName = ctx.playerName
 local sendResult = ctx.sendResult
 local movePlayer = ctx.movePlayer
 local enterPlayer = ctx.enterPlayer
@@ -31,18 +29,13 @@ end
 -- A wall reload operation owns the same scope as a generation, so Enter/Exit must
 -- be refused for every player of the affected RV, not only its captured members.
 local function wallReloadBusy(rvId)
-    local server = RailroaderRV and RailroaderRV.Server
-    if not server or type(server.isWallReloadTransactionActive) ~= "function" then
-        return true, "RV transaction gate is unavailable"
-    end
-    local callOk, active, reason = pcall(server.isWallReloadTransactionActive,
-        rvId)
-    if not callOk or type(active) ~= "boolean" then
-        return true, "RV transaction gate is unavailable"
-    end
-    if active then
+    local active, reason = RailroaderRV.Server.isWallReloadTransactionActive(rvId)
+    if active == true then
         return true, type(reason) == "string" and reason ~= "" and reason
             or "RV wall reload is in progress"
+    end
+    if active ~= false then
+        error("RailroaderRV: wall reload mutex query returned invalid state")
     end
     return false
 end
@@ -50,11 +43,9 @@ end
 function Adapter.OnClientCommand(module, command, player, args)
     if module ~= C.MOD_ID then return end
     if command ~= C.COMMAND_RV_ENTER and command ~= C.COMMAND_RV_EXIT then return end
-    -- The transaction gate may reject before pcall is entered.  Treat that
-    -- branch as an intentional handled result; otherwise the uninitialised `ok`
-    -- below overwrites its real reason with `false`, which renders as the
-    -- misleading "unknown reason" to the client.
-    local ok, result, reason = true, nil, nil
+    -- Busy transitions are normal request rejections; operation exceptions
+    -- propagate through the event dispatcher.
+    local result, reason
     local busy, busyReason = wallReloadBusy(nil)
     if busy then
         result, reason = false, busyReason
@@ -63,12 +54,11 @@ function Adapter.OnClientCommand(module, command, player, args)
         if locoId == nil then
             result, reason = false, "locomotive id is missing"
         else
-            ok, result, reason = pcall(enterPlayer, player, locoId)
+            result, reason = enterPlayer(player, locoId)
         end
     else
-        ok, result, reason = pcall(exitPlayer, player)
+        result, reason = exitPlayer(player)
     end
-    if not ok then result, reason = false, result end
     if result ~= true then
         print("[RailroaderRV] Railroader RV command rejected: "
             .. tostring(reason or "unknown reason"))
@@ -78,65 +68,71 @@ end
 
 local function onlinePlayersSnapshot()
     local result, seen = {}, {}
+    local onlineListAvailable = false
     local ok, players = callGlobal("getOnlinePlayers")
     if ok and players then
         local sizeOk, size = call(players, "size")
         local count = integer(size)
         if sizeOk and count and count >= 0 then
+            onlineListAvailable = true
             for index = 0, count - 1 do
                 local playerOk, player = call(players, "get", index)
-                if playerOk and player and not seen[player] then
+                if not playerOk then return result, false end
+                if player and not seen[player] then
                     seen[player] = true
                     result[#result + 1] = player
                 end
             end
+            if #result > 0 then return result, true end
         elseif type(players) == "table" then
+            onlineListAvailable = true
             for _, player in pairs(players) do
                 if player and not seen[player] then
                     seen[player] = true
                     result[#result + 1] = player
                 end
             end
+            if #result > 0 then return result, true end
+        else
+            return result, false
         end
     end
     -- Single-player/co-op fallback when getOnlinePlayers is not exposed in the
     -- active Lua pass.  The server-side command path remains authoritative.
-    if #result == 0 then
-        local playerOk, player = callGlobal("getPlayer")
+    local playerOk, player = callGlobal("getPlayer")
+    if playerOk then
         if player then result[1] = player end
+        return result, true
     end
-    return result
+    if onlineListAvailable then return result, true end
+    return result, false
 end
 
--- Rebuild the client-side utility affordance after a reconnect from the
--- authoritative player identity and current persisted mapping.  This is only a
--- candidate hint: the utility command path calls resolveCurrentUtilityRV again,
--- so a stale client hint cannot grant access or select an RV.
+-- Rebuild the client-side utility affordance from the server-resolved current
+-- RV. Exterior visitors are resolved by the nearest mapped locomotive inside
+-- the normal hull-distance reach; utility commands resolve that context again.
 function Adapter.onlinePlayersSnapshot()
     return onlinePlayersSnapshot()
 end
 
-function Adapter.syncUtilityMapping(player)
+function Adapter.syncUtilityMapping(player, previousIdentity)
     local accepted, context = Adapter.resolveCurrentUtilityRV(player)
-    if accepted ~= true or type(context) ~= "table"
-        or type(context.identity) ~= "table"
-        or type(context.record) ~= "table" then
-        return false
-    end
+    if accepted ~= true then return false end
     local onlineId = playerId(player)
     local identity = context.identity
     local record = context.record
-    if onlineId == nil or type(identity.rvId) ~= "string"
-        or identity.rvId == "" or integer(identity.generation) == nil
-        or record.locoId == nil then
-        return false
+    if onlineId == nil then return false end
+    if previousIdentity ~= nil
+        and previousIdentity.rvId == identity.rvId
+        and previousIdentity.generation == identity.generation then
+        return true, identity
     end
     local payload = {
         ok = true,
         onlineId = onlineId,
-        rvId = tostring(identity.rvId),
-        locoId = tostring(record.locoId),
-        generation = integer(identity.generation),
+        rvId = identity.rvId,
+        locoId = record.locoId,
+        generation = identity.generation,
         templateId = record.templateId,
     }
     local sentOk, sent = callGlobal("sendServerCommand", player, C.MOD_ID,
@@ -149,18 +145,12 @@ end
 -- reload query deliberately receives no RV filter: one managed world scope
 -- cannot safely run a second Enter/Exit or generation for another rvId.
 Adapter.serverTransactionMutexStatus = function()
-    local server = RailroaderRV and RailroaderRV.Server
-    if not server
-        or type(server.isGenerationTransactionActive) ~= "function" then
-        return nil, nil, "RV generation transaction state is unavailable"
-    end
-    local generationCallOk, generationActive = pcall(
-        server.isGenerationTransactionActive)
-    if not generationCallOk or type(generationActive) ~= "boolean" then
-        return nil, nil, C.INVALID_RV_DATA
+    local generationActive = RailroaderRV.Server.isGenerationTransactionActive()
+    if generationActive ~= true and generationActive ~= false then
+        error("RailroaderRV: generation mutex query returned invalid state")
     end
     local wallBusy, wallReason = wallReloadBusy(nil)
-    return generationActive, wallBusy == true, wallReason
+    return generationActive, wallBusy, wallReason
 end
 
 -- Enter/Exit must prove that the mapping record and the current persisted
@@ -169,9 +159,6 @@ end
 Adapter.wallReloadTransactionBlocks = function(rvId)
     local generationBusy, wallBusy, mutexReason =
         Adapter.serverTransactionMutexStatus()
-    if generationBusy == nil then
-        return true, mutexReason
-    end
     if generationBusy then
         return true, "RV generation transaction is in progress"
     end

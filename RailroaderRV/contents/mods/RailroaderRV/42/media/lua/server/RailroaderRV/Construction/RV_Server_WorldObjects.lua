@@ -452,9 +452,7 @@ local function createGenerator(cell, square, generation, tagContext)
     -- becomes world-visible.
     ServerWorld.tagObject(generator, generation, RoomTemplate.PROXY_ROLES.power, tagContext)
     addSpecialObject(square, generator)
-    if type(cls.updateGenerator) == "function" then
-        pcall(cls.updateGenerator, square)
-    end
+    if type(cls.updateGenerator) == "function" then cls.updateGenerator(square) end
     if not ServerUtil.callSucceeded(generator, "transmitCompleteItemToClients") then
         error("RailroaderRV: generator client transmission failed")
     end

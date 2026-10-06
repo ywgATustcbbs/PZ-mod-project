@@ -4,6 +4,13 @@
 -- The shared RV_Constants/RV_Layout modules are required at request time. A
 -- missing or malformed shared contract rejects the request before world I/O.
 
+-- Server-side Lua files can also be evaluated by a client-only process. Keep
+-- the server facade and its event subscriptions out of that process while
+-- preserving the single-player and server-side initialization paths.
+if isClient() and not isServer() then
+    return {}
+end
+
 local OWNER = "RailroaderRV"
 local COMMAND_MODULE = "RailroaderRV"
 local COMMAND = "Generate"
@@ -23,51 +30,17 @@ local railroaderValidationHook = nil
 local railroaderCommitHook = nil
 local railroaderFailureHook = nil
 
-local function loadModule(name, globalName)
-    local ok, result = pcall(require, name)
-    if ok and type(result) == "table" then
-        return result
-    end
-    local value = rawget(_G, globalName)
-    if type(value) == "table" then
-        return value
-    end
-    local rv = rawget(_G, "RailroaderRV")
-    if type(rv) == "table" then
-        local nestedName = globalName == "RV_Constants" and "Constants"
-            or globalName == "RV_Layout" and "Layout" or nil
-        if nestedName and type(rv[nestedName]) == "table" then
-            return rv[nestedName]
-        end
-    end
-    return {}
-end
-
--- PZ's Lua loader uses slash-separated media paths (the same contract used by
--- RV_Layout.lua and the utility modules).  Keep the global fallback
--- only for a debugger reload; normal loading must return the actual tables.
-local Constants = loadModule("RailroaderRV/Common/RV_Constants", "RV_Constants")
+local Constants = require("RailroaderRV/Common/RV_Constants")
 local Core = require("RailroaderRV/Core/RV_Server_Core")
 local GenerationTransaction = require(
     "RailroaderRV/Construction/RV_Server_GenerationTransaction")()
-local boundaryLoaded, Boundary = pcall(require, "RailroaderRV/BoundaryGuard/RV_BoundaryServer")
-if not boundaryLoaded or type(Boundary) ~= "table" then
-    Boundary = nil
-    print("[RailroaderRV] RV boundary service unavailable; boundary hooks disabled")
-end
+local Boundary = require("RailroaderRV/BoundaryGuard/RV_BoundaryServer")
 
 -- The Railroader adapter owns the mapping, the entry/exit gate and the wall
 -- reload operation service.  It is loaded here, before the internal modules are
 -- assembled, because RoomOwnership asks it whether a wall reload is holding the
 -- RV's players outside their room geometry.
-local railroaderOk, RailroaderServer = pcall(require,
-    "RailroaderRV/Core/RV_RailroaderServer")
-if not railroaderOk or type(RailroaderServer) ~= "table" then
-    RailroaderServer = nil
-    print("[RailroaderRV] Railroader RV adapter unavailable: "
-        .. tostring(railroaderOk and "module did not return a table"
-            or RailroaderServer))
-end
+require("RailroaderRV/Core/RV_RailroaderServer")
 
 local RV = rawget(_G, "RailroaderRV") or {}
 rawset(_G, "RailroaderRV", RV)
@@ -94,12 +67,8 @@ local safeErrorText
 -- wait and its single abort path.
 local RELOCATION_TIMEOUT_TICKS = 600
 
-if UtilityServer and type(UtilityServer.initializeRecord) == "function" then
-    RV.Server.initializeUtilityRecord = UtilityServer.initializeRecord
-end
-if UtilityServer and type(UtilityServer.settleAndRefreshLoad) == "function" then
-    RV.Server.settleRVUtilityLoad = UtilityServer.settleAndRefreshLoad
-end
+RV.Server.initializeUtilityRecord = UtilityServer.initializeRecord
+RV.Server.settleRVUtilityLoad = UtilityServer.settleAndRefreshLoad
 
 -- IsoRegions does not expose a Lua callback for completion of its asynchronous
 -- dynamic-room rebuild. Room ownership guards use nearby-player probes and

@@ -64,42 +64,6 @@ local function anchorForSlot(row, column)
     }
 end
 
-local function denseRegionList(regions)
-    if type(regions) ~= "table" or getmetatable(regions) ~= nil then
-        return nil
-    end
-    local count, highest = 0, 0
-    for key in pairs(regions) do
-        if type(key) ~= "number" or integer(key) ~= key
-            or key < 1 or key > Slots.COUNT then
-            return nil
-        end
-        count = count + 1
-        if key > highest then highest = key end
-    end
-    if count ~= highest then return nil end
-    return count
-end
-
-local function validatedRegion(region)
-    local minX, minY = integer(region.minX), integer(region.minY)
-    local maxX, maxY = integer(region.maxX), integer(region.maxY)
-    if not minX or not minY or not maxX or not maxY
-        or maxX ~= minX + SIZE or maxY ~= minY + SIZE then
-        return nil
-    end
-
-    local dx, dy = minX - FIRST_MIN_X, minY - FIRST_MIN_Y
-    if dx < 0 or dy < 0 or dx >= Slots.COLUMNS * SIZE
-        or dy >= Slots.ROWS * SIZE or dx % SIZE ~= 0 or dy % SIZE ~= 0 then
-        return nil
-    end
-    local column, row = dx / SIZE + 1, dy / SIZE + 1
-    local index = indexForSlot(row, column)
-    if not index then return nil end
-    return index, { minX = minX, minY = minY, maxX = maxX, maxY = maxY }
-end
-
 function Slots.indexToAnchor(index)
     local row, column = slotForIndex(index)
     if not row then return nil end
@@ -126,22 +90,12 @@ function Slots.indexForAnchor(anchor)
 end
 
 function Slots.findFirstFree(regions)
-    local count = denseRegionList(regions)
-    if count == nil then return nil, "invalid-region-list" end
-
-    local occupied, validated = {}, {}
-    for i = 1, count do
-        local index, region = validatedRegion(regions[i])
-        if not index then return nil, "invalid-region" end
-        for j = 1, #validated do
-            local other = validated[j]
-            if region.minX < other.maxX and other.minX < region.maxX
-                and region.minY < other.maxY and other.minY < region.maxY then
-                return nil, "overlapping-regions"
-            end
-        end
-        occupied[index] = true
-        validated[#validated + 1] = region
+    local occupied = {}
+    for i = 1, #regions do
+        local region = regions[i]
+        local column = (region.minX - FIRST_MIN_X) / SIZE + 1
+        local row = (region.minY - FIRST_MIN_Y) / SIZE + 1
+        occupied[indexForSlot(row, column)] = true
     end
 
     for index = 1, Slots.COUNT do

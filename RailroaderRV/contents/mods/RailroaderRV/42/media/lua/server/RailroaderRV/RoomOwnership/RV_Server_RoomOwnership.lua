@@ -8,7 +8,6 @@ local Constants = ctx.Constants
 local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
-local ServerSchema = ctx.ServerSchema
 local roomOwnershipGuards = ctx.roomOwnershipGuards
 
 -- The server checks authoritative players' current squares each tick and
@@ -16,16 +15,9 @@ local roomOwnershipGuards = ctx.roomOwnershipGuards
 local ROOM_OWNERSHIP_3X3_INTERVAL_TICKS = 120
 
 -- The wall reload service owns the boundary lease while it holds the RV's
--- players outside their room geometry.  The query is authoritative and covers
--- the whole process, so a missing or failing service pauses this cleanup.
+-- players outside their room geometry.
 local function wallReloadActive()
-    local server = type(RV) == "table" and RV.Server or nil
-    if type(server) ~= "table"
-        or type(server.isWallReloadTransactionActive) ~= "function" then
-        return true
-    end
-    local callOk, active = pcall(server.isWallReloadTransactionActive)
-    return not callOk or type(active) ~= "boolean" or active
+    return RV.Server.isWallReloadTransactionActive()
 end
 
 local function notifyFailure(player, reason)
@@ -362,11 +354,6 @@ local function refreshServerRoomOwnershipGuard(guard, phase)
     end
     guard.pendingCells = {}
     guard.scanDueTick = nil
-    if cleared > 0 then
-        print("[RailroaderRV] room ownership refresh generation="
-            .. tostring(guard.generation) .. " phase=" .. tostring(phase or "tick")
-            .. " cleared=" .. tostring(cleared))
-    end
     return cleared
 end
 
@@ -412,33 +399,19 @@ local function processServerRoomOwnershipGuards()
                 + ROOM_OWNERSHIP_3X3_INTERVAL_TICKS
         end
     end
-    -- This runs inside the shared generic tick, which has no pcall of its own, so
-    -- a raise from a scan precondition (no authoritative cell, a player square
-    -- inside the bounds with no IsoCell) must be logged instead of killing the
-    -- boundary sweep, the utility tick and the generation tick that follow it.
+    -- Failures from the guard scan propagate through the shared tick dispatcher.
     if snapshotOk and #playerStates > 0 then
-        local sweepOk, sweepError = pcall(clearInvalidRoomOwnershipNearPlayers,
-            roomOwnershipGuards, playerStates, true, neighborhoodDue)
-        if not sweepOk then
-            print("[RailroaderRV] room ownership neighborhood sweep failed: "
-                .. tostring(sweepError))
-        end
+        clearInvalidRoomOwnershipNearPlayers(roomOwnershipGuards, playerStates,
+            true, neighborhoodDue)
     end
     -- Event-triggered structure scans, merged per tick by scheduleRoomOwnershipScan.
     -- The due marker is cleared before the scan. Keep event cells until the
-    -- refresh completes; it clears pendingCells after using them. A scan that
-    -- raises is reported once and stays unarmed until the next event or probe.
-    local scansOk, scansError = pcall(function()
-        for _, guard in pairs(roomOwnershipGuards) do
-            if guard.scanDueTick ~= nil and ctx.serverTick >= guard.scanDueTick then
-                guard.scanDueTick = nil
-                refreshServerRoomOwnershipGuard(guard, nil)
-            end
+    -- refresh completes; it clears pendingCells after using them.
+    for _, guard in pairs(roomOwnershipGuards) do
+        if guard.scanDueTick ~= nil and ctx.serverTick >= guard.scanDueTick then
+            guard.scanDueTick = nil
+            refreshServerRoomOwnershipGuard(guard, nil)
         end
-    end)
-    if not scansOk then
-        print("[RailroaderRV] room ownership scan failed: "
-            .. tostring(scansError))
     end
 end
 
@@ -471,6 +444,13 @@ local function armClientRoomOwnershipGuard(generation, oldBounds, newBounds,
     if not ServerUtil.callGlobalSucceeded("sendServerCommand", COMMAND_MODULE,
         COMMAND_REFRESH_ROOM_OWNERSHIP, payload) then
         error("RailroaderRV: client room ownership guards could not be armed")
+    end
+    local players, snapshotOk = onlinePlayersSnapshot()
+    if snapshotOk then
+        for i = 1, #players do
+            RV.Server.markRoomOwnershipMonitorGuarded(players[i], payload.rvId,
+                payload.generation)
+        end
     end
 end
 

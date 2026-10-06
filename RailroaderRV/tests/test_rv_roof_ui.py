@@ -86,6 +86,8 @@ ISButton = {
             __index = {
                 initialise = function() end,
                 setFont = function() end,
+                setBackgroundRGBA = function() end,
+                setBackgroundColorMouseOverRGBA = function() end,
                 setEnable = function(self, value) self.enabled = value end,
                 getAbsoluteX = function(self) return self.x end,
                 getAbsoluteY = function(self) return self.y end,
@@ -118,9 +120,11 @@ RailroaderRV = {
         COMMAND_RV_UTILITY_MAPPING = "mapping",
         COMMAND_RV_UTILITY_SNAPSHOT = "snapshot",
         COMMAND_RV_UTILITY_ACK = "ack",
+        COMMAND_RV_CLIENT_DEBUG = "clientDebug",
     },
     RailroaderContextMenu = {
         getUtilityMapping = function() return mapping end,
+        hasUtilityDashboardCandidate = function() return true end,
         acceptUtilityMapping = function(args)
             if args.ok ~= true then return false end
             mapping = { rvId = args.rvId, generation = args.generation }
@@ -297,9 +301,17 @@ class RoofUIBehaviorChecks(unittest.TestCase):
         cls.window_source = WINDOW.read_text(encoding="utf-8")
         cls.inventory_source = INVENTORY.read_text(encoding="utf-8")
 
-    def make_ui(self):
+    def make_ui(self, initial_snapshot: bool = True,
+            use_real_template: bool = False):
         lua = LuaRuntime(unpack_returned_tuples=True)
         lua.execute(LUA_STUBS)
+        client_lua = str(LUA_ROOT / "client").replace("\\", "/")
+        shared_lua = str(LUA_ROOT / "shared").replace("\\", "/")
+        lua.execute(
+            "package.path = "
+            + repr(f"{client_lua}/?.lua;{shared_lua}/?.lua;")
+            + " .. package.path"
+        )
         inventory = lua.execute(self.inventory_source)
         lua.globals().inventory = inventory
         lua.execute(
@@ -308,6 +320,11 @@ class RoofUIBehaviorChecks(unittest.TestCase):
         client = lua.execute(self.client_source)
         lua.globals().client = client
         lua.execute('package.loaded["RailroaderRV/GUI/RV_UtilityClient"] = client')
+        if use_real_template:
+            lua.execute(
+                'package.preload["RailroaderRV/RoomTemplate/RV_RoomTemplate"] = nil; '
+                'actualRoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")'
+            )
         roof_window = lua.execute(self.window_source)
         lua.globals().roofWindow = roof_window
         lua.execute(
@@ -328,17 +345,70 @@ class RoofUIBehaviorChecks(unittest.TestCase):
         lua.globals().roof_window = roof_window
         lua.globals().player_obj = lua.globals().player
         lua.execute("roof_window.show(player_obj)")
+        if initial_snapshot:
+            template_id = "railroader-rv" if use_real_template else "RV.A"
+            lua.globals().initial_template_id = template_id
+            lua.execute(
+                """
+                roof_window.onSnapshot(player_obj, {
+                    rvId = "rv-a", generation = 1,
+                    templateId = initial_template_id, roofDevices = {},
+                })
+                """
+            )
+        lua.execute("sameRef = function(first, second) return rawequal(first, second) end")
+        return lua, lua.globals().roof_window.instance
+
+    def test_late_matching_snapshot_populates_roof_grid_on_first_open(self) -> None:
+        lua, window = self.make_ui(
+            initial_snapshot=False, use_real_template=True,
+        )
+        self.assertIsNone(window.roofCells)
+        self.assertEqual(len(window.canvas.entries), 0)
+
         lua.execute(
             """
-            local w = roof_window.instance
-            roof_window.onSnapshot(player_obj, {
+            client.onServerCommand("RailroaderRV", "snapshot", {
                 rvId = "rv-a", generation = 1,
-                templateId = "RV.A", roofDevices = {},
+                templateId = "railroader-rv", roofDevices = {},
             })
             """
         )
-        lua.execute("sameRef = function(first, second) return rawequal(first, second) end")
-        return lua, lua.globals().roof_window.instance
+
+        self.assertEqual(window.templateId, "railroader-rv")
+        self.assertEqual(len(window.roofCells), 88)
+        self.assertEqual(len(window.canvas.entries), 88)
+
+        lua.execute(
+            """
+            client.onServerCommand("RailroaderRV", "snapshot", {
+                rvId = "other-rv", generation = 1,
+                templateId = "railroader-rv", roofDevices = {},
+            })
+            """
+        )
+        self.assertEqual(len(window.roofCells), 88)
+
+        lua.execute(
+            """
+            roof_window.instance:setVisible(false)
+            roof_window.onSnapshot(player_obj, {
+                rvId = "rv-a", generation = 1,
+                templateId = "railroader-rv", roofDevices = {},
+            })
+            roof_window.instance:setVisible(true)
+            roof_window.onSnapshot({}, {
+                rvId = "rv-a", generation = 1,
+                templateId = "railroader-rv", roofDevices = {},
+            })
+            roof_window.instance = nil
+            roof_window.onSnapshot(player_obj, {
+                rvId = "rv-a", generation = 1,
+                templateId = "railroader-rv", roofDevices = {},
+            })
+            """
+        )
+        self.assertEqual(len(window.roofCells), 88)
 
     def test_cell_click_clears_queue_then_tracks_native_started_action(self) -> None:
         lua, window = self.make_ui()

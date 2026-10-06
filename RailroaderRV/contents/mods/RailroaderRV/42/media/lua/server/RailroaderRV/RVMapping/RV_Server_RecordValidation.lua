@@ -4,27 +4,38 @@ local Constants = ctx.Constants
 local Boundary = ctx.Boundary
 local ServerSchema = ctx.ServerSchema
 local RV = ctx.RV
-local ServerUtil = ctx.ServerUtil
 local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local RoofRefresh = require("RailroaderRV/RoofRefresh/RV_RoofRefresh")
-local function safeErrorText(...) return ctx.safeErrorText(...) end
 local armTargetedClientRoomOwnershipGuard = ctx.armTargetedClientRoomOwnershipGuard
 local playerIdentity = ctx.playerIdentity
 local queueGeneration = ctx.queueGeneration
+local guardedRoomOwnershipIdentities = setmetatable({}, { __mode = "k" })
+
+function RV.Server.markRoomOwnershipMonitorGuarded(player, rvId, generation)
+    local generations = guardedRoomOwnershipIdentities[player]
+    if generations == nil then
+        generations = {}
+        guardedRoomOwnershipIdentities[player] = generations
+    end
+    generations[tostring(rvId)] = generation
+    return true
+end
+
+function RV.Server.pruneRoomOwnershipMonitorConnections(onlinePlayers)
+    local online = {}
+    for _, player in pairs(onlinePlayers) do
+        online[player] = true
+    end
+    for player in pairs(guardedRoomOwnershipIdentities) do
+        if online[player] ~= true then
+            guardedRoomOwnershipIdentities[player] = nil
+        end
+    end
+end
 
 local function currentMappingRecord(rvId, generation)
-    local adapter = RailroaderRV and RailroaderRV.RailroaderServer
-    if type(adapter) ~= "table"
-        or type(adapter.currentMappingRecord) ~= "function" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local ok, accepted, record = pcall(adapter.currentMappingRecord,
-        rvId, generation)
-    if not ok or accepted ~= true or type(record) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    return true, record
+    return RailroaderRV.RailroaderServer.currentMappingRecord(rvId, generation)
 end
 
 -- A mapping record is the published authority.  Its anchor, managed region,
@@ -34,43 +45,29 @@ end
 -- published record is by construction committed, so readers must not be able
 -- to mistake a fabricated `state` for real generation state.
 local function manifestViewForRecord(record)
-    if type(record) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local slotIndex = ServerUtil.integer(record.slotIndex)
-    local generation = ServerUtil.integer(record.generation)
-    local anchor = slotIndex and RegionSlots.indexToAnchor(slotIndex) or nil
+    local slotIndex = record.slotIndex
+    local generation = record.generation
+    local anchor = RegionSlots.indexToAnchor(slotIndex)
     local boundary = Boundary.boundaryFor(record)
-    if not anchor or not boundary or generation == nil then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local ok, manifest = pcall(function()
-        local layout = Layout.make(anchor.x, anchor.y, anchor.z,
-            record.templateId)
-        return {
-            generation = generation,
-            slotIndex = slotIndex,
-            anchor = anchor,
-            bounds = ServerSchema.boundsFor(layout),
-            rvId = tostring(record.locoId),
-            boundary = boundary,
-        }
-    end)
-    if not ok or type(manifest) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    return true, manifest
+    local layout = Layout.make(anchor.x, anchor.y, anchor.z,
+        record.templateId)
+    return {
+        generation = generation,
+        slotIndex = slotIndex,
+        anchor = anchor,
+        bounds = ServerSchema.boundsFor(layout),
+        rvId = tostring(record.locoId),
+        boundary = boundary,
+    }
 end
 
 local function manifestForIdentity(rvId, generation)
     local recordOk, record = currentMappingRecord(rvId, generation)
-    if not recordOk then return false, record end
+    if recordOk == false then return false, record end
     -- The published mapping record is the whole authority: it carries the slot
     -- index and identity, and every geometric fact is derived from the template
     -- for that slot.  Nothing is persisted outside this map.
-    local viewOk, view = manifestViewForRecord(record)
-    if not viewOk then return false, view end
-    return true, view
+    return true, manifestViewForRecord(record)
 end
 
 function RV.Server.setRailroaderValidationHook(callback)
@@ -110,8 +107,7 @@ end
 function RV.Server.refreshRoofVisuals(rvId)
     local adapter = RailroaderRV.RailroaderServer
     local record = adapter.currentMappingRecordById(rvId)
-    local manifestOk, manifest = manifestViewForRecord(record)
-    if not manifestOk then error(manifest, 0) end
+    local manifest = manifestViewForRecord(record)
     return RoofRefresh.run(manifest.bounds)
 end
 
@@ -125,54 +121,32 @@ end
 -- current manifest view for this RV. No client state or caller-supplied bounds
 -- participate in this command.
 function RV.Server.armCurrentRoomOwnershipMonitor(player, record)
-    if type(record) ~= "table"
-        or record.generated ~= true
-        or type(record.locoId) ~= "string" or record.locoId == ""
-        or type(record.players) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local recordGeneration = ServerUtil.toNumber(record.generation)
-    if not ServerUtil.isFiniteNumber(recordGeneration) or math.floor(recordGeneration)
-        ~= recordGeneration or recordGeneration < 1 then
-        return false, Constants.INVALID_RV_DATA
-    end
-    -- Managed bounds come from the compiled template, never from the record.
-    local boundary = Boundary.boundaryFor(record)
-    if type(boundary) ~= "table" or type(boundary.managed) ~= "table"
-        or type(boundary.shellEdges) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
-
+    local recordGeneration = record.generation
     local identityOk, identityOrReason = playerIdentity(player)
     if not identityOk then return false, identityOrReason end
     -- The mapping record comparison already proves the published identity.
     -- An in-flight generation is the only other owner of this scope; its
     -- process-local transaction is the gate, not a durable record.
     local transaction = ctx.GenerationTransaction
-    if type(transaction) == "table"
-        and type(transaction.current) == "function" then
-        local pendingOk, pending = pcall(transaction.current)
-        if pendingOk and type(pending) == "table"
-            and tostring(pending.rvId) == tostring(record.locoId)
-            and ServerUtil.integer(pending.generation) == recordGeneration then
-            return false, "RV generation is still in progress"
-        end
+    local pending = transaction.current()
+    if pending ~= nil and tostring(pending.rvId) == tostring(record.locoId)
+        and pending.generation == recordGeneration then
+        return false, "RV generation is still in progress"
     end
     local manifestAccepted, manifest = RV.Server.currentRVManifestForBoundary(
         record.locoId, recordGeneration)
-    if manifestAccepted ~= true or type(manifest) ~= "table" then
-        return false, Constants.INVALID_RV_DATA
-    end
-    local manifestGeneration = ServerUtil.toNumber(manifest.generation)
-    if tostring(manifest.rvId) ~= tostring(record.locoId)
-        or manifestGeneration ~= recordGeneration then
-        return false, Constants.INVALID_RV_DATA
+    if manifestAccepted == false then
+        return false, manifest
     end
 
-    local armedOk, armedError = pcall(armTargetedClientRoomOwnershipGuard,
-        player, recordGeneration, manifest.bounds, record.locoId)
-    if not armedOk then
-        return false, safeErrorText(armedError)
+    local rvId = tostring(record.locoId)
+    local armedGenerations = guardedRoomOwnershipIdentities[player]
+    if armedGenerations == nil
+        or armedGenerations[rvId] ~= recordGeneration then
+        armTargetedClientRoomOwnershipGuard(player, recordGeneration,
+            manifest.bounds, record.locoId)
+        RV.Server.markRoomOwnershipMonitorGuarded(player, record.locoId,
+            recordGeneration)
     end
     return true
 end

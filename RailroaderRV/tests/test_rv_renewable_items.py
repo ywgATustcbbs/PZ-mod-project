@@ -14,6 +14,18 @@ SOLAR_LOOT = (
     MOD_ROOT
     / "media/lua/server/RailroaderRV/Power/RV_SolarPanelLoot.lua"
 )
+WATER_LOOT = (
+    MOD_ROOT
+    / "media/lua/server/RailroaderRV/Items/RV_WaterLootDistributions.lua"
+)
+WATER_LOOT_TABLES = (
+    "GarageTools",
+    "CrateTools",
+    "ToolStoreTools",
+    "ArmyStorageElectronics",
+    "EngineerTools",
+    "ToolFactoryTools",
+)
 
 
 class SolarPanelLootChecks(unittest.TestCase):
@@ -129,6 +141,69 @@ class SolarPanelLootChecks(unittest.TestCase):
 
         self.assertEqual(self.lua.globals().RANDOM_CALLS, 0)
         self.assertEqual(self.lua.globals().addedCount(container), 0)
+
+
+class IndustrialWaterPumpLootChecks(unittest.TestCase):
+    def setUp(self) -> None:
+        self.lua = LuaRuntime(unpack_returned_tuples=True)
+        self.lua.execute(
+            """
+            local listeners = {}
+            Events = {
+                OnPreDistributionMerge = {
+                    Add = function(callback)
+                        table.insert(listeners, callback)
+                    end,
+                    Trigger = function()
+                        for _, callback in ipairs(listeners) do callback() end
+                    end,
+                },
+            }
+            function require(_) end
+            SandboxVars = {
+                RailroaderRV = { IndustrialWaterPumpLootChance = 0 }
+            }
+            ProceduralDistributions = { list = {
+                GarageTools = { items = { "ExistingTool", 2 } },
+                CrateTools = { items = { "ExistingTool", 2 } },
+                ToolStoreTools = { items = { "ExistingTool", 2 } },
+                ArmyStorageElectronics = { items = { "ExistingTool", 2 } },
+                EngineerTools = { items = { "ExistingTool", 2 } },
+                ToolFactoryTools = { items = { "ExistingTool", 2 } },
+                UnrelatedTools = { items = { "ExistingTool", 2 } },
+            } }
+            """
+        )
+        self.lua.execute(WATER_LOOT.read_text(encoding="utf-8"))
+
+    def set_chance(self, value: int) -> None:
+        self.lua.globals().SandboxVars.RailroaderRV.IndustrialWaterPumpLootChance = value
+
+    def merge_distributions(self) -> None:
+        self.lua.globals().Events.OnPreDistributionMerge.Trigger()
+
+    def test_zero_chance_omits_pump_from_all_six_tables(self) -> None:
+        self.set_chance(0)
+
+        self.merge_distributions()
+
+        distributions = self.lua.globals().ProceduralDistributions.list
+        for table_name in WATER_LOOT_TABLES:
+            self.assertEqual(len(distributions[table_name]["items"]), 2)
+        self.assertEqual(len(distributions.UnrelatedTools["items"]), 2)
+
+    def test_configured_chance_is_added_to_each_original_table(self) -> None:
+        self.set_chance(37)
+
+        self.merge_distributions()
+
+        distributions = self.lua.globals().ProceduralDistributions.list
+        for table_name in WATER_LOOT_TABLES:
+            items = distributions[table_name]["items"]
+            self.assertEqual(len(items), 4)
+            self.assertEqual(items[3], "RailroaderRV.WaterPumpIndustrial")
+            self.assertEqual(items[4], 37)
+        self.assertEqual(len(distributions.UnrelatedTools["items"]), 2)
 
 
 if __name__ == "__main__":

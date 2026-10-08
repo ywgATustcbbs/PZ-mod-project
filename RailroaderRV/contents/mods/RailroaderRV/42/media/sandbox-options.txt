@@ -13,7 +13,17 @@ option RailroaderRV.SolarPanelLootChance
 	type = integer,
 	min = 0,
 	max = 100,
-	default = 10,
+	default = 1,
 	page = RailroaderRV,
 	translation = RailroaderRV_SolarPanelLootChance,
+}
+
+option RailroaderRV.IndustrialWaterPumpLootChance
+{
+	type = integer,
+	min = 0,
+	max = 100,
+	default = 1,
+	page = RailroaderRV,
+	translation = RailroaderRV_IndustrialWaterPumpLootChance,
 }

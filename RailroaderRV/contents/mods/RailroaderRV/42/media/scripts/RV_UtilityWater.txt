@@ -91,7 +91,7 @@ module RailroaderRV
 		timedAction = Making,
 		Tags = InHandCraft,
 		category = RailroaderRV,
-		SkillRequired = Electricity:3;MetalWelding:2,
+		SkillRequired = Electricity:3,
 		OnTest = Recipe.OnTest.AssembleRVWaterPump,
 		inputs
 		{

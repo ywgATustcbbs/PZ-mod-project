@@ -1,0 +1,74 @@
+[h1]🚂 Railroader RV[/h1]
+[b]Turn a locomotive into your very own home![/b]
+
+Have you ever dreamed of having a home that can travel along the railroad tracks in the post-apocalyptic world of Project Zomboid?
+
+Now you can turn a locomotive into your own mobile home! Relax inside, store supplies, arrange furniture, and even build your own independent water and electrical systems.
+
+Whether you're exploring alone or surviving with friends, you can drive your mobile base through a zombie-infested world, always searching for your next place to call home.
+
+[h2]A Standalone RV Mod[/h2]
+This is a completely independent mod. It does not depend on Project RV Interior or any other RV mods.
+
+[list]
+[*][b]Procedural Generation:[/b] The RV interior is generated procedurally, so you don't need to enable or install a separate RV map.
+[*][b]Server-Authoritative Design:[/b] All data and calculations are handled by the server. Clients only send action requests and display the resulting state.
+[/list]
+
+[h2]Enterable Locomotive Interior[/h2]
+Your locomotive is no longer just a vehicle. It's a fully livable mobile base!
+
+[list]
+[*][b]Different Building Permissions:[/b] The interior is divided into restricted areas, non-buildable areas, and free-build areas.
+[list]
+[*][b]Restricted Areas:[/b] Players cannot enter or build in these areas. Players who enter restricted areas will be teleported back into the valid RV interior. Removed structures will be restored, and unauthorized constructions will be deleted.
+[*][b]Non-Buildable Areas:[/b] Players can move around, drop items on the floor, and perform normal activities, but building and dismantling are prohibited.
+[*][b]Free-Build Areas:[/b] Players can freely build, dismantle, and customize the interior.
+[/list]
+[*][b]Independent Interior Space:[/b] Enter your own dedicated living space directly from the locomotive.
+[*][b]Interior Customization:[/b] Place furniture, storage containers, and living facilities in designated building areas. If the cab feels too small, you can enable an option in the sandbox settings to allow construction in the locomotive's mechanical and electrical compartments. This sacrifices some realism but gives you much more room to build inside the engine and equipment areas.
+[/list]
+
+[h2]Independent Water and Electrical Systems[/h2]
+Life on the move still requires water and electricity!
+
+This mod simulates realistic RV water and electrical systems as closely as practical, while making some compromises for gameplay. These systems are not fully realistic simulations, and you'll need to build and maintain your own water and power infrastructure.
+
+[h3]⚡ Electrical System[/h3]
+[list]
+[*]Generate electricity using different types of equipment. Install conventional fuel-powered generators, or mount solar panels and wind turbines on the roof to harness sunlight and wind.
+[*]Store electricity in batteries. The RV uses a simplified power model: [b]Power Generation → Battery Charging → Battery Storage → Inverter → Electrical Appliances[/b]. This system aims to balance realism with gameplay.
+[*]Manage the electricity consumption of your onboard appliances and equipment.
+[*]Electricity production and consumption are calculated in watt-hours (Wh), using reasonably realistic specifications for generators and electrical devices.
+[*]A basic overload protection system is included. If you don't install a circuit breaker, an electrical overload can destroy your inverter.
+[/list]
+
+[h3]💧 Water System[/h3]
+[list]
+[*]Store water for everyday use in an onboard water tank.
+[*]The plumbing system requires an electric water pump to maintain water pressure. If the RV's electrical system is not operating, the water supply will stop working.
+[*]Manually refill your water tank when needed.
+[*]To collect rainwater, you must install rain collectors on the roof through the RV management interface. Unlike some other RV mods, your roof won't be covered with rain collectors from the very beginning.
+[*]Pump water from nearby sources, such as rivers and lakes, directly into your RV's water tank. You can even collect rainwater from puddles on the ground!
+[*]Contaminated water must be filtered before use. You'll need to install water filters, which wear out over time and must be inspected and replaced regularly.
+[*]Check your water and electrical systems at any time through the RV management panel.
+[/list]
+
+Plan your resources carefully to keep your mobile home running for as long as possible!
+
+[h2]👥 Multiplayer Support[/h2]
+Drive your locomotive with friends and share your living space throughout your journey. You can also designate your RV as a safehouse and respawn inside it.
+
+[i]Note: This mod has been tested on a dedicated server and works correctly. Player-hosted multiplayer sessions and single-player mode have not been tested, although they should theoretically work. If they don't, blame the absolute spaghetti mess of code that The Indi Stone left us with. Please report any issues, and I'll do my best to fix them.[/i]
+
+[hr]
+
+[h2]📌 How to Use[/h2]
+[list]
+[*]This mod requires [b]Railroader[/b].
+[*]Use the locomotive's interaction menu to enter or exit the RV interior.
+[*]Use the RV management interface to monitor and manage your water and electrical resources.
+[*]Only certain areas of the interior allow unrestricted building and dismantling. Follow the in-game instructions and restrictions.
+[/list]
+
+[i]For the most accurate information about available features and mechanics, please refer to the current release version.[/i]

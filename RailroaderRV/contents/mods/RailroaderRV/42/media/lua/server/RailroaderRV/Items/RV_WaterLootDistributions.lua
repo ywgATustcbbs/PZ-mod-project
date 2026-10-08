@@ -11,10 +11,13 @@ local LOOT_TABLES = {
 }
 
 local function addIndustrialWaterPump()
-	for _, tableName in ipairs(LOOT_TABLES) do
-		local items = ProceduralDistributions.list[tableName].items
-		table.insert(items, INDUSTRIAL_WATER_PUMP)
-		table.insert(items, 0.1)
+	local chance = SandboxVars.RailroaderRV.IndustrialWaterPumpLootChance
+	if chance > 0 then
+		for _, tableName in ipairs(LOOT_TABLES) do
+			local items = ProceduralDistributions.list[tableName].items
+			table.insert(items, INDUSTRIAL_WATER_PUMP)
+			table.insert(items, chance)
+		end
 	end
 end
 

@@ -183,7 +183,7 @@ module RailroaderRV
 		timedAction = Making,
 		Tags = InHandCraft,
 		category = RailroaderRV,
-		SkillRequired = MetalWelding:1,
+		SkillRequired = Electricity:3,
 		OnTest = Recipe.OnTest.AssembleRVMotor,
 		inputs
 		{

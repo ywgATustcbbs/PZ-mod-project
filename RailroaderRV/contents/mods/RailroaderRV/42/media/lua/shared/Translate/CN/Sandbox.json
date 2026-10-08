@@ -3,5 +3,7 @@
   "Sandbox_RailroaderRV_AllowEngineAreaBuilding": "允许在火车机电区域建造",
   "Sandbox_RailroaderRV_AllowEngineAreaBuilding_tooltip": "开启后，新生成的房车仅在 z=1 屋顶格向 z=0 投影的区域（88 格）允许建造与拆除；无屋顶走廊仍可通行，但不可建造或拆除。供水覆盖整个开放区。关闭时使用驾驶室模板；已生成房车继续使用其记录的模板。",
   "Sandbox_RailroaderRV_SolarPanelLootChance": "太阳能面板刷新概率",
-  "Sandbox_RailroaderRV_SolarPanelLootChance_tooltip": "每次目标容器填充时按此概率加入太阳能面板；原版战利品补货时也会重新抽取（0–100%%）。仅影响民房车库、自提仓库、军事基地和仓库；默认 10%%。"
+  "Sandbox_RailroaderRV_SolarPanelLootChance_tooltip": "每次目标容器填充时按此概率加入太阳能面板；原版战利品补货时也会重新抽取（0–100%%）。仅影响民房车库、自提仓库、军事基地和仓库；默认 1%%。",
+  "Sandbox_RailroaderRV_IndustrialWaterPumpLootChance": "工业水泵刷新概率",
+  "Sandbox_RailroaderRV_IndustrialWaterPumpLootChance_tooltip": "原有工具及军用电子器材掉落表中的每轮基础概率为此值（0–100%%）；原版战利品补货时也会重新抽取。物资倍率和抽取轮数会影响容器最终刷新概率；设为 0 可禁用。默认：1%%。"
 }

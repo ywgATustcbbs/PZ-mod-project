@@ -3,5 +3,7 @@
   "Sandbox_RailroaderRV_AllowEngineAreaBuilding": "Allow building in locomotive mechanical areas",
   "Sandbox_RailroaderRV_AllowEngineAreaBuilding_tooltip": "Newly generated RVs allow building and demolition only in the 88-cell z=0 projection of the z=1 roof. Roofless corridor cells remain walkable but cannot be built or demolished. Water service covers the full build area. When disabled, the cab-only template is used. Existing RVs keep their recorded template.",
   "Sandbox_RailroaderRV_SolarPanelLootChance": "Solar panel spawn chance",
-  "Sandbox_RailroaderRV_SolarPanelLootChance_tooltip": "Each time a target container is filled, this chance is rolled for a solar panel. Vanilla loot respawns roll again (0–100%%). Applies only to residential garages, self-storage units, military-base rooms, and warehouses. Default: 10%%."
+  "Sandbox_RailroaderRV_SolarPanelLootChance_tooltip": "Each time a target container is filled, this chance is rolled for a solar panel. Vanilla loot respawns roll again (0–100%%). Applies only to residential garages, self-storage units, military-base rooms, and warehouses. Default: 1%%.",
+  "Sandbox_RailroaderRV_IndustrialWaterPumpLootChance": "Industrial water pump spawn chance",
+  "Sandbox_RailroaderRV_IndustrialWaterPumpLootChance_tooltip": "Each roll in the existing tool and military electronics loot tables uses this base chance (0–100%%); vanilla loot respawns roll again. Loot multipliers and roll counts affect the final container chance. 0 disables the pump. Default: 1%%."
 }

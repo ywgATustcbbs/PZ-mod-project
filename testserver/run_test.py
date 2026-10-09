@@ -874,7 +874,12 @@ def wait_for_server(
 def _launch_client_direct(client_exe: Path, client_cache: Path) -> int:
     """Fallback for hosts where PowerShell cannot create the GUI process."""
 
-    command = [str(client_exe), f"-cachedir={client_cache}"]
+    command = [
+        str(client_exe),
+        f"-cachedir={client_cache}",
+        "-modfolders",
+        "mods,workshop,steam",
+    ]
     try:
         process = subprocess.Popen(
             command,
@@ -902,7 +907,10 @@ def launch_client(client_exe: Path, client_cache: Path) -> int:
         json.dumps(
             {
                 "filePath": str(client_exe),
-                "argument": f'-cachedir="{client_cache}"',
+                "argument": (
+                    f'-cachedir="{client_cache}" '
+                    "-modfolders mods,workshop,steam"
+                ),
                 "workingDirectory": str(client_exe.parent),
             },
             ensure_ascii=False,

@@ -14,6 +14,7 @@ local guardContextForPlayer = ctx.guardContextForPlayer
 local playerPosition = ctx.playerPosition
 local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
+local ClientDispatch = require("RailroaderRV/Core/RV_ServerClientDispatch")
 
 local function boundaryKey(boundary)
     return tostring(boundary.rvId) .. ":" .. tostring(boundary.generation)
@@ -96,7 +97,7 @@ local function correctOutside(state, player, boundary, record, onlineId)
         server.teleportToPosition(player, target)
     end
     state.lastValid = { x = target.x, y = target.y, z = target.z }
-    callGlobal("sendServerCommand", player, C.MOD_ID,
+    ClientDispatch.sendToPlayer(player, C.MOD_ID,
         C.COMMAND_RV_BOUNDARY_CORRECTION, {
             rvId = boundary.rvId, generation = boundary.generation,
             onlineId = onlineId,

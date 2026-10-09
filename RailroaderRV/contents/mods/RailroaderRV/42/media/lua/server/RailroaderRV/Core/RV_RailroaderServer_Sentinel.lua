@@ -8,6 +8,7 @@
 -- query through `serverTransactionMutexStatus`.
 return function(ctx)
 local Core = require("RailroaderRV/Core/RV_Server_Core")
+local ClientDispatch = require("RailroaderRV/Core/RV_ServerClientDispatch")
 local Adapter = ctx.Adapter
 local C = ctx.C
 local integer = ctx.integer
@@ -135,9 +136,8 @@ function Adapter.syncUtilityMapping(player, previousIdentity)
         generation = identity.generation,
         templateId = record.templateId,
     }
-    local sentOk, sent = callGlobal("sendServerCommand", player, C.MOD_ID,
-        C.COMMAND_RV_UTILITY_MAPPING, payload)
-    return sentOk and sent ~= false, identity
+    return ClientDispatch.sendToPlayer(player, C.MOD_ID,
+        C.COMMAND_RV_UTILITY_MAPPING, payload), identity
 end
 
 -- Read both halves of the service-wide transaction mutex before any adapter

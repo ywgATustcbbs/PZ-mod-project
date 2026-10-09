@@ -11,6 +11,7 @@
 -- the completion callback that runs once after every member is home.
 local Constants = require("RailroaderRV/Common/RV_Constants")
 local ServerUtil = require("RailroaderRV/Common/RV_ServerUtil")
+local ClientDispatch = require("RailroaderRV/Core/RV_ServerClientDispatch")
 local Boundary = require("RailroaderRV/BoundaryGuard/RV_BoundaryServer")
 
 local M = {}
@@ -144,8 +145,8 @@ local function applyTeleport(player, target, temporary)
 end
 
 local function sendRelocate(op, member, target, phase)
-    return ServerUtil.callGlobalSucceeded("sendServerCommand", member.player,
-        Constants.MOD_ID, "Relocate", {
+    return ClientDispatch.sendToPlayer(member.player, Constants.MOD_ID,
+        "Relocate", {
             token = op.token,
             onlineId = member.onlineId,
             rvId = op.rvId,
@@ -227,8 +228,8 @@ local function finishFailure(op, reason, live)
         local player = live[member.identityKey]
         if player ~= nil then
             member.player = player
-            if sendRelocate(op, member, member.captured, "return")
-                and applyTeleport(member.player, member.captured, false) then
+            if applyTeleport(member.player, member.captured, false)
+                and sendRelocate(op, member, member.captured, "return") then
                 returned = returned + 1
                 completeLease(op, member)
             else
@@ -271,8 +272,8 @@ local function advanceMoveOut(op, live)
             return finishFailure(op,
                 "wall reload boundary lease could not be armed", live)
         end
-        if not sendRelocate(op, member, target, "temporary")
-            or not applyTeleport(member.player, target, true) then
+        if not applyTeleport(member.player, target, true)
+            or not sendRelocate(op, member, target, "temporary") then
             return finishFailure(op, "wall reload move-out teleport failed", live)
         end
     end
@@ -294,8 +295,8 @@ local function advanceWaitReload(op, live)
         local target = {
             x = member.captured.x, y = member.captured.y, z = member.captured.z,
         }
-        if not sendRelocate(op, member, target, "return")
-            or not applyTeleport(member.player, target, false) then
+        if not applyTeleport(member.player, target, false)
+            or not sendRelocate(op, member, target, "return") then
             return finishFailure(op, "wall reload return teleport failed", live)
         end
     end

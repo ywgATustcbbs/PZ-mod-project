@@ -6,8 +6,14 @@ local Water = require("RailroaderRV/Water/RV_UtilityWaterConstants")
 
 ISRVUtilityAction = ISBaseTimedAction:derive("ISRVUtilityAction")
 
+local PROGRESS_INTERVAL_MS = 1000
+
 local function serverUtility()
     return require("RailroaderRV/Core/RV_UtilityServer")
+end
+
+local function isSinglePlayer()
+    return not isClient() and not isServer()
 end
 
 local function isWaterTransfer(operation)
@@ -30,6 +36,28 @@ function ISRVUtilityAction:start()
     else
         self:setActionAnim("Loot")
     end
+    if isSinglePlayer() then
+        if self.operation == U.OP_ADD_FUEL then
+            local accepted, amount = serverUtility().beginFuelTimedAction(
+                self.character, self.item)
+            if not accepted then
+                self.serverFuelInvalid = true
+                self:forceStop()
+                return
+            end
+            self.serverFuelAmount = amount
+            self.lastFuelProgress = 0
+            self.lastFuelProgressMs = getTimestampMs()
+            self.serverFuelStarted = true
+        elseif isWaterTransfer(self.operation) then
+            local accepted = serverUtility().beginWaterTimedAction(self)
+            if not accepted then
+                self.serverWaterInvalid = true
+                self:forceStop()
+                return
+            end
+        end
+    end
 end
 
 function ISRVUtilityAction:update()
@@ -39,6 +67,20 @@ function ISRVUtilityAction:update()
         self.character:setMetabolicTarget(Metabolics.HeavyDomestic)
     else
         self.character:setMetabolicTarget(Metabolics.MediumWork)
+    end
+    if not isSinglePlayer() then return end
+
+    local nowMs = getTimestampMs()
+    if self.operation == U.OP_ADD_FUEL then
+        if not self.serverFuelInvalid
+            and nowMs - self.lastFuelProgressMs >= PROGRESS_INTERVAL_MS then
+            self:applyFuelProgress(self:getJobDelta())
+            self.lastFuelProgressMs = nowMs
+        end
+    elseif isWaterTransfer(self.operation) and not self.serverWaterInvalid
+        and self.serverWaterStarted
+        and nowMs - self.serverWaterLastMs >= PROGRESS_INTERVAL_MS then
+        serverUtility().progressWaterTimedAction(self)
     end
 end
 
@@ -53,7 +95,8 @@ function ISRVUtilityAction:serverStart()
         end
         self.serverFuelAmount = amount
         self.lastFuelProgress = 0
-        emulateAnimEvent(self.netAction, 1000, "FuelProgress", nil)
+        self.serverFuelStarted = true
+        emulateAnimEvent(self.netAction, PROGRESS_INTERVAL_MS, "FuelProgress", nil)
         return
     end
     if not isWaterTransfer(self.operation) then return end
@@ -63,7 +106,7 @@ function ISRVUtilityAction:serverStart()
         self.netAction:forceComplete()
         return
     end
-    emulateAnimEvent(self.netAction, 1000, "WaterProgress", nil)
+    emulateAnimEvent(self.netAction, PROGRESS_INTERVAL_MS, "WaterProgress", nil)
 end
 
 function ISRVUtilityAction:applyFuelProgress(progress)
@@ -76,7 +119,11 @@ function ISRVUtilityAction:applyFuelProgress(progress)
         self.character, self.item, delta)
     if not accepted then
         self.serverFuelInvalid = true
-        self.netAction:forceComplete()
+        if isServer() then
+            self.netAction:forceComplete()
+        else
+            self:forceStop()
+        end
         return false
     end
     self.lastFuelProgress = progress
@@ -93,11 +140,15 @@ end
 
 function ISRVUtilityAction:serverStop()
     if self.operation == U.OP_ADD_FUEL then
-        if not self.serverFuelInvalid then self:applyFuelProgress(self.netAction:getProgress()) end
-        serverUtility().finishFuelTimedAction(self.character)
+        if self.serverFuelStarted then
+            if not self.serverFuelInvalid then
+                self:applyFuelProgress(self.netAction:getProgress())
+            end
+            serverUtility().finishFuelTimedAction(self.character)
+        end
         return
     end
-    if isWaterTransfer(self.operation) then
+    if isWaterTransfer(self.operation) and self.serverWaterStarted then
         serverUtility().finishWaterTimedAction(self)
     end
 end
@@ -105,10 +156,14 @@ end
 function ISRVUtilityAction:complete()
     if not isClient() then
         if self.operation == U.OP_ADD_FUEL then
-            if not self.serverFuelInvalid then self:applyFuelProgress(1) end
-            serverUtility().finishFuelTimedAction(self.character)
+            if self.serverFuelStarted then
+                if not self.serverFuelInvalid then self:applyFuelProgress(1) end
+                if not self.serverFuelInvalid then
+                    serverUtility().finishFuelTimedAction(self.character)
+                end
+            end
         elseif isWaterTransfer(self.operation) then
-            if not self.serverWaterInvalid then
+            if self.serverWaterStarted and not self.serverWaterInvalid then
                 serverUtility().finishWaterTimedAction(self)
             end
         else
@@ -134,6 +189,19 @@ local function notifyActionEnded(self)
 end
 
 function ISRVUtilityAction:stop()
+    if isSinglePlayer() then
+        if self.operation == U.OP_ADD_FUEL and self.serverFuelStarted then
+            if not self.serverFuelInvalid then
+                self:applyFuelProgress(self:getJobDelta())
+            end
+            if not self.serverFuelInvalid then
+                serverUtility().finishFuelTimedAction(self.character)
+            end
+        elseif isWaterTransfer(self.operation) and self.serverWaterStarted
+            and not self.serverWaterInvalid then
+            serverUtility().finishWaterTimedAction(self)
+        end
+    end
     if self.operation == U.OP_ADD_FUEL and self.item then
         self.item:setJobDelta(0)
         self.character:stopOrTriggerSound(self.sound)

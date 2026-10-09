@@ -112,7 +112,8 @@ local function commit(record, identity)
 end
 
 local function chargerEfficiency(power)
-    return power.charger and power.charger.condition / power.charger.conditionMax or nil
+    return power.charger and P.chargerEfficiency(power.charger.condition,
+        power.charger.conditionMax) or nil
 end
 
 local function inverterEfficiency(power)
@@ -336,7 +337,7 @@ function M.settlePower(identity, mappingRecord, player, providedRecord, action)
     if actionLoads then
         for _, load in pairs(actionLoads) do load.running = powered end
     end
-    local actionLoad = action ~= nil and actionLoads and actionLoads[action]
+    local actionLoad = action and actionLoads and actionLoads[action]
     local extractionPumpRunning = actionLoad ~= nil
         and actionLoad.running and water.extractionPump ~= nil
     return {

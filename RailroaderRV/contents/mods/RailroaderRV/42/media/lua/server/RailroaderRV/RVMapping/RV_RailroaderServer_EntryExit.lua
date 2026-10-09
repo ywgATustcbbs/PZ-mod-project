@@ -4,6 +4,7 @@ local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local ServerTeleport = require("RailroaderRV/Common/RV_ServerTeleport")
 local WaterConstants = require("RailroaderRV/Water/RV_UtilityWaterConstants")
+local ClientDispatch = require("RailroaderRV/Core/RV_ServerClientDispatch")
 local processIsServer = ctx.processIsServer
 local Boundary = ctx.Boundary
 local Adapter = ctx.Adapter
@@ -195,7 +196,7 @@ end
 local function sendResult(player, ok, reason)
     local onlineId = playerId(player)
     if onlineId == nil then return end
-    callGlobal("sendServerCommand", player, C.MOD_ID, C.COMMAND_RV_TELEPORT, {
+    ClientDispatch.sendToPlayer(player, C.MOD_ID, C.COMMAND_RV_TELEPORT, {
         ok = ok == true, onlineId = onlineId, reason = reason,
     })
 end
@@ -222,13 +223,11 @@ local function movePlayer(player, position, action, relation)
             payload.generation = integer(relation.generation)
         end
     end
-    local sentCallOk, sentResult = callGlobal("sendServerCommand", player,
+    local sent = ClientDispatch.sendToPlayer(player,
         C.MOD_ID, C.COMMAND_RV_TELEPORT, payload)
-    local sent = sentCallOk and sentResult ~= false
-    -- A single-player world has no network command channel.  Its official
-    -- TrainEntity/Ride state is updated locally; the same call still sends the
-    -- RVTeleport hint when the channel exists.  MP/co-op must have the command
-    -- path or the transaction fails closed.
+    -- Multiplayer clients receive the same Ride transition hint over the
+    -- native command channel; singleplayer applies it through the local client
+    -- handler before the authoritative teleport below.
     if not sent and processIsServer() then return false end
     if action == "enter" and type(relation) == "table" then
         return ServerTeleport.teleportToRVSpawn(player, relation, position)

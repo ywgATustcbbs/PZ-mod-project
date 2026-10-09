@@ -169,8 +169,54 @@ end
 -- operation is marked cancelled once, logged once, and the player can press the
 -- button again.  `GenerationTransaction.cancel` is the request signal;
 -- `abortGeneration` is the only observer.
+local function logStagingAbortDiagnostic(record, reason)
+    if record.stage ~= "WAIT_STAGING" then return end
+
+    local resolved, playerOrReason = resolvePendingPlayer(record)
+    local player = resolved and playerOrReason or nil
+    local actualPosition = player ~= nil
+        and (tostring(player:getX()) .. "," .. tostring(player:getY()) .. ","
+            .. tostring(player:getZ())) or "unavailable"
+    local stagingProof = "skipped"
+    local stagingReason = resolved and "not evaluated" or safeErrorText(playerOrReason)
+    local targetAreaStatus = "skipped"
+    local targetAreaReason = resolved and "not evaluated" or safeErrorText(playerOrReason)
+    if player ~= nil then
+        local atStaging, stagingProofReason = playerIsAtStagingDestination(
+            player, record.stagingDestination, record.bounds)
+        stagingProof = atStaging and "passed" or "failed"
+        stagingReason = stagingProofReason == nil and "matched"
+            or safeErrorText(stagingProofReason)
+
+        local targetLoaded, targetLoadReason = ServerSchema.targetAreaLoadStatus(
+            player, record.bounds, safeErrorText)
+        targetAreaStatus = targetLoaded == true and "loaded"
+            or targetLoaded == false and "not-loaded" or "error"
+        targetAreaReason = targetLoadReason == nil and "none"
+            or safeErrorText(targetLoadReason)
+    end
+
+    local target = record.stagingDestination
+    print("[RailroaderRV][Diag] server event=generation_abort"
+        .. " token=" .. tostring(record.token)
+        .. " generation=" .. tostring(record.generation)
+        .. " stage=" .. tostring(record.stage)
+        .. " stagingAcked=" .. tostring(record.stagingAcked)
+        .. " resolve=" .. (resolved and "ok" or "failed")
+        .. " resolveReason=" .. (resolved and "none" or safeErrorText(playerOrReason))
+        .. " actual=" .. actualPosition
+        .. " target=" .. tostring(target.x) .. "," .. tostring(target.y)
+        .. "," .. tostring(target.z)
+        .. " stagingProof=" .. stagingProof
+        .. " stagingReason=" .. stagingReason
+        .. " targetArea=" .. targetAreaStatus
+        .. " targetAreaReason=" .. targetAreaReason
+        .. " abortReason=" .. safeErrorText(reason))
+end
+
 local function runGenerationAbort(record, reason)
     if record == nil then return end
+    logStagingAbortDiagnostic(record, reason)
     GenerationTransaction.cancel(reason)
     local abortOk, abortError = pcall(abortGeneration, record, reason)
     if not abortOk then
@@ -347,7 +393,19 @@ function RV.Server.OnClientCommand(module, command, player, args)
         return
     end
     if module == COMMAND_MODULE and command == COMMAND_RELOCATE_ACK then
+        local waitingRecord = GenerationTransaction.current()
+        local waitingForStaging = waitingRecord ~= nil
+            and waitingRecord.stage == "WAIT_STAGING"
+        local ackToken = type(args) == "table" and args.token or nil
         local accepted, reason = acknowledgeRelocation(player, args)
+        if waitingForStaging then
+            print("[RailroaderRV][Diag] server event=staging_ack token="
+                .. tostring(ackToken) .. " generation="
+                .. tostring(waitingRecord.generation) .. " phase=staging"
+                .. " accepted=" .. tostring(accepted == true)
+                .. " reason=" .. (accepted == true and "none"
+                    or safeErrorText(reason)))
+        end
         if not accepted then
             print("[RailroaderRV] relocation acknowledgement rejected: "
                 .. safeErrorText(reason))

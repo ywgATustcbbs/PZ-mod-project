@@ -27,6 +27,9 @@ local recipes = {
     ["Assemble RV Smart Power Controller"] = {
         previewSprites = {
             "appliances_com_01_72",
+            "appliances_com_01_73",
+            "appliances_com_01_74",
+            "appliances_com_01_75",
         },
         staticSprites = {
             ["Base.Mov_DesktopComputer"] = "appliances_com_01_72",

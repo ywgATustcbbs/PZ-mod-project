@@ -7,6 +7,7 @@ local COMMAND_RV_TELEPORT = ctx.COMMAND_RV_TELEPORT
 local Constants = ctx.Constants
 local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
+local ClientDispatch = ctx.ClientDispatch
 local ServerWorld = ctx.ServerWorld
 local roomOwnershipGuards = ctx.roomOwnershipGuards
 
@@ -34,7 +35,7 @@ local function notifyFailure(player, reason)
         and string.find(reasonText, invalidRVData, 1, true) then
         reasonText = invalidRVData
     end
-    return ServerUtil.callGlobalSucceeded("sendServerCommand", player,
+    return ClientDispatch.sendToPlayer(player,
         COMMAND_MODULE, COMMAND_RV_TELEPORT, {
             ok = false, onlineId = onlineId, reason = reasonText,
         })
@@ -441,7 +442,7 @@ local function armClientRoomOwnershipGuard(generation, oldBounds, newBounds,
     copyRoomRefreshBounds(payload, "new", newBounds)
     -- The no-player overload broadcasts to every connected client. A player
     -- other than the requester may later walk through the retired footprint.
-    if not ServerUtil.callGlobalSucceeded("sendServerCommand", COMMAND_MODULE,
+    if not ClientDispatch.broadcast(COMMAND_MODULE,
         COMMAND_REFRESH_ROOM_OWNERSHIP, payload) then
         error("RailroaderRV: client room ownership guards could not be armed")
     end
@@ -478,7 +479,7 @@ local function armTargetedClientRoomOwnershipGuard(player, generation, newBounds
         hasOld = false,
     }
     copyRoomRefreshBounds(payload, "new", newBounds)
-    if not ServerUtil.callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,
+    if not ClientDispatch.sendToPlayer(player, COMMAND_MODULE,
         COMMAND_REFRESH_ROOM_OWNERSHIP, payload) then
         error("RailroaderRV: targeted room ownership guard could not be armed")
     end

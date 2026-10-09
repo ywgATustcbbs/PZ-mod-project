@@ -12,7 +12,7 @@ module RailroaderRV
 		ItemType = base:normal,
 		DisplayName = RV Battery Charger,
 		Icon = RailroaderRV_RVCharger,
-		ConditionMax = 1000,
+		ConditionMax = 100,
 		ConditionLowerChanceOneIn = 0,
 	}
 
@@ -23,7 +23,7 @@ module RailroaderRV
 		ItemType = base:normal,
 		DisplayName = RV Power Inverter,
 		Icon = RailroaderRV_RVInverter,
-		ConditionMax = 1000,
+		ConditionMax = 100,
 		ConditionLowerChanceOneIn = 0,
 	}
 

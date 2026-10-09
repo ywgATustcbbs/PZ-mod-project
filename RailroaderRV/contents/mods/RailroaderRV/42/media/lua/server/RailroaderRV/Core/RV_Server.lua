@@ -57,6 +57,7 @@ local ServerTeleport = require("RailroaderRV/Common/RV_ServerTeleport")
 local ServerWorld = require("RailroaderRV/Common/RV_ServerWorld")
 local ServerSchema = require("RailroaderRV/Common/RV_ServerSchema")
 local UtilityServer = require("RailroaderRV/Core/RV_UtilityServer")
+local ClientDispatch = require("RailroaderRV/Core/RV_ServerClientDispatch")
 
 local pendingSerial = 0
 local serverTick = Core.getTick()
@@ -94,6 +95,7 @@ local ctx = {
     Boundary = Boundary,
     RV = RV,
     ServerUtil = ServerUtil,
+    ClientDispatch = ClientDispatch,
     ServerWorld = ServerWorld,
     ServerSchema = ServerSchema,
     UtilityServer = UtilityServer,

@@ -34,6 +34,9 @@ local RV_WATER_PUMP_MOVEABLE_SPRITES = {
 }
 local RV_DESKTOP_COMPUTER_MOVEABLE_SPRITES = {
     ["appliances_com_01_72"] = true,
+    ["appliances_com_01_73"] = true,
+    ["appliances_com_01_74"] = true,
+    ["appliances_com_01_75"] = true,
 }
 
 local function allowRVMoveable(item, allowedSprites)
@@ -130,7 +133,7 @@ P.BATTERY_DISCHARGE_FACTOR = function(health)
 end
 
 P.DEVICE_POWER_W = {
-    Light = 60,
+    Light = 30,
     Radio = 15,
     TV = 100,
     Fridge = 125,
@@ -149,7 +152,7 @@ P.CRAFT_EFFICIENCY_RANDOM_MIN = -0.05
 P.CRAFT_EFFICIENCY_RANDOM_MAX = 0.05
 P.CRAFT_EFFICIENCY_MIN = 0.70
 P.CRAFT_EFFICIENCY_MAX = 0.98
-P.COMPONENT_CONDITION_MAX = 1000
+P.COMPONENT_CONDITION_MAX = 100
 
 function P.batteryParameters(fullType, condition, maxCondition)
     local profile = P.BATTERY_TYPES[fullType]
@@ -169,6 +172,10 @@ function P.craftEfficiency(electricalLevel, randomOffset)
     return math.max(P.CRAFT_EFFICIENCY_MIN, math.min(P.CRAFT_EFFICIENCY_MAX,
         P.CRAFT_EFFICIENCY_BASE + electricalLevel * P.CRAFT_EFFICIENCY_PER_ELECTRICAL
             + randomOffset))
+end
+
+function P.chargerEfficiency(condition, conditionMax)
+    return math.min(condition / conditionMax, P.CRAFT_EFFICIENCY_MAX)
 end
 
 return P

@@ -8,6 +8,7 @@ local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry"
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
+local ClientDispatch = require("RailroaderRV/Core/RV_ServerClientDispatch")
 -- Match BoundaryValidation's cache lifetime for players already tracked here.
 local VALIDATION_REFRESH_TICKS = 60
 
@@ -116,12 +117,12 @@ function Boundary.diagnoseGuardState(player, knownIdentity, position, relation,
         or onlineId == nil or onlineId < 0 then
         return false
     end
-    local sentCallOk, sentResult = callGlobal("sendServerCommand", player,
+    local sent = ClientDispatch.sendToPlayer(player,
         C.MOD_ID, C.COMMAND_RV_TELEPORT, {
             ok = false, onlineId = onlineId,
             reason = C.INVALID_RV_DATA,
         })
-    if not sentCallOk or sentResult == false then
+    if not sent then
         print("[RailroaderRV][BoundaryDiag] invalid RV data notice failed"
             .. " player=" .. tostring(id.key)
             .. " reason=" .. tostring(reason))

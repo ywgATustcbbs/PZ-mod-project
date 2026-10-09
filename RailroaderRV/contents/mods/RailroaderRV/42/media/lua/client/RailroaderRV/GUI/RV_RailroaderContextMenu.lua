@@ -683,7 +683,9 @@ function Menu.OnServerCommand(module, command, args)
         return
     end
     if command == C.COMMAND_RV_SAFEHOUSE_SYNC then
-        SafeHouse.addSafeHouse(args.x, args.y, args.w, args.h, args.owner)
+        if isMultiplayer() then
+            SafeHouse.addSafeHouse(args.x, args.y, args.w, args.h, args.owner)
+        end
         local player = localPlayerByOnlineId(args.onlineId)
         if player then
             local message = text("UI_RailroaderRV_Safehouse_Claimed",

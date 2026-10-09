@@ -15,6 +15,8 @@ local RoofServer = require("RailroaderRV/Roof/RV_Server_RoofDevices")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local Util = require("RailroaderRV/Common/RV_ServerUtil")
 local Core = require("RailroaderRV/Core/RV_Server_Core")
+local ClientDispatch = require("RailroaderRV/Core/RV_ServerClientDispatch")
+local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 require("TimedActions/ISRVUtilityAction")
 
 local M = {}
@@ -43,8 +45,7 @@ end
 
 local function send(player, command, payload)
     if not player then return false end
-    return Util.callGlobalSucceeded("sendServerCommand", player, C.MOD_ID,
-        command, payload)
+    return ClientDispatch.sendToPlayer(player, C.MOD_ID, command, payload)
 end
 
 local function resolveRV(player, operation, phase)
@@ -145,6 +146,39 @@ local function forCurrentRecords(callback)
         local mappingOk, mappingRecord = currentMappingRecord(identity)
         if mappingOk then callback(identity, entry.record, mappingRecord) end
     end
+end
+
+local function zombieSnapshot()
+    local zombieList = getCell():getZombieList()
+    local snapshot = {}
+    for index = 0, zombieList:size() - 1 do
+        snapshot[#snapshot + 1] = zombieList:get(index)
+    end
+    return snapshot
+end
+
+local function sweepAvailableRVRegions()
+    local zombies = zombieSnapshot()
+    forCurrentRecords(function(identity, _record, mappingRecord)
+        if not serviceBusy(identity) then
+            local region = RegionSlots.indexToRegion(mappingRecord.slotIndex)
+            local killed = 0
+            for i = 1, #zombies do
+                local zombie = zombies[i]
+                if zombie:getCurrentSquare() ~= nil and not zombie:isDead() then
+                    local x, y, z = zombie:getX(), zombie:getY(), zombie:getZ()
+                    if x >= region.minX and x < region.maxX
+                        and y >= region.minY and y < region.maxY
+                        and math.floor(z) >= C.RV_IDENTITY_MIN_Z
+                        and math.floor(z) < C.RV_IDENTITY_MAX_Z then
+                        zombie:dieNetwork(nil, nil, false, nil)
+                        killed = killed + 1
+                        if killed == 2 then break end
+                    end
+                end
+            end
+        end
+    end)
 end
 
 local function actionContext(player, operation, phase)
@@ -332,7 +366,11 @@ local function endWaterTimedAction(action, settlementDone, record)
     action.serverWaterInvalid = true
     action.serverWaterEnded = true
     if recordAvailable then broadcastToRV(action.serverWaterIdentity, record) end
-    action.netAction:forceComplete()
+    if isServer() then
+        action.netAction:forceComplete()
+    else
+        action:forceStop()
+    end
     return false
 end
 
@@ -604,6 +642,7 @@ function M.onEveryTenMinutes()
             waterIntent, nil, record)
         broadcastToRV(identity, updated)
     end)
+    sweepAvailableRVRegions()
 end
 
 function M.onEveryHour()

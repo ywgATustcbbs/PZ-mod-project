@@ -19,6 +19,15 @@ local updateRoomOwnershipGuards = ctx.updateRoomOwnershipGuards
 local finiteNumber = ctx.finiteNumber
 local pendingFinalRelocation = nil
 
+local function diagnosticPlayerLocation(playerObj)
+    local x, y, z = playerObj:getX(), playerObj:getY(), playerObj:getZ()
+    local square = playerObj:getCurrentSquare()
+    local squarePosition = square and (tostring(square:getX()) .. ","
+        .. tostring(square:getY()) .. "," .. tostring(square:getZ())) or "nil"
+    return "position=" .. tostring(x) .. "," .. tostring(y) .. ","
+        .. tostring(z) .. " currentSquare=" .. squarePosition
+end
+
 function Client.requestGenerate(playerObj)
     if not playerObj then return end
     -- Do not add x/y/z (or a precomputed layout) to this payload.  The server
@@ -180,7 +189,30 @@ function Client.onServerCommand(module, command, args)
     local generationTransition = args.generationTransition == true
     local generationPhase = args.generationPhase
     local playerObj = localPlayerByOnlineId(onlineId)
-    if not playerObj or playerObj:isDead() then
+    local playerDead = playerObj ~= nil and playerObj:isDead()
+    if generationTransition then
+        local location = playerObj and not playerDead
+            and diagnosticPlayerLocation(playerObj)
+            or "position=unavailable currentSquare=unavailable"
+        print("[RailroaderRV][Diag] client event=relocate_received token="
+            .. tostring(token) .. " generation=" .. tostring(args.generation)
+            .. " phase=" .. tostring(generationPhase) .. " target="
+            .. tostring(x) .. "," .. tostring(y) .. "," .. tostring(z)
+            .. " " .. location)
+        local previous = ctx.pendingRelocation
+        if generationPhase == "return" and previous ~= nil
+            and previous.generationTransition then
+            print("[RailroaderRV][Diag] client event=relocate_pending_replaced"
+                .. " pendingToken=" .. tostring(previous.token)
+                .. " pendingGeneration=" .. tostring(previous.generation)
+                .. " pendingPhase=" .. tostring(previous.generationPhase)
+                .. " pendingTicks=" .. tostring(previous.ticks)
+                .. " pendingTarget=" .. tostring(previous.x) .. ","
+                .. tostring(previous.y) .. "," .. tostring(previous.z)
+                .. " returnToken=" .. tostring(token) .. " " .. location)
+        end
+    end
+    if not playerObj or playerDead then
         return
     end
     assert(not (wallReloadTransition and generationTransition),
@@ -241,6 +273,7 @@ function Client.onServerCommand(module, command, args)
     -- getCurrentSquare() check would still see stale room metadata.
     ctx.pendingRelocation = {
         token = token,
+        generation = args.generation,
         onlineId = onlineId,
         x = x,
         y = y,
@@ -251,6 +284,13 @@ function Client.onServerCommand(module, command, args)
         generationPhase = generationPhase,
         ticks = 0,
     }
+    if generationTransition then
+        print("[RailroaderRV][Diag] client event=relocate_pending token="
+            .. tostring(token) .. " generation=" .. tostring(args.generation)
+            .. " phase=" .. tostring(generationPhase) .. " target="
+            .. tostring(x) .. "," .. tostring(y) .. "," .. tostring(z)
+            .. " " .. diagnosticPlayerLocation(playerObj))
+    end
 end
 
 function Client.onTick()
@@ -285,6 +325,20 @@ function Client.onTick()
     end
     pending.ticks = pending.ticks + 1
     if pending.ticks > RELOCATION_TIMEOUT_TICKS then
+        if pending.generationTransition then
+            local expiredPlayer = localPlayerByOnlineId(pending.onlineId)
+            local location = expiredPlayer and not expiredPlayer:isDead()
+                and diagnosticPlayerLocation(expiredPlayer)
+                or "position=unavailable currentSquare=unavailable"
+            print("[RailroaderRV][Diag] client event=relocate_pending_timeout"
+                .. " token=" .. tostring(pending.token)
+                .. " generation=" .. tostring(pending.generation)
+                .. " phase=" .. tostring(pending.generationPhase)
+                .. " target=" .. tostring(pending.x) .. ","
+                .. tostring(pending.y) .. "," .. tostring(pending.z)
+                .. " reason=client relocation acknowledgement timed out "
+                .. location)
+        end
         ctx.pendingRelocation = nil
         return
     end
@@ -341,6 +395,14 @@ function Client.onTick()
     -- This is the one applied signal the server waits for; the operation has a
     -- single deadline and no client-side retry.
     ctx.pendingRelocation = nil
+    if pending.generationTransition then
+        print("[RailroaderRV][Diag] client event=relocate_ack_submit token="
+            .. tostring(pending.token) .. " generation="
+            .. tostring(pending.generation) .. " phase="
+            .. tostring(pending.generationPhase) .. " target="
+            .. tostring(pending.x) .. "," .. tostring(pending.y) .. ","
+            .. tostring(pending.z) .. " " .. diagnosticPlayerLocation(playerObj))
+    end
     sendClientCommand(playerObj, C.MOD_ID, COMMAND_RELOCATE_ACK,
         { token = pending.token })
 end

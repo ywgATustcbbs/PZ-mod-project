@@ -4,6 +4,7 @@
 local C = require("RailroaderRV/Common/RV_Constants")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local Store = require("RailroaderRV/Core/RV_UtilityStore")
+local ClientDispatch = require("RailroaderRV/Core/RV_ServerClientDispatch")
 
 local M = {}
 
@@ -13,9 +14,11 @@ end
 
 local function sendRejection(player, reason)
     if player then
-        sendServerCommand(player, C.MOD_ID, C.COMMAND_RV_SAFEHOUSE_RESULT, {
-            onlineId = playerOnlineId(player), ok = false, reason = reason,
-        })
+        ClientDispatch.sendToPlayer(player, C.MOD_ID,
+            C.COMMAND_RV_SAFEHOUSE_RESULT, {
+                onlineId = playerOnlineId(player), ok = false,
+                reason = reason,
+            })
     end
     return false, reason
 end
@@ -60,7 +63,7 @@ local function claimCabSafehouse(player, record)
     SafeHouse.addSafeHouse(x, y, width, height, username)
     -- The native constructor derives onlineID from x/y on each peer; the
     -- geometry is the synchronization identity, never SafeHouse.getId().
-    sendServerCommand(C.MOD_ID, C.COMMAND_RV_SAFEHOUSE_SYNC, {
+    ClientDispatch.broadcast(C.MOD_ID, C.COMMAND_RV_SAFEHOUSE_SYNC, {
         x = x, y = y, w = width, h = height, owner = username,
         onlineId = playerOnlineId(player),
     })

@@ -1239,22 +1239,32 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
             end, emptyText, labelFor)
     end
 
-    local function componentEfficiencyLabel(item)
+    local function componentEfficiencyLabel(item, efficiency)
         return itemLabel(item) .. "  |  "
             .. getText("UI_RailroaderRV_Utility_Efficiency") .. ": "
-            .. display(item:getCondition() / item:getConditionMax() * 100, 0) .. "%"
+            .. display(efficiency * 100, 0) .. "%"
+    end
+
+    local function chargerEfficiencyLabel(item)
+        return componentEfficiencyLabel(item,
+            P.chargerEfficiency(item:getCondition(), item:getConditionMax()))
+    end
+
+    local function inverterEfficiencyLabel(item)
+        return componentEfficiencyLabel(item,
+            item:getCondition() / item:getConditionMax())
     end
 
     function Window:addCharger(anchor)
         self:addComponent(anchor, U.OP_INSTALL_CHARGER, P.CHARGER_TYPE,
             getText("UI_RailroaderRV_Utility_NoChargerInInventory"),
-            componentEfficiencyLabel)
+            chargerEfficiencyLabel)
     end
 
     function Window:addInverter(anchor)
         self:addComponent(anchor, U.OP_INSTALL_INVERTER, P.INVERTER_TYPE,
             getText("UI_RailroaderRV_Utility_NoInverterInInventory"),
-            componentEfficiencyLabel)
+            inverterEfficiencyLabel)
     end
 
     function Window:addCircuitBreaker(anchor)

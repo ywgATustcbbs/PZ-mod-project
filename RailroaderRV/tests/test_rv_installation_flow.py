@@ -60,6 +60,7 @@ function instanceItem(fullType)
     return item
 end
 function isClient() return false end
+function isServer() return false end
 function getGameTime()
     return {
         getWorldAgeHours = function() return now end,
@@ -96,10 +97,10 @@ local requestedLoad
 package.preload["RailroaderRV/Power/RV_UtilityPowerDevices"] = function()
     local actual = dofile([[__MEDIA_LUA__/server/RailroaderRV/Power/RV_UtilityPowerDevices.lua]])
     requestedLoad = {
-        scan = function(identity, record, player, slotIndex)
+        scan = function(identity, record, player, slotIndex, templateId)
             scanCount = scanCount + 1
             missingScanSquareReturned = false
-            return actual.scan(identity, record, player, slotIndex)
+            return actual.scan(identity, record, player, slotIndex, templateId)
         end,
         requestedLoadW = function() return requestedLoadW, 0 end,
         potentialLoadW = function() return 0 end,
@@ -131,7 +132,10 @@ package.preload["RailroaderRV/Common/RV_ServerWorld"] = function()
     }
 end
 package.preload["RailroaderRV/Water/RV_UtilityWater"] = function()
-    return { setConnection = function() return true end }
+    return {
+        CONSTANTS = require("RailroaderRV/Water/RV_UtilityWaterConstants"),
+        setConnection = function() return true end,
+    }
 end
 package.preload["RailroaderRV/Core/RV_Server_Core"] = function()
     return { tickModulo = function() return false end }
@@ -355,7 +359,8 @@ function setWeather(hour, month, cloud, precipitation, fog, wind)
 end
 
 function evaluateSolarMix(withFuel, fuelEnabled, fuelLiters,
-    batteryChargeWh, loadW, chargerInstalled)
+    batteryChargeWh, loadW, chargerInstalled,
+    chargerCondition, chargerConditionMax)
     local record = Store.getRecord(identity, false)
     local power = record.power
     power.generators = {
@@ -376,7 +381,8 @@ function evaluateSolarMix(withFuel, fuelEnabled, fuelLiters,
         condition = 100, maxCondition = 100, usedDelta = 1 } }
     power.batteryWh = batteryChargeWh
     power.charger = chargerInstalled
-        and { condition = 1000, conditionMax = 1000 } or nil
+        and { condition = chargerCondition or 1000,
+            conditionMax = chargerConditionMax or 1000 } or nil
     power.inverter = { condition = 1000, conditionMax = 1000 }
     requestedLoadW = loadW
     return Power.snapshot(record, identity, activeContext)
@@ -483,6 +489,13 @@ class InstallationFlowChecks(unittest.TestCase):
         self.assertEqual(result.scanCount, 1)
         self.assertEqual(result.commitCount, 1)
         self.assertEqual(result.snapshotCount, 1)
+
+    def test_charger_snapshot_caps_efficiency_at_98_percent(self) -> None:
+        self.globals.reset(None, None, None, False, True)
+        snapshot = self.globals.evaluateSolarMix(
+            False, False, 0, 360, 0, True, 100, 100
+        )
+        self.assertEqual(snapshot.chargerEfficiency, 0.98)
 
     def test_cancel_and_completion_time_capacity_rejection_consume_nothing(self) -> None:
         cancelled = self.globals.reset(
@@ -638,16 +651,19 @@ class InstallationFlowChecks(unittest.TestCase):
             False, False, 0, 500, 0, True
         )
         self.assertEqual(renewable_only.renewableAvailablePowerW, 650)
-        self.assertEqual(renewable_only.renewableUsedPowerW, 250)
-        self.assertEqual(renewable_only.generationPowerW, 250)
+        self.assertAlmostEqual(renewable_only.renewableUsedPowerW, 250 / 0.98)
+        self.assertAlmostEqual(renewable_only.generationPowerW, 250 / 0.98)
         self.assertEqual(renewable_only.fuelConsumptionLPerHour, 0)
         self.assertEqual(renewable_only.batteryChargePowerW, 250)
 
         mixed = self.globals.evaluateSolarMix(True, True, 10, 720, 2000, True)
         self.assertEqual(mixed.renewableAvailablePowerW, 650)
         self.assertEqual(mixed.renewableUsedPowerW, 650)
-        self.assertEqual(mixed.generationPowerW, 1500)
-        self.assertAlmostEqual(mixed.fuelConsumptionLPerHour, 1.1625)
+        self.assertAlmostEqual(mixed.generationPowerW, 1500 / 0.98)
+        self.assertAlmostEqual(
+            mixed.fuelConsumptionLPerHour,
+            0.1 + (1500 / 0.98 - 650) / 1000 * 1.25,
+        )
         self.assertLessEqual(mixed.batteryChargePowerW, mixed.maxChargePowerW)
 
         fuel_empty = self.globals.evaluateSolarMix(

@@ -71,7 +71,7 @@ module RailroaderRV
 		{
 			item 5 [Base.BlowTorch],
 			item 1 [Base.WeldingMask] mode:keep,
-			item 1 [Base.MetalDrum],
+			item 1 [Base.MetalDrum;Base.Mov_OrangeBarrel;Base.Mov_LightGreenBarrel;Base.Mov_DarkGreenBarrel],
 			item 10 [Base.CharcoalCrafted],
 			item 20 [Base.RippedSheets],
 			item 2 [Base.Sandbag] flags[ItemCount],

@@ -11,6 +11,7 @@ local COMMAND_FINAL_RELOCATE = ctx.COMMAND_FINAL_RELOCATE
 local Boundary = ctx.Boundary
 local RV = ctx.RV
 local ServerUtil = ctx.ServerUtil
+local ClientDispatch = ctx.ClientDispatch
 local RELOCATION_TIMEOUT_TICKS = ctx.RELOCATION_TIMEOUT_TICKS
 local WORLD_MIN_Z = ctx.WORLD_MIN_Z
 local WORLD_MAX_Z = ctx.WORLD_MAX_Z
@@ -113,12 +114,18 @@ local function playerIdentity(player)
     }
 end
 
--- Pure lookup of the live IsoPlayer for a record's stable online ID.  A missing
--- object is reported as a reason; this never rebinds a transaction, never
--- writes record state and never runs a side effect.
+-- Pure lookup of the live IsoPlayer through the mode's player registry.  A
+-- missing object is reported as a reason; this never rebinds a transaction,
+-- never writes record state and never runs a side effect.
 local function resolvePendingPlayer(record)
-    local foundOk, current = ServerUtil.callGlobal("getPlayerByOnlineID",
-        record.identity.onlineId)
+    local foundOk, current
+    if isMultiplayer() then
+        foundOk, current = ServerUtil.callGlobal("getPlayerByOnlineID",
+            record.identity.onlineId)
+    else
+        foundOk, current = ServerUtil.callGlobal("getSpecificPlayer",
+            record.player:getPlayerNum())
+    end
     if not foundOk or current == nil then
         return false, "requesting player disconnected or was replaced"
     end
@@ -160,8 +167,8 @@ local function generationPositionProof(player, target)
 end
 
 local function sendRelocate(player, payload)
-    return ServerUtil.callGlobalSucceeded("sendServerCommand", player,
-        COMMAND_MODULE, COMMAND_RELOCATE, payload)
+    return ClientDispatch.sendToPlayer(player, COMMAND_MODULE,
+        COMMAND_RELOCATE, payload)
 end
 
 -- Re-state the staging relocation for the record's current phase.  "temporary"
@@ -197,11 +204,10 @@ local function sendStagingRelocation(record, phase)
     -- exact captured position and must not be re-centered.
     local teleportX = phase == "return" and target.x or target.x + 0.5
     local teleportY = phase == "return" and target.y or target.y + 0.5
-    if not sendRelocate(record.player, payload)
-        or not RV.Server.teleportToPosition(record.player, {
+    if not RV.Server.teleportToPosition(record.player, {
             x = teleportX, y = teleportY, z = target.z,
         }) then
-        return false, "server-to-client relocation command failed"
+        return false, "authoritative staging relocation failed"
     end
     if phase == "return" then
         -- B42's float teleport overload floors x/y.  The return must land on the
@@ -214,6 +220,9 @@ local function sendStagingRelocation(record, phase)
             or not ServerUtil.callSucceeded(record.player, "setLastY", target.y) then
             return false, "authoritative return relocation failed"
         end
+    end
+    if not sendRelocate(record.player, payload) then
+        return false, "server-to-client relocation command failed"
     end
     return true
 end
@@ -245,10 +254,6 @@ local function sendFinalRelocation(record, deadline)
         payload.role = record.railroader.sourceRole
         payload.seat = record.railroader.sourceSeat
     end
-    if not ServerUtil.callGlobalSucceeded("sendServerCommand", record.player,
-        COMMAND_MODULE, COMMAND_FINAL_RELOCATE, payload) then
-        return false, "final server-to-client relocation command failed"
-    end
     -- B42.20's float teleport overload floors x/y.  Restore the server-selected
     -- half-cell center through the official setters so the authoritative proof
     -- and the client acknowledgement compare the same exact destination.
@@ -259,6 +264,10 @@ local function sendFinalRelocation(record, deadline)
         or not ServerUtil.callSucceeded(record.player, "setLastX", target.x)
         or not ServerUtil.callSucceeded(record.player, "setLastY", target.y) then
         return false, "final authoritative server relocation failed"
+    end
+    if not ClientDispatch.sendToPlayer(record.player, COMMAND_MODULE,
+        COMMAND_FINAL_RELOCATE, payload) then
+        return false, "final server-to-client relocation command failed"
     end
     if deadline ~= nil then record.deadlineTick = deadline end
     return true

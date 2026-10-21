@@ -89,26 +89,27 @@ local function clearGenerationArea(cell, bounds)
     end)
 end
 
-local function buildGeneration(player, layout, bounds, generation)
+local function buildGeneration(player, layout, bounds, generation, mode)
     local cell = ServerWorld.getCellForPlayer(player)
 
-    -- Tags carry identity only; geometry is derived from the live square.
-    local pending = GenerationTransaction.current()
-    local tagContext = {
-        rvId = pending and pending.rvId,
-        templateId = pending and pending.layout.templateId,
-    }
     local templateObjects = layout.templateObjects
     local shellByTemplateIndex = {}
-    for i = 1, #bounds.wallCoordinates do
-        local edge = bounds.wallCoordinates[i]
-        for partPosition = 1, #edge.templateIndices do
-            local index = edge.templateIndices[partPosition]
-            shellByTemplateIndex[index] = edge
+    local tagContext
+    if mode == "production" then
+        -- Tags carry identity only; geometry is derived from the live square.
+        local pending = GenerationTransaction.current()
+        tagContext = {
+            rvId = pending.rvId,
+            templateId = pending.layout.templateId,
+        }
+        for i = 1, #bounds.wallCoordinates do
+            local edge = bounds.wallCoordinates[i]
+            for partPosition = 1, #edge.templateIndices do
+                local index = edge.templateIndices[partPosition]
+                shellByTemplateIndex[index] = edge
+            end
         end
     end
-
-    local powerProxyPoint = layout.powerProxy
 
     for i = 1, #templateObjects do
         local entry = templateObjects[i]
@@ -117,11 +118,16 @@ local function buildGeneration(player, layout, bounds, generation)
             square = ensureRoofSquare(cell, entry.x, entry.y, entry.z)
         end
         createCapturedTemplateObject(cell, square, entry, generation, tagContext,
-            shellByTemplateIndex[i])
+            shellByTemplateIndex[i], mode)
     end
 
     recalcAndCheckStructure(cell, bounds, layout)
 
+    if mode == "template-development" then
+        return
+    end
+
+    local powerProxyPoint = layout.powerProxy
     local proxySquare = ServerWorld.getSquare(cell, powerProxyPoint.x,
         powerProxyPoint.y, powerProxyPoint.z)
     if not proxySquare then

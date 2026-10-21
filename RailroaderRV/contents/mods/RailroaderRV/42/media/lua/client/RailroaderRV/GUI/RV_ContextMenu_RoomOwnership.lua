@@ -12,7 +12,6 @@ local finiteNumber = C.finiteNumber
 local finiteInteger = C.finiteInteger
 
 local function localPlayerByOnlineId(onlineId)
-    assert(onlineId ~= nil, "RailroaderRV: onlineId is missing")
     local count = getNumActivePlayers()
     for playerNum = 0, count - 1 do
         local playerObj = getSpecificPlayer(playerNum)
@@ -28,6 +27,7 @@ local function readRoomRefreshBounds(args, prefix)
         "wallMinX", "wallMaxX", "wallMinY", "wallMaxY",
         "roomMinX", "roomMaxX", "roomMinY", "roomMaxY",
         "roofMinX", "roofMaxX", "roofMinY", "roofMaxY", "z", "roofZ",
+        "templateId",
     }
     local bounds = {}
     for i = 1, #fields do

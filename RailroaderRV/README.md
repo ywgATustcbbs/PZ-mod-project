@@ -9,6 +9,34 @@ Mod ID、Lua 命名空间和物品 full type 均使用 `RailroaderRV`。`mod.inf
 模块边界和静态代码分析见[全局模块索引](docs/module-analysis/global-summary.md)。分析文档是静态
 审计记录；运行时行为和当前接口以本 README 与 `contents/mods/RailroaderRV/42/` 下的代码为准。
 
+Railroader 每个物理 unit（机车或货车）各自对应独立的 RV mapping；当前支持的 RR kind 精确为
+`loco`、`car_box` 与 `car_bx40`。RR 中的 `car_box` 和 `car_bx40` 是不同 kind，RV 保留来源 kind；
+两者暂时共用 `railroader-rv-car-box` 模板。同一模板类别的 unit 共用该 RV 模板。原有 mapping 字段 `locoId` 与
+`rvId` 保留名称，表示该物理 unit 的稳定 ID。挂接或摘下其他车辆不会改变 unit 与 RV 的映射。
+共享桥 `RV_RailroaderUnits` 通过 `RR.API.unitOf` 将稳定 unit ID 解析为当前 train/cut，再用
+`RR.API.units` 读取单车公开视图；列表从 `RR.API.trains`、`units` 和 `cuts` 建立。cut ID 只用于
+当前 cut 的查询，mapping 始终使用车辆自身的稳定 ID。货车范围几何用公开物理 pose、半长和半宽计算；
+机车的座位、乘员状态和几何由公开 API 提供。货车没有公开的 reach 或座位字段，RV 保留自身的
+2.0 格交互范围和无座退出规则。现有 `onBoardMenu` 与
+`onCabMenu` 回调只枚举机车/车头，不提供货车菜单目标；`car_box` 和 `car_bx40` 入口从 PZ 世界目标上下文解析当前稳定 unit ID。
+
+机车的登乘和席位意图继续使用公开 API。退出机车时，多人模式先请求 API 选择乘客席，再请求司机席；
+单人模式请求司机席。机车没有可用席位时拒绝退出，不改用车旁位置。货车 `car_box` 与 `car_bx40` 没有席位：
+服务端用 `RR.API.lastKnown` 获取该 unit 的服务端权威位置并传送玩家；客户端在目标加载后调用
+`RR.API.boardCar` 将玩家放到车厢地板，服务端再按当前车厢 floor 和玩家位置校验完成 ACK。客户端只在异步加载期间
+对 `unknown` 或 `notloaded` 重试；其它登乘失败或超时会将玩家回滚到 RV 内原位。机车退出和货车退出使用各自 unit 的 mapping。
+进入时继续禁止移动中的司机和车外玩家；同一机车的 passenger 仍可在移动时进入，沿用现有 0.05 m/s
+判定阈值。若所需公开几何或当前 view 不可用，RV 停止当前操作，不用 `nopose` 重新计算，也不以历史
+`locoPosition` 回退或自动重试。RV 继续负责权限、传送、回滚和 utility mapping。
+RV 还通过 `RR.API.onBoardMenu` 和 `onCabMenu` 向附近 E 菜单及 cab V 菜单注册机车/车头的“进入房车”和“水电管理”；
+这些回调不提供货车菜单目标，`car_box` 与 `car_bx40` 使用 PZ 世界目标上下文进入。
+不可用的选项直接隐藏：停驶时三种 rider role 都可显示进入项，移动时只有 passenger 可显示；水电项沿用现有
+utility mapping 候选条件，并使用对应机车/车头的 mapping。选择时进入项按当前公开 train view 重新检查并调用原进入路径，
+水电项调用原 dashboard 入口；服务端仍验证并处理操作。单人模式停驶 outside 也会显示进入项，SP 仅司机席规则属于出口座位选择。
+原 PZ 右键菜单保留；公开回调没有 disabled 参数，因此不用灰置不可用项。
+本迁移依赖预览包新增的几何与座位 API，Railroader Workshop 2.1 不提供这些接口。
+测试源选择只决定加载哪份 Railroader 包，`RR.API.VERSION=1` 不保证其具有这些 API。
+
 ## 设计与安全边界
 
 路线和房屋由服务端按需程序化生成，不内置地图。客户端只提交操作意图；服务端验证玩家、
@@ -31,12 +59,12 @@ slotIndex 派生。生成先将客户端和服务器移到由所选布局中心�
 `managedOriginX+floor(width/2)`、`managedOriginY+floor(height/2)`、`-15`。`-15` 是只存在于进程内存中的无状态 relocation sentinel；
 服务端只用当前 Mapping 及由槽位派生的模板边界重新解析该位置，不把它持久化成玩家坐标，也不恢复原坐标。
 
-房车模板来自 2026-09-25 服务端日志，保留了 357 个原始对象的坐标、对象类、名称、sprite、
+机车共享模板来自 2026-09-25 服务端日志，保留了 357 个原始对象的坐标、对象类、名称、sprite、
 朝向及捕获状态。捕获数据中的 50 处栅栏原有墙体衬层，其中 4 个不在房车边界上的衬层已移除；
 其余 46 处真实边界位置上的 47 个木墙对象只在客户端隐藏；(2,2,0) 有两面同向墙。
 墙体碰撞仍由服务端保留。
-隐形墙现用于围住可活动区域，角落不再放独立隐形障碍物；西北角同时有北墙和西墙，另有四段角落隐形墙补齐边界缺口；当前共 412 个模板对象。玩家活动范围为 walkAabbs 描述的 6×23 格。
-沙盒选项“允许在火车机电区域建造”默认关闭：关闭时保留驾驶室内部 x=-4..1、y=-2..1 的 24 个 z0 建造格；开启时新生成的房车使用单独注册的机电区域模板，开放区精确等于 z=1 屋顶格向 z=0 的 88 格投影，由五个不重叠的预定义矩形组成。驾驶室、短机头和长机头中没有屋顶的走廊格仍可通行，但不能建造或拆除，受保护的模板对象会按原模板恢复。生成时所选模板 ID 保存在 mapping record 中，因此更改选项只影响之后生成的房车；已有房车继续使用其记录的布局。16 个水代理的 3×3 搜索范围覆盖全部 88 格；发电和供水系统部件仍按各自角色保护。服务端每 10 tick 对
+隐形墙现用于围住可活动区域，角落不再放独立隐形障碍物；西北角同时有北墙和西墙，另有四段角落隐形墙补齐边界缺口；当前共 412 个模板对象。玩家活动范围为 walkAabbs 描述的 6×23 格。上述对象内容与几何是机车模板源；箱车模板以该源内容初始化，但拥有独立模板 ID，并可之后独立修改。RR 的 `car_box` 与 `car_bx40` 保留各自 kind，生成时共用该箱车模板 ID。
+沙盒选项“允许在火车机电区域建造”仅影响 `loco` 房车，默认关闭：关闭时保留驾驶室内部 x=-4..1、y=-2..1 的 24 个 z0 建造格；开启时新生成的 `loco` 房车使用单独注册的机电区域模板，开放区精确等于 z=1 屋顶格向 z=0 的 88 格投影，由五个不重叠的预定义矩形组成。驾驶室、短机头和长机头中没有屋顶的走廊格仍可通行，但不能建造或拆除，受保护的模板对象会按原模板恢复。该选项不改变独立的 `car_box` 模板。生成时所选模板 ID 保存在 mapping record 中，因此更改选项只影响之后生成的 `loco` 房车；已有房车继续使用其记录的布局。16 个水代理的 3×3 搜索范围覆盖全部 88 格；发电和供水系统部件仍按各自角色保护。服务端每 10 tick 对
 100×100 管理范围内的玩家采样，以玩家为中心将 3×3 XY 坐标去重排入共享的有界恢复队列。
 每 tick 通常检查一个 XY 坐标；积压超过阈值时预算增至 2 或 4 个，并核对该坐标的受管 Z 层。
 没有匹配在线玩家的队列项会出队丢弃；卸载或缺失的格不会强制加载。外部玩家物品和归属不明对象保留。
@@ -46,7 +74,24 @@ slotIndex 派生。生成先将客户端和服务器移到由所选布局中心�
 由北墙和西墙组成，另新增四段隐形墙补齐活动区域边界缺口。移动许可按模板 walkAabbs 判定，
 建造许可按 buildCells 判定；服务端边界守卫使用当前映射和玩家位置。
 
-玩家可从房车机车右键菜单请求认领房车安全屋。服务端按当前 utility record 结算后检查水箱、供水泵、
+### 车厢模板开发
+
+模板开发菜单默认由 `ENABLE_TEMPLATE_DEVELOPMENT=false` 隐藏；管理员仍需角色能力 `UseDebugContextMenu`，服务端会校验该能力。此开关只控制客户端菜单入口，不要求开启客户端 debug context 菜单开关，也不是权限边界。
+右键菜单一级入口为“车厢模板开发”，其下提供“新建模板”、
+“编辑已有模板”和“保存模板”。同一 RV 模板类别的 unit 共用模板；当前模板选择提供 `loco` 与一个共享箱车选项，
+对应 RR kind `car_box` 和 `car_bx40`。机车 `loco` 沿用 `railroader-rv` 普通模板及可选的
+`railroader-rv-engine-area` 模板；两种箱车共用独立 ID `railroader-rv-car-box`，当前使用独立的 `CarBoxSource` 捕获布局。
+菜单只显示一个共享箱车选项，不会为 BX40 创建重复模板入口。新建弹窗先选择种类，
+再输入南北长度和东西宽度；开发者负责输入合法尺寸。南北长度映射到 Y 轴，东西宽度映射到 X 轴。
+新建会清理开发范围并生成对应尺寸的基础木地板；编辑按所选种类
+生成现有模板建筑，之后开发者可在游戏内建造、拆除和编辑。
+
+开发位置沿用旧的坐标换算：服务端根据玩家当前位置换算模板 anchor；开发者自行选择并保证操作位置适用。
+开发建筑使用 `100×100×2` 管理范围，不应用生产房车的对象 tag 或设备代理，也不写入 production mapping。
+右键“保存模板”时，服务端依据当前玩家位置重新换算该范围，不依赖此前的开发会话；日志输出对象相对坐标、
+对象类、名称、sprite、朝向和状态，不输出 walk/build 范围，也不会自动写入 Lua 源文件。
+
+玩家可从对应 RV unit 右键菜单请求认领房车安全屋。服务端按当前 utility record 结算后检查水箱、供水泵、
 滤芯剩余量和供水泵电力；中心水箱当前水量为零不影响认领，认领后水系统状态变化也不会撤销安全屋。
 安全屋使用原生 SafeHouse，范围是当前 mapping anchor 对应驾驶室的单个 6×4 XY 矩形
 （相对坐标 x=-4..1、y=-2..1），不扩展到机电区或走廊。安全屋的原生驱逐与释放行为保持原样；
@@ -241,21 +286,32 @@ v ≥ 90                 → 0 W
 
 ## 验证状态
 
-本次 RailroaderRV 1.0 文档和正式化事务没有启动游戏、客户端、服务器或运行时测试脚本。下列离线行为检查
-可以从项目根目录运行，使用 Lupa 执行 Lua 模块；它们不替代一键多人游戏测试：
+本轮已通过一键整体入口进行预览版实际测试，用户反馈“测试没有问题”并确认提交。物理 unit mapping、`car_box` / `car_bx40`
+进出及模板开发的逐项操作记录未单独收集；上述反馈不扩展为每个边界场景的独立验证。下列离线检查命令可从项目根目录运行；
+它们不替代预览包的实际联机验证：
 
 ```powershell
 python -m pip install lupa
 python -m unittest discover -s RailroaderRV/tests -p "test_rv_installation_flow.py" -v
 python -m unittest discover -s RailroaderRV/tests -p "test_rv_power_device_cache.py" -v
 python -m unittest discover -s RailroaderRV/tests -p "test_rv_generation.py" -v
+python -B RailroaderRV/tests/test_rv_radial_menu.py
+python -B RailroaderRV/tests/test_rv_railroader_units.py
+python -B RailroaderRV/tests/test_rv_unit_mapping.py
+python RailroaderRV/tests/test_rv_template_development_menu.py
+python RailroaderRV/tests/test_rv_template_development_server.py
 ```
 
+模板开发菜单离线测试当前 3/3 通过，服务端命令、模板编辑构建、tick 阶段推进与保存日志检查 1/1 通过。
+这些 Lupa 检查没有启动游戏或服务器，不代表实机验收。
+
 实际联机验收的唯一入口为项目根目录下的 `python testserver/run_test.py`；它会启动可见的服务器控制台和
-常规客户端，不应拆开启动两者。脚本会生成服务端 `Mods=BuildingCraft;RailroaderRV;B42Trans_CN`、
-`WorkshopItems=3556544454` 配置；该 Workshop ID 对应统一原版汉化 `B42Trans_CN`。客户端 cache 不单独
-保存模组列表，连接后按服务器的模组配置加载。脚本每次启动会重写
-相关 Mods/WorkshopItems 设置，因此手工配置会被覆盖。此 README 不推断 Railroader 的 Workshop ID。
+常规客户端，不应拆开启动两者。默认 Workshop 模式使用 `Z:\RailroaderRVCache\server` 与 `client` cache；
+`--railroader-build preview` 使用只读本地预览源，并使用 `Z:\RailroaderRVCache\preview\server` 与 `client` 独立 cache/profile。
+两种模式的服务端 `Mods` 均为 `BuildingCraft;Railroader;RailroaderRV;B42Trans_CN`；Workshop 模式包含 Railroader 的
+Workshop ID，预览模式从所选 cache 的本地预览包加载 Railroader，并从 `WorkshopItems` 中排除该 ID。
+客户端按 `mods,workshop,steam` 顺序搜索，预览 cache 中的本地包优先于 Workshop 副本。脚本只更新所选 profile 的
+`Mods` 与 `WorkshopItems`，保留其他服务器选项。
 
 已反馈的 15 L 饮水桶曾出现 0.6 L 差值；后续一轮连续加水得到 15、30、45 L，未复现该差值，仍不视为
 RailroaderRV 1.0 的实机验收结论。新的天然水源菜单行为同样尚未实测。此前屋顶刷新在未加载的模板位置

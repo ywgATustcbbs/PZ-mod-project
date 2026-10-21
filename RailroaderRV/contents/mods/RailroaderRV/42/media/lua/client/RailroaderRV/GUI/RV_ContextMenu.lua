@@ -58,5 +58,8 @@ local ctx = {
 
 require("RailroaderRV/GUI/RV_ContextMenu_RoomOwnership")(ctx)
 require("RailroaderRV/GUI/RV_ContextMenu_Relocation")(ctx)
+if C.ENABLE_TEMPLATE_DEVELOPMENT then
+    require("RailroaderRV/GUI/RV_TemplateDevelopment")(ctx)
+end
 
 return Client

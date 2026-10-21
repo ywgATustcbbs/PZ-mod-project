@@ -6,11 +6,6 @@ local ServerUtil = require("RailroaderRV/Common/RV_ServerUtil")
 local M = {}
 
 local function dispatchLocal(module, command, args)
-    if module ~= C.MOD_ID then
-        error("RailroaderRV: unsupported local server-command module "
-            .. tostring(module), 0)
-    end
-
     if command == "Relocate" or command == C.COMMAND_FINAL_RELOCATE
         or command == C.COMMAND_REFRESH_ROOM_OWNERSHIP then
         RailroaderRV.Client.onServerCommand(module, command, args)
@@ -28,9 +23,6 @@ local function dispatchLocal(module, command, args)
         RailroaderRV.UtilityClient.onServerCommand(module, command, args)
         RailroaderRV.RailroaderContextMenu.OnServerCommand(
             module, command, args)
-    else
-        error("RailroaderRV: no local handler for server command "
-            .. tostring(module) .. "." .. tostring(command), 0)
     end
 end
 

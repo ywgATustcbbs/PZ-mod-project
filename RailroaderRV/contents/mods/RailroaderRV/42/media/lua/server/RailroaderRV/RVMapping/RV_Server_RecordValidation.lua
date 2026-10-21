@@ -108,7 +108,7 @@ function RV.Server.refreshRoofVisuals(rvId)
     local adapter = RailroaderRV.RailroaderServer
     local record = adapter.currentMappingRecordById(rvId)
     local manifest = manifestViewForRecord(record)
-    return RoofRefresh.run(manifest.bounds)
+    return RoofRefresh.run(manifest.bounds, record.templateId)
 end
 
 function RV.Server.scheduleRoofRefreshForRV(rvId)

@@ -427,6 +427,7 @@ local function copyRoomRefreshBounds(target, prefix, bounds)
         target[prefix .. field] = ServerUtil.requiredInteger(bounds[field],
             "room refresh " .. prefix .. field)
     end
+    target[prefix .. "templateId"] = bounds.templateId
 end
 
 local function armClientRoomOwnershipGuard(generation, oldBounds, newBounds,

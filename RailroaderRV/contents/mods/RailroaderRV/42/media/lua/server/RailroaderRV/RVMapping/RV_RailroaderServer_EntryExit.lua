@@ -5,6 +5,7 @@ local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local ServerTeleport = require("RailroaderRV/Common/RV_ServerTeleport")
 local WaterConstants = require("RailroaderRV/Water/RV_UtilityWaterConstants")
 local ClientDispatch = require("RailroaderRV/Core/RV_ServerClientDispatch")
+local RRApi = RR.API
 local processIsServer = ctx.processIsServer
 local Boundary = ctx.Boundary
 local Adapter = ctx.Adapter
@@ -12,32 +13,25 @@ local C = ctx.C
 local function recordForLoco(...) return ctx.recordForLoco(...) end
 local function transactionBlocks(...) return ctx.wallReloadTransactionBlocks(...) end
 local sourceWithinRange
-local number = ctx.number
 local integer = ctx.integer
-local call = ctx.call
-local callGlobal = ctx.callGlobal
 local playerId = ctx.playerId
 local playerName = ctx.playerName
 local playerDead = ctx.playerDead
 local playerPosition = ctx.playerPosition
 local copyPosition = ctx.copyPosition
 local newTransitionToken = ctx.newTransitionToken
-local copyPose = ctx.copyPose
 local trainId = ctx.trainId
 local findTrain = ctx.findTrain
 local trainPosition = ctx.trainPosition
 local trainMoving = ctx.trainMoving
 local trainPose = ctx.trainPose
+local trainGeometry = ctx.trainGeometry
+local singleplayerMode = ctx.singleplayerMode
 local seatPosition = ctx.seatPosition
-local besidePosition = ctx.besidePosition
-local persistedBesidePosition = ctx.persistedBesidePosition
-local hullDistance = ctx.hullDistance
-local seatForPlayer = ctx.seatForPlayer
-local freePassengerSeat = ctx.freePassengerSeat
+local interactionGeometry = ctx.interactionGeometry
 local playerRole = ctx.playerRole
 local forgetTrainSeat = ctx.forgetTrainSeat
-local putPassenger = ctx.putPassenger
-local putDriver = ctx.putDriver
+local assignTrainSeat = ctx.assignTrainSeat
 local mapData = ctx.mapData
 local markMappingChanged = ctx.markMappingChanged
 local rvRegion = ctx.rvRegion
@@ -45,6 +39,9 @@ local refreshRoofForPlayer = ctx.refreshRoofForPlayer
 local armRoomOwnershipMonitor = ctx.armRoomOwnershipMonitor
 local recordAtPlayerCoordinate = ctx.recordAtPlayerCoordinate
 local nearestMappedTrain
+local pendingExitBoardings = {}
+local EXIT_BOARD_TIMEOUT_TICKS = 600
+local EXIT_BOARD_POSITION_TOLERANCE = 1.5
 
 function Adapter.resolveCurrentUtilityRV(player, diagnosticOperation,
         diagnosticPhase)
@@ -88,8 +85,8 @@ function Adapter.resolveCurrentUtilityRV(player, diagnosticOperation,
                 and sourceWithinRange(player, liveTrain) then
                 record, train, status = boundRecord, liveTrain, "locomotive-bound"
                 locomotiveSide = true
-                locomotiveRole, locomotiveSeat = playerRole(liveTrain,
-                    onlineId)
+                locomotiveRole, locomotiveSeat = playerRole(liveTrain, player)
+                if locomotiveRole == nil then return reject(locomotiveSeat) end
             end
         end
     end
@@ -99,8 +96,8 @@ function Adapter.resolveCurrentUtilityRV(player, diagnosticOperation,
             record, train, status = nearbyRecord, nearbyTrain,
                 "locomotive-candidate"
             locomotiveSide = true
-            locomotiveRole, locomotiveSeat = playerRole(nearbyTrain,
-                onlineId)
+            locomotiveRole, locomotiveSeat = playerRole(nearbyTrain, player)
+            if locomotiveRole == nil then return reject(locomotiveSeat) end
         end
     end
     if not record then return reject(status or "outside-rv") end
@@ -148,9 +145,6 @@ function Adapter.currentUtilityRecord(identity)
     local record = recordForLoco(map, identity.rvId)
     if not record then
         return false, C.INVALID_RV_DATA
-    end
-    if record.generation == nil then
-        error("current RV mapping has no generation")
     end
     if record.generation ~= integer(identity.generation) then
         return false, C.INVALID_RV_DATA
@@ -222,13 +216,16 @@ local function movePlayer(player, position, action, relation)
             payload.rvId = tostring(relation.rvId)
             payload.generation = integer(relation.generation)
         end
+        payload.boardCarId = relation.boardCarId
+        payload.boardToken = relation.boardToken
     end
     local sent = ClientDispatch.sendToPlayer(player,
         C.MOD_ID, C.COMMAND_RV_TELEPORT, payload)
-    -- Multiplayer clients receive the same Ride transition hint over the
-    -- native command channel; singleplayer applies it through the local client
-    -- handler before the authoritative teleport below.
-    if not sent and processIsServer() then return false end
+    -- Public assignRider/releaseRider calls own cab binding; RVTeleport only
+    -- handles the RV teleport and mapping update.
+    if not sent and processIsServer() and action ~= "exit-board-cancel" then
+        return false
+    end
     if action == "enter" and type(relation) == "table" then
         return ServerTeleport.teleportToRVSpawn(player, relation, position)
     end
@@ -275,35 +272,19 @@ local function markPlayerInside(map, record, player, sourcePosition,
     }
 end
 
-local function otherGeneratedRecord(map, locoId)
-    local wanted = tostring(locoId)
-    for key, record in pairs(map.locomotives) do
-        if tostring(key) ~= wanted then
-            return record
-        end
-    end
-    return nil
-end
-
 sourceWithinRange = function(player, train)
-    local distance = hullDistance(player, train)
-    local rr = rawget(_G, "RR")
-    local officialReach = rr and rr.Ride and rr.Ride.MOUNT_REACH
-    local reach = number(officialReach) or number(C.RV_MOUNT_REACH)
-    return distance ~= nil and distance <= reach
+    local distance, reach = interactionGeometry(player, train)
+    return distance ~= nil and reach ~= nil and distance <= reach
 end
 
 nearestMappedTrain = function(map, player)
-    local rr = rawget(_G, "RR")
-    local officialReach = rr and rr.Ride and rr.Ride.MOUNT_REACH
-    local reach = number(officialReach) or number(C.RV_MOUNT_REACH)
     local nearestDistance, nearestKey, nearestRecord, nearestTrain
     for key, record in pairs(map.locomotives) do
         local train = findTrain(record.locoId)
         if train and trainPosition(train) then
-            local distance = hullDistance(player, train)
+            local distance, reach = interactionGeometry(player, train)
             local recordKey = tostring(key)
-            if distance ~= nil and distance <= reach
+            if distance ~= nil and reach ~= nil and distance <= reach
                 and (nearestDistance == nil or distance < nearestDistance
                     or (distance == nearestDistance
                         and recordKey < nearestKey)) then
@@ -317,31 +298,28 @@ end
 
 local function requestData(train, player, role, seat, sourcePosition)
     local entryPosition = copyPosition(sourcePosition)
-    local locoPosition = trainPose(train)
-    if not entryPosition or not locoPosition then
-        error(C.INVALID_RV_DATA)
+    if not entryPosition or not trainPose(train) then
+        return nil
     end
     return {
         locoId = tostring(trainId(train)), sourceRole = role, sourceSeat = seat,
         playerUsername = playerName(player), playerOnlineId = playerId(player),
         entryPosition = entryPosition,
-        -- The server's generation transaction allocates this locomotive a
-        -- current-schema matrix slot before relocation; no fixed destination
-        -- is captured from the entry event.
-        locoPosition = locoPosition,
     }
 end
 
-local function removeSeatForEntry(train, player, onlineId)
-    return forgetTrainSeat(train, player, onlineId)
+local function removeSeatForEntry(train, player)
+    return forgetTrainSeat(train, player)
 end
 
-local function restoreEntrySeat(train, player, onlineId, role, seat)
+local function restoreEntrySeat(train, player, role, seat)
     if role == "driver" then
-        putDriver(train, player, onlineId)
+        return assignTrainSeat(train, player, "driver", 0)
     elseif role == "passenger" and seat ~= nil then
-        putPassenger(train, player, onlineId, seat)
+        return assignTrainSeat(train, player,
+            "passenger", seat)
     end
+    return true
 end
 
 local function enterExisting(player, train, record, sourceRole,
@@ -363,7 +341,11 @@ local function enterExisting(player, train, record, sourceRole,
     if armed ~= true then
         return false, "RV boundary entry transition could not be armed"
     end
-    local removedRole, removedSeat = removeSeatForEntry(train, player, onlineId)
+    local removedRole, removedSeat = removeSeatForEntry(train, player)
+    if not removedRole then
+        Boundary.clearPlayer(player)
+        return false, removedSeat
+    end
     if removedRole == "external" then removedSeat = nil end
     local oldRelation = map.players[playerName(player)]
     local oldRiders = {}
@@ -379,19 +361,21 @@ local function enterExisting(player, train, record, sourceRole,
     if not moved then
         map.players[playerName(player)] = oldRelation
         record.players = oldRiders
-        if removedRole == "driver" then
-            putDriver(train, player, onlineId)
-        elseif removedRole == "passenger" and removedSeat ~= nil then
-            putPassenger(train, player, onlineId, removedSeat)
-        end
+        local restored, restoreReason = restoreEntrySeat(train, player,
+            removedRole, removedSeat)
         Boundary.clearPlayer(player)
+        if not restored and restoreReason ~= "seattaken"
+            and restoreReason ~= "aboard" then
+            error("RailroaderRV: failed to restore the Railroader seat: "
+                .. tostring(restoreReason))
+        end
         return false, "RV entry teleport failed"
     end
     if Boundary.completeTransition(player, transitionToken) ~= true then
         error("RV boundary entry transition could not be completed")
     end
     settleUtilityTransition(record, player)
-    record.locoPosition = trainPose(train) or record.locoPosition
+    record.locoPosition = trainPose(train)
     -- The server has just moved the player into the persisted RV footprint;
     -- synchronize room and roof metadata around the existing captured floor
     -- before the first repeat-entry frame is rendered. A failed or deferred
@@ -407,6 +391,9 @@ local function enterPlayer(player, locoId)
     end
     local onlineId, name = playerId(player), playerName(player)
     if onlineId == nil or not name then return false, "player identity is unavailable" end
+    if pendingExitBoardings[onlineId] then
+        return false, "RV cargo car boarding is already in progress"
+    end
     -- Check before removing a Railroader seat or changing mapping state.  The
     -- generation service repeats the global check authoritatively, but this
     -- early RV-specific gate avoids a temporary seat mutation on rejection.
@@ -422,18 +409,27 @@ local function enterPlayer(player, locoId)
     end
     if existingRecord then return false, "player is already inside an RV" end
     local train = findTrain(locoId)
-    if not train then return false, "target is not an active Railroader locomotive" end
-    local role, seat = playerRole(train, onlineId)
+    if not train then return false, "target is not an active Railroader unit" end
+    if train.isLocomotive ~= true
+        and (not trainPose(train) or not trainGeometry(train)) then
+        return false, "cargo car pose is unavailable"
+    end
+    local role, seat = playerRole(train, player)
+    if role == nil then return false, seat end
     local moving = trainMoving(train)
     if moving and role ~= "passenger" then
         return false, role == "driver" and "driver cannot enter while moving"
-            or "outside player cannot enter a moving locomotive"
+            or "outside player cannot enter a moving Railroader unit"
     end
     if role == "external" and not sourceWithinRange(player, train) then
-        return false, "player is outside locomotive interaction range"
+        return false, "player is outside Railroader unit interaction range"
     end
-    local sourcePosition = role == "external" and playerPosition(player)
-        or seatPosition(train, seat or 0) or playerPosition(player)
+    local sourcePosition
+    if role == "external" then
+        sourcePosition = playerPosition(player)
+    else
+        sourcePosition = seatPosition(train, seat or 0)
+    end
     if not sourcePosition then return false, "entry position is unavailable" end
 
     local record = recordForLoco(map, trainId(train))
@@ -441,25 +437,34 @@ local function enterPlayer(player, locoId)
         return enterExisting(player, train, record, role, seat,
             sourcePosition, map)
     end
-    if otherGeneratedRecord(map, trainId(train)) then
-        return false, "the RV is already assigned to another locomotive"
-    end
-
+    local data = requestData(train, player, role, seat, sourcePosition)
+    if not data then return false, "entry position is unavailable" end
     -- A passenger is removed before the staging relocation.  Otherwise the
     -- official seat pin would immediately drag the player back to the moving
     -- locomotive while the generation stream is loading.
-    local removedRole, removedSeat = removeSeatForEntry(train, player, onlineId)
-    local data = requestData(train, player, role, seat, sourcePosition)
+    local removedRole, removedSeat = removeSeatForEntry(train, player)
+    if not removedRole then return false, removedSeat end
     data.removedRole, data.removedSeat = removedRole, removedSeat
     data.sourcePosition = copyPosition(sourcePosition)
     local requestOk, queued, reason = pcall(
         RailroaderRV.Server.requestRailroaderGeneration, player, data)
     if not requestOk then
-        restoreEntrySeat(train, player, onlineId, removedRole, removedSeat)
+        local restored, restoreReason = restoreEntrySeat(train, player,
+            removedRole, removedSeat)
+        if not restored and restoreReason ~= "seattaken"
+            and restoreReason ~= "aboard" then
+            error("RailroaderRV: failed to restore the Railroader seat: "
+                .. tostring(restoreReason))
+        end
         error(queued, 0)
     end
     if not queued then
-        restoreEntrySeat(train, player, onlineId, removedRole, removedSeat)
+        local restored, restoreReason = restoreEntrySeat(train, player,
+            removedRole, removedSeat)
+        if not restored and restoreReason ~= "seattaken"
+            and restoreReason ~= "aboard" then
+            return false, restoreReason
+        end
         return false, reason
     end
     return true
@@ -467,18 +472,12 @@ end
 
 local function restoreAfterGenerationFailure(player, data)
     local train = findTrain(data.locoId)
-    local onlineId = playerId(player)
-    if train and onlineId ~= nil then
-        local role = data.removedRole
-        if role == "driver" and train.driver == nil then
-            putDriver(train, player, onlineId)
-        elseif role == "passenger" and data.removedSeat ~= nil
-            and seatForPlayer(train, onlineId) == nil then
-            local occupied = false
-            for _, assigned in pairs(train.passengers or {}) do
-                if number(assigned) == number(data.removedSeat) then occupied = true end
-            end
-            if not occupied then putPassenger(train, player, onlineId, data.removedSeat) end
+    if train and playerId(player) ~= nil then
+        local restored, reason = restoreEntrySeat(train, player,
+            data.removedRole, data.removedSeat)
+        if not restored and reason ~= "seattaken" and reason ~= "aboard" then
+            error("RailroaderRV: failed to restore the Railroader seat: "
+                .. tostring(reason))
         end
     end
     movePlayer(player, data.sourcePosition, "generation-failed", {
@@ -493,18 +492,16 @@ local function commitGeneration(player, data, prepared)
     local locoId = tostring(data.locoId)
     local generation = prepared.generation
     local slotIndex = prepared.slotIndex
-    local anchor = RegionSlots.indexToAnchor(slotIndex)
-    assert(slotIndex == data.slotIndex
-        and anchor.x == prepared.anchor.x
-        and anchor.y == prepared.anchor.y
-        and anchor.z == prepared.anchor.z,
-        C.INVALID_RV_DATA)
+    local train = findTrain(locoId)
+    local geometry = train and trainGeometry(train)
+    local locoPosition = train and trainPose(train)
+    if not geometry or not locoPosition then
+        return false, "locomotive pose is unavailable"
+    end
     Boundary.boundaryFor({
         locoId = locoId, generation = generation, slotIndex = slotIndex,
         templateId = prepared.layout.templateId,
     })
-    local record = recordForLoco(map, locoId)
-    assert(record == nil)
     local candidateRecord = { players = {} }
     local candidateMap = {
         schemaVersion = map.schemaVersion,
@@ -518,7 +515,6 @@ local function commitGeneration(player, data, prepared)
         candidateMap.players[name] = relation
     end
     candidateMap.locomotives[locoId] = candidateRecord
-    local train = findTrain(locoId)
     -- Durable record state only: identity, slot allocation and the two
     -- cross-restart poses.  Anchor, region, bounds and shell edges are
     -- derived from slotIndex and the compiled template when they are read.
@@ -528,8 +524,7 @@ local function commitGeneration(player, data, prepared)
     candidateRecord.slotIndex = slotIndex
     candidateRecord.templateId = prepared.layout.templateId
     candidateRecord.rvPosition = copyPosition(prepared.finalDestination)
-    candidateRecord.locoPosition = train and trainPose(train)
-        or copyPose(data.locoPosition)
+    candidateRecord.locoPosition = locoPosition
     markPlayerInside(candidateMap, candidateRecord, player,
         data.entryPosition, data.sourceRole, data.sourceSeat)
     local actionLedger = Boundary.builderActionLedger
@@ -576,9 +571,233 @@ end
 local function validateGeneration(player, data)
     if not player or playerDead(player) then return false, "player is dead" end
     local train = findTrain(data.locoId)
-    if not train then return false, "locomotive disappeared during generation" end
+    if not train then return false, "Railroader unit disappeared during generation" end
+    local geometry = trainGeometry(train)
+    if not geometry or not trainPose(train) then
+        return false, "Railroader unit pose is unavailable during generation"
+    end
     if data.sourceRole ~= "passenger" and trainMoving(train) then
-        return false, "locomotive started moving before RV generation completed"
+        return false, "Railroader unit started moving before RV generation completed"
+    end
+    return true
+end
+
+local function copyPose(pose)
+    local result = copyPosition(pose)
+    if not result then return nil end
+    result.dirX, result.dirY = pose.dirX, pose.dirY
+    return result
+end
+
+local function sendExitBoardResult(pending, action)
+    local onlineId = pending.onlineId
+    local payload = {
+        ok = true, action = action, onlineId = onlineId,
+        boardToken = pending.token, rvId = pending.locoId,
+        locoId = pending.locoId, generation = pending.generation,
+    }
+    return ClientDispatch.sendToPlayer(pending.player, C.MOD_ID,
+        C.COMMAND_RV_TELEPORT, payload)
+end
+
+local function completeExitBoarding(pending, boardPoint)
+    local map = mapData()
+    local latestPose, reason = RRApi.lastKnown(pending.carId, {})
+    if not latestPose then
+        return false, reason
+    end
+    local position = copyPosition(boardPoint)
+    local pose = copyPose(latestPose)
+    pendingExitBoardings[pending.onlineId] = nil
+    settleUtilityTransition(pending.record, pending.player)
+    pending.record.locoPosition = pose
+    markPlayerOutside(map, pending.record, pending.player, position, nil,
+        "external")
+    Boundary.clearPlayer(pending.player)
+    markMappingChanged()
+    sendExitBoardResult(pending, "exit-board-complete")
+    return true
+end
+
+local function boardPointForPending(pending)
+    local point, reason = RRApi.carBoardPoint(pending.carId, {})
+    if point then return point end
+    if reason == "unknown" or reason == "notloaded" then
+        return nil, reason, true
+    end
+    return nil, reason, false
+end
+
+local function serverPlayerAtBoardPoint(player, point)
+    local position = playerPosition(player)
+    if not position then return nil end
+    local dx, dy = position.x - point.x, position.y - point.y
+    return dx * dx + dy * dy
+            <= EXIT_BOARD_POSITION_TOLERANCE * EXIT_BOARD_POSITION_TOLERANCE
+        and math.abs(position.z - point.z) <= 0.75
+end
+
+local function tryCompleteExitBoarding(pending)
+    if pending.clientBoarded ~= true then return nil end
+    local point, reason, retry = boardPointForPending(pending)
+    if not point then
+        if retry then return nil end
+        return false, reason or "Railroader car floor is unavailable"
+    end
+    local atBoardPoint = serverPlayerAtBoardPoint(pending.player, point)
+    if atBoardPoint == nil or atBoardPoint == false then return nil end
+    local completed, completionReason = completeExitBoarding(pending, point)
+    if not completed then
+        return false, completionReason
+            or "Railroader unit position is unavailable"
+    end
+    return true
+end
+
+local function finishPendingExitBoarding(pending, reason, disconnected)
+    pendingExitBoardings[pending.onlineId] = nil
+    local moved
+    if disconnected then
+        moved = ServerTeleport.teleportToPosition(pending.player,
+            pending.origin)
+    else
+        moved = movePlayer(pending.player, pending.origin,
+            "exit-board-cancel", {
+                locoId = pending.locoId, rvId = pending.locoId,
+                generation = pending.generation, boardToken = pending.token,
+            })
+    end
+    if Boundary.completeTransition(pending.player, pending.token) ~= true then
+        error("RV boundary exit transition could not be completed")
+    end
+    if moved ~= true then
+        error("RailroaderRV: failed to return player after car boarding "
+            .. tostring(reason))
+    end
+    return true
+end
+
+local function playerIsOnline(pending)
+    local players, ok = Adapter.onlinePlayersSnapshot()
+    if ok ~= true then return nil end
+    for index = 1, #players do
+        local current = players[index]
+        if playerId(current) == pending.onlineId
+            and playerName(current) == pending.playerName then
+            return true
+        end
+    end
+    return false
+end
+
+local function acknowledgeExitBoarding(player, args)
+    local onlineId = playerId(player)
+    local token = args and args.boardToken
+    local pending = onlineId ~= nil and pendingExitBoardings[onlineId] or nil
+    if not pending or pending.player ~= player or pending.token ~= token
+        or playerDead(player) or type(args.boarded) ~= "boolean" then
+        return false, "stale or invalid RV boarding acknowledgement"
+    end
+    local blocked, reason = transactionBlocks(pending.locoId)
+    if blocked then
+        finishPendingExitBoarding(pending, reason, false)
+        return true
+    end
+    if args.boarded ~= true then
+        finishPendingExitBoarding(pending,
+            "Railroader car boarding failed", false)
+        return true
+    end
+    pending.clientBoarded = true
+    local completed, completionReason = tryCompleteExitBoarding(pending)
+    if completed == false then
+        finishPendingExitBoarding(pending, completionReason, false)
+    end
+    return true
+end
+
+local function processPendingExitBoardings(tick)
+    local now = integer(tick)
+    for _, pending in pairs(pendingExitBoardings) do
+        if playerIsOnline(pending) == false then
+            finishPendingExitBoarding(pending,
+                "player disconnected while boarding the Railroader car", true)
+        elseif now >= pending.deadline then
+            finishPendingExitBoarding(pending,
+                "Railroader car boarding timed out", false)
+        else
+            local extended = Boundary.extendTransition(pending.player,
+                pending.token, now + C.BOUNDARY_TRANSITION_TIMEOUT_TICKS)
+            if extended ~= true then
+                finishPendingExitBoarding(pending,
+                    "RV boundary exit transition expired", false)
+            else
+                local blocked, reason = transactionBlocks(pending.locoId)
+                if blocked then
+                    finishPendingExitBoarding(pending, reason, false)
+                else
+                    local completed, completionReason =
+                        tryCompleteExitBoarding(pending)
+                    if completed == false then
+                        finishPendingExitBoarding(pending,
+                            completionReason, false)
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function exitCargoPlayer(player, record)
+    local onlineId, username = playerId(player), playerName(player)
+    if onlineId == nil or not username then
+        return false, "player identity is unavailable"
+    end
+    if pendingExitBoardings[onlineId] then
+        return false, "RV cargo car boarding is already in progress"
+    end
+    local blocked, blockReason = transactionBlocks(record.locoId)
+    if blocked then
+        return false, blockReason
+    end
+    local carId = tonumber(record.locoId)
+    local lastKnown, lastKnownReason = RRApi.lastKnown(carId, {})
+    if not lastKnown then
+        return false, lastKnownReason
+            or "Railroader unit position is unavailable"
+    end
+    local target = copyPosition(lastKnown)
+    if not target then
+        return false, "Railroader unit exit position is unavailable"
+    end
+    local transitionToken = newTransitionToken("exit", record)
+    local armed = Boundary.beginTransition(player, record.locoId,
+        record.generation, transitionToken, "exit")
+    if armed ~= true then
+        return false, "RV boundary exit transition could not be armed"
+    end
+    local origin = playerPosition(player)
+    if not origin then
+        if Boundary.completeTransition(player, transitionToken) ~= true then
+            error("RV boundary exit transition could not be completed")
+        end
+        return false, "RV interior position is unavailable"
+    end
+    local pending = {
+        player = player, onlineId = onlineId, playerName = username,
+        record = record, locoId = tostring(record.locoId), carId = carId,
+        generation = record.generation, token = transitionToken,
+        origin = origin, deadline = Adapter._ticks + EXIT_BOARD_TIMEOUT_TICKS,
+    }
+    pendingExitBoardings[onlineId] = pending
+    local moved = movePlayer(player, target, "exit-board", {
+        locoId = tostring(record.locoId), role = "external",
+        rvId = record.locoId, generation = record.generation,
+        boardCarId = carId, boardToken = transitionToken,
+    })
+    if not moved then
+        finishPendingExitBoarding(pending, "RV exit teleport failed", false)
+        return false, "RV exit teleport failed"
     end
     return true
 end
@@ -596,61 +815,22 @@ local function exitPlayer(player)
     if not record then
         return false, C.INVALID_RV_DATA
     end
+    if record.templateId == RoomTemplate.CAR_BOX_TEMPLATE_ID then
+        return exitCargoPlayer(player, record)
+    end
     local blocked, blockReason = transactionBlocks(record.locoId)
     if blocked then
         return false, blockReason
     end
-    if not train then
-        local target = persistedBesidePosition(record)
-        if not target then return false, C.INVALID_RV_DATA end
-        -- The mapping is valid but the locomotive is inactive/unloaded.  Do
-        -- not invent a driver/passenger seat; use only a persisted beside
-        -- target and retain the explicit state for diagnostics and tests.
-        if lookupState ~= "inactive-mapped" then return false, C.INVALID_RV_DATA end
-        local transitionToken = newTransitionToken("exit", record)
-        local armed = Boundary.beginTransition(player, record.locoId,
-            record.generation, transitionToken, "exit")
-        if armed ~= true then
-            return false, "RV boundary exit transition could not be armed"
-        end
-        settleUtilityTransition(record, player)
-        local moved = movePlayer(player, target, "exit", {
-            locoId = record.locoId, role = "beside", seat = nil,
-            rvId = record.locoId, generation = record.generation,
-        })
-        if not moved then
-            if Boundary.completeTransition(player, transitionToken) ~= true then
-                error("RV boundary exit transition could not be completed")
-            end
-            return false, "inactive locomotive exit teleport failed"
-        end
-        markPlayerOutside(map, record, player, target, nil, "beside")
-        Boundary.clearPlayer(player)
-        markMappingChanged()
-        return true
-    end
+    if not train then return false, "locomotive is not available" end
     local onlineId = playerId(player)
     if onlineId == nil then return false, "player identity is unavailable" end
-    local moving = trainMoving(train)
-    local seat, role, target
-    if moving then
-        seat = freePassengerSeat(train)
-        if not seat then return false, "all passenger positions are occupied" end
-        target = seatPosition(train, seat)
-        role = "passenger"
-    else
-        seat = freePassengerSeat(train)
-        if seat then
-            target, role = seatPosition(train, seat), "passenger"
-        elseif train.driver == nil then
-            target, role, seat = seatPosition(train, 0), "driver", 0
-        else
-            target, role = besidePosition(train), "beside"
-            seat = nil
-        end
+    local geometry = trainGeometry(train)
+    local locoPosition = trainPose(train)
+    if not geometry or not locoPosition then
+        return false, "Railroader unit exit position is unavailable"
     end
-    if not target then return false, "locomotive exit position is unavailable" end
-
+    local singleplayer = singleplayerMode()
     local transitionToken = newTransitionToken("exit", record)
     local armed = Boundary.beginTransition(player, record.locoId,
         record.generation, transitionToken, "exit")
@@ -658,14 +838,46 @@ local function exitPlayer(player)
         return false, "RV boundary exit transition could not be armed"
     end
 
-    local assigned = false
-    if role == "passenger" then assigned = putPassenger(train, player, onlineId, seat)
-    elseif role == "driver" then assigned = putDriver(train, player, onlineId) end
-    if role ~= "beside" and not assigned then
+    local assignment, assignReason
+    local role, seat, target
+    if singleplayer then
+        assignment, assignReason = assignTrainSeat(train, player, "driver", 0)
+    else
+        assignment, assignReason = assignTrainSeat(train, player, "passenger")
+    end
+    if assignment then
+        role, seat = assignment.role, assignment.seatIndex
+        target = copyPosition(assignment.position)
+    elseif not singleplayer and (assignReason == "seatsfull"
+        or assignReason == "noseat") then
+        assignment, assignReason = assignTrainSeat(train, player, "driver", 0)
+        if assignment then
+            role, seat = assignment.role, assignment.seatIndex
+            target = copyPosition(assignment.position)
+        else
+            if Boundary.completeTransition(player, transitionToken) ~= true then
+                error("RV boundary exit transition could not be completed")
+            end
+            return false, assignReason
+        end
+    else
         if Boundary.completeTransition(player, transitionToken) ~= true then
             error("RV boundary exit transition could not be completed")
         end
-        return false, "locomotive seat became occupied"
+        return false, assignReason
+    end
+    if not target then
+        if assignment then
+            local released, releaseReason = forgetTrainSeat(train, player)
+            if not released then
+                error("RailroaderRV: failed to release a seat without an exit position: "
+                    .. tostring(releaseReason))
+            end
+        end
+        if Boundary.completeTransition(player, transitionToken) ~= true then
+            error("RV boundary exit transition could not be completed")
+        end
+        return false, "Railroader unit exit position is unavailable"
     end
     settleUtilityTransition(record, player)
     local moved = movePlayer(player, target, "exit", {
@@ -673,13 +885,17 @@ local function exitPlayer(player)
         rvId = record.locoId, generation = record.generation,
     })
     if not moved then
-        if role ~= "beside" then forgetTrainSeat(train, player, onlineId) end
+        local released, releaseReason = forgetTrainSeat(train, player)
+        if not released then
+            error("RailroaderRV: failed to release a seat after exit teleport failure: "
+                .. tostring(releaseReason))
+        end
         if Boundary.completeTransition(player, transitionToken) ~= true then
             error("RV boundary exit transition could not be completed")
         end
         return false, "RV exit teleport failed"
     end
-    record.locoPosition = trainPose(train) or record.locoPosition
+    record.locoPosition = locoPosition
     markPlayerOutside(map, record, player, target, seat, role)
     Boundary.clearPlayer(player)
     markMappingChanged()
@@ -694,4 +910,6 @@ ctx.restoreAfterGenerationFailure = restoreAfterGenerationFailure
 ctx.commitGeneration = commitGeneration
 ctx.validateGeneration = validateGeneration
 ctx.exitPlayer = exitPlayer
+ctx.acknowledgeExitBoarding = acknowledgeExitBoarding
+Adapter.processPendingExitBoardings = processPendingExitBoardings
 end

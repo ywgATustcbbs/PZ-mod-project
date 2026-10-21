@@ -4,11 +4,8 @@ local processIsServer = ctx.processIsServer
 local Boundary = ctx.Boundary
 local Core = ctx.Core
 local C = ctx.C
-local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
-local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
-local ClientDispatch = require("RailroaderRV/Core/RV_ServerClientDispatch")
 -- Match BoundaryValidation's cache lifetime for players already tracked here.
 local VALIDATION_REFRESH_TICKS = 60
 
@@ -100,9 +97,7 @@ local function playerPosition(player)
     return { x = x, y = y, z = z }, inRVRegion
 end
 
--- One-shot server-side notice for rejected RV data. The GUI already consumes
--- this stable failure code and shows the delete-and-rebuild instruction, so the
--- diagnostic reason stays server-side.
+-- Server-side reason log for rejected boundary validation.
 function Boundary.diagnoseGuardState(player, knownIdentity, position, relation,
     record, reason)
     if not processIsServer() or type(position) ~= "table" then
@@ -117,18 +112,7 @@ function Boundary.diagnoseGuardState(player, knownIdentity, position, relation,
         or onlineId == nil or onlineId < 0 then
         return false
     end
-    local sent = ClientDispatch.sendToPlayer(player,
-        C.MOD_ID, C.COMMAND_RV_TELEPORT, {
-            ok = false, onlineId = onlineId,
-            reason = C.INVALID_RV_DATA,
-        })
-    if not sent then
-        print("[RailroaderRV][BoundaryDiag] invalid RV data notice failed"
-            .. " player=" .. tostring(id.key)
-            .. " reason=" .. tostring(reason))
-        return false
-    end
-    print("[RailroaderRV][BoundaryDiag] invalid RV data notice sent"
+    print("[RailroaderRV][BoundaryDiag] boundary validation rejected"
         .. " player=" .. tostring(id.key)
         .. " reason=" .. tostring(reason))
     return true
@@ -175,20 +159,16 @@ end
 local function makeBoundary(layout, rvId, generation)
     local source = layout.managed
     local managed = {
-        originX = integer(source.originX), originY = integer(source.originY),
-        width = integer(source.width), height = integer(source.height),
-        minZ = integer(source.minZ), maxZ = integer(source.maxZ),
+        originX = source.originX, originY = source.originY,
+        width = source.width, height = source.height,
+        minZ = source.minZ, maxZ = source.maxZ,
     }
-    if not TemplateGeometry.anchorFromManaged(managed,
-        RoomTemplate.get(layout.templateId)) or managed.maxZ <= managed.minZ then
-        error("RailroaderRV: generated boundary layout is invalid")
-    end
     return {
-        rvId = tostring(rvId), generation = integer(generation),
+        rvId = tostring(rvId), generation = generation,
         templateId = layout.templateId,
         managed = managed,
         shellEdges = encodeShellEdges(layout.shellEdges, rvId,
-            integer(generation)),
+            generation),
     }
 end
 
@@ -200,14 +180,7 @@ local function boundaryFor(record)
     local rvId = record.locoId
     local generation = record.generation
     local slotIndex = record.slotIndex
-    if rvId == nil or tostring(rvId) == ""
-        or generation < 1 or math.floor(generation) ~= generation then
-        error("RailroaderRV: current mapping identity is invalid")
-    end
     local anchor = RegionSlots.indexToAnchor(slotIndex)
-    if not anchor then
-        error("RailroaderRV: current mapping slot index is invalid")
-    end
     -- One template layout per anchor; the compiled template never changes at
     -- runtime, so the derived boundary may be reused for this identity.
     local cached = boundariesBySlot[slotIndex]

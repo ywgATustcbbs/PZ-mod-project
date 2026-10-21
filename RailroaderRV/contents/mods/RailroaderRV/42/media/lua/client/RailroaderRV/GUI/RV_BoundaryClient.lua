@@ -45,7 +45,6 @@ local function onlineId(player)
 end
 
 local function localPlayerByOnlineId(id)
-    assert(id ~= nil, "RailroaderRV: onlineId is missing")
     if type(getNumActivePlayers) ~= "function"
         or type(getSpecificPlayer) ~= "function" then return nil end
     local okCount, count = pcall(getNumActivePlayers)

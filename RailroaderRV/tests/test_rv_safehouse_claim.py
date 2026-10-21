@@ -143,6 +143,40 @@ def install_current_rv_resolver(lua: LuaRuntime) -> None:
 
 
 def load_client_menu(lua: LuaRuntime) -> None:
+    lua.execute(
+        r"""
+        RR = RR or {}
+        RR.API = RR.API or {}
+        RR.API.onBoardMenu = RR.API.onBoardMenu or function() end
+        RR.API.onCabMenu = RR.API.onCabMenu or function() end
+        package.loaded["Railroader/RR_API"] = RR.API
+        package.loaded["RailroaderRV/RVMapping/RV_RailroaderUnits"] =
+            package.loaded["RailroaderRV/RVMapping/RV_RailroaderUnits"] or {
+                find = function(id)
+                    for _, train in ipairs(RR.API.trains({})) do
+                        if tostring(train.id) == tostring(id) then
+                            return { id = train.id, kind = "loco",
+                                isLocomotive = true,
+                                locomotiveId = train.id, speed = train.speed }
+                        end
+                    end
+                    return nil
+                end,
+                list = function()
+                    local units = {}
+                    for _, train in ipairs(RR.API.trains({})) do
+                        units[#units + 1] = { id = train.id, kind = "loco",
+                            isLocomotive = true, locomotiveId = train.id,
+                            speed = train.speed }
+                    end
+                    return units
+                end,
+                geometry = function(unit, x, y)
+                    return RR.API.locomotiveGeometry(unit.id, x, y)
+                end,
+            }
+        """
+    )
     path = MOD / "client/RailroaderRV/GUI/RV_RailroaderContextMenu.lua"
     lua.globals().client_menu_path = path.as_posix()
     lua.execute("ClientMenu = dofile(client_menu_path)")
@@ -507,6 +541,7 @@ class RVSafehouseClaimTests(unittest.TestCase):
             end
             Events = {
                 OnGameStart = makeEvent(),
+                OnClickedAnimalForContext = makeEvent(),
                 OnFillWorldObjectContextMenu = makeEvent(),
                 OnPreFillWorldObjectContextMenu = makeEvent(),
                 OnFillInventoryObjectContextMenu = makeEvent(),
@@ -541,7 +576,6 @@ class RVSafehouseClaimTests(unittest.TestCase):
                 return nil
             end
             function getNumActivePlayers() return 1 end
-            function instanceof(_, className) return className == "IsoAnimal" end
             sentClientCommands = {}
             function sendClientCommand(...)
                 sentClientCommands[#sentClientCommands + 1] = { ... }
@@ -554,55 +588,32 @@ class RVSafehouseClaimTests(unittest.TestCase):
             utilitySnapshot = nil
             snapshotRequestCount = 0
 
-            menuPaused = false
-            singleOffer = false
-            nativeShowCount = 0
-            nativeAnimalMenuCount = 0
             nativeWorldMenuCount = 0
             locomotive = {
-                getAnimalType = function() return "rr_loco" end,
                 getAnimalID = function() return "loco-17" end,
             }
-            trainRecord = { animal = locomotive }
-            nearestRecord = trainRecord
-            nearestDistance = 1
-            local nativeShowSeatMenu = function()
-                nativeShowCount = nativeShowCount + 1
-                if singleOffer or menuPaused then return false end
-                return true
-            end
-            boardMenu = {
-                addForAnimal = function(playerNum, context, animal, test)
-                    if not nearestRecord or nearestDistance > 2 then return end
-                    nativeAnimalMenuCount = nativeAnimalMenuCount + 1
-                    if not test then
-                        context:addOption("Native animal entry", nil, function() end)
-                    end
-                end,
-                OnFill = function(_, context)
-                    if not nearestRecord or nearestDistance > 2 then return end
-                    nativeWorldMenuCount = nativeWorldMenuCount + 1
-                    context:addOption("Native world entry", nil, function() end)
-                end,
-                showSeatMenu = nativeShowSeatMenu,
-            }
-            Events.OnFillWorldObjectContextMenu.Add(boardMenu.OnFill)
-            originalAnimalMenu = boardMenu.addForAnimal
-            originalShowSeatMenu = boardMenu.showSeatMenu
+            publicTrains = { { id = "loco-17" } }
+            locomotiveDistances = { ["loco-17"] = 1 }
             RR = {
-                Ride = {
-                    current = nil,
-                    MOUNT_REACH = 2,
-                    nearestBoardable = function(reach)
-                        assert(reach == 2)
-                        if nearestRecord and nearestDistance <= reach then
-                            return nearestRecord, nearestDistance
-                        end
-                        return nil
+                API = {
+                    trains = function() return publicTrains end,
+                    locomotiveGeometry = function(id, x, y)
+                        local distance = locomotiveDistances[tostring(id)]
+                        if distance == nil then return nil, "unknown" end
+                        return {
+                            hullDistanceTiles = distance,
+                            mountReachTiles = 2,
+                        }
                     end,
                 },
-                BoardMenu = boardMenu,
             }
+            nativeWorldHook = function(_, context)
+                if locomotiveDistances["loco-17"] <= 2 then
+                    nativeWorldMenuCount = nativeWorldMenuCount + 1
+                    context:addOption("Native world entry", nil, function() end)
+                end
+            end
+            Events.OnFillWorldObjectContextMenu.Add(nativeWorldHook)
 
             package.loaded["RailroaderRV/GUI/RV_UtilityClient"] = {
                 requestAddFuel = function() end,
@@ -634,13 +645,13 @@ class RVSafehouseClaimTests(unittest.TestCase):
         lua.execute("UtilityMenu = dofile(utility_menu_path)")
         lua.execute(
             r"""
-            assert(RR.BoardMenu.showSeatMenu == originalShowSeatMenu)
-            for _, callback in ipairs(Events.OnGameStart.handlers) do
-                callback()
+            local animalEventRegistered = false
+            for _, callback in ipairs(Events.OnClickedAnimalForContext.handlers) do
+                if callback == ClientMenu.OnClickedAnimalForContext then
+                    animalEventRegistered = true
+                end
             end
-            assert(RR.BoardMenu.addForAnimal ~= originalAnimalMenu)
-            assert(RR.BoardMenu.rrRVRailroaderAnimalMenuWrapped)
-            assert(RR.BoardMenu.showSeatMenu == originalShowSeatMenu)
+            assert(animalEventRegistered)
             local function context()
                 local value = { options = {} }
                 function value:addOption(name, target, callback, ...)
@@ -669,7 +680,7 @@ class RVSafehouseClaimTests(unittest.TestCase):
 
             local officialWorldHookPreserved = false
             for _, callback in ipairs(Events.OnFillWorldObjectContextMenu.handlers) do
-                if callback == RR.BoardMenu.OnFill then
+                if callback == nativeWorldHook then
                     officialWorldHookPreserved = true
                 end
             end
@@ -687,12 +698,13 @@ class RVSafehouseClaimTests(unittest.TestCase):
             for _, callback in ipairs(Events.OnFillWorldObjectContextMenu.handlers) do
                 callback(0, outsideContext, { locomotive }, false)
             end
-            RR.BoardMenu.addForAnimal(0, outsideContext, locomotive, false)
+            for _, callback in ipairs(Events.OnClickedAnimalForContext.handlers) do
+                callback(0, outsideContext, { locomotive }, false)
+            end
             assert(countNamed(outsideContext, "Enter RV") == 1)
             assert(countNamed(outsideContext, "RV utility panel") == 0)
             assert(countNamed(outsideContext, "Claim RV Safehouse") == 0)
             assert(countNamed(outsideContext, "Native world entry") == 1)
-            assert(countNamed(outsideContext, "Native animal entry") == 1)
             local enter = findNamed(outsideContext, "Enter RV")
             assert(enter.iconTexture.path == "media/ui/RailroaderRV/enterrv.png")
             enter.callback(enter.target, enter.args[1])
@@ -700,19 +712,15 @@ class RVSafehouseClaimTests(unittest.TestCase):
             assert(sentClientCommands[1][2] == C.MOD_ID)
             assert(sentClientCommands[1][3] == C.COMMAND_RV_ENTER)
             assert(sentClientCommands[1][4].locoId == "loco-17")
-            assert(nativeWorldMenuCount == 1 and nativeAnimalMenuCount == 1)
-
-            singleOffer = true
-            assert(RR.BoardMenu.showSeatMenu(trainRecord) == false)
-            assert(nativeShowCount == 1)
-            assert(RR.BoardMenu.showSeatMenu == originalShowSeatMenu)
-            singleOffer = false
-            menuPaused = true
-            assert(RR.BoardMenu.showSeatMenu(trainRecord) == false)
-            menuPaused = false
+            assert(nativeWorldMenuCount == 1)
 
             assert(ClientMenu.acceptUtilityMapping({ ok = true, onlineId = 41,
                 rvId = "rv-17", locoId = "loco-17", generation = 1 }))
+            ClientMenu.clearUtilityMapping()
+            ClientMenu.OnServerCommand(C.MOD_ID, C.COMMAND_FINAL_RELOCATE, {
+                rvId = "rv-17", locoId = "loco-17", generation = 1,
+            })
+            assert(ClientMenu.getUtilityMapping().locoId == "loco-17")
             utilitySnapshot = {
                 rvId = "rv-17", generation = 1,
                 water = { tankCount = 2, supplyPumpInstalled = true,
@@ -726,7 +734,9 @@ class RVSafehouseClaimTests(unittest.TestCase):
             for _, callback in ipairs(Events.OnFillWorldObjectContextMenu.handlers) do
                 callback(0, generatedContext, { locomotive }, false)
             end
-            RR.BoardMenu.addForAnimal(0, generatedContext, locomotive, false)
+            for _, callback in ipairs(Events.OnClickedAnimalForContext.handlers) do
+                callback(0, generatedContext, { locomotive }, false)
+            end
             assert(countNamed(generatedContext, "Enter RV") == 1)
             assert(countNamed(generatedContext, "RV utility panel") == 1)
             assert(countNamed(generatedContext, "Claim RV Safehouse") == 0)
@@ -737,11 +747,10 @@ class RVSafehouseClaimTests(unittest.TestCase):
             assert(dashboardPlayer == activePlayer)
 
             local otherLocomotive = {
-                getAnimalType = function() return "rr_loco" end,
                 getAnimalID = function() return "loco-18" end,
             }
-            nearestRecord = { animal = otherLocomotive }
-            nearestDistance = 1
+            publicTrains = { { id = "loco-18" } }
+            locomotiveDistances["loco-18"] = 1
             local otherTrainContext = context()
             ClientMenu.OnPreFillWorldObjectContextMenu(0,
                 otherTrainContext, { otherLocomotive }, false)
@@ -749,14 +758,16 @@ class RVSafehouseClaimTests(unittest.TestCase):
             assert(countNamed(otherTrainContext, "RV utility panel") == 0)
             assert(countNamed(otherTrainContext, "Claim RV Safehouse") == 0)
 
-            nearestRecord = { animal = locomotive }
-            nearestDistance = 3
+            publicTrains = { { id = "loco-17" } }
+            locomotiveDistances["loco-17"] = 3
             local farContext = context()
             ClientMenu.OnPreFillWorldObjectContextMenu(0,
                 farContext, { locomotive }, false)
             ClientMenu.OnFillWorldObjectContextMenu(0,
                 farContext, { locomotive }, false)
-            RR.BoardMenu.addForAnimal(0, farContext, otherLocomotive, false)
+            for _, callback in ipairs(Events.OnClickedAnimalForContext.handlers) do
+                callback(0, farContext, { otherLocomotive }, false)
+            end
             assert(countNamed(farContext, "Enter RV") == 0)
             assert(countNamed(farContext, "RV utility panel") == 0)
 
@@ -766,7 +777,7 @@ class RVSafehouseClaimTests(unittest.TestCase):
             activePlayer.x = region.minX + 1
             activePlayer.y = region.minY + 1
             activePlayer.z = anchor.z + C.RV_MANAGED_MIN_Z_OFFSET
-            nearestRecord = nil
+            publicTrains = {}
 
             ClientMenu.clearUtilityMapping()
             local beforeGenerationContext = context()

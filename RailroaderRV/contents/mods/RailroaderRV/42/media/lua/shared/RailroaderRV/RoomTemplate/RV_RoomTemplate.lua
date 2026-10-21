@@ -1,10 +1,12 @@
 -- Current shared template data and pure queries.
 local Source = require "RailroaderRV/RoomTemplate/RV_Template"
+local CarBoxSource = require "RailroaderRV/RoomTemplate/RV_Template_CarBox"
 
 local RoomTemplate = {}
 
 RoomTemplate.TEMPLATE_ID = "railroader-rv"
 RoomTemplate.ENGINE_AREA_TEMPLATE_ID = "railroader-rv-engine-area"
+RoomTemplate.CAR_BOX_TEMPLATE_ID = "railroader-rv-car-box"
 RoomTemplate.CURRENT_TEMPLATE_VERSION = 11
 RoomTemplate.WIDTH = 100
 RoomTemplate.HEIGHT = 100
@@ -37,8 +39,6 @@ local function cellKey(x, y, z)
     return tostring(x) .. ":" .. tostring(y) .. ":" .. tostring(z)
 end
 
-local roofCells = Source.roofCells
-
 local function compileBuildCells(rectangles)
     local buildCells = {}
     for index = 1, #rectangles do
@@ -52,7 +52,7 @@ local function compileBuildCells(rectangles)
     return buildCells
 end
 
-local function compileTemplate(templateId, buildCells, waterProxies,
+local function compileTemplate(templateId, source, buildCells, waterProxies,
     buildRects)
     local buildCellSet = {}
     for index = 1, #buildCells do
@@ -67,34 +67,39 @@ local function compileTemplate(templateId, buildCells, waterProxies,
             displayName = "Railroader RV",
             templateVersion = RoomTemplate.CURRENT_TEMPLATE_VERSION,
             anchor = { x = 0, y = 0, z = 0 },
-            sourceTarget = Source.sourceTarget,
+            sourceTarget = source.sourceTarget,
             width = RoomTemplate.WIDTH,
             height = RoomTemplate.HEIGHT,
             minX = RoomTemplate.MIN_X,
             maxXExclusive = RoomTemplate.MAX_X_EXCLUSIVE,
             minY = RoomTemplate.MIN_Y,
             maxYExclusive = RoomTemplate.MAX_Y_EXCLUSIVE,
-            objectCount = Source.objectCount,
+            objectCount = source.objectCount,
         },
-        powerProxy = Source.powerProxy,
+        powerProxy = source.powerProxy,
         waterProxies = waterProxies,
-        roofCells = roofCells,
-        roofRefreshPoints = Source.roofRefreshPoints,
+        roofCells = source.roofCells,
+        roofRefreshPoints = source.roofRefreshPoints,
         celldef = {},
         objects = {},
         misc = {
-            walkAabbs = Source.walkAabbs,
+            walkAabbs = source.walkAabbs,
             buildCells = buildCells,
             buildRects = buildRects,
         },
     }
 
-    for index = 1, Source.objectCount do
-        local source = Source.objects[index]
-        local x, y, z = source.x, source.y, source.z
+    for index = 1, source.objectCount do
+        local captured = source.objects[index]
+        local x, y, z = captured.x, captured.y, captured.z
         local demolitionAllowed = buildCellSet[cellKey(x, y, z)]
-        if not demolitionAllowed and (source.class == "IsoDoor"
-            or source.class == "IsoWindow") then
+        local carBoxGarageWall = templateId == RoomTemplate.CAR_BOX_TEMPLATE_ID
+            and captured.class == "IsoThumpable"
+            and (captured.sprite == "walls_garage_02_0"
+                or captured.sprite == "walls_garage_02_1"
+                or captured.sprite == "walls_garage_02_2")
+        if not demolitionAllowed and (captured.class == "IsoDoor"
+            or captured.class == "IsoWindow" or carBoxGarageWall) then
             demolitionAllowed = buildCellSet[cellKey(x - 1, y, z)]
                 or buildCellSet[cellKey(x, y - 1, z)]
         end
@@ -104,12 +109,12 @@ local function compileTemplate(templateId, buildCells, waterProxies,
             x = x,
             y = y,
             z = z,
-            class = source.class,
-            name = source.name,
-            sprite = source.sprite,
-            north = source.north,
-            direction = source.direction,
-            state = source.state,
+            class = captured.class,
+            name = captured.name,
+            sprite = captured.sprite,
+            north = captured.north,
+            direction = captured.direction,
+            state = captured.state,
             protected = not demolitionAllowed,
         }
         value.objects[index] = object
@@ -127,12 +132,14 @@ local function compileTemplate(templateId, buildCells, waterProxies,
     return value
 end
 
-compileTemplate(RoomTemplate.TEMPLATE_ID, Source.buildCells,
+compileTemplate(RoomTemplate.TEMPLATE_ID, Source, Source.buildCells,
     Source.waterProxies)
 local engineAreaBuildCells = compileBuildCells(Source.engineAreaBuildRects)
 compileTemplate(RoomTemplate.ENGINE_AREA_TEMPLATE_ID,
-    engineAreaBuildCells, Source.engineAreaWaterProxies,
+    Source, engineAreaBuildCells, Source.engineAreaWaterProxies,
     Source.engineAreaBuildRects)
+compileTemplate(RoomTemplate.CAR_BOX_TEMPLATE_ID, CarBoxSource,
+    CarBoxSource.buildCells, CarBoxSource.waterProxies)
 
 -- Every declared refresh point must name a real captured entry that sits on the
 -- exact template coordinates the point declares.  Both sides are this mod's own
@@ -158,7 +165,8 @@ local function validateRoofRefreshPoints(points, orderedObjects)
 end
 
 for _, templateId in ipairs({ RoomTemplate.TEMPLATE_ID,
-    RoomTemplate.ENGINE_AREA_TEMPLATE_ID }) do
+    RoomTemplate.ENGINE_AREA_TEMPLATE_ID,
+    RoomTemplate.CAR_BOX_TEMPLATE_ID }) do
     local value = templates[templateId]
     validateRoofRefreshPoints(value.roofRefreshPoints, value.objects)
 end
@@ -186,6 +194,14 @@ end
 function RoomTemplate.templateIdForEngineAreaBuilding(enabled)
     return enabled and RoomTemplate.ENGINE_AREA_TEMPLATE_ID
         or RoomTemplate.TEMPLATE_ID
+end
+
+function RoomTemplate.templateIdForKind(kind, allowEngineArea)
+    if kind == "loco" then
+        return RoomTemplate.templateIdForEngineAreaBuilding(allowEngineArea)
+    elseif kind == "car_box" or kind == "car_bx40" then
+        return RoomTemplate.CAR_BOX_TEMPLATE_ID
+    end
 end
 
 function RoomTemplate.cellAt(value, x, y)

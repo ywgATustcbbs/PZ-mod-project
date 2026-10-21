@@ -38,6 +38,7 @@ function Adapter.OnTick(tick)
     -- The wall reload operation owns the RV's players until every one of them is
     -- back inside, so it advances before any other per-tick RV work.
     WallReload.onTick()
+    Adapter.processPendingExitBoardings(tick)
     if not Core.tickModulo(30) then return end
     local map = mapData()
     local changed = false

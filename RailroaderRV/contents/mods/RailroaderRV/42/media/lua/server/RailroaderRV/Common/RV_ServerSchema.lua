@@ -24,6 +24,7 @@ local function boundsFor(layout)
         managedOriginX = managed.originX, managedOriginY = managed.originY,
         managedWidth = managed.width, managedHeight = managed.height,
         managedMinZ = managed.minZ, managedMaxZ = managed.maxZ,
+        templateId = layout.templateId,
         managed = managed, shellEdges = layout.shellEdges,
         roomMinX = room.minX, roomMaxX = room.maxX,
         roomMinY = room.minY, roomMaxY = room.maxY, roomZ = room.z,

@@ -84,8 +84,6 @@ local function destinationSquareIsLoaded(x, y, z)
 end
 
 local function tryApplyFinalRelocation(args, pending)
-    assert(args.token ~= nil,
-        "RailroaderRV: final relocation token is missing")
     local token = args.token
     local onlineId = args.onlineId
     local x, y, z = args.x, args.y, args.z
@@ -168,19 +166,12 @@ function Client.onServerCommand(module, command, args)
         return
     end
     if command == COMMAND_FINAL_RELOCATE then
-        -- Only a server-marked Railroader generation may touch Ride state.
-        -- Ordinary technical Generate still uses this generic final teleport,
-        -- but must not dismount a locomotive the player happens to occupy.
-        if args.railroaderTransition == true then
-            RailroaderRV.RailroaderContextMenu.prepareGenerationRelocation(args)
-        end
         applyFinalRelocation(args)
         return
     end
     if command ~= COMMAND_RELOCATE then return end
     local token = args.token
     local onlineId = args.onlineId
-    assert(token ~= nil, "RailroaderRV: relocation token is missing")
     -- A wall reload return preserves the server-captured fractional x/y/z
     -- exactly; phase selects the engine call without rounding return values.
     local x, y, z = args.x, args.y, args.z
@@ -215,24 +206,18 @@ function Client.onServerCommand(module, command, args)
     if not playerObj or playerDead then
         return
     end
-    assert(not (wallReloadTransition and generationTransition),
-        "RailroaderRV: relocation has conflicting transition markers")
     local exactReturn = false
     if wallReloadTransition then
         if wallReloadPhase == "temporary" then
             exactReturn = false
         elseif wallReloadPhase == "return" then
             exactReturn = true
-        else
-            error("RailroaderRV: unknown wall reload relocation phase")
         end
     elseif generationTransition then
         if generationPhase == "temporary" then
             exactReturn = false
         elseif generationPhase == "return" then
             exactReturn = true
-        else
-            error("RailroaderRV: unknown generation relocation phase")
         end
     end
     if wallReloadTransition and wallReloadPhase == "temporary"
@@ -250,13 +235,6 @@ function Client.onServerCommand(module, command, args)
             playerObj:setHaloNote(GENERATION_HALO_RENDER_TEXT,
                 255, 255, 255, 1500)
         end)
-    end
-    -- Railroader generation removes the official seat before this staging
-    -- teleport.  Clear the local Ride state first, but only for the strict
-    -- server-created marker; ordinary technical Generate must keep this
-    -- bridge completely Railroader-agnostic.
-    if args.railroaderTransition == true then
-        RailroaderRV.RailroaderContextMenu.prepareGenerationStaging(args)
     end
     -- The wallReload* names below are the existing Relocate wire fields for the
     -- wall reload operation; keep their wire spelling synchronized with the

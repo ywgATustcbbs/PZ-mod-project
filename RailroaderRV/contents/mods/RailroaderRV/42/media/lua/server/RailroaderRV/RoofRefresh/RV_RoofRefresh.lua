@@ -6,8 +6,6 @@
 
 local Core = require("RailroaderRV/Core/RV_Server_Core")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
-local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
-local refreshPoints = RoomTemplate.roofRefreshPoints(Template)
 local ServerWorld = require("RailroaderRV/Common/RV_ServerWorld")
 
 RailroaderRV = RailroaderRV or {}
@@ -51,7 +49,11 @@ local function refreshPoint(cell, bounds, point)
     return true, "room synchronized at " .. coordinate(x, y, z)
 end
 
-local function refreshAllPoints(bounds)
+-- Resolve points from the mapping's template at execution time; scheduled
+-- callbacks may refresh any supported RV template.
+local function refreshAllPoints(bounds, templateId)
+    local template = RoomTemplate.get(templateId)
+    local refreshPoints = RoomTemplate.roofRefreshPoints(template)
     local cell = getCell()
     local reason
     for index = 1, #refreshPoints do
@@ -63,8 +65,8 @@ local function refreshAllPoints(bounds)
     return true, reason
 end
 
-function Refresh.run(bounds)
-    local refreshed, reason = refreshAllPoints(bounds)
+function Refresh.run(bounds, templateId)
+    local refreshed, reason = refreshAllPoints(bounds, templateId)
     if refreshed ~= true then return fail(reason) end
     return true, reason
 end

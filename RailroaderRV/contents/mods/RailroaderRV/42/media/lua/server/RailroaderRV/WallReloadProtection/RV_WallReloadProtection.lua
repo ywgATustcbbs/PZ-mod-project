@@ -180,9 +180,6 @@ local function livePlayersByKey()
     local adapter = RailroaderRV.RailroaderServer
     local players, snapshotOk = adapter.onlinePlayersSnapshot()
     if snapshotOk == false then return nil end
-    if snapshotOk ~= true then
-        error("RailroaderRV: online player snapshot returned invalid status")
-    end
     for i = 1, #players do
         local player = players[i]
         if player ~= nil then
@@ -348,11 +345,6 @@ function M.onTick()
                     advanceWaitReload(op, live)
                 elseif op.phase == PHASE_RETURN then
                     advanceReturn(op, live)
-                else
-                    local phaseError = "RailroaderRV: unknown wall reload phase "
-                        .. tostring(op.phase)
-                    finishFailure(op, phaseError, live)
-                    error(phaseError, 0)
                 end
             end
         end
@@ -438,9 +430,6 @@ function M.begin(request, onComplete)
     local generationActive = api.isGenerationTransactionActive()
     if generationActive == true then
         return false, "RV generation transaction is in progress"
-    end
-    if generationActive ~= false then
-        error("RailroaderRV: generation transaction query returned invalid state")
     end
     local accepted, manifest = api.currentRVManifestForBoundary(request.rvId,
         ServerUtil.integer(request.generation))

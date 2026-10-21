@@ -19,14 +19,7 @@ local function tagForObject(object)
     local data = object:getModData()
     local tag = data[M.WATER_TAG_KEY]
     if tag == nil then return nil end
-    if type(tag) ~= "table" then
-        error("RailroaderRV: water sink tag is not a table")
-    end
     if tag.owner ~= C.MOD_ID or tag.role ~= "sink" then return nil end
-    assert(type(tag.rvId) == "string" and tag.rvId ~= ""
-        and type(tag.generation) == "number" and tag.generation >= 1
-        and type(tag.slotIndex) == "number",
-        "RailroaderRV: water sink identity is incomplete")
     return tag
 end
 

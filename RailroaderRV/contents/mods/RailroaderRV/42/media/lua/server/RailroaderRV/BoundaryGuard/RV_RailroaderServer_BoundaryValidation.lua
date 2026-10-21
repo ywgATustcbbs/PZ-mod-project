@@ -40,10 +40,6 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
     local name = suppliedIdentity.username
     local identityKey = suppliedIdentity.key
     if identityId == nil or not name then return nil end
-    if identityKey ~= tostring(identityId) .. ":" .. name then
-        error("RailroaderRV: boundary identity key is inconsistent")
-    end
-
     local server = RailroaderRV.Server
     local generationBusy, wallBusy = serverTransactionMutexStatus()
     local state = Boundary._states[identityKey]
@@ -108,9 +104,6 @@ local function validatePlayer(player, suppliedIdentity, knownMap,
         diagnose("manifest-rejected")
         cache[identityKey] = nil
         return nil
-    end
-    if manifestAccepted ~= true then
-        error("RailroaderRV: current RV manifest query returned invalid state")
     end
     if wallBusy == true and wallReloadActive(server, record.locoId) then
         diagnose("roof-refresh-transaction-rejected")

@@ -222,5 +222,10 @@
     "UI_RailroaderRV_Utility_ExtractionPumpHelp": "房车靠近河流、湖泊等水源时，玩家携带橡胶软管，可以自动加水。需要消耗房车电力。",
     "UI_RailroaderRV_Utility_MissingRubberHose": "缺少橡胶软管",
     "UI_RailroaderRV_Utility_MissingPower": "缺少电力",
-    "UI_RailroaderRV_Utility_NoNearbyNaturalWater": "附近无天然水源"
+    "UI_RailroaderRV_Utility_NoNearbyNaturalWater": "附近无天然水源",
+    "UI_RailroaderRV_TemplateDevelopmentSize": "南北长×东西宽（例如23x6）",
+    "UI_RailroaderRV_TemplateDevelopmentType": "车厢类型",
+    "UI_RailroaderRV_TemplateDevelopmentNorthSouthLength": "南北长度（格）",
+    "UI_RailroaderRV_TemplateDevelopmentEastWestWidth": "东西宽度（格）",
+    "UI_RailroaderRV_TemplateDevelopmentSubmit": "生成"
 }

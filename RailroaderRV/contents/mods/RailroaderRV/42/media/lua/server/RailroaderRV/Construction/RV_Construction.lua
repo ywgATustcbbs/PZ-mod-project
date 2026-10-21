@@ -32,13 +32,14 @@ function Construction.new(context, operations)
         return operations.clear(cell, bounds)
     end
 
-    function service.buildCurrentGeneration(player, layout, bounds, generation)
+    function service.buildCurrentGeneration(player, layout, bounds, generation,
+        mode)
         requireCurrentBuild(player)
         local pending = generationTransaction.current()
         if not pending or tostring(pending.generation) ~= tostring(generation) then
             error("RailroaderRV: build requires the current clearing phase")
         end
-        return operations.build(player, layout, bounds, generation)
+        return operations.build(player, layout, bounds, generation, mode)
     end
 
     return service

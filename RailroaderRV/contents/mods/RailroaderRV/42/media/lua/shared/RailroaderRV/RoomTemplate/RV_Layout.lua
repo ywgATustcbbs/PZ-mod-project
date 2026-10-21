@@ -6,20 +6,19 @@
 
 local RoomTemplate = require "RailroaderRV/RoomTemplate/RV_RoomTemplate"
 local TemplateGeometry = require "RailroaderRV/RoomTemplate/RV_TemplateGeometry"
+local Constants = require "RailroaderRV/Common/RV_Constants"
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.Layout = RailroaderRV.Layout or {}
 
 local Layout = RailroaderRV.Layout
-local Template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
-local roofCells = RoomTemplate.roofCells(Template)
-local walkAabbs = Template.misc.walkAabbs
 
 -- The physical room/wall plan currently describes the primary rectangular
 -- shell. Queries use all walk regions and generation still emits every object.
-local walkGeometry = walkAabbs[1]
-local roofZOffset = roofCells[1].z
 function Layout.eachStructureCoordinate(bounds, callback)
+    local template = RoomTemplate.get(bounds.templateId)
+    local roofCells = RoomTemplate.roofCells(template)
+    local walkGeometry = template.misc.walkAabbs[1]
     for x = bounds.wallMinX, bounds.wallMaxX do
         for y = bounds.wallMinY, bounds.wallMaxY do
             callback(x, y, bounds.z)
@@ -361,6 +360,67 @@ function Layout.make(cx, cy, cz, templateId)
         result.templateObjects[i] = copy
     end
     return result
+end
+
+-- Build a clean rectangular floor for the template-development workspace.
+-- The clear bounds stay equal to production's full 100x100, two-layer scope,
+-- while every floor tile is authored from the requested dimensions.
+function Layout.makeTemplateDevelopmentFloor(cx, cy, cz, templateId,
+    northSouthLength, eastWestWidth)
+    local minX = cx - math.floor(eastWestWidth / 2)
+    local minY = cy - math.floor(northSouthLength / 2)
+    local maxX = minX + eastWestWidth - 1
+    local maxY = minY + northSouthLength - 1
+    local managedMinX = cx + RoomTemplate.MIN_X
+    local managedMinY = cy + RoomTemplate.MIN_Y
+    local clearMaxX = managedMinX + RoomTemplate.WIDTH
+    local clearMaxY = managedMinY + RoomTemplate.HEIGHT
+    local objects = {}
+
+    for y = minY, maxY do
+        for x = minX, maxX do
+            objects[#objects + 1] = {
+                templateIndex = #objects + 1,
+                x = x,
+                y = y,
+                z = cz,
+                class = "IsoObject",
+                name = "Floor",
+                sprite = Constants.SPRITES.woodFloor.sprite,
+                direction = "N",
+                state = {},
+            }
+        end
+    end
+
+    local emptyEdges = {}
+    local edgeCounts = { north = 0, west = 0 }
+    return {
+        templateId = templateId,
+        anchor = { x = cx, y = cy, z = cz },
+        clear = rectangle(managedMinX, clearMaxX, managedMinY, clearMaxY,
+            nil, cz, cz + 2, true),
+        managed = {
+            originX = managedMinX,
+            originY = managedMinY,
+            width = RoomTemplate.WIDTH,
+            height = RoomTemplate.HEIGHT,
+            minZ = cz,
+            maxZ = cz + 2,
+        },
+        shellEdges = {},
+        templateObjects = objects,
+        room = rectangle(minX, maxX, minY, maxY, cz),
+        wall = rectangle(minX, maxX, minY, maxY, cz),
+        roof = rectangle(minX, maxX, minY, maxY, cz + 1),
+        wallCoordinates = emptyEdges,
+        wallObjectCount = 0,
+        wallCoordinateCount = 0,
+        wallEdgeCounts = edgeCounts,
+        wallCornerCount = 0,
+        powerProxy = nil,
+        waterProxies = {},
+    }
 end
 
 return Layout

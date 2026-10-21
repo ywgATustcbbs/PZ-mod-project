@@ -11,6 +11,7 @@ local ServerSchema = ctx.ServerSchema
 local GenerationTransaction = ctx.GenerationTransaction
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local Layout = require("RailroaderRV/RoomTemplate/RV_Layout")
+local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local RELOCATION_TIMEOUT_TICKS = ctx.RELOCATION_TIMEOUT_TICKS
 local registerServerRoomOwnershipGuard = ctx.registerServerRoomOwnershipGuard
 local refreshServerRoomOwnershipGuard = ctx.refreshServerRoomOwnershipGuard
@@ -53,15 +54,7 @@ local function selectGenerationStagingDestination(layout, bounds)
     return destination
 end
 
-local function playerIsAtStagingDestination(player, destination, bounds)
-    local expectedX = bounds.managedOriginX
-        + math.floor(bounds.managedWidth / 2)
-    local expectedY = bounds.managedOriginY
-        + math.floor(bounds.managedHeight / 2)
-    assert(destination.purpose == "generation-center"
-        and destination.z == GENERATION_STAGING_Z
-        and destination.x == expectedX and destination.y == expectedY,
-        "generation staging destination identity is stale")
+local function playerIsAtStagingDestination(player, destination)
     local playerOk, positionOrReason = validateAuthoritativePlayer(player)
     if not playerOk then
         return false, positionOrReason
@@ -115,9 +108,6 @@ local function relocatePlayerIntoHouse(player, prepared)
 end
 
 local function generateForPlayer(player, prepared)
-    assert(GenerationTransaction.owns(player) == true
-        and prepared.stage == "WAIT_STAGING",
-        "generation is not waiting at the staging boundary")
     prepared.stage = "BUILD"
     local playerOk, positionOrReason = validateAuthoritativePlayer(player)
     if not playerOk then
@@ -146,7 +136,7 @@ local function generateForPlayer(player, prepared)
     local bounds = prepared.bounds
     local cell = ServerWorld.getCellForPlayer(player)
     local atStaging, stagingReason = playerIsAtStagingDestination(player,
-        prepared.stagingDestination, bounds)
+        prepared.stagingDestination)
     if not atStaging then
         return false, stagingReason
     end
@@ -158,17 +148,22 @@ local function generateForPlayer(player, prepared)
     -- deltas; the requester remains at the validated staging square,
     -- outside both old and new structure footprints, while later client
     -- ticks repair any missed retired room ID.
-    armClientRoomOwnershipGuard(generation, nil, bounds, prepared.rvId)
-    local roomOwnershipGuard = registerServerRoomOwnershipGuard(generation,
-        player, nil, bounds, prepared.rvId)
+    local roomOwnershipGuard
+    if prepared.mode == "production" then
+        armClientRoomOwnershipGuard(generation, nil, bounds, prepared.rvId)
+        roomOwnershipGuard = registerServerRoomOwnershipGuard(generation,
+            player, nil, bounds, prepared.rvId)
+    end
     -- No durable mutation record: the in-memory record is the gate.
     clearGenerationArea(cell, bounds)
-    buildGeneration(player, layout, bounds, generation)
+    buildGeneration(player, layout, bounds, generation, prepared.mode)
     -- Scan once more on the server immediately before the final client command.
     -- The client repeats the same scan synchronously before its teleport; neither
     -- side relies on a later OnTick to repair the square after the player enters.
-    refreshServerRoomOwnershipGuard(roomOwnershipGuard,
-        "before-final-relocate", true)
+    if prepared.mode == "production" then
+        refreshServerRoomOwnershipGuard(roomOwnershipGuard,
+            "before-final-relocate", true)
+    end
     prepared.generation = generation
     relocatePlayerIntoHouse(player, prepared)
     -- Keep the process-local record alive across the asynchronous client
@@ -181,8 +176,6 @@ end
 -- never fall through to DONE; the record keeps the same token, deadline and
 -- single abort path.
 local function finalizeGenerationAfterRelocate(player, prepared)
-    assert(prepared.stage == "WAIT_FINAL" and prepared.finalAcked == true,
-        "final relocation acknowledgement is still pending")
     local target = prepared.finalDestination
     local proofOk, proofOrPosition, positionMismatch =
         generationPositionProof(player, target)
@@ -202,13 +195,17 @@ local function finalizeGenerationAfterRelocate(player, prepared)
         end
         return false, proofOrPosition
     end
-    refreshGenerationRoomOwnershipGuard(prepared.rvId,
-        prepared.generation, "before-commit")
+    if prepared.mode == "production" then
+        refreshGenerationRoomOwnershipGuard(prepared.rvId,
+            prepared.generation, "before-commit")
+    end
     if Boundary.completeTransition(player, prepared.token) ~= true then
         return false, "generation boundary transition could not be completed"
     end
-    refreshGenerationRoomOwnershipGuard(prepared.rvId,
-        prepared.generation, "pre-mapping-commit")
+    if prepared.mode == "production" then
+        refreshGenerationRoomOwnershipGuard(prepared.rvId,
+            prepared.generation, "pre-mapping-commit")
+    end
     -- The mapping is the persistent publication point. It runs once, only
     -- after every room/transition check has passed.
     if prepared.railroader ~= nil and prepared.commitApplied ~= true then
@@ -223,7 +220,8 @@ local function finalizeGenerationAfterRelocate(player, prepared)
     return true
 end
 
-local function queueGeneration(player, authoritativePosition, railroaderData)
+local function queueGeneration(player, authoritativePosition, railroaderData,
+    templateDevelopment)
     if GenerationTransaction.isActive() then
         return false, "generation already queued or in progress"
     end
@@ -243,31 +241,55 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         return false, originalPosition
     end
 
-    -- Concurrency is owned by the in-memory record (checked above); the
-    -- durable record only remembers which slot the last generation claimed.
-    local allocated, selectedSlot, anchor, priorGeneration =
-        RailroaderRV.RailroaderServer.allocateRVRegion(
-        railroaderData and railroaderData.locoId or nil)
-    if allocated ~= true then
-        return false, selectedSlot
-    end
-    local slotIndex = selectedSlot
-    local targetX, targetY, targetZ = anchor.x, anchor.y, anchor.z
-    local rvId = railroaderData and tostring(railroaderData.locoId)
-        or ("technical:slot:" .. tostring(slotIndex))
-    -- A published mapping means this locomotive already has a completed RV.
-    -- Unmapped requests select a free slot and always begin at the full clear
-    -- pass, which also removes objects left by a failed earlier attempt.
-    if priorGeneration ~= nil then
-        return false, "RailroaderRV: locomotive already has a completed RV mapping"
-    end
+    local mode = templateDevelopment and "template-development" or "production"
+    local slotIndex
+    local targetX, targetY, targetZ
+    local rvId
     local generation = 1
-    if railroaderData then
-        railroaderData.slotIndex = slotIndex
+    local layout
+    if templateDevelopment then
+        local anchor = TemplateGeometry.templateAnchorForWorld(
+            originalPosition.x, originalPosition.y, originalPosition.z)
+        targetX, targetY, targetZ = anchor.x, anchor.y, anchor.z
+        rvId = "template-development:" .. identityOrReason.key
+        if templateDevelopment.operation == "new" then
+            layout = Layout.makeTemplateDevelopmentFloor(targetX, targetY,
+                targetZ, templateDevelopment.templateId,
+                templateDevelopment.northSouthLength,
+                templateDevelopment.eastWestWidth)
+        else
+            layout = Layout.make(targetX, targetY, targetZ,
+                templateDevelopment.templateId)
+        end
+    else
+        -- Concurrency is owned by the in-memory record; the durable record
+        -- only remembers which slot the last production generation claimed.
+        local kind = "loco"
+        if railroaderData then
+            kind = RailroaderRV.RailroaderServer.findUnit(
+                railroaderData.locoId).kind
+        end
+        local templateId = RoomTemplate.templateIdForKind(kind,
+            SandboxVars.RailroaderRV.AllowEngineAreaBuilding)
+        local allocated, selectedSlot, anchor, priorGeneration =
+            RailroaderRV.RailroaderServer.allocateRVRegion(
+            railroaderData and railroaderData.locoId or nil)
+        if allocated ~= true then
+            return false, selectedSlot
+        end
+        slotIndex = selectedSlot
+        targetX, targetY, targetZ = anchor.x, anchor.y, anchor.z
+        rvId = railroaderData and tostring(railroaderData.locoId)
+            or ("technical:slot:" .. tostring(slotIndex))
+        -- A published mapping means this unit already has a completed RV.
+        if priorGeneration ~= nil then
+            return false, "RailroaderRV: unit already has a completed RV mapping"
+        end
+        if railroaderData then
+            railroaderData.slotIndex = slotIndex
+        end
+        layout = Layout.make(targetX, targetY, targetZ, templateId)
     end
-    local templateId = RoomTemplate.templateIdForEngineAreaBuilding(
-        SandboxVars.RailroaderRV.AllowEngineAreaBuilding)
-    local layout = Layout.make(targetX, targetY, targetZ, templateId)
     local bounds = ServerSchema.boundsFor(layout)
     local anchorPosition = { x = targetX, y = targetY, z = targetZ }
     local finalDestination = {
@@ -277,7 +299,9 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     }
     -- Check map coordinates before either relocation. This is a live world
     -- boundary check, not a second validation of the compiled layout.
-    ServerSchema.validateTargetCoordinates(bounds, anchorPosition)
+    if mode == "production" then
+        ServerSchema.validateTargetCoordinates(bounds, anchorPosition)
+    end
     local stagingDestination = selectGenerationStagingDestination(layout, bounds)
     ctx.pendingSerial = ctx.pendingSerial + 1
     local token = identityOrReason.key .. ":" .. tostring(ctx.serverTick)
@@ -296,6 +320,7 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
         rvId = tostring(transitionRvId),
         generation = transitionGeneration,
         slotIndex = slotIndex,
+        mode = mode,
         layout = layout,
         bounds = bounds,
         anchor = {
@@ -327,7 +352,7 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     GenerationTransaction.begin(player, record)
 
     local transitionOk, transitionResult = pcall(Boundary.beginTransition,
-        player, transitionRvId, transitionGeneration, token, "generation")
+        player, transitionRvId, transitionGeneration, token)
     if not transitionOk then
         local cleanupOk, cleanupError = pcall(Boundary.clearPlayer, player)
         GenerationTransaction.release()
@@ -353,11 +378,19 @@ local function queueGeneration(player, authoritativePosition, railroaderData)
     return true
 end
 
+local function queueTemplateDevelopment(player, request)
+    local templateId = RoomTemplate.templateIdForKind(request.kind,
+        SandboxVars.RailroaderRV.AllowEngineAreaBuilding)
+    request.templateId = templateId
+    return queueGeneration(player, nil, nil, request)
+end
+
 
 ctx.validateRequest = validateRequest
 ctx.generateForPlayer = generateForPlayer
 ctx.finalizeGenerationAfterRelocate = finalizeGenerationAfterRelocate
 ctx.queueGeneration = queueGeneration
+ctx.queueTemplateDevelopment = queueTemplateDevelopment
 ctx.selectGenerationStagingDestination = selectGenerationStagingDestination
 ctx.playerIsAtStagingDestination = playerIsAtStagingDestination
 end

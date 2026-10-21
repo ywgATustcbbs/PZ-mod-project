@@ -105,7 +105,7 @@ def compile_current_template_metadata(shared_lua_root: Path) -> dict[str, object
 def compile_template_variant_contracts(
     shared_lua_root: Path, server_lua_root: Path
 ) -> dict[str, object]:
-    """Exercise both registered layouts through the real Lua modules."""
+    """Exercise registered layouts through the real Lua modules."""
 
     from lupa import LuaRuntime
 
@@ -127,10 +127,13 @@ local Layout = require "RailroaderRV/RoomTemplate/RV_Layout"
 local Geometry = require "RailroaderRV/RoomTemplate/RV_TemplateGeometry"
 local baseId = RoomTemplate.TEMPLATE_ID
 local engineId = RoomTemplate.ENGINE_AREA_TEMPLATE_ID
+local carBoxId = RoomTemplate.CAR_BOX_TEMPLATE_ID
 local base = RoomTemplate.get(baseId)
 local engine = RoomTemplate.get(engineId)
+local carBox = RoomTemplate.get(carBoxId)
 local baseLayout = Layout.make(20050, 2050, 0, baseId)
 local engineLayout = Layout.make(20050, 2050, 0, engineId)
+local carBoxLayout = Layout.make(20050, 2050, 0, carBoxId)
 local omittedTemplateIdRejected = not pcall(function()
     Layout.make(20050, 2050, 0, nil)
 end)
@@ -249,8 +252,10 @@ local function boundaryFor(templateId)
 end
 local baseBoundary = boundaryFor(baseId)
 local engineBoundary = boundaryFor(engineId)
+local carBoxBoundary = boundaryFor(carBoxId)
 local engineAnchor = Geometry.anchorFromManaged(engineBoundary.managed, engine)
 local baseAnchor = Geometry.anchorFromManaged(baseBoundary.managed, base)
+local carBoxAnchor = Geometry.anchorFromManaged(carBoxBoundary.managed, carBox)
 local engineRoofBuildable = Geometry.isBuildable({
     x = engineAnchor.x - 3, y = engineAnchor.y + 3, z = engineAnchor.z,
 }, engineAnchor, engine)
@@ -360,6 +365,17 @@ local generatorProxyColumnProtected = repair.isProtectedCell(engineBoundary,
     engineAnchor.y + engine.powerProxy.y)
 local addedWaterProxyColumnProtected = repair.isProtectedCell(engineBoundary,
     engineAnchor.x - 3, engineAnchor.y - 5)
+local carBoxProtectionEntry = nil
+for index = 1, #carBox.objects do
+    if carBox.objects[index].protected then
+        carBoxProtectionEntry = carBox.objects[index]
+        break
+    end
+end
+local carBoxProtectionQueued = carBoxProtectionEntry ~= nil
+    and repair.isProtectedCell(carBoxBoundary,
+        carBoxAnchor.x + carBoxProtectionEntry.x,
+        carBoxAnchor.y + carBoxProtectionEntry.y)
 local corridorRepairChanged = repair.repairCell({}, engineBoundary,
     repairWorldX, repairWorldY)
 local corridorTemplateRestoreCalls = restoredTemplateEntries
@@ -455,28 +471,6 @@ local templateRecoveryProtectedObjectsPreserved =
     and playerCorpse.inventory.items[1] == corpseInventoryBag
     and corpseInventoryBag.items[1] == corpseInventoryItem
     and droppedBag.item == droppedBagItem
-repairSquareObjects = { {
-    class = engineCorridorHeadObjects[1].class,
-    modData = { RailroaderRV = {
-        owner = "RailroaderRV", role = "captured-template",
-        templateId = engineBoundary.templateId,
-        rvId = engineBoundary.rvId, generation = engineBoundary.generation,
-    } },
-} }
-repairBoundary = engineBoundary
-repairWorldX, repairWorldY = engineAnchor.x - 4, engineAnchor.y - 6
-repairSquareLayers = { [engineAnchor.z] = true }
-repairRemovalCount = 0
-repairRemovalTargets = {}
-local generatedObjectMissingTemplateIndexOk, generatedObjectMissingTemplateIndexError =
-    pcall(function()
-        repair.repairCell({}, engineBoundary, repairWorldX, repairWorldY)
-    end)
-local generatedObjectMissingTemplateIndexRejected =
-    not generatedObjectMissingTemplateIndexOk
-    and string.find(tostring(generatedObjectMissingTemplateIndexError),
-        "generated template object has no template index", 1, true) ~= nil
-
 local Devices = require "RailroaderRV/Power/RV_UtilityPowerDevices"
 local function scanEngineFloor(templateId, rvId)
     local anchor = require("RailroaderRV/RVMapping/RV_RegionSlots").indexToAnchor(1)
@@ -636,8 +630,10 @@ local sameManaged = baseLayout.managed.originX == engineLayout.managed.originX
 return {
     baseId = baseId,
     engineId = engineId,
+    carBoxId = carBoxId,
     disabledSelection = RoomTemplate.templateIdForEngineAreaBuilding(false),
     enabledSelection = RoomTemplate.templateIdForEngineAreaBuilding(true),
+    carBoxSelection = RoomTemplate.templateIdForKind("car_box"),
     baseCells = base.misc.buildCells,
     engineCells = engine.misc.buildCells,
     baseProxies = base.waterProxies,
@@ -649,6 +645,7 @@ return {
     engineWalkAabb = engine.misc.walkAabbs[1],
     baseLayoutId = baseLayout.templateId,
     engineLayoutId = engineLayout.templateId,
+    carBoxLayoutId = carBoxLayout.templateId,
     sameManaged = sameManaged,
     omittedTemplateIdRejected = omittedTemplateIdRejected,
     separateTemplateObjects = base ~= engine and base.objects ~= engine.objects,
@@ -666,8 +663,10 @@ return {
     coveredEngineCells = coveredEngineCells,
     baseBoundaryId = baseBoundary.templateId,
     engineBoundaryId = engineBoundary.templateId,
+    carBoxBoundaryId = carBoxBoundary.templateId,
     baseCabColumnHasProtectedLayer = baseCabColumnHasProtectedLayer,
     corridorHeadProtectionQueued = corridorHeadProtectionQueued,
+    carBoxProtectionQueued = carBoxProtectionQueued,
     generatorProxyColumnProtected = generatorProxyColumnProtected,
     addedWaterProxyColumnProtected = addedWaterProxyColumnProtected,
     engineRoofBuildable = engineRoofBuildable,
@@ -695,7 +694,6 @@ return {
     baseLegalPlayerBuilt = baseLegalPlayerBuilt,
     engineLegalPlayerBuilt = engineLegalPlayerBuilt,
     playerBuiltRepairRemovalCount = repairRemovalCount,
-    generatedObjectMissingTemplateIndexRejected = generatedObjectMissingTemplateIndexRejected,
     corridorDemolitionBlocked = corridorDemolitionBlocked,
     roofDemolitionBlocked = roofDemolitionBlocked,
     baseTemplateRoofDemolitionBlocked = baseTemplateRoofDemolitionBlocked,
@@ -982,6 +980,12 @@ def main() -> int:
     railroader_server_path = (
         server_root / "Core" / "RV_RailroaderServer.lua"
     )
+    railroader_train_path = (
+        server_root / "RVMapping" / "RV_RailroaderServer_Train.lua"
+    )
+    railroader_units_path = (
+        shared_root / "RVMapping" / "RV_RailroaderUnits.lua"
+    )
     railroader_client_path = (
         client_root / "GUI" / "RV_RailroaderContextMenu.lua"
     )
@@ -1072,6 +1076,10 @@ def main() -> int:
     checks.true(
         railroader_client_path.is_file(),
         f"Railroader client adapter is missing: {railroader_client_path}",
+    )
+    checks.true(
+        railroader_units_path.is_file(),
+        f"Railroader unit adapter is missing: {railroader_units_path}",
     )
     checks.true(constants_path.is_file(), f"shared constants Lua is missing: {constants_path}")
     checks.true(template_path.is_file(), f"captured RV template Lua is missing: {template_path}")
@@ -1253,6 +1261,16 @@ def main() -> int:
         railroader_server = (
             read_utf8(railroader_server_path)
             if railroader_server_path.is_file()
+            else ""
+        )
+        railroader_train = (
+            read_utf8(railroader_train_path)
+            if railroader_train_path.is_file()
+            else ""
+        )
+        railroader_units = (
+            read_utf8(railroader_units_path)
+            if railroader_units_path.is_file()
             else ""
         )
         railroader_client = aggregate_lua_sources(
@@ -1484,8 +1502,12 @@ def main() -> int:
             checks.true(
                 variant_contracts["baseBoundaryId"] == variant_contracts["baseId"]
                 and variant_contracts["engineBoundaryId"] == variant_contracts["engineId"]
+                and variant_contracts["carBoxSelection"] == variant_contracts["carBoxId"]
+                and variant_contracts["carBoxLayoutId"] == variant_contracts["carBoxId"]
+                and variant_contracts["carBoxBoundaryId"] == variant_contracts["carBoxId"]
                 and bool(variant_contracts["baseCabColumnHasProtectedLayer"])
                 and bool(variant_contracts["corridorHeadProtectionQueued"])
+                and bool(variant_contracts["carBoxProtectionQueued"])
                 and bool(variant_contracts["generatorProxyColumnProtected"])
                 and bool(variant_contracts["addedWaterProxyColumnProtected"]),
                 "boundary cache or protection repair does not follow persisted template IDs",
@@ -1650,11 +1672,8 @@ def main() -> int:
                 and int(engine_legal_build["removalCount"]) == 0
                 and int(engine_legal_build["remainingCount"]) == 1
                 and bool(engine_legal_build["preservedIdentityMatched"])
-                and int(variant_contracts["playerBuiltRepairRemovalCount"]) == 0
-                and bool(variant_contracts[
-                    "generatedObjectMissingTemplateIndexRejected"
-                ]),
-                "template recovery must clear unbuildable corridors, preserve both template build masks, and reject malformed captured-template tags",
+                and int(variant_contracts["playerBuiltRepairRemovalCount"]) == 0,
+                "template recovery must clear unbuildable corridors and preserve both template build masks",
             )
             checks.true(
                 bool(variant_contracts["baseScan"]["scanned"])
@@ -2022,16 +2041,13 @@ def main() -> int:
             all(token in utility_catalog for token in (
                 'M.WATER_TAG_KEY = "RailroaderRVWater"',
                 'tag.owner ~= C.MOD_ID or tag.role ~= "sink"',
-                'type(tag.rvId) ~= "string"',
-                'integer(tag.generation) == nil',
-                'integer(tag.slotIndex) == nil',
                 "function M.readSinkIdentity", "function M.isCurrentWaterSink",
                 "function M.isWaterPipedDevice", "function M.hasFluidContainer",
                 "flags.waterPiped", "data.canBeWaterPiped == true",
             ))
             and "UTILITY_ROLE_PROXY" not in utility_catalog
             and "proxyFingerprint" not in utility_catalog,
-            "Water catalog does not enforce the new exact RV mapping identity and native sink capability",
+            "Water catalog does not classify owned sinks and native water-piped capabilities",
         )
         water_options = section(
             utility_context,
@@ -2388,17 +2404,27 @@ def main() -> int:
         )
         generation_cleanup = section(
             generation_flow,
-            r"if priorGeneration ~= nil then",
-            r"local generation = 1",
+            r"local function queueGeneration",
+            r"ctx\.queueGeneration\s*=",
+        )
+        production_allocation = section(
+            generation_cleanup or "",
+            r"else\s*-- Concurrency is owned by the in-memory record",
+            r"\n    end\n    local bounds = ServerSchema\.boundsFor",
         )
         checks.true(
             generation_cleanup is not None
-            and "locomotive already has a completed RV mapping" in generation_cleanup
+            and production_allocation is not None
+            and re.search(
+                r'if priorGeneration ~= nil then\s+'
+                r'return false, "RailroaderRV: unit already has a completed RV mapping"',
+                production_allocation,
+            ) is not None
             and "local function removeOldGeneration" not in room_ownership
             and "removeOldGeneration" not in generation_flow
             and "ServerSchema.walkBounds" not in room_ownership
             and "ServerWorld.clearSquare" not in room_ownership,
-            "obsolete old-generation cleanup is reachable without a complete undo snapshot",
+            "production generation does not reject an existing unit mapping before any old-generation cleanup",
         )
         repair_context = section(
             template_protection_repair,
@@ -2422,6 +2448,7 @@ def main() -> int:
                 "local function boundsFor(layout)",
                 "managedOriginX = managed.originX, managedOriginY = managed.originY,",
                 "managedWidth = managed.width, managedHeight = managed.height,",
+                "templateId = layout.templateId,",
                 "wallCoordinates = layout.wallCoordinates,",
                 "for x = bounds.clearMinX, bounds.clearMaxX - 1 do",
                 "if not square and requireLoaded == true then",
@@ -2444,8 +2471,8 @@ def main() -> int:
             and 'state.leaseToken = type(token) == "string" and token or nil'
                 in boundary_server
             and "pcall(Boundary.beginTransition," in server
-            and 'player, transitionRvId, transitionGeneration, token, "generation")'
-                in server
+            and "player, transitionRvId, transitionGeneration, token)" in generation_flow
+            and "transitionKind" not in generation_flow
             and "Boundary.beginTransition(player, record.locoId," in server
             and "bitmapVersion" not in boundary_server
             and "record.bitmapVersion" not in railroader_server,
@@ -2495,65 +2522,184 @@ def main() -> int:
             "client correction does not reset movement history fields",
         )
 
-        # Railroader adapter executable contracts.  These source-level tests
-        # intentionally exercise the authority/race decisions without loading
-        # the game: the official Lua snapshot is not a runtime test substitute.
+        # Train integration source is split across the adapter facade, its
+        # Train/Mapping/EntryExit modules, and the client menu.
+        railroader_integration = "\n".join((
+            railroader_server, railroader_train, railroader_units,
+            mapping, entry_exit,
+            railroader_client,
+        ))
         checks.true(
-            '== "rr_loco"' in railroader_server
-            and '== "rr_loco"' in railroader_client,
-            "Railroader adapter does not identify rr_loco on both sides",
+            "return RR.API" in railroader_train
+            and 'local Units = require("RailroaderRV/RVMapping/RV_RailroaderUnits")' in railroader_train
+            and "return Units.find(unitId)" in railroader_train
+            and 'local API = require "Railroader/RR_API"' in railroader_units
+            and "API.trains({})" in railroader_units
+            and "API.unitOf(wanted)" in railroader_units
+            and "API.units(consistId, {})" in railroader_units
+            and "API.cuts({})" in railroader_units
+            and "API.locomotiveGeometry(" in railroader_units
+            and "local publicView = findPublicLocomotive(wanted, apiViews)" in railroader_units
+            and "view.id" in railroader_units
+            and "railroaderAPI().riderState" in railroader_train
+            and "railroaderAPI().assignRider" in railroader_train
+            and "railroaderAPI().releaseRider" in railroader_train
+            and "railroaderAPI().locomotiveGeometry" in railroader_train,
+            "Railroader train adapter is missing a public RR.API integration path",
         )
         checks.true(
-            'serverTrain.active' in railroader_server
-            and 'trainEntity.active' in railroader_server
-            and 'authority == "singleplayer"' in railroader_server
-            and "train.rider" in railroader_server
-            and "RR.Ride" in railroader_server,
-            "adapter does not distinguish RR_ServerTrain MP and TrainEntity/Ride SP state",
-        )
-        checks.true(
-            ".Body.hullDistance" in railroader_server
-            and "sourceWithinRange" in railroader_server
-            and "RV_MOUNT_REACH" in railroader_server
-            and "or 24" not in railroader_server,
-            "server entry range is not the Railroader hull-distance contract",
-        )
-        checks.true(
-            "ride.MOUNT_REACH" in railroader_client
-            and "nearestBoardable(reach)" in railroader_client
-            and "C.RV_ENTER_RANGE or 24" not in railroader_client,
-            "client menu does not use Railroader MOUNT_REACH",
-        )
-        checks.true(
-            "singleplayerDismount" in railroader_server
-            and "singleplayerMount" in railroader_server
-            and "ride.dismount" in railroader_server
-            and "ride.mountRecord" in railroader_server
-            and "ride.dismount, true" in railroader_client
-            and "ride.mountRecord" in railroader_client,
-            "SP Ride cleanup/remount and client transition ordering are missing",
-        )
-        checks.true(
-            'args.action ~= "exit"' in railroader_client
-            and 'args.action ~= "generation-failed"' in railroader_client,
-            "SP generation-failed transition does not remount through Ride after teleport",
-        )
-        checks.true(
-            all(token in railroader_server for token in (
-                "_seatNames", "_claims", "_cmdSeq", "markResync",
-                "setBlockMovement", "setCanShout", "setIsResting",
+            all(token not in railroader_integration for token in (
+                "RR.BoardMenu", "RR.MPClient", "RR.ServerTrain.active",
+                "RR.TrainEntity.active", "RR.Body", "RR.Ride",
+                "RR.Consist", "RR.ServerTrain.findCar",
+                "RR.ServerTrain.records", "RR.Cuts.active",
+                "RR.CabMenu", "RR.Cars", "RR.TrackGraph", "RR.Routes",
+                "Events.OnRailroaderTrainUpdate",
+                "_boardPending", "_seatNames", "_claims", "_cmdSeq",
+                "markResync", "record.animal", "train.driver",
+                "train.passengers", "animal:getAnimalSize()",
             )),
-            "MP seat writes do not cover official claim/name/command/resync and player flags",
+            "RV Railroader integration still reads private records, bodies, Ride state, or menu hooks",
         )
         checks.true(
-            "action == \"enter\"" in railroader_client
-            and "action == \"generation-failed\"" in railroader_client
-            and "action == \"exit\"" in railroader_client
-            and "prepareGenerationRelocation" in railroader_client
-            and "prepareGenerationRelocation" in client
-            and "rr.MPClient" in railroader_client
-            and "_boardPending" in railroader_client,
-            "RVTeleport transition does not cover enter/failure/exit MP snapshot races",
+            all(token not in railroader_integration for token in (
+                "setBlockMovement", "setCanShout", "setIsResting",
+                "_stopping", "_stopHold", "brakeInput", "throttle",
+                "RR.APIClient", "RR.APIServer",
+            ))
+            and re.search(
+                r'if singleplayer then\s*'
+                r'assignment, assignReason = assignTrainSeat\(\s*'
+                r'train, player, "driver", 0\s*\)\s*else\s*'
+                r'assignment, assignReason = assignTrainSeat\(\s*'
+                r'train, player, "passenger"\s*\)\s*end',
+                entry_exit,
+            ) is not None
+            and 'if singleplayer and moving then' not in entry_exit
+            and 'elseif singleplayer and assignReason == "seattaken"' not in entry_exit,
+            "seat lifecycle still writes Railroader-owned flags, adds SP passenger/moving behavior, or uses a companion API",
+        )
+        checks.true(
+            "currentGeometry.seatPositions[seat]" in railroader_train
+            and "geometry.mountReachTiles" in railroader_train
+            and re.search(
+                r'local data = requestData\([\s\S]*?'
+                r'local removedRole, removedSeat = removeSeatForEntry\(',
+                entry_exit,
+            ) is not None
+            and re.search(
+                r'local geometry = trainGeometry\(train\)[\s\S]*?'
+                r'if not geometry or not locoPosition then[\s\S]*?'
+                r'Boundary\.beginTransition[\s\S]*?assignTrainSeat\(',
+                entry_exit[entry_exit.find("local function exitPlayer"):],
+            ) is not None
+            and re.search(
+                r'local geometry = train and trainGeometry\(train\)[\s\S]*?'
+                r'local locoPosition = train and trainPose\(train\)[\s\S]*?'
+                r'if not geometry or not locoPosition then[\s\S]*?'
+                r'Boundary\.boundaryFor\(',
+                section(
+                    entry_exit,
+                    r"local function commitGeneration",
+                    r"local function validateGeneration",
+                ) or "",
+            ) is not None
+            and re.search(
+                r'local geometry = trainGeometry\(train\)[\s\S]*?'
+                r'if not geometry or not trainPose\(train\) then[\s\S]*?'
+                r'if data\.sourceRole ~= "passenger" and trainMoving\(train\)',
+                entry_exit,
+            ) is not None,
+            "API geometry/current pose is not checked before seat, boundary, or generation changes",
+        )
+        entry_api_flow = section(
+            entry_exit,
+            r"local function enterPlayer",
+            r"local function restoreAfterGenerationFailure",
+        )
+        checks.true(
+            entry_api_flow is not None
+            and re.search(
+                r'local role, seat = playerRole\(train, player\)\s*'
+                r'if role == nil then return false, seat end\s*'
+                r'local moving = trainMoving\(train\)\s*'
+                r'if moving and role ~= "passenger" then\s*'
+                r'return false, role == "driver" and "driver cannot enter while moving"\s*'
+                r'or "outside player cannot enter a moving Railroader unit"',
+                entry_api_flow,
+            ) is not None,
+            "entry does not reject moving driver/outside roles while allowing passengers",
+        )
+        exit_api_flow = section(
+            entry_exit,
+            r"local function exitPlayer",
+            r"ctx\.sendResult = sendResult",
+        )
+        checks.true(
+            "besidePosition" not in railroader_train + entry_exit
+            and "persistedBesidePosition" not in railroader_integration
+            and "copyPose(record.locoPosition)" not in railroader_integration
+            and 'role, target = "beside"' not in (exit_api_flow or "")
+            and re.search(
+                r'if not train then return false, "locomotive is not available" end',
+                exit_api_flow or "",
+            ) is not None
+            and re.search(
+                r'if not train then return false, "locomotive is not available" end[\s\S]*?'
+                r'local geometry = trainGeometry\(train\)[\s\S]*?'
+                r'if not geometry or not locoPosition then[\s\S]*?'
+                r'Boundary\.beginTransition[\s\S]*?assignTrainSeat\([\s\S]*?'
+                r'movePlayer\(player, target, "exit"',
+                exit_api_flow or "",
+            ) is not None,
+            "missing API train/geometry can still produce an exit, seat, boundary, or teleport action",
+        )
+        checks.true(
+            "Events.OnClickedAnimalForContext.Add(Menu.OnClickedAnimalForContext)"
+            in railroader_client
+            and "Events.OnPreFillWorldObjectContextMenu.Add(Menu.OnPreFillWorldObjectContextMenu)"
+            in railroader_client
+            and "clickedUnit(animal)" in railroader_client
+            and "Units.find(id)" in railroader_client
+            and "nearestUnitInReach(player)" in railroader_client
+            and "unitInReach(player, unit)" in railroader_client
+            and "nearestId" not in railroader_client
+            and "ride.nearestBoardable" not in railroader_client
+            and "ride.MOUNT_REACH" not in railroader_client
+            and 'tostring(animalType) == "rr_loco"' not in railroader_client
+            and "patchRailroaderAnimalMenu" not in railroader_client,
+            "RV menu does not resolve clicked Railroader unit IDs and use current unit geometry for target discovery",
+        )
+        checks.true(
+            exit_api_flow is not None
+            and re.search(
+                r'if singleplayer then\s*'
+                r'assignment, assignReason = assignTrainSeat\(\s*'
+                r'train,\s*player,\s*"driver",\s*0\s*\)\s*'
+                r'else\s*assignment, assignReason = assignTrainSeat\(\s*'
+                r'train,\s*player,\s*"passenger"\s*\)',
+                exit_api_flow,
+            ) is not None
+            and re.search(
+                r'elseif not singleplayer and \(assignReason == "seatsfull"\s*'
+                r'or assignReason == "noseat"\) then[\s\S]*?'
+                r'assignTrainSeat\(train, player, "driver", 0\)',
+                exit_api_flow,
+            ) is not None
+            and "trainMoving" not in exit_api_flow
+            and "besidePosition" not in exit_api_flow
+            and 'role, target = "beside"' not in exit_api_flow
+            and "copyPosition(assignment.position)" in exit_api_flow
+            and re.search(
+                r'local assignment, assignReason[\s\S]*?'
+                r'local moved = movePlayer\(player, target, "exit"',
+                exit_api_flow,
+            ) is not None
+            and 'forgetTrainSeat(train, player)' in exit_api_flow
+            and exit_api_flow.find('"passenger"')
+                < exit_api_flow.rfind('"driver", 0')
+                < exit_api_flow.find('movePlayer(player, target, "exit"'),
+            "RV exit does not follow SP driver / MP open-passenger then driver API seat order and teleport rollback",
         )
 
         # The current-square refresh uses the public IsoMovingObject overload;
@@ -2583,10 +2729,8 @@ def main() -> int:
             "current-square refresh retry is not bounded and cleaned up",
         )
 
-        # The first generation Relocate is a separate race from RVTeleport:
-        # the server may have removed the seat while the client is still
-        # locally mounted.  Verify the Railroader-only marker, call ordering,
-        # and token-scoped duplicate-dismount guard precisely.
+        # Generation staging/final relocation stays RV-owned. Public seat
+        # actions handle Railroader cab binding; no client Ride bridge is needed.
         queue_transition = section(
             generation_flow_source,
             r"local function queueGeneration",
@@ -2597,189 +2741,54 @@ def main() -> int:
             r"function Client\.onServerCommand",
             r"function Client\.onTick",
         )
-        ride_transition = section(
-            railroader_client,
-            r"local function prepareRideTransition",
-            r"local function finishRideTransition",
-        )
-        generation_relocation = section(
-            railroader_client,
-            r"function Menu\.prepareGenerationRelocation",
-            r"function Menu\.OnFillWorldObjectContextMenu",
-        )
-        generation_staging = section(
-            railroader_client,
-            r"function Menu\.prepareGenerationStaging",
-            r"function Menu\.OnFillWorldObjectContextMenu",
-        )
         final_handler = section(
             client,
             r"if command == COMMAND_FINAL_RELOCATE then",
             r"if command ~= COMMAND_RELOCATE then return end",
         )
-        final_relocation = section(
-            server,
-            r"local function relocatePlayerIntoHouse",
-            r"local function generateForPlayer",
-        )
-        # The staging Relocate payload now belongs to the relocation service
-        # (RV_Server_PlayerValidation.sendStagingRelocation).  queueGeneration
-        # only stages the identity onto the adapter's asynchronous payload before
-        # handing the record to that sender.
         stage_marker = section(
-            server,
+            player_validation_source,
             r"local function sendStagingRelocation\(record, phase\)",
             r"if not sendRelocate\(record\.player, payload\)",
+        )
+        final_relocate_payload = section(
+            player_validation_source,
+            r"local function sendFinalRelocation\(record, deadline\)",
+            r"ctx\.keepGenerationTransitionAlive = keepGenerationTransitionAlive",
         )
         checks.true(
             queue_transition is not None
             and stage_marker is not None
-            and re.search(
-                r'if phase ~= "return" and type\(record\.railroader\) == "table" then'
-                r'[\s\S]*?payload\.railroaderTransition = true',
-                stage_marker,
-            ) is not None
-            and "payload.action = \"enter\"" in stage_marker
-            and "payload.locoId = record.railroader.locoId" in stage_marker
-            and "payload.role = record.railroader.sourceRole" in stage_marker
-            and "payload.seat = record.railroader.sourceSeat" in stage_marker
             and "railroaderData.rvId = tostring(transitionRvId)" in queue_transition
             and "railroaderData.generation = transitionGeneration" in queue_transition
-            and "local transitionRvId = rvId" in queue_transition
-            and "local transitionGeneration = generation" in queue_transition
             and 'local sentOk, sentReason = sendStagingRelocation(record, "temporary")'
-            in queue_transition,
-            "Railroader staging marker is not server-only or not sent via Relocate payload",
-        )
-        if stage_marker is not None:
-            marker_guard = stage_marker.find(
-                'if phase ~= "return" and type(record.railroader) == "table" then'
-            )
-            marker_write = stage_marker.find(
-                "payload.railroaderTransition = true"
-            )
-            checks.true(
-                marker_guard >= 0 and marker_write > marker_guard,
-                "Relocate marker is not guarded by Railroader generation data",
-            )
-        checks.true(
-            relocate_handler is not None
-            and "args.railroaderTransition == true" in relocate_handler
-            and "local rvId = args.rvId" in relocate_handler
-            and "rvId = tostring(rvId)" in relocate_handler
-            and "prepareGenerationStaging" in relocate_handler
-            and "if not preparedOk or prepared ~= true then return end" in relocate_handler,
-            "client Relocate handler does not recognize the strict Railroader staging marker",
-        )
-        if relocate_handler is not None:
-            marker_pos = relocate_handler.find("args.railroaderTransition == true")
-            staging_pos = relocate_handler.find(
-                "prepareGenerationStaging", marker_pos
-            )
-            teleport_pos = relocate_handler.find(
-                "playerObj:teleportTo", staging_pos
-            )
-            checks.true(
-                marker_pos >= 0 and staging_pos > marker_pos and teleport_pos > staging_pos,
-                "staging Ride cleanup is not ordered before the server Relocate teleport",
-            )
-        checks.true(
-            generation_staging is not None
-            and "validGenerationFinalHint(args)" in generation_staging
-            and "prepareRideTransition(args)" in generation_staging
-            and "_rvGenerationTransition" in railroader_client,
-            "Railroader staging helper does not use the existing Ride transition and guard",
-        )
-        checks.true(
-            generation_relocation is not None
-            and "generationTransitionMatches" in generation_relocation
-            and "pending.finalSeen = true" in generation_relocation
-            and "prepareRideTransition(args)" in generation_relocation,
-            "FinalRelocate does not distinguish the first staging transition from duplicate callbacks",
-        )
-        checks.true(
-            final_relocation is not None,
-            "final in-house relocation helper is missing",
-        )
-        # The FinalRelocate payload was moved out of the in-house helper into the
-        # relocation service's own sender (cf190a1).
-        final_relocate_payload = section(
-            server,
-            r"local function sendFinalRelocation\(record, deadline\)",
-            r"if not callGlobalSucceeded\(\"sendServerCommand\", record\.player,",
-        )
-        checks.true(
-            final_relocate_payload is not None
-            and re.search(
-                r'local payload = \{[\s\S]*?'
-                r'generation = record\.generation,',
-                final_relocate_payload,
-            ) is not None
-            and re.search(
-                r'if type\(record\.railroader\) == "table" then[\s\S]*?'
-                r'payload\.railroaderTransition = true',
-                final_relocate_payload,
-            ) is not None
-            and "token = record.token" in final_relocate_payload
-            and "rvId = tostring(record.rvId)" in final_relocate_payload
-            and "payload.action = \"enter\"" in final_relocate_payload
-            and "payload.locoId = record.railroader.locoId" in final_relocate_payload,
-            "Railroader FinalRelocate payload does not carry the strict server marker",
+            in queue_transition
+            and "railroaderTransition" not in stage_marker
+            and "prepareGenerationStaging" not in relocate_handler,
+            "RV generation staging still carries the removed client Ride marker",
         )
         checks.true(
             final_handler is not None
-            and "validRailroaderFinalHint(args)" in final_handler
-            and "if marked and railroaderMenu" in final_handler
-            and "hasGenerationTransition" not in final_handler
-            and "if (marked or pending)" not in final_handler
-            and "prepareGenerationRelocation" in final_handler,
-            "FinalRelocate handler does not gate Ride preparation on the current server marker",
-        )
-        if final_handler is not None:
-            prepare_pos = final_handler.find("prepareGenerationRelocation")
-            guard_pos = final_handler.find("if marked and railroaderMenu")
-            checks.true(
-                guard_pos >= 0 and prepare_pos > guard_pos,
-                "ordinary FinalRelocate can call the Railroader transition without its gate",
-            )
-        checks.true(
-            generation_relocation is not None
-            and "if not validGenerationFinalHint(args) then return false end" in generation_relocation
-            and "return false" in generation_relocation,
-            "Railroader FinalRelocate adapter does not no-op ordinary technical payloads",
-        )
-
-        # On a quick authoritative exit, the target record must receive the
-        # official gate even if Ride.current is already nil; a beside exit may
-        # not arm that gate.
-        exit_transition = None
-        if ride_transition is not None:
-            exit_start = ride_transition.find('elseif action == "exit" then')
-            return_pos = ride_transition.find("    return record", exit_start)
-            if exit_start >= 0 and return_pos > exit_start:
-                exit_transition = ride_transition[exit_start:return_pos]
-        checks.true(
-            exit_transition is not None
-            and "if wantsSeat and record then" in exit_transition
-            and "record._boardPending = true" in exit_transition
-            and "if ride.current then" in exit_transition
-            and exit_transition.find("record._boardPending = true")
-            < exit_transition.find("if ride.current then")
-            and re.search(r"if old then\s*old\._boardPending", exit_transition) is None,
-            "exit transition does not arm the target record independently of Ride.current (or arms beside)",
+            and "applyFinalRelocation(args)" in final_handler
+            and "railroaderTransition" not in final_handler
+            and "prepareGenerationRelocation" not in final_handler
+            and final_relocate_payload is not None
+            and "token = record.token" in final_relocate_payload
+            and "rvId = tostring(record.rvId)" in final_relocate_payload
+            and "payload.locoId = record.railroader.locoId" in final_relocate_payload
+            and "payload.railroaderTransition" not in final_relocate_payload
+            and "rememberUtilityMapping(args, \"enter\")" in railroader_client
+            and "command == C.COMMAND_FINAL_RELOCATE" in railroader_client,
+            "FinalRelocate does not keep RV mapping sync independent from Ride hooks",
         )
         checks.true(
             "recordAtPlayerCoordinate" in railroader_server
             and "inRegion(position, recordRegion(record))" in railroader_server
             and "RV_REGION_SIZE" in railroader_server
             and "validMappingRecord" in railroader_server
-            and "copyPose(record.locoPosition)" in railroader_server
-            and "inactive-mapped" in railroader_server
-            and "persistedBesidePosition" in railroader_server
             and 'return nil, nil, nil, "outside-rv"' in railroader_server
             and "trainPose(train)" in railroader_server
-            and "usableCoordinate" in railroader_server
-            and 'isValidSquare' in railroader_server,
+            ,
             "exit reverse lookup does not use the current 100x100 mapping contract",
         )
         existing_entry = section(
@@ -3454,11 +3463,13 @@ def main() -> int:
                 exit_player,
             ) is not None
             and re.search(
-                r'if not train then[\s\S]*?persistedBesidePosition\(record\)'
-                r'[\s\S]*?lookupState ~= "inactive-mapped"[\s\S]*?'
-                r'role = "beside"',
+                r'if not train then return false, "locomotive is not available" end',
                 exit_player,
             ) is not None
+            and exit_player.find("if not train then")
+                < exit_player.find("Boundary.beginTransition")
+                < exit_player.find("movePlayer")
+            and "putPassenger" not in exit_player
             and all(token in exit_player for token in (
                 "Boundary.beginTransition", "movePlayer", "markPlayerOutside",
                 "Boundary.clearPlayer", "markMappingChanged",
@@ -3468,22 +3479,9 @@ def main() -> int:
                 < exit_player.find("markPlayerOutside")
                 < exit_player.find("Boundary.clearPlayer")
                 < exit_player.find("markMappingChanged")
-            and "putPassenger" not in exit_player[exit_player.find("if not train then"):]
-            .split("local onlineId", 1)[0],
-            "exit does not retain its beside fallback and boundary lease through the outside mapping update",
+            ,
+            "exit without an API train can act, or its mapping/boundary ordering changed",
         )
-        checks.true(
-            re.search(
-                r'if moving then[\s\S]*?freePassengerSeat\(train\)[\s\S]*?all passenger positions',
-                railroader_server,
-            ) is not None
-            and re.search(
-                r'freePassengerSeat\(train\)[\s\S]*?elseif train\.driver == nil[\s\S]*?besidePosition',
-                railroader_server,
-            ) is not None,
-            "exit seat order does not enforce moving-passenger and stopped passenger/driver/beside rules",
-        )
-
         if constants_path.is_file():
             checks.true(
                 all(token in constants for token in (
@@ -3716,9 +3714,10 @@ def main() -> int:
                 == {"IsoObject", "IsoThumpable"}
                 and {row[5] for row in captured_top_roof_rows}
                 == {"location_shop_fossoil_01_39"}
-                and "roofCells = roofCells" in room_template
+                and "roofCells = source.roofCells" in room_template
                 and "return value.roofCells" in room_template
-                and "RoomTemplate.roofCells(Template)" in layout,
+                and "local template = RoomTemplate.get(bounds.templateId)" in layout
+                and "local roofCells = RoomTemplate.roofCells(template)" in layout,
                 "authored roof cell coordinates do not match the actual captured roof footprint",
             )
             checks.true(
@@ -3830,7 +3829,7 @@ def main() -> int:
                 "local function objectMatchesStaticIdentity(object, tag, expected," in protected_demolition
                 and "templateIndex)" in protected_demolition
                 and "or C.finiteInteger(tag.templateIndex) ~= templateIndex then" in protected_demolition
-                and "local indexedObject, indexedAt =" in protected_demolition
+                and "local indexedObject = TemplateGeometry.lookupObjectByIndex(index, template)" in protected_demolition
                 and "TemplateGeometry.lookupObjectByIndex(index, template)" in protected_demolition
                 and "local offset = TemplateGeometry.worldToTemplate(world, anchor)" in protected_demolition
                 and "local matches = TemplateGeometry.lookupObjectsAtWorld(world, anchor," in protected_demolition
@@ -3883,8 +3882,9 @@ def main() -> int:
                 "shared layout retains a dead player-floor rectangle or loses its clear bounds",
             )
             checks.true(
-                "local walkGeometry = walkAabbs[1]" in layout
-                and "local roofZOffset = roofCells[1].z" in layout
+                "local walkGeometry = template.misc.walkAabbs[1]" in layout
+                and "local templateWalkGeometry = templateWalkAabbs[1]" in layout
+                and "local templateRoofZOffset = templateRoofCells[1].z" in layout
                 and "local interior = rectangle(" in layout
                 and "cx + templateWalkGeometry.minX," in layout
                 and "cx + templateWalkGeometry.maxX - 1," in layout
@@ -5013,7 +5013,8 @@ def main() -> int:
                 and "seen[key]" not in structure_scan
                 and "Layout.eachStructureCoordinate(bounds, function(x, y, z)" in structure_scan
                 and "ServerWorld.getSquare(cell, x, y, z)" in structure_scan
-                and "ServerUtil.requiredInteger(bounds[field]," in structure_footprint,
+                and "ServerUtil.requiredInteger(bounds[field]," in structure_footprint
+                and 'target[prefix .. "templateId"] = bounds.templateId' in structure_footprint,
                 "server stale-room scan does not share the coordinate traversal or retain strict server bounds and square access",
             )
         structure_coordinates = section(
@@ -5023,6 +5024,9 @@ def main() -> int:
         )
         checks.true(
             structure_coordinates is not None
+            and "local template = RoomTemplate.get(bounds.templateId)" in structure_coordinates
+            and "local roofCells = RoomTemplate.roofCells(template)" in structure_coordinates
+            and "local walkGeometry = template.misc.walkAabbs[1]" in structure_coordinates
             and "for x = bounds.wallMinX, bounds.wallMaxX do" in structure_coordinates
             and "for y = bounds.wallMinY, bounds.wallMaxY do" in structure_coordinates
             and "callback(x, y, bounds.z)" in structure_coordinates
@@ -5591,35 +5595,43 @@ def main() -> int:
             "generation does not construct captured classes from their current template entries",
         )
         checks.true(
-            "function Menu.hasUtilityDashboardCandidate(player, insideOnly, locomotiveIdHint)" in railroader_client
+            "function Menu.hasUtilityDashboardCandidate(player, insideOnly, unitIdHint)" in railroader_client
             and "local mapping = Menu.getUtilityMapping()" in railroader_client
-            and "local showDashboard = Menu.hasUtilityDashboardCandidate(player, false, locoId)" in railroader_client
+            and re.search(
+                r"Menu\.hasUtilityDashboardCandidate\(player,\s*false,\s*unit\.id\)",
+                railroader_client,
+            ) is not None
             and "if mapContainsPlayer(player) then return true end" in railroader_client
             and "if insideOnly then return false end" in railroader_client
-            and "local id = locomotiveIdHint" in railroader_client
-            and "local locomotive = nearestLocomotive()" in railroader_client
+            and "local id = unitIdHint" in railroader_client
+            and "local nearest = nearestUnitInReach(player)" in railroader_client
+            and "id = nearest and nearest.id or nil" in railroader_client
             and "tostring(id) == mapping.locoId" in railroader_client
-            and "context:addOption(enterLabel, player, requestEnter, locoId)" in railroader_client
+            and re.search(
+                r"context:addOption\(enterLabel,\s*player,\s*requestEnter,\s*unit\.id\)",
+                railroader_client,
+            ) is not None
             and "option.iconTexture = getTexture(ICON_ENTER_RV)" in railroader_client
             and "if showDashboard and not hasDashboard then" in railroader_client
             and "option.iconTexture = getTexture(ICON_UTILITY_DASHBOARD)" in railroader_client,
             "client utility menu does not preserve its two RV entry-point intents",
         )
         checks.true(
-            "local function patchRailroaderAnimalMenu()" in railroader_client
-            and "local boardMenu = RR.BoardMenu" in railroader_client
-            and "local originalAddForAnimal = boardMenu.addForAnimal" in railroader_client
-            and "boardMenu.addForAnimal = function(playerNum, context, animal, test, ...)" in railroader_client
-            and "local result = originalAddForAnimal(playerNum, context, animal, test, ...)" in railroader_client
-            and "addNearbyLocomotiveOptions(playerNum, context, test, animal)" in railroader_client
-            and "return result" in railroader_client
-            and "Events.OnGameStart.Add(patchRailroaderAnimalMenu)" in railroader_client
-            and railroader_client.count("addNearbyLocomotiveOptions(playerNum, context, test)") == 2
-            and "addSlice" not in railroader_client
-            and "showSeatMenu" not in railroader_client
+            "function Menu.OnClickedAnimalForContext(playerNum, context, animals, test)" in railroader_client
+            and "Events.OnClickedAnimalForContext.Add(Menu.OnClickedAnimalForContext)" in railroader_client
+            and "clickedUnit(animal)" in railroader_client
+            and "Units.find(id)" in railroader_client
+            and "API.trains({})" in railroader_units
+            and "API.locomotiveGeometry(" in railroader_units
+            and "nearestUnitInReach(player)" in railroader_client
+            and "unitInReach(player, unit)" in railroader_client
+            and "nearestId" not in railroader_client
+            and "patchRailroaderAnimalMenu" not in railroader_client
+            and "RR.BoardMenu" not in railroader_client
             and "Events.OnFillWorldObjectContextMenu.Add(Menu.OnFillWorldObjectContextMenu)" in railroader_client
+            and "Events.OnPreFillWorldObjectContextMenu.Add(Menu.OnPreFillWorldObjectContextMenu)" in railroader_client
             and "Events.OnFillWorldObjectContextMenu.Remove" not in railroader_client,
-            "RV right-click options do not wrap Railroader's animal menu while preserving its native world hook",
+            "RV menu does not use the PZ animal event or lost its empty-floor exit hook",
         )
         checks.true(
             "local function addDashboardOption(player, context)" in utility_context
@@ -6062,9 +6074,10 @@ def main() -> int:
             "testserver docs do not record the UTF-8 startup constraint",
         )
         checks.true(
-            "Z:\\RailroaderRVCache\\client" in testserver_agent
-            and "Z:\\RailroaderRVCache\\server" in testserver_agent,
-            "testserver docs do not identify the persistent server/client caches",
+            r"Workshop mode defaults to `Z:\RailroaderRVCache\server` and `client`" in testserver_agent
+            and "preview mode defaults to `testserver/runtime/preview/server` and `client`" in testserver_agent
+            and "The caches keep each mode's server INI" in testserver_agent,
+            "testserver docs do not identify the isolated Workshop/preview server/client caches",
         )
 
     checks.true(mod_info_path.is_file(), f"mod.info is missing: {mod_info_path}")
@@ -6185,11 +6198,38 @@ def main() -> int:
             and "_acquire_instance_lock(runtime_root, settings.run_bat)" in runner,
             "one-click test runner does not isolate lock/instance state under testserver/runtime",
         )
+        make_settings = runner.split("def make_settings(", 1)[1].split(
+            "\ndef run(", 1
+        )[0]
+        initialize_caches = runner.split("def initialize_ramdisk_caches(", 1)[1].split(
+            "\ndef prepare(", 1
+        )[0]
         checks.true(
             'RAMDISK_CACHE_ROOT = Path(r"Z:\\RailroaderRVCache")' in runner
-            and 'server_cache = server_cache or (RAMDISK_CACHE_ROOT / "server")' in runner
-            and 'client_cache = client_cache or (RAMDISK_CACHE_ROOT / "client")' in runner,
-            "one-click test runner does not use the documented persistent Z: cache defaults",
+            and 'run_bat.parent / "runtime" / "preview"' in make_settings
+            and 'server_cache = server_cache or (mode_cache_root / "server")' in make_settings
+            and 'client_cache = client_cache or (mode_cache_root / "client")' in make_settings
+            and 'server_cache = server_cache / "preview"' in make_settings
+            and 'client_cache = client_cache / "preview"' in make_settings,
+            "one-click test runner does not isolate Workshop and runtime preview cache paths",
+        )
+        checks.true(
+            (
+                'settings.railroader_build == "preview" or not settings.client_cache_is_default'
+                in initialize_caches
+            )
+            and 'runtime_root / "preview" / INSTANCE_STATE_FILENAME' in runner
+            and "RAMDISK_CACHE_ROOT"
+            not in runner.split("def _server_profile_template(", 1)[1].split(
+                    "\ndef build_parser(", 1
+                )[0],
+            "preview cache initialization, profile source, or instance state is not isolated from Workshop RAM disk state",
+        )
+        checks.true(
+            'choices=("workshop", "preview")' in runner
+            and 'railroader_preview_source = (' in make_settings
+            and '"Railroader-prerelease" / RAILROADER_PREVIEW_DIRECTORY' in make_settings,
+            "one-click test runner lacks a fixed preview source selection",
         )
         checks.true(
             "_copy_mod_tree" in runner,
@@ -6225,14 +6265,51 @@ def main() -> int:
             "BuildCraft is not overlaid to both server/client mods/BuildingCraft caches",
         )
         checks.true(
-            '"Mods": f"{BUILDCRAFT_MOD_ID};{MOD_ID}"' in runner
-            and '"WorkshopItems": ""' in runner,
-            "server options do not enforce BuildCraft-first Mods and offline WorkshopItems",
+            'RAILROADER_WORKSHOP_ID = "3774360904"' in runner
+            and 'SERVER_MOD_LIST = f"{BUILDCRAFT_MOD_ID};{RAILROADER_MOD_ID};{MOD_ID};B42Trans_CN"' in runner
+            and 'WORKSHOP_SERVER_ITEMS = f"3556544454;{RAILROADER_WORKSHOP_ID}"' in runner
+            and 'PREVIEW_SERVER_ITEMS = "3556544454"' in runner
+            and "configure_server_mod_profile(settings)" in runner,
+            "server mod profile does not select the matching Workshop/preview source",
+        )
+        checks.true(
+            runner.count("settings.railroader_preview_source,") == 2
+            and runner.count("RAILROADER_PREVIEW_DIRECTORY,") >= 2
+            and "-modfolders mods,workshop,steam" in runner
+            and "_railroader_workshop_paths" not in runner
+            and "park_railroader_workshop_items" not in runner
+            and "suspend_staged_railroader_preview" not in runner,
+            "Railroader preview is not staged to both caches with normal mod precedence",
+        )
+        checks.true(
+            "validate_railroader_preview_source" not in runner
+            and "def _server_profile_template(" in runner
+            and "shutil.copy2(template, profile)" in runner,
+            "preview staging or first-use server profile does not follow the normal copy/config flow",
+        )
+        checks.true(
+            "def stage_mod(" in runner
+            and "_copy_mod_tree(source, destination, dry_run)" in runner,
+            "one-click test runner no longer uses the normal mod staging path",
+        )
+        checks.true(
+            'Railroader-prerelease/` 全目录只读' in read_utf8(root / "AGENTS.md")
+            and 'READ_ME_FIRST.txt' in read_utf8(root / "AGENTS.md"),
+            "root agent instructions do not mark the prerelease tree read-only",
         )
         checks.true(
             re.search(r"(?im)\b(?:rmtree|Remove-Item|shutil\.rmtree)\b", runner)
             is None,
             "one-click test runner contains an automatic runtime data delete/reset operation",
+        )
+        checks.true(
+            "CREATE_NO_WINDOW" not in runner
+            and re.search(
+                r"process\s*=\s*subprocess\.Popen\([\s\S]{0,200}?startupinfo=visible_startup_info\(\)",
+                runner,
+            )
+            is not None,
+            "one-click test runner still has a hidden subprocess path",
         )
 
     run_lua_syntax_checks(root, checks)

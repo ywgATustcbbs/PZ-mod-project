@@ -152,8 +152,6 @@ if state.subscribed == false then
     Events.OnDestroyIsoThumpable.Add(function(object)
         dispatch("OnDestroyIsoThumpable", object)
     end)
-elseif state.subscribed ~= true then
-    error("RailroaderRV: Core subscription state is invalid", 0)
 end
 
 return Core

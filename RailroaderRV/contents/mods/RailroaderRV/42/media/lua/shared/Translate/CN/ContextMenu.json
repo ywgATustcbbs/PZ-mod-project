@@ -3,11 +3,18 @@
     "ContextMenu_RailroaderRV_BuildLayout": "制作房车",
     "ContextMenu_RailroaderRV_FinishLayout": "结束建造",
     "ContextMenu_RailroaderRV_Enter": "进入房车",
+    "ContextMenu_RailroaderRV_EnterCargo": "进入车厢房车",
     "ContextMenu_RailroaderRV_Exit": "退出房车",
     "ContextMenu_RailroaderRV_ClaimSafehouse": "认领房车安全屋",
     "ContextMenu_RailroaderRV_ClaimSafehouse_WaterUnavailable": "认领安全屋需要房车供水系统正常运转",
     "ContextMenu_RailroaderRV_UtilityDashboard": "房车水电系统面板",
     "ContextMenu_RailroaderRV_ConnectWaterSink": "连接水槽供水",
     "ContextMenu_RailroaderRV_DisconnectWaterSink": "断开水槽供水",
-    "ContextMenu_RailroaderRV_AddFuel": "添加燃油到房车"
+    "ContextMenu_RailroaderRV_AddFuel": "添加燃油到房车",
+    "ContextMenu_RailroaderRV_TemplateDevelopment": "车厢模板开发",
+    "ContextMenu_RailroaderRV_TemplateDevelopment_NewTemplate": "新建模板",
+    "ContextMenu_RailroaderRV_TemplateDevelopment_EditTemplate": "编辑已有模板",
+    "ContextMenu_RailroaderRV_TemplateDevelopment_SaveTemplate": "保存模板",
+    "ContextMenu_RailroaderRV_TemplateDevelopment_Loco": "机车",
+    "ContextMenu_RailroaderRV_TemplateDevelopment_CarBox": "货车厢 / BX40（共用）"
 }

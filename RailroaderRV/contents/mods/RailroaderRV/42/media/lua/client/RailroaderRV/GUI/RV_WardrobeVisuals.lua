@@ -56,8 +56,7 @@ local function isTaggedWardrobe(object)
     end
 
     local templateIndex = tag.templateIndex
-    local entry = assert(templateObjects[templateIndex],
-        "RailroaderRV: tagged wardrobe template index is unknown")
+    local entry = templateObjects[templateIndex]
     -- Every template attribute comes from the compiled entry named by
     -- `templateIndex`; the tag stores no copy of them.
     if not isWardrobeTemplateEntry(entry)

@@ -15,6 +15,25 @@ local Boundary = ctx.Boundary
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
 local entriesByCellByTemplate = {}
+local CAR_BOX_EAST_GARAGE_X = 3
+local CAR_BOX_EAST_GARAGE_MIN_Y = -2
+local CAR_BOX_EAST_GARAGE_MAX_Y = 1
+local NORTH_WALL_PROPERTIES = {
+    "WallN", "WallNTrans", "DoorWallN", "WindowN", "windowN",
+    "doorN", "WallNW",
+}
+local WEST_WALL_PROPERTIES = {
+    "WallW", "WallWTrans", "DoorWallW", "WindowW", "windowW",
+    "doorW",
+}
+
+local function isCarBoxEastGarageCell(template, x, y, z)
+    return template.metadata.id == RoomTemplate.CAR_BOX_TEMPLATE_ID
+        and x == CAR_BOX_EAST_GARAGE_X
+        and y >= CAR_BOX_EAST_GARAGE_MIN_Y
+        and y <= CAR_BOX_EAST_GARAGE_MAX_Y
+        and z == 0
+end
 
 local function integer(value)
     local number = ServerUtil.toNumber(value)
@@ -33,7 +52,8 @@ local function templateCellKey(x, y)
     return tostring(x) .. ":" .. tostring(y)
 end
 for _, templateId in ipairs({ RoomTemplate.TEMPLATE_ID,
-    RoomTemplate.ENGINE_AREA_TEMPLATE_ID }) do
+    RoomTemplate.ENGINE_AREA_TEMPLATE_ID,
+    RoomTemplate.CAR_BOX_TEMPLATE_ID }) do
     local template = RoomTemplate.get(templateId)
     local templateObjects = RoomTemplate.orderedObjects(template)
     local entriesByCell = {}
@@ -163,6 +183,27 @@ local function templateProxyAtColumn(anchor, x, y, template)
     return false
 end
 
+-- Car-box recovery also owns ordinary objects on sampled managed cells that
+-- have no active walk/build footprint, captured template content, or proxy.
+-- Keep this predicate shared by queue selection and repair's empty-entry gate.
+local function isCarBoxInactiveManagedCell(boundary, template, anchor, x, y)
+    if template.metadata.id ~= RoomTemplate.CAR_BOX_TEMPLATE_ID
+        or not TemplateGeometry.inManagedRegion({ x = x, y = y, z = anchor.z },
+            boundary.managed, template) then
+        return false
+    end
+    local templateX, templateY = templateCoordinates(anchor, x, y, anchor.z)
+    if templateX == nil then return false end
+    local world = { x = x, y = y, z = anchor.z }
+    if TemplateGeometry.isBuildable(world, anchor, template)
+        or TemplateGeometry.isWalkable(world, anchor, template)
+        or templateProxyAtColumn(anchor, x, y, template) then
+        return false
+    end
+    return entriesByCellByTemplate[template.metadata.id][
+        templateCellKey(templateX, templateY)] == nil
+end
+
 -- Candidate filtering includes captured protection flags and both template-declared proxies.
 local function isProtectedCell(boundary, x, y)
     local template = RoomTemplate.get(boundary.templateId)
@@ -171,6 +212,9 @@ local function isProtectedCell(boundary, x, y)
     for z = boundary.managed.minZ, boundary.managed.maxZ - 1 do
         local cellX, cellY, cellZ = templateCoordinates(anchor, x, y, z)
         if cellX ~= nil then
+            if isCarBoxEastGarageCell(template, cellX, cellY, cellZ) then
+                return true
+            end
             if templateProxyAtOffset(cellX, cellY, cellZ, template) then
                 return true
             end
@@ -185,7 +229,7 @@ local function isProtectedCell(boundary, x, y)
             end
         end
     end
-    return false
+    return isCarBoxInactiveManagedCell(boundary, template, anchor, x, y)
 end
 
 -- The trusted identity written by this mod when a captured object is created.
@@ -196,9 +240,6 @@ local function objectTag(object)
     if data == nil then return nil end
     local tag = data.RailroaderRV
     if tag == nil then return nil end
-    if type(tag) ~= "table" then
-        error("RailroaderRV: generated object tag is not a table")
-    end
     if tag.owner ~= Constants.MOD_ID then return nil end
     return tag
 end
@@ -211,10 +252,6 @@ local function objectTemplateIndex(object)
         return nil
     end
     local templateIndex = tag.templateIndex
-    if type(templateIndex) ~= "number" or templateIndex < 1
-        or math.floor(templateIndex) ~= templateIndex then
-        error("RailroaderRV: generated template object has no template index")
-    end
     return templateIndex
 end
 
@@ -337,6 +374,64 @@ local function isSpareObject(object, entries, sideHostDoorOrWindow)
     return true
 end
 
+local function objectHasSpriteProperty(object, property)
+    local propertiesOk, properties = ServerUtil.invoke(object, "getProperties")
+    if not propertiesOk or properties == nil then return false end
+    local hasOk, has = ServerUtil.invoke(properties, "has", property)
+    return hasOk and has == true
+end
+
+local function hasAnySpriteProperty(object, properties)
+    for index = 1, #properties do
+        if objectHasSpriteProperty(object, properties[index]) then return true end
+    end
+    return false
+end
+
+local function isWestFacingWallSurface(object)
+    if objectHasSpriteProperty(object, "solidfloor") then return false end
+
+    if hasAnySpriteProperty(object, NORTH_WALL_PROPERTIES) then return false end
+
+    if not hasAnySpriteProperty(object, WEST_WALL_PROPERTIES) then return false end
+
+    if isRuntimeDoorOrWindow(object) then
+        local northOk, north = ServerUtil.invoke(object, "getNorth")
+        if not northOk or north ~= false then return false end
+        local windowOk, isWindow = ServerUtil.invoke(object, "isWindow")
+        if (ServerUtil.classInstance(object, "IsoWindow")
+            or windowOk and isWindow == true)
+            and not objectHasSpriteProperty(object, "WindowW") then
+            return false
+        end
+    end
+    return true
+end
+
+local function isCapturedCarBoxGarageEntry(object, entries)
+    local templateIndex = objectTemplateIndex(object)
+    if not templateIndex then return false end
+    for index = 1, #entries do
+        local entry = entries[index]
+        if entry.templateIndex == templateIndex
+            and entry.class == "IsoThumpable"
+            and entry.name == "Thumpable"
+            and entry.north == false
+            and (entry.sprite == "walls_garage_02_0"
+                or entry.sprite == "walls_garage_02_1"
+                or entry.sprite == "walls_garage_02_2")
+            and objectMatchesCaptured(object, entry) then
+            return true
+        end
+    end
+    return false
+end
+
+local function isCarBoxEastGarageWallObject(object, entries)
+    return isCapturedCarBoxGarageEntry(object, entries)
+        or isWestFacingWallSurface(object)
+end
+
 local function isBloodOrSplat(object)
     local sprite = ServerWorld.getSpriteName(object)
     if type(sprite) == "string"
@@ -443,7 +538,7 @@ local function restoreEntry(cell, square, objects, entry, boundary)
         end
     end
     createCapturedTemplateObject(cell, square, entry, boundary.generation,
-        tagContext, entry.edge)
+        tagContext, entry.edge, "production")
 end
 
 local function repairTemplateProtectionCell(player, expectedBoundary, x, y)
@@ -454,12 +549,19 @@ local function repairTemplateProtectionCell(player, expectedBoundary, x, y)
     local template = RoomTemplate.get(boundary.templateId)
     local anchor = TemplateGeometry.anchorFromManaged(boundary.managed, template)
     local proxyColumn = templateProxyAtColumn(anchor, x, y, template)
+    local templateX, templateY, templateZ = templateCoordinates(anchor, x, y,
+        anchor.z)
+    local eastGarageColumn = templateX ~= nil
+        and isCarBoxEastGarageCell(template, templateX, templateY, templateZ)
+    local carBoxInactiveCell = isCarBoxInactiveManagedCell(boundary, template,
+        anchor, x, y)
     local buildable = TemplateGeometry.isBuildable({ x = x, y = y,
         z = anchor.z }, anchor, template)
-    if buildable and not proxyColumn then return false end
+    if buildable and not proxyColumn and not eastGarageColumn then return false end
     local entries = templateEntriesAt(boundary, anchor,
         shellEdgeMap(boundary, template), x, y, template)
-    if #entries == 0 and not proxyColumn then return false end
+    if #entries == 0 and not proxyColumn and not eastGarageColumn
+        and not carBoxInactiveCell then return false end
 
     local cell = ServerWorld.getCellForPlayer(player)
 
@@ -470,7 +572,11 @@ local function repairTemplateProtectionCell(player, expectedBoundary, x, y)
             local objects = ServerWorld.squareSnapshot(square)
             local layerBuildable = TemplateGeometry.isBuildable({ x = x,
                 y = y, z = z }, anchor, template)
-            local preserveOrdinaryObjects = buildable or layerBuildable
+            local layerX, layerY, layerZ = templateCoordinates(anchor, x, y, z)
+            local eastGarageLayer = layerX ~= nil
+                and isCarBoxEastGarageCell(template, layerX, layerY, layerZ)
+            local preserveOrdinaryObjects = not eastGarageLayer
+                and (buildable or layerBuildable)
             local removedOnLayer = false
             for index = 1, #objects do
                 local object = objects[index]
@@ -478,10 +584,14 @@ local function repairTemplateProtectionCell(player, expectedBoundary, x, y)
                     -- Template utility proxies are retained on their scan path.
                 elseif not preserveOrdinaryObjects
                     and not protectedWorldObject(object) then
-                    local sideHostDoorOrWindow = isCabSideDoorOrWindow(object,
-                        x, y, z, anchor, template)
-                    local spare = isSpareObject(object, entries,
-                        sideHostDoorOrWindow)
+                    local sideHostDoorOrWindow = not eastGarageLayer
+                        and isCabSideDoorOrWindow(object, x, y, z, anchor,
+                            template)
+                    local eastGarageWallObject = eastGarageLayer
+                        and isCarBoxEastGarageWallObject(object, entries)
+                    local spare = not eastGarageWallObject
+                        and isSpareObject(object, entries,
+                            sideHostDoorOrWindow)
                     if spare and removeRepairSpareObject(square, object) then
                         repaired = true
                         removedOnLayer = true

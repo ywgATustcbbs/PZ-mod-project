@@ -101,12 +101,8 @@ end
 
 local function resolveTemplateObject(object, tag)
     local index = tag.templateIndex
-    local template = assert(RoomTemplate.get(tag.templateId),
-        "RailroaderRV: tagged template ID is unknown")
-    local indexedObject, indexedAt =
-        TemplateGeometry.lookupObjectByIndex(index, template)
-    assert(type(indexedObject) == "table" and indexedAt == index,
-        "RailroaderRV: tagged template index is unknown")
+    local template = RoomTemplate.get(tag.templateId)
+    local indexedObject = TemplateGeometry.lookupObjectByIndex(index, template)
 
     local x, y, z = objectCoordinates(object)
     if x == nil then return nil, "object-world-coordinate-unavailable" end
@@ -144,7 +140,6 @@ local function isCurrentProhibitedObject(object)
         -- Ordinary world content: no owner, nothing to protect.
         return false
     end
-    if type(tag) ~= "table" then return false end
     if tag.owner ~= C.MOD_ID then
         return false
     end

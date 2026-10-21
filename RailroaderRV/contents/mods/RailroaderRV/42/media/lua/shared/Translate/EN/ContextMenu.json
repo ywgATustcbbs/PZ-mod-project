@@ -3,11 +3,18 @@
     "ContextMenu_RailroaderRV_BuildLayout": "Prepare RV layout",
     "ContextMenu_RailroaderRV_FinishLayout": "Finish RV layout",
     "ContextMenu_RailroaderRV_Enter": "Enter RV",
+    "ContextMenu_RailroaderRV_EnterCargo": "Enter cargo car RV",
     "ContextMenu_RailroaderRV_Exit": "Exit RV",
     "ContextMenu_RailroaderRV_ClaimSafehouse": "Claim RV safehouse",
     "ContextMenu_RailroaderRV_ClaimSafehouse_WaterUnavailable": "Claiming a safehouse requires the RV water system to function normally",
     "ContextMenu_RailroaderRV_UtilityDashboard": "RV utility panel",
     "ContextMenu_RailroaderRV_ConnectWaterSink": "Connect sink to water",
     "ContextMenu_RailroaderRV_DisconnectWaterSink": "Disconnect sink from water",
-    "ContextMenu_RailroaderRV_AddFuel": "Add fuel to RV"
+    "ContextMenu_RailroaderRV_AddFuel": "Add fuel to RV",
+    "ContextMenu_RailroaderRV_TemplateDevelopment": "Template Development",
+    "ContextMenu_RailroaderRV_TemplateDevelopment_NewTemplate": "New Template",
+    "ContextMenu_RailroaderRV_TemplateDevelopment_EditTemplate": "Edit Existing Template",
+    "ContextMenu_RailroaderRV_TemplateDevelopment_SaveTemplate": "Save Template",
+    "ContextMenu_RailroaderRV_TemplateDevelopment_Loco": "Locomotive",
+    "ContextMenu_RailroaderRV_TemplateDevelopment_CarBox": "Car Box / BX40 (shared)"
 }

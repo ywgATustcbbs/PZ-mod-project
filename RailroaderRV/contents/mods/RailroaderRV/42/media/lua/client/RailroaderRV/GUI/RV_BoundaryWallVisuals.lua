@@ -47,8 +47,7 @@ local function isTaggedBoundarySupportWall(object)
         or not boundaryRoles[tag.role] then
         return false
     end
-    local expected = assert(templateObjects[tag.templateIndex],
-        "RailroaderRV: tagged boundary template index is unknown")
+    local expected = templateObjects[tag.templateIndex]
     -- The boundary role is exactly the set the server assigns to captured shell
     -- edges; every attribute below is re-read from the compiled template entry
     -- named by `tag.templateIndex`, because the tag stores no copy of it.

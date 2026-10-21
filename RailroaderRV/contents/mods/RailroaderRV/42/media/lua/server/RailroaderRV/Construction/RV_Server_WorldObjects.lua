@@ -294,7 +294,8 @@ local function ensureRoofSquare(cell, x, y, z)
     return connected
 end
 
-local function createFloor(square, sprite, generation, role, tagContext, capturedEntry, edge)
+local function createFloor(square, sprite, generation, role, tagContext,
+    capturedEntry, edge, mode)
     if not sprite then
         error("RailroaderRV: floor sprite is not configured")
     end
@@ -343,19 +344,22 @@ local function createFloor(square, sprite, generation, role, tagContext, capture
     if capturedEntry then
         applyCapturedIdentityAndState(floor, capturedEntry)
     end
-    local floorTagData = capturedEntry
-        and capturedTagData(capturedEntry, edge) or {}
-    floorTagData.previousSprite = previousSprite
-    floorTagData.createdByGeneration = createdByGeneration
-    local tagged, tagError = pcall(ServerWorld.tagObject, floor, generation, role,
-        tagContext, floorTagData)
-    if not tagged then
-        local removed, removeError = pcall(ServerWorld.removeGenericObject, square, floor)
-        if not removed then
-            error(tostring(tagError) .. " (untagged floor cleanup failed: "
-                .. tostring(removeError) .. ")")
+    if mode == "production" then
+        local floorTagData = capturedEntry
+            and capturedTagData(capturedEntry, edge) or {}
+        floorTagData.previousSprite = previousSprite
+        floorTagData.createdByGeneration = createdByGeneration
+        local tagged, tagError = pcall(ServerWorld.tagObject, floor,
+            generation, role, tagContext, floorTagData)
+        if not tagged then
+            local removed, removeError = pcall(ServerWorld.removeGenericObject,
+                square, floor)
+            if not removed then
+                error(tostring(tagError) .. " (untagged floor cleanup failed: "
+                    .. tostring(removeError) .. ")")
+            end
+            error(tagError)
         end
-        error(tagError)
     end
     if hadFloor then
         -- This floor is already present in the client object map.  Send the
@@ -493,13 +497,15 @@ local function createWaterProxy(cell, square, generation, tagContext)
 end
 
 local function createCapturedTemplateObject(cell, square, entry, generation,
-    tagContext, edge)
+    tagContext, edge, mode)
     if type(entry) ~= "table" or type(entry.class) ~= "string"
         or type(entry.templateIndex) ~= "number" then
         error("RailroaderRV: captured template object is malformed")
     end
-    local role = edge and edge.role or "captured-template"
-    local tagData = capturedTagData(entry, edge)
+    local role = mode == "production"
+        and (edge and edge.role or "captured-template") or nil
+    local tagData = mode == "production"
+        and capturedTagData(entry, edge) or nil
     local object
     if isVisualCornerTemplateEntry(entry) then
         if entry.class ~= "IsoObject" then
@@ -514,8 +520,10 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
             error("RailroaderRV: captured corner trim construction failed")
         end
         applyCapturedIdentityAndState(tileObject, entry)
-        ServerWorld.tagObject(tileObject, generation, role,
-            tagContext, tagData)
+        if mode == "production" then
+            ServerWorld.tagObject(tileObject, generation, role,
+                tagContext, tagData)
+        end
         if not ServerUtil.callSucceeded(square, "AddTileObject", tileObject) then
             error("RailroaderRV: captured corner trim attachment failed")
         end
@@ -533,7 +541,7 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
         -- The corner trim entries above are tile objects; other captured
         -- IsoObject entries in this template occupy the floor slot.
         object = createFloor(square, entry.sprite, generation, role, tagContext,
-            entry, edge)
+            entry, edge, mode)
         return object
     elseif entry.class == "IsoThumpable" then
         -- Register the numeric sprite before the string constructor performs
@@ -555,8 +563,10 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
         if entry.name == "Wooden Door Frame" then
             configureCapturedDoorFrame(thumpable, entry)
         end
-        ServerWorld.tagObject(thumpable, generation, role,
-            tagContext, tagData)
+        if mode == "production" then
+            ServerWorld.tagObject(thumpable, generation, role,
+                tagContext, tagData)
+        end
         addSpecialObject(square, thumpable)
         -- The B42 health setter resolves the object through its square. Apply
         -- captured health after attachment, while the generation tag already
@@ -574,8 +584,10 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
             error("RailroaderRV: captured IsoDoor construction failed")
         end
         applyCapturedIdentityAndState(door, entry)
-        ServerWorld.tagObject(door, generation, role,
-            tagContext, tagData)
+        if mode == "production" then
+            ServerWorld.tagObject(door, generation, role,
+                tagContext, tagData)
+        end
         addSpecialObject(square, door)
         object = door
     elseif entry.class == "IsoWindow" then
@@ -591,8 +603,10 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
             error("RailroaderRV: captured window unlocked state failed")
         end
         applyCapturedIdentityAndState(window, entry, true)
-        ServerWorld.tagObject(window, generation, role,
-            tagContext, tagData)
+        if mode == "production" then
+            ServerWorld.tagObject(window, generation, role,
+                tagContext, tagData)
+        end
         addSpecialObject(square, window)
         applyCapturedHealthState(window, entry)
         object = window
@@ -612,8 +626,10 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
             or not ServerUtil.callSucceeded(light, "update") then
             error("RailroaderRV: captured light switch state failed")
         end
-        ServerWorld.tagObject(light, generation, role,
-            tagContext, tagData)
+        if mode == "production" then
+            ServerWorld.tagObject(light, generation, role,
+                tagContext, tagData)
+        end
         addSpecialObject(square, light)
         if not ServerUtil.callSucceeded(light, "update") then
             error("RailroaderRV: captured light switch update failed")

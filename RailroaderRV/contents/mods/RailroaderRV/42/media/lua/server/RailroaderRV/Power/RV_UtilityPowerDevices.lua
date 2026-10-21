@@ -173,7 +173,8 @@ end
 
 local fixedTemplateCandidates = {}
 for _, templateId in ipairs({ RoomTemplate.TEMPLATE_ID,
-    RoomTemplate.ENGINE_AREA_TEMPLATE_ID }) do
+    RoomTemplate.ENGINE_AREA_TEMPLATE_ID,
+    RoomTemplate.CAR_BOX_TEMPLATE_ID }) do
     fixedTemplateCandidates[templateId] = templateCandidates(
         RoomTemplate.get(templateId))
 end

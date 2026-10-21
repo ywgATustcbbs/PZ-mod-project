@@ -19,12 +19,14 @@ local sendResult = ctx.sendResult
 local movePlayer = ctx.movePlayer
 local enterPlayer = ctx.enterPlayer
 local exitPlayer = ctx.exitPlayer
+local acknowledgeExitBoarding = ctx.acknowledgeExitBoarding
 
 local function commandArgument(args, key)
     if args == nil then return nil end
     if type(args) == "table" then return args[key] end
     local ok, value = call(args, "get", key)
-    return ok and value or nil
+    if not ok then return nil end
+    return value
 end
 
 -- A wall reload operation owns the same scope as a generation, so Enter/Exit must
@@ -35,15 +37,24 @@ local function wallReloadBusy(rvId)
         return true, type(reason) == "string" and reason ~= "" and reason
             or "RV wall reload is in progress"
     end
-    if active ~= false then
-        error("RailroaderRV: wall reload mutex query returned invalid state")
-    end
-    return false
+    return active
 end
 
 function Adapter.OnClientCommand(module, command, player, args)
     if module ~= C.MOD_ID then return end
     if command ~= C.COMMAND_RV_ENTER and command ~= C.COMMAND_RV_EXIT then return end
+    if command == C.COMMAND_RV_EXIT
+        and commandArgument(args, "boardToken") ~= nil then
+        local acknowledged, reason = acknowledgeExitBoarding(player, {
+            boardToken = commandArgument(args, "boardToken"),
+            boarded = commandArgument(args, "boarded"),
+        })
+        if acknowledged ~= true then
+            print("[RailroaderRV] Railroader RV boarding acknowledgement rejected: "
+                .. tostring(reason or "invalid acknowledgement"))
+        end
+        return
+    end
     -- Busy transitions are normal request rejections; operation exceptions
     -- propagate through the event dispatcher.
     local result, reason
@@ -146,9 +157,6 @@ end
 -- cannot safely run a second Enter/Exit or generation for another rvId.
 Adapter.serverTransactionMutexStatus = function()
     local generationActive = RailroaderRV.Server.isGenerationTransactionActive()
-    if generationActive ~= true and generationActive ~= false then
-        error("RailroaderRV: generation mutex query returned invalid state")
-    end
     local wallBusy, wallReason = wallReloadBusy(nil)
     return generationActive, wallBusy, wallReason
 end

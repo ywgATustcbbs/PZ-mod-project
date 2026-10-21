@@ -1,11 +1,14 @@
 -- Client intent/menu half of the Railroader RV adapter.
 --
--- The client uses the clicked rr_loco only for the enter intent. Safehouse
--- claims carry no target hint; the server resolves the player's current RV.
+-- The client uses a clicked animal only to select a stable Railroader unit ID
+-- for the enter intent. Safehouse claims carry no target hint; the server
+-- resolves the player's current RV.
 
+require("Railroader/RR_API")
 require("RailroaderRV/Common/RV_Constants")
 require("RailroaderRV/Common/RV_UtilityConstants")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
+local Units = require("RailroaderRV/RVMapping/RV_RailroaderUnits")
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.RailroaderContextMenu = RailroaderRV.RailroaderContextMenu or {}
@@ -19,6 +22,7 @@ local ICON_EXIT_RV = "media/ui/RailroaderRV/exitrv.png"
 local ICON_UTILITY_DASHBOARD = "media/ui/RailroaderRV/managementpannel.png"
 
 Menu._rvUtilityMapping = Menu._rvUtilityMapping or nil
+local pendingExitBoardings = {}
 
 local finiteNumber = C.finiteNumber
 local finiteInteger = C.finiteInteger
@@ -37,7 +41,6 @@ local function localPlayer(playerNum)
 end
 
 local function localPlayerByOnlineId(onlineId)
-    assert(onlineId ~= nil, "RailroaderRV: onlineId is missing")
     local count = 0
     if type(getNumActivePlayers) == "function" then
         local ok, value = pcall(getNumActivePlayers)
@@ -109,26 +112,10 @@ local function rememberUtilityMapping(args, action)
     Menu._rvUtilityMapping = mapping
 end
 
-local function isIsoAnimal(animal)
-    if not animal or type(instanceof) ~= "function" then return false end
-    local ok, result = pcall(instanceof, animal, "IsoAnimal")
-    return ok and result == true
-end
-
-local function locomotiveType(animal)
-    if not isIsoAnimal(animal) then return nil end
-    local ok, value = pcall(function() return animal:getAnimalType() end)
-    return ok and tostring(value) or nil
-end
-
-local function isLocomotive(animal)
-    return locomotiveType(animal) == "rr_loco"
-end
-
-local function locomotiveId(animal)
+local function clickedUnit(animal)
     if not animal then return nil end
-    local ok, value = pcall(function() return animal:getAnimalID() end)
-    return ok and value or nil
+    local id = animal:getAnimalID()
+    return Units.find(id)
 end
 
 local function optionAlreadyExists(context, label)
@@ -152,10 +139,10 @@ local function markTest()
     return true
 end
 
-local function requestEnter(player, locoId)
-    if not player or locoId == nil then return end
+local function requestEnter(player, unitId)
+    if not player or unitId == nil then return end
     sendClientCommand(player, C.MOD_ID, C.COMMAND_RV_ENTER, {
-        locoId = locoId,
+        locoId = unitId,
     })
 end
 
@@ -243,23 +230,45 @@ local function addSafehouseClaim(playerNum, context, test)
     return true
 end
 
-local function nearestLocomotive()
-    local rr = rawget(_G, "RR")
-    local ride = rr and rr.Ride
-    if not ride or type(ride.nearestBoardable) ~= "function" then return nil end
-    -- Railroader 2.1 publishes the same hull-distance reach used by E.
-    -- Do not replace it with a centre-radius approximation.
-    local reach = finiteNumber(ride.MOUNT_REACH)
-        or finiteNumber(C.RV_MOUNT_REACH)
-        or 2.0
-    local record
-    local ok = pcall(function()
-        record = ride.nearestBoardable(reach)
-    end)
-    if ok and type(record) == "table" and isLocomotive(record.animal) then
-        return record.animal
+local function unitInReach(player, unit)
+    local position = playerPosition(player)
+    if not position or not unit then return false end
+    local geometry = Units.geometry(unit, position.x, position.y)
+    if not geometry then return false end
+    local reach
+    if unit.isLocomotive then
+        reach = geometry.mountReachTiles
+    else
+        reach = C.RV_MOUNT_REACH
     end
-    return nil
+    return geometry.hullDistanceTiles ~= nil and reach ~= nil
+        and geometry.hullDistanceTiles <= reach
+end
+
+local function nearestUnitInReach(player)
+    local position = playerPosition(player)
+    if not position then return nil end
+    local units = Units.list()
+    if not units then return nil end
+    local best, bestDistance
+    for _, unit in ipairs(units) do
+        local geometry = Units.geometry(unit, position.x, position.y)
+        -- A unit without its current pose cannot be considered a nearby target.
+        if geometry and geometry.hullDistanceTiles ~= nil then
+            local reach
+            if unit.isLocomotive then
+                reach = geometry.mountReachTiles
+            else
+                reach = C.RV_MOUNT_REACH
+            end
+            local distance = geometry.hullDistanceTiles
+            if reach ~= nil and distance <= reach
+                    and (bestDistance == nil or distance < bestDistance) then
+                best, bestDistance = unit, distance
+            end
+        end
+    end
+    return best
 end
 
 function Menu.getUtilityMapping()
@@ -290,32 +299,84 @@ function Menu.clearUtilityMapping()
     Menu._rvUtilityMapping = nil
 end
 
-function Menu.hasUtilityDashboardCandidate(player, insideOnly, locomotiveIdHint)
+local function clearPendingExitBoardings()
+    for onlineId in pairs(pendingExitBoardings) do
+        pendingExitBoardings[onlineId] = nil
+    end
+end
+
+function Menu.hasUtilityDashboardCandidate(player, insideOnly, unitIdHint)
     local mapping = Menu.getUtilityMapping()
     if not mapping or not player then return false end
     if mapContainsPlayer(player) then return true end
     if insideOnly then return false end
-    local id = locomotiveIdHint
+    local id = unitIdHint
     if id == nil then
-        local locomotive = nearestLocomotive()
-        if not locomotive then return false end
-        id = locomotiveId(locomotive)
+        local nearest = nearestUnitInReach(player)
+        id = nearest and nearest.id or nil
     end
     return id ~= nil and tostring(id) == mapping.locoId
 end
 
-local function addLocomotiveOptions(playerNum, context, animal, test)
-    if not context or not isLocomotive(animal) then return false end
-    local player = localPlayer(playerNum)
-    local locoId = locomotiveId(animal)
-    if not player or locoId == nil then return false end
+local function visibleTrain(trainId)
+    for _, train in ipairs(RR.API.trains({})) do
+        if train.id == trainId then return train end
+    end
+    return nil
+end
 
-    local enterLabel = text("ContextMenu_RailroaderRV_Enter", "Enter RV")
+local function canEnterRV(train, player)
+    if not player then return false end
+    local rider = RR.API.riderState(train.id, player)
+    if not rider then return false end
+    return rider.role == "passenger"
+        or ((rider.role == "driver" or rider.role == "outside")
+            and math.abs(train.speed) <= C.RV_STOPPED_SPEED)
+end
+
+local function enterRVFromRadial(trainId, player)
+    local train = visibleTrain(trainId)
+    if train and canEnterRV(train, player) then
+        requestEnter(player, train.id)
+    end
+end
+
+local function openUtilityFromRadial(trainId, player)
+    if Menu.hasUtilityDashboardCandidate(player, false, trainId) then
+        RailroaderRV.UtilityContextMenu.openDashboard(player)
+    end
+end
+
+local function addRailroaderRadialOptions(train, player, add)
+    if canEnterRV(train, player) then
+        add(text("ContextMenu_RailroaderRV_Enter", "Enter RV"),
+            ICON_ENTER_RV, enterRVFromRadial)
+    end
+    if Menu.hasUtilityDashboardCandidate(player, false, train.id) then
+        add(text("ContextMenu_RailroaderRV_UtilityDashboard",
+            "RV utility panel"), ICON_UTILITY_DASHBOARD,
+            openUtilityFromRadial)
+    end
+end
+
+local function addUnitOptions(playerNum, context, unit, test)
+    if not context or not unit or unit.id == nil then return false end
+    local player = localPlayer(playerNum)
+    if not player then return false end
+
+    local enterLabel
+    if unit.isLocomotive then
+        enterLabel = text("ContextMenu_RailroaderRV_Enter", "Enter RV")
+    else
+        enterLabel = text("ContextMenu_RailroaderRV_EnterCargo",
+            "Enter cargo car RV")
+    end
     local dashboardLabel = text("ContextMenu_RailroaderRV_UtilityDashboard",
         "RV utility panel")
     local hasEnter = optionAlreadyExists(context, enterLabel)
     local hasDashboard = optionAlreadyExists(context, dashboardLabel)
-    local showDashboard = Menu.hasUtilityDashboardCandidate(player, false, locoId)
+    local showDashboard = Menu.hasUtilityDashboardCandidate(player, false,
+        unit.id)
 
     if test then
         if not hasEnter or (showDashboard and not hasDashboard) then
@@ -325,7 +386,8 @@ local function addLocomotiveOptions(playerNum, context, animal, test)
     end
 
     if not hasEnter then
-        local option = context:addOption(enterLabel, player, requestEnter, locoId)
+        local option = context:addOption(enterLabel, player, requestEnter,
+            unit.id)
         option.iconTexture = getTexture(ICON_ENTER_RV)
     end
     if showDashboard and not hasDashboard then
@@ -336,132 +398,22 @@ local function addLocomotiveOptions(playerNum, context, animal, test)
     return true
 end
 
-local function addNearbyLocomotiveOptions(playerNum, context, test, clickedAnimal)
-    local animal = nearestLocomotive()
-    if not animal then return false end
-    if clickedAnimal
-        and locomotiveId(clickedAnimal) ~= locomotiveId(animal) then
-        return false
+local function addNearbyUnitOptions(playerNum, context, test, clickedAnimal)
+    local player = localPlayer(playerNum)
+    if not player then return false end
+    local unit
+    if clickedAnimal then
+        unit = clickedUnit(clickedAnimal)
+        if not unit or not unitInReach(player, unit) then
+            return false
+        end
+    else
+        unit = nearestUnitInReach(player)
     end
-    return addLocomotiveOptions(playerNum, context, animal, test)
+    return addUnitOptions(playerNum, context, unit, test)
 end
 
-local function patchRailroaderAnimalMenu()
-    local boardMenu = RR.BoardMenu
-    if boardMenu.rrRVRailroaderAnimalMenuWrapped then return end
-    local originalAddForAnimal = boardMenu.addForAnimal
-    boardMenu.addForAnimal = function(playerNum, context, animal, test, ...)
-        local result = originalAddForAnimal(playerNum, context, animal, test, ...)
-        addNearbyLocomotiveOptions(playerNum, context, test, animal)
-        return result
-    end
-    boardMenu.rrRVRailroaderAnimalMenuWrapped = true
-end
-
-local function nowMs()
-    if type(getTimestampMs) == "function" then
-        local ok, value = pcall(getTimestampMs)
-        value = finiteNumber(value)
-        if ok and value then return value end
-    end
-    return os.time() * 1000
-end
-
--- The generation transaction can spend longer than Ride's two-second stale
--- snapshot grace waiting for the remote footprint.  Keep a token-scoped
--- marker so a repeated FinalRelocate callback does not call dismount a second
--- time (dismount(true) may place the player beside the locomotive).  A new
--- generation gets a new server token, so it can still start a fresh cleanup
--- even when the same locomotive is used again.
-local GENERATION_TRANSITION_TTL_MS = 300000
 local CURRENT_SQUARE_REFRESH_TICKS = 120
-
-local function generationTransitionMatches(pending, args)
-    assert(args.token ~= nil and args.locoId ~= nil
-        and args.rvId ~= nil and args.generation ~= nil,
-        "RailroaderRV: generation transition identity is incomplete")
-    if pending == nil then return false end
-    return pending.rvId == args.rvId
-        and pending.generation == args.generation
-        and pending.token == args.token
-end
-
-local function activeGenerationTransition()
-    local pending = Menu._rvGenerationTransition
-    if pending and pending.expiresAt ~= nil
-        and nowMs() > pending.expiresAt then
-        Menu._rvGenerationTransition = nil
-        return nil
-    end
-    return pending
-end
-
-local function localTrainRecord(locoId)
-    local rr = rawget(_G, "RR")
-    local active = rr and rr.TrainEntity and rr.TrainEntity.active
-    if type(active) ~= "table" or locoId == nil then return nil end
-    local wanted = tostring(locoId)
-    for _, record in pairs(active) do
-        if type(record) == "table" then
-            local id = record.id
-            if id == nil and record.animal then
-                pcall(function() id = record.animal:getAnimalID() end)
-            end
-            if id ~= nil and tostring(id) == wanted then return record end
-        end
-    end
-    return nil
-end
-
--- RVTeleport is delivered around the same time as Railroader's seat snapshot.
--- Let the official Ride API clear a local seat before the RV coordinate write;
--- Ride.dismount(true) also arms Railroader's documented stale-snapshot grace,
--- preventing RR_MPClient from calling placePlayerBeside after this teleport.
-local function prepareRideTransition(args, action)
-    if action == nil then action = args.action end
-    assert(action ~= nil, "RailroaderRV: ride transition action is missing")
-    local rr = rawget(_G, "RR")
-    local ride = rr and rr.Ride
-    local record = localTrainRecord(args.locoId)
-    if action == "generation-failed" then
-        -- A failed generation ends the one-shot staging transition.  The
-        -- server snapshot that follows is then allowed to restore the seat.
-        Menu._rvGenerationTransition = nil
-    end
-    if not ride then return record end
-    if action == "enter" or action == "generation-failed" then
-        if ride.current and type(ride.dismount) == "function" then
-            pcall(ride.dismount, true)
-        end
-        -- A failed generation restores the old official seat on the server.
-        -- `_boardPending` is only the local RR_MPClient stale-packet gate; the
-        -- subsequent official snapshot still decides whether mountRecord runs.
-        if action == "generation-failed" and record
-            and (args.role == "driver" or args.role == "passenger") then
-            record._boardPending = true
-        end
-    elseif action == "exit" then
-        -- Set the target record's official stale-snapshot gate even when the
-        -- local Ride state was already cleared.  This closes the quick-exit
-        -- race during the enter dismount grace.  Beside exits intentionally
-        -- do not set _boardPending and never fabricate a seat.
-        local wantsSeat = args.role == "driver" or args.role == "passenger"
-        if wantsSeat and record then
-            record._boardPending = true
-        end
-        if ride.current then
-            -- A partial/stale snapshot may still have the old local seat.
-            -- Clear it through Ride, then allow the server's new snapshot to
-            -- mount officially.
-            local old = ride.current
-            if type(ride.dismount) == "function" then
-                pcall(ride.dismount, true)
-            end
-            if wantsSeat and old then old._boardPending = true end
-        end
-    end
-    return record
-end
 
 -- IsoGameCharacter:teleportTo writes the coordinates but deliberately leaves
 -- IsoMovingObject.current untouched until a normal movement/collision update.
@@ -527,7 +479,38 @@ local function scheduleCurrentSquareRefresh(player, x, y, z)
     end
 end
 
+local function processPendingExitBoardings()
+    for onlineId, pending in pairs(pendingExitBoardings) do
+        if pending.awaitingServer ~= true then
+            local dead = pending.player:isDead()
+            local boarded, reason
+            if dead then
+                reason = "noplayer"
+            else
+                boarded, reason = RR.API.boardCar(pending.locoId,
+                    pending.player)
+            end
+            if boarded then
+                pending.awaitingServer = true
+                scheduleCurrentSquareRefresh(pending.player,
+                    boarded.x, boarded.y, boarded.z)
+                sendClientCommand(pending.player, C.MOD_ID,
+                    C.COMMAND_RV_EXIT, {
+                        boardToken = pending.token, boarded = true,
+                    })
+            elseif reason ~= "unknown" and reason ~= "notloaded" then
+                pending.awaitingServer = true
+                sendClientCommand(pending.player, C.MOD_ID,
+                    C.COMMAND_RV_EXIT, {
+                        boardToken = pending.token, boarded = false,
+                    })
+            end
+        end
+    end
+end
+
 function Menu.onTick()
+    processPendingExitBoardings()
     local pending = Menu._rvCurrentSquareRefresh
     if type(pending) ~= "table" then return end
     pending.ticks = pending.ticks + 1
@@ -559,67 +542,6 @@ function Menu.onTick()
     end
 end
 
-local function finishRideTransition(args, record, player)
-    local rr = rawget(_G, "RR")
-    local ride = rr and rr.Ride
-    if not ride or (args.action ~= "exit" and args.action ~= "generation-failed")
-        or rr.MPClient then return end
-    -- In SP there is no RR_MPClient snapshot.  Use the official Ride API after
-    -- the authoritative teleport, never by fabricating rider/seat fields.
-    if record and (args.role == "driver" or args.role == "passenger")
-        and type(ride.mountRecord) == "function" then
-        assert(args.seat ~= nil, "RailroaderRV: seat is missing from exit sync")
-        pcall(ride.mountRecord, record, true, args.seat)
-    end
-end
-
--- Called by RV_ContextMenu's generic FinalRelocate bridge.  It shares the
--- exact enter ordering with RVTeleport, including Railroader's stale-snapshot
--- dismount grace, while leaving final coordinates under the server command.
-function Menu.prepareGenerationRelocation(args)
-    local pending = activeGenerationTransition()
-    if generationTransitionMatches(pending, args) then
-        -- The staging handler already performed the only Ride dismount for
-        -- this token.  Keep the marker through duplicate command callbacks;
-        -- the final coordinates are still applied by RV_ContextMenu from the
-        -- server payload immediately below this hook.
-        pending.finalSeen = true
-        pending.expiresAt = nowMs() + GENERATION_TRANSITION_TTL_MS
-        rememberUtilityMapping(args, "enter")
-        return
-    end
-    -- The server-created marker carries the identity used by the staging
-    -- transition; generic technical FinalRelocate never enters this method.
-    rememberUtilityMapping(args, "enter")
-    prepareRideTransition(args, "enter")
-    Menu._rvGenerationTransition = {
-        token = args.token,
-        locoId = args.locoId,
-        rvId = args.rvId,
-        generation = args.generation,
-        finalSeen = true,
-        expiresAt = nowMs() + GENERATION_TRANSITION_TTL_MS,
-    }
-end
-
--- Called only for the server-created Relocate marker.  This is intentionally
--- separate from generic Generate so a technical generation can never touch a
--- local Railroader Ride state by accident.
-function Menu.prepareGenerationStaging(args)
-    local pending = activeGenerationTransition()
-    if generationTransitionMatches(pending, args) then
-        return
-    end
-    prepareRideTransition(args, "enter")
-    Menu._rvGenerationTransition = {
-        token = args.token,
-        locoId = args.locoId,
-        rvId = args.rvId,
-        generation = args.generation,
-        expiresAt = nowMs() + GENERATION_TRANSITION_TTL_MS,
-    }
-end
-
 function Menu.OnFillWorldObjectContextMenu(playerNum, context, worldObjects, test)
     if not context then return end
     local player = localPlayer(playerNum)
@@ -632,11 +554,20 @@ function Menu.OnFillWorldObjectContextMenu(playerNum, context, worldObjects, tes
         return
     end
     if not mapContainsPlayer(player) then
-        addNearbyLocomotiveOptions(playerNum, context, test)
+        addNearbyUnitOptions(playerNum, context, test)
         return
     end
     addExit(playerNum, context, test)
     addSafehouseClaim(playerNum, context, test)
+end
+
+function Menu.OnClickedAnimalForContext(playerNum, context, animals, test)
+    for _, animal in ipairs(animals) do
+        if addNearbyUnitOptions(playerNum, context, test, animal) then
+            return true
+        end
+    end
+    return false
 end
 
 -- The vanilla world-menu pipeline fires OnPreFillWorldObjectContextMenu before
@@ -658,7 +589,7 @@ function Menu.OnPreFillWorldObjectContextMenu(playerNum, context, worldObjects, 
     end
     local inside = mapContainsPlayer(player)
     if not inside then
-        addNearbyLocomotiveOptions(playerNum, context, test)
+        addNearbyUnitOptions(playerNum, context, test)
         return
     end
     addExit(playerNum, context, test)
@@ -680,6 +611,9 @@ function Menu.OnServerCommand(module, command, args)
         if Menu._safehouseClaimOption then
             updateSafehouseClaimOption(Menu._safehouseClaimOption, args)
         end
+        return
+    elseif command == C.COMMAND_FINAL_RELOCATE then
+        if args.locoId ~= nil then rememberUtilityMapping(args, "enter") end
         return
     end
     if command == C.COMMAND_RV_SAFEHOUSE_SYNC then
@@ -734,18 +668,43 @@ function Menu.OnServerCommand(module, command, args)
         if args.reason then print("[RailroaderRV] " .. tostring(args.reason)) end
         return
     end
-    rememberUtilityMapping(args)
-    local x, y, z = args.x, args.y, args.z
     local player = localPlayerByOnlineId(onlineId)
     if not player then return end
-    local record = prepareRideTransition(args)
+    if args.action == "exit-board" then
+        pendingExitBoardings[onlineId] = {
+            player = player, token = args.boardToken,
+            locoId = args.boardCarId, awaitingServer = false,
+        }
+        player:teleportTo(args.x, args.y, args.z)
+        return
+    elseif args.action == "exit-board-complete" then
+        local pendingBoarding = pendingExitBoardings[onlineId]
+        if pendingBoarding
+            and pendingBoarding.token == args.boardToken then
+            pendingExitBoardings[onlineId] = nil
+        end
+        rememberUtilityMapping(args, "exit")
+        return
+    elseif args.action == "exit-board-cancel" then
+        local pendingBoarding = pendingExitBoardings[onlineId]
+        if not pendingBoarding
+            or pendingBoarding.token ~= args.boardToken then
+            return
+        end
+        pendingExitBoardings[onlineId] = nil
+        player:teleportTo(args.x, args.y, args.z)
+        scheduleCurrentSquareRefresh(player, args.x, args.y, args.z)
+        return
+    end
+    rememberUtilityMapping(args)
+    local x, y, z = args.x, args.y, args.z
     player:teleportTo(x, y, z)
     scheduleCurrentSquareRefresh(player, x, y, z)
-    finishRideTransition(args, record, player)
 end
 
-if Events and Events.OnGameStart and type(Events.OnGameStart.Add) == "function" then
-    Events.OnGameStart.Add(patchRailroaderAnimalMenu)
+if Events and Events.OnClickedAnimalForContext
+    and type(Events.OnClickedAnimalForContext.Add) == "function" then
+    Events.OnClickedAnimalForContext.Add(Menu.OnClickedAnimalForContext)
 end
 if Events and Events.OnFillWorldObjectContextMenu
     and type(Events.OnFillWorldObjectContextMenu.Add) == "function" then
@@ -758,16 +717,24 @@ end
 if Events and Events.OnServerCommand and type(Events.OnServerCommand.Add) == "function" then
     Events.OnServerCommand.Add(Menu.OnServerCommand)
 end
+local function clearContextConnectionState()
+    Menu.clearUtilityMapping()
+    clearPendingExitBoardings()
+end
+
 if Events and Events.OnConnected and type(Events.OnConnected.Add) == "function" then
-    Events.OnConnected.Add(Menu.clearUtilityMapping)
+    Events.OnConnected.Add(clearContextConnectionState)
 end
 if Events and Events.OnDisconnect and type(Events.OnDisconnect.Add) == "function" then
-    Events.OnDisconnect.Add(Menu.clearUtilityMapping)
+    Events.OnDisconnect.Add(clearContextConnectionState)
 end
 if Events and Events.OnTick and type(Events.OnTick.Add) == "function"
     and not Menu._rvCurrentSquareRefreshHook then
     Events.OnTick.Add(Menu.onTick)
     Menu._rvCurrentSquareRefreshHook = true
 end
+
+RR.API.onBoardMenu(addRailroaderRadialOptions)
+RR.API.onCabMenu(addRailroaderRadialOptions)
 
 return Menu

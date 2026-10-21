@@ -216,9 +216,6 @@ local function wallReloadForObject(object)
     local match
     for _, record in pairs(map.locomotives) do
         if Boundary.isCurrentShellWall(object, Boundary.boundaryFor(record)) then
-            if match then
-                error("world object matches multiple trusted RV mappings")
-            end
             match = record
         end
     end

@@ -191,15 +191,6 @@ local function sendStagingRelocation(record, phase)
         generationTransition = true,
         generationPhase = phase == "return" and "return" or "temporary",
     }
-    -- Only a Railroader-backed generation carries a local Ride transition hint.
-    -- A return must not re-enter a seat; seat truth stays with Railroader.
-    if phase ~= "return" and type(record.railroader) == "table" then
-        payload.railroaderTransition = true
-        payload.action = "enter"
-        payload.locoId = record.railroader.locoId
-        payload.role = record.railroader.sourceRole
-        payload.seat = record.railroader.sourceSeat
-    end
     -- The staging target is an integer contract point; the return target is the
     -- exact captured position and must not be re-centered.
     local teleportX = phase == "return" and target.x or target.x + 0.5
@@ -243,16 +234,8 @@ local function sendFinalRelocation(record, deadline)
         y = target.y,
         z = target.z,
     }
-    -- Railroader generation removed the official seat before staging.  Carry
-    -- only a transition hint so the client adapter can run Ride.dismount(true)
-    -- before this final RV teleport; seat truth still comes from Railroader's
-    -- next server snapshot.
     if type(record.railroader) == "table" then
-        payload.railroaderTransition = true
-        payload.action = "enter"
         payload.locoId = record.railroader.locoId
-        payload.role = record.railroader.sourceRole
-        payload.seat = record.railroader.sourceSeat
     end
     -- B42.20's float teleport overload floors x/y.  Restore the server-selected
     -- half-cell center through the official setters so the authoritative proof

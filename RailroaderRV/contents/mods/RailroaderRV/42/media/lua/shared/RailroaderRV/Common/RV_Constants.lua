@@ -39,6 +39,9 @@ end
 C.MOD_ID = "RailroaderRV"
 C.COMMAND_GENERATE = "Generate"
 C.COMMAND_DUMP_TEMPLATE_CAPTURE = "DumpTemplateCapture"
+C.COMMAND_RV_TEMPLATE_DEVELOPMENT = "TemplateDevelopment"
+-- Enable the template development menu entry.
+C.ENABLE_TEMPLATE_DEVELOPMENT = false
 C.COMMAND_FINAL_RELOCATE = "FinalRelocate"
 C.COMMAND_FINAL_RELOCATE_ACK = "FinalRelocateAck"
 C.COMMAND_REFRESH_ROOM_OWNERSHIP = "RefreshRoomOwnership"

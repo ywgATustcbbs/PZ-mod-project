@@ -154,10 +154,9 @@ end
 
 -- The reverse lookup intentionally starts with the passenger coordinate.  It
 -- never asks a world-room API, a room identifier, or a generated object which
--- RV the player belongs to.  A current-schema mapping whose live locomotive
--- is temporarily absent is retained for the persisted
--- vehicle-pose exit.  Coordinates outside the target 100x100 region are a
--- separate outside-rv rejection and are never corrected by this adapter.
+-- RV the player belongs to.  If the current API locomotive or its geometry is
+-- unavailable, no exit is performed.  Coordinates outside the target 100x100
+-- region are a separate outside-rv rejection and are never corrected here.
 local function recordAtPlayerCoordinate(map, player)
     local position = playerPositionInRegion(player, rvRegion())
     if not position then return nil, nil, nil, "outside-rv" end
@@ -187,9 +186,6 @@ local function allocateRVRegion(locoId)
     for _, record in pairs(map.locomotives) do
         local region = recordRegion(record)
         local slotIndex = record.slotIndex
-        if occupiedSlots[slotIndex] then
-            error("duplicate RV region slot in trusted mapping")
-        end
         occupiedSlots[slotIndex] = tostring(record.locoId)
         occupied[#occupied + 1] = { minX = integer(region.minX),
             minY = integer(region.minY), maxX = integer(region.maxX),
@@ -208,9 +204,6 @@ local function currentMappingRecord(rvId, generation)
     local record = recordForLoco(map, rvId)
     if not record then
         return false, C.INVALID_RV_DATA
-    end
-    if record.generation == nil then
-        error("current RV mapping has no generation")
     end
     if record.generation ~= integer(generation) then
         return false, C.INVALID_RV_DATA

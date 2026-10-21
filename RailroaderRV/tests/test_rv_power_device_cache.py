@@ -31,7 +31,9 @@ HARNESS = r"""
 package.path = [[__MEDIA_LUA__/shared/?.lua;__MEDIA_LUA__/server/?.lua;]] .. package.path
 RailroaderRV = {}
 local U = require("RailroaderRV/Common/RV_UtilityConstants")
+local PowerConfig = require("RailroaderRV/Power/RV_UtilityPowerConfig")
 require("RailroaderRV/Common/RV_Constants")
+RVTestExpectedLightDemandW = PowerConfig.DEVICE_POWER_W.Light
 
 local root = { records = {} }
 local transmitCount = 0
@@ -59,6 +61,7 @@ RainManager = { isRaining = function() return false end }
 
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
+mappingRecord.templateId = RoomTemplate.TEMPLATE_ID
 local template = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
 local anchor = RegionSlots.indexToAnchor(mappingRecord.slotIndex)
 local firstBuildCell = template.misc.buildCells[1]
@@ -106,6 +109,44 @@ end
 local Store = require("RailroaderRV/Core/RV_UtilityStore")
 local Devices = require("RailroaderRV/Power/RV_UtilityPowerDevices")
 local Power = require("RailroaderRV/Power/RV_UtilityPower")
+package.preload["TimedActions/ISRVUtilityAction"] = function() return {} end
+package.preload["RailroaderRV/Water/RV_UtilityWater"] = function()
+    return {
+        CONSTANTS = require("RailroaderRV/Water/RV_UtilityWaterConstants"),
+        settleWater = function(identity, _, _, powerState)
+            assert(type(powerState.supplyPumpPowered) == "boolean")
+            return Store.getRecord(identity, false)
+        end,
+    }
+end
+RailroaderRV.RailroaderServer = {
+    onlinePlayersSnapshot = function() return {} end,
+}
+local function unusedEvent()
+    return { Add = function() end }
+end
+Events = {
+    OnTick = unusedEvent(),
+    OnClientCommand = unusedEvent(),
+    OnProcessAction = unusedEvent(),
+    OnObjectAdded = unusedEvent(),
+    OnObjectAboutToBeRemoved = unusedEvent(),
+    OnDestroyIsoThumpable = unusedEvent(),
+    EveryTenMinutes = unusedEvent(),
+    EveryHours = unusedEvent(),
+}
+local UtilityServer = require("RailroaderRV/Core/RV_UtilityServer")
+
+function scanSelectedTemplate(kind, allowEngineArea)
+    local templateId = RoomTemplate.templateIdForKind(kind, allowEngineArea)
+    local record = { power = { deviceCache = { template = {}, build = {} } } }
+    local scanIdentity = { rvId = "template-scan:" .. kind .. ":"
+        .. tostring(allowEngineArea), generation = 1 }
+    Devices.initialize(record, scanIdentity)
+    local scanned = Devices.scan(scanIdentity, record, player,
+        mappingRecord.slotIndex, templateId)
+    return templateId, scanned
+end
 
 function createAndSettle()
     local record = Store.getRecord(identity, true)
@@ -119,21 +160,23 @@ function createAndSettle()
     transmitCount = 0
     squareLookupCount = 0
 
-    local settled, updated = Power.settleAndRefreshLoad(identity, player,
-        Store.getRecord(identity, false), mappingRecord)
+    local settled, updated = UtilityServer.settleAndRefreshLoad(identity,
+        player, mappingRecord)
     assert(settled == true)
     assert(type(updated.power.deviceCache) == "table")
     assert(#updated.power.deviceCache.build == 1)
     assert(updated.power.deviceCache.build[1].id
         == tostring(fixtureX) .. ":" .. tostring(fixtureY) .. ":"
             .. tostring(fixtureZ) .. ":7")
-    assert(updated.power.deviceCache.build[1].demandPowerW == 60)
+    assert(updated.power.deviceCache.build[1].demandPowerW
+        == PowerConfig.DEVICE_POWER_W.Light)
     assert(updated.power.deviceCache.build[1].active == true)
     local persisted = Store.getRecord(identity, false)
     assert(#persisted.power.deviceCache.build == 1)
     assert(persisted.power.deviceCache.build[1].id
         == updated.power.deviceCache.build[1].id)
-    assert(persisted.power.deviceCache.build[1].demandPowerW == 60)
+    assert(persisted.power.deviceCache.build[1].demandPowerW
+        == PowerConfig.DEVICE_POWER_W.Light)
     assert(persisted.power.deviceCache.build[1].active == true)
     return #updated.power.deviceCache.template,
         #updated.power.deviceCache.build,
@@ -174,9 +217,8 @@ function failSettlementWithCacheShape(shape)
         error("unknown cache shape fixture")
     end
     transmitCount = 0
-    local record = Store.getRecord(identity, false)
     local ok, result = pcall(function()
-        return Power.settleAndRefreshLoad(identity, player, record,
+        return UtilityServer.settleAndRefreshLoad(identity, player,
             mappingRecord)
     end)
     return ok, tostring(result), transmitCount
@@ -191,6 +233,21 @@ class PowerDeviceCacheChecks(unittest.TestCase):
         self.lua.execute(HARNESS.replace("__MEDIA_LUA__", media_lua))
         self.globals = self.lua.globals()
 
+    def test_scan_uses_candidates_for_each_supported_template_kind(self) -> None:
+        cases = (
+            ("loco", False, "railroader-rv"),
+            ("loco", True, "railroader-rv-engine-area"),
+            ("car_box", False, "railroader-rv-car-box"),
+            ("car_bx40", False, "railroader-rv-car-box"),
+        )
+        for kind, allow_engine_area, expected_template_id in cases:
+            with self.subTest(kind=kind, allow_engine_area=allow_engine_area):
+                template_id, scanned = self.globals.scanSelectedTemplate(
+                    kind, allow_engine_area
+                )
+                self.assertEqual(template_id, expected_template_id)
+                self.assertTrue(scanned)
+
     def test_full_production_scan_commits_device_cache_once(self) -> None:
         (
             _template_count, build_count, device_id, demand_w, active,
@@ -201,7 +258,7 @@ class PowerDeviceCacheChecks(unittest.TestCase):
 
         self.assertEqual(build_count, 1)
         self.assertIsNotNone(device_id)
-        self.assertEqual(demand_w, 60)
+        self.assertEqual(demand_w, self.globals.RVTestExpectedLightDemandW)
         self.assertTrue(active)
         self.assertEqual(transmit_count, 1)
         self.assertGreater(square_lookups, 1)
@@ -217,7 +274,9 @@ class PowerDeviceCacheChecks(unittest.TestCase):
 
         self.assertEqual(build_count, 1)
         self.assertIsNotNone(restored_id)
-        self.assertEqual(restored_demand, 60)
+        self.assertEqual(
+            restored_demand, self.globals.RVTestExpectedLightDemandW
+        )
         self.assertTrue(restored_active)
         self.assertEqual(transmit_count, 0)
 

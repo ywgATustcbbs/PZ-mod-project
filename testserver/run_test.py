@@ -30,8 +30,14 @@ from typing import Mapping, Sequence
 
 
 MOD_ID = "RailroaderRV"
+RAILROADER_MOD_ID = "Railroader"
+RAILROADER_WORKSHOP_ID = "3774360904"
+RAILROADER_PREVIEW_DIRECTORY = "railroader_pz_mod"
 BUILDCRAFT_MOD_ID = "BuildingCraft"
 BUILDCRAFT_WORKSHOP_ID = "3459887404"
+SERVER_MOD_LIST = f"{BUILDCRAFT_MOD_ID};{RAILROADER_MOD_ID};{MOD_ID};B42Trans_CN"
+WORKSHOP_SERVER_ITEMS = f"3556544454;{RAILROADER_WORKSHOP_ID}"
+PREVIEW_SERVER_ITEMS = "3556544454"
 SERVER_NAME = "test"
 DEFAULT_PORT = 16261
 DEFAULT_UDP_PORT = 16262
@@ -302,8 +308,9 @@ def stage_mod(
     label: str,
     dry_run: bool,
     mod_id: str = MOD_ID,
+    package_directory: str | None = None,
 ) -> None:
-    destination = cache_dir / "mods" / mod_id
+    destination = cache_dir / "mods" / (package_directory or mod_id)
     ensure_directory(destination, f"{label}模组目录", dry_run)
     files, directories = _copy_mod_tree(source, destination, dry_run)
     action = "将复制" if dry_run else "已复制"
@@ -766,7 +773,7 @@ def run_subprocess_smoke() -> None:
         process = subprocess.Popen(
             command,
             cwd=str(run_bat.parent),
-            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            startupinfo=visible_startup_info(),
         )
         try:
             code = process.wait(timeout=10)
@@ -984,6 +991,8 @@ class Settings:
     project_root: Path
     run_bat: Path
     mod_source: Path
+    railroader_build: str
+    railroader_preview_source: Path
     buildcraft_source: Path | None
     server_cache: Path
     client_cache: Path
@@ -1106,16 +1115,17 @@ def _read_cache_layout(path: Path) -> dict[str, object] | None:
 
 
 def initialize_ramdisk_caches(settings: Settings) -> None:
-    """Use the stable Z: client cache and copy the old workspace cache once, safely."""
+    """Initialize the default Workshop client cache, migrating it once."""
 
-    requested: dict[str, tuple[Path, Path]] = {}
-    if settings.client_cache_is_default:
-        requested["client"] = (
+    if settings.railroader_build == "preview" or not settings.client_cache_is_default:
+        return
+
+    requested = {
+        "client": (
             settings.client_cache,
             settings.run_bat.parent / "runtime" / "client",
         )
-    if not requested:
-        return
+    }
 
     if not Path("Z:/").is_dir():
         raise RunnerError(
@@ -1189,7 +1199,11 @@ def initialize_ramdisk_caches(settings: Settings) -> None:
         layout["caches"] = merged_caches
         merged_sources = dict(marker.get("sources", {}))
         merged_sources.update(
-            {role: str(source.resolve()) for role, (_destination, source) in new_roles.items()}
+            {
+                role: str(source.resolve())
+                for role, (_destination, source) in new_roles.items()
+                if source is not None
+            }
         )
         layout["sources"] = merged_sources
         layout["status"] = "initializing"
@@ -1203,12 +1217,12 @@ def initialize_ramdisk_caches(settings: Settings) -> None:
             )
         if destination.exists() and not destination.is_dir():
             raise RunnerError(f"Z: 目标 cache 不是目录: {destination}")
-        if destination.exists() and source.exists():
+        if destination.exists() and source is not None and source.exists():
             raise RunnerError(
                 f"Z: {role} cache 与工作区旧 cache 同时存在，无法确定哪份存档较新: "
                 f"{destination}；{source}。没有覆盖或合并任何文件。"
             )
-        if not destination.exists() and source.exists():
+        if not destination.exists() and source is not None and source.exists():
             source_sizes[role] = _cache_tree_size(source)
             estimated_copy_bytes += source_sizes[role]
 
@@ -1229,7 +1243,9 @@ def initialize_ramdisk_caches(settings: Settings) -> None:
             "root": expected_root,
             "caches": expected_caches,
             "sources": {
-                role: str(source.resolve()) for role, (_destination, source) in requested.items()
+                role: str(source.resolve())
+                for role, (_destination, source) in requested.items()
+                if source is not None
             },
         }
     _write_cache_layout(marker_path, layout)
@@ -1238,7 +1254,7 @@ def initialize_ramdisk_caches(settings: Settings) -> None:
             _cache_tree_size(destination)
             log(f"采用已有且无工作区副本的 Z: {role} cache: {destination}")
             continue
-        if source.exists():
+        if source is not None and source.exists():
             byte_count = source_sizes[role]
             log(
                 f"首次迁移 {role} cache（{byte_count / (1024 * 1024):.1f} MiB）: "
@@ -1279,13 +1295,25 @@ def prepare(settings: Settings) -> Path:
         validate_ports(settings.port, settings.udp_port)
 
     log(f"项目根目录: {settings.project_root}")
+    log(f"Railroader 版本来源: {settings.railroader_build}")
     log(f"本地模组源: {settings.mod_source}")
     log(f"BuildCraft 本地源包（Workshop {BUILDCRAFT_WORKSHOP_ID}）: {buildcraft_source}")
     ensure_directory(settings.client_cache, "客户端缓存", settings.dry_run)
     if settings.server_cache.resolve() == settings.client_cache.resolve():
         raise RunnerError("服务器缓存与客户端缓存必须是不同目录")
 
+    configure_server_mod_profile(settings)
+
     stage_mod(settings.mod_source, settings.server_cache, "服务器", settings.dry_run)
+    if settings.railroader_build == "preview":
+        stage_mod(
+            settings.railroader_preview_source,
+            settings.server_cache,
+            "服务器 Railroader 预览版",
+            settings.dry_run,
+            RAILROADER_MOD_ID,
+            RAILROADER_PREVIEW_DIRECTORY,
+        )
     stage_mod(
         buildcraft_source,
         settings.server_cache,
@@ -1295,6 +1323,15 @@ def prepare(settings: Settings) -> Path:
     )
     if not settings.no_client:
         stage_mod(settings.mod_source, settings.client_cache, "客户端", settings.dry_run)
+        if settings.railroader_build == "preview":
+            stage_mod(
+                settings.railroader_preview_source,
+                settings.client_cache,
+                "客户端 Railroader 预览版",
+                settings.dry_run,
+                RAILROADER_MOD_ID,
+                RAILROADER_PREVIEW_DIRECTORY,
+            )
         stage_mod(
             buildcraft_source,
             settings.client_cache,
@@ -1306,6 +1343,92 @@ def prepare(settings: Settings) -> Path:
     return settings.server_cache / "server-console.txt"
 
 
+def configure_server_mod_profile(settings: Settings) -> None:
+    """Write the selected Railroader source into this mode's server cache."""
+
+    workshop_items = (
+        WORKSHOP_SERVER_ITEMS
+        if settings.railroader_build == "workshop"
+        else PREVIEW_SERVER_ITEMS
+    )
+    options = {
+        "Mods": SERVER_MOD_LIST,
+        "WorkshopItems": workshop_items,
+    }
+    profile = settings.server_cache / "Server" / f"{SERVER_NAME}.ini"
+    if settings.dry_run:
+        if not profile.is_file():
+            template = _server_profile_template(settings, profile)
+            if template is not None:
+                log(f"[dry-run] 将从完整测试服务器配置复制: {template} -> {profile}")
+        log(f"[dry-run] 将更新服务器模组配置: {profile} ({settings.railroader_build})")
+        return
+
+    if not profile.is_file():
+        template = _server_profile_template(settings, profile)
+        if template is not None:
+            try:
+                profile.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(template, profile)
+                log(f"已从完整测试服务器配置初始化: {template} -> {profile}")
+            except OSError as exc:
+                raise RunnerError(f"无法复制服务器配置模板 {template} -> {profile}: {exc}") from exc
+
+    existing_lines: list[str] = []
+    if profile.is_file():
+        try:
+            existing_lines = profile.read_text(encoding="utf-8-sig").splitlines()
+        except OSError as exc:
+            raise RunnerError(f"无法读取服务器配置 {profile}: {exc}") from exc
+
+    values = {key.casefold(): (key, value) for key, value in options.items()}
+    written: set[str] = set()
+    updated_lines: list[str] = []
+    for line in existing_lines:
+        stripped = line.lstrip()
+        if not stripped or stripped.startswith(("#", ";")) or "=" not in line:
+            updated_lines.append(line)
+            continue
+        key = line.split("=", 1)[0].strip().casefold()
+        if key in values:
+            canonical_key, value = values[key]
+            updated_lines.append(f"{canonical_key}={value}")
+            written.add(key)
+        else:
+            updated_lines.append(line)
+    for key, value in options.items():
+        if key.casefold() not in written:
+            updated_lines.append(f"{key}={value}")
+
+    updated_text = "\n".join(updated_lines) + "\n"
+    if existing_lines and updated_text == "\n".join(existing_lines) + "\n":
+        return
+    try:
+        profile.parent.mkdir(parents=True, exist_ok=True)
+        profile.write_text(updated_text, encoding="utf-8", newline="\n")
+    except OSError as exc:
+        raise RunnerError(f"无法写入服务器配置 {profile}: {exc}") from exc
+
+
+def _server_profile_template(settings: Settings, profile: Path) -> Path | None:
+    """Find an existing full test profile without copying other cache data."""
+
+    candidates = [
+        settings.run_bat.parent
+        / "runtime"
+        / "server"
+        / "Server"
+        / f"{SERVER_NAME}.ini"
+    ]
+    profile_key = profile.resolve().as_posix().casefold()
+    for candidate in candidates:
+        if candidate.resolve().as_posix().casefold() == profile_key:
+            continue
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="准备并启动 Railroader RV 的独立服务器与常规 Project Zomboid 客户端。"
@@ -1313,6 +1436,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project-root", type=Path, help="项目根目录（默认按脚本位置发现）")
     parser.add_argument("--run-bat", type=Path, help="服务器入口 run.bat")
     parser.add_argument("--mod-source", type=Path, help="本地 RailroaderRV 模组目录")
+    parser.add_argument(
+        "--railroader-build",
+        choices=("workshop", "preview"),
+        default="workshop",
+        help="Railroader 来源；默认 Workshop 正式版，preview 使用本地预览包",
+    )
     parser.add_argument(
         "--buildcraft-source",
         "--buildcraft-mod-source",
@@ -1326,12 +1455,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--server-cache",
         type=Path,
-        help=f"服务器完整用户缓存目录（默认 {RAMDISK_CACHE_ROOT / 'server'}）",
+        help="服务器缓存目录；preview 将此路径作为 base 并追加 preview 子目录",
     )
     parser.add_argument(
         "--client-cache",
         type=Path,
-        help=f"客户端完整用户缓存目录（默认 {RAMDISK_CACHE_ROOT / 'client'}）",
+        help="客户端缓存目录；preview 将此路径作为 base 并追加 preview 子目录",
     )
     parser.add_argument("--client-exe", type=Path, help="ProjectZomboid64.exe 的路径")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="服务器 DefaultPort")
@@ -1377,12 +1506,25 @@ def make_settings(args: argparse.Namespace) -> Settings:
         and (mod_source / "mod.info").is_file()
     ):
         mod_source = mod_source.parent
+    railroader_preview_source = (
+        project_root / "Railroader-prerelease" / RAILROADER_PREVIEW_DIRECTORY
+    )
     server_cache = resolve_path(args.server_cache, project_root)
     client_cache = resolve_path(args.client_cache, project_root)
     server_cache_is_default = server_cache is None
     client_cache_is_default = client_cache is None
-    server_cache = server_cache or (RAMDISK_CACHE_ROOT / "server")
-    client_cache = client_cache or (RAMDISK_CACHE_ROOT / "client")
+    if args.railroader_build == "preview":
+        if server_cache is not None:
+            server_cache = server_cache / "preview"
+        if client_cache is not None:
+            client_cache = client_cache / "preview"
+    mode_cache_root = (
+        run_bat.parent / "runtime" / "preview"
+        if args.railroader_build == "preview"
+        else RAMDISK_CACHE_ROOT
+    )
+    server_cache = server_cache or (mode_cache_root / "server")
+    client_cache = client_cache or (mode_cache_root / "client")
     client_exe = resolve_path(args.client_exe, Path.cwd())
     if client_exe is None and not args.no_client:
         client_exe = discover_client(None)
@@ -1392,6 +1534,8 @@ def make_settings(args: argparse.Namespace) -> Settings:
         project_root=project_root,
         run_bat=run_bat,
         mod_source=mod_source,
+        railroader_build=args.railroader_build,
+        railroader_preview_source=railroader_preview_source,
         buildcraft_source=buildcraft_source,
         server_cache=server_cache,
         client_cache=client_cache,
@@ -1444,7 +1588,11 @@ def run(settings: Settings) -> int:
         return 0
 
     runtime_root = settings.run_bat.parent / "runtime"
-    instance_state_path = runtime_root / INSTANCE_STATE_FILENAME
+    instance_state_path = (
+        runtime_root / "preview" / INSTANCE_STATE_FILENAME
+        if settings.railroader_build == "preview"
+        else runtime_root / INSTANCE_STATE_FILENAME
+    )
     instance_lock = _acquire_instance_lock(runtime_root, settings.run_bat)
     server_process: subprocess.Popen[bytes] | None = None
     instance_state: dict[str, object] | None = None
@@ -1498,7 +1646,11 @@ def run(settings: Settings) -> int:
             time.sleep(1.0)
             now = time.monotonic()
             if (
-                (settings.server_cache_is_default or settings.client_cache_is_default)
+                settings.railroader_build == "workshop"
+                and (
+                    settings.server_cache_is_default
+                    or settings.client_cache_is_default
+                )
                 and now - last_space_check >= 15.0
             ):
                 ramdisk_warning_level = _warn_if_ramdisk_low(

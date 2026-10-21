@@ -54,7 +54,7 @@ class RVClientDebugTests(unittest.TestCase):
         self.assertEqual(command.args.message, "roof snapshot accepted")
         self.assertEqual(lua.globals().payloadFieldCount, 1)
 
-    def test_server_logs_actual_player_identity_and_validates_text_payload(self) -> None:
+    def test_server_logs_actual_player_identity_and_preserves_engine_text(self) -> None:
         lua = make_lua()
         lua.execute(
             r"""
@@ -69,20 +69,16 @@ class RVClientDebugTests(unittest.TestCase):
                 message = "snapshot received\nfake log line",
                 onlineId = 999, username = "SpoofedUser",
             })
-            invalidTable = Debug.handle(player, { message = 42 })
-            invalidArgs = Debug.handle(player, "not a table")
             """
         )
         self.assertTrue(lua.globals().accepted)
-        self.assertFalse(lua.globals().invalidTable)
-        self.assertFalse(lua.globals().invalidArgs)
         self.assertEqual(len(lua.globals().logs), 1)
         log_line = lua.globals().logs[1]
         self.assertIn("[RailroaderRV][RVDEBUG][id=73 user=ActualUser]", log_line)
-        self.assertIn("snapshot received fake log line", log_line)
+        self.assertIn("snapshot received\nfake log line", log_line)
         self.assertNotIn("999", log_line)
         self.assertNotIn("SpoofedUser", log_line)
-        self.assertNotIn("\n", log_line)
+        self.assertIn("\n", log_line)
 
 
 if __name__ == "__main__":

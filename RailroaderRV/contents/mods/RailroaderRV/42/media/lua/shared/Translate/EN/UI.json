@@ -222,5 +222,10 @@
     "UI_RailroaderRV_Utility_ExtractionPumpHelp": "When the RV is near a river, lake, or other water source, carrying a rubber hose enables automatic refilling. This uses RV power.",
     "UI_RailroaderRV_Utility_MissingRubberHose": "Missing rubber hose",
     "UI_RailroaderRV_Utility_MissingPower": "Missing power",
-    "UI_RailroaderRV_Utility_NoNearbyNaturalWater": "No nearby natural water source"
+    "UI_RailroaderRV_Utility_NoNearbyNaturalWater": "No nearby natural water source",
+    "UI_RailroaderRV_TemplateDevelopmentSize": "North-south length × east-west width (e.g. 23x6)",
+    "UI_RailroaderRV_TemplateDevelopmentType": "Railroader unit type",
+    "UI_RailroaderRV_TemplateDevelopmentNorthSouthLength": "North-south length (tiles)",
+    "UI_RailroaderRV_TemplateDevelopmentEastWestWidth": "East-west width (tiles)",
+    "UI_RailroaderRV_TemplateDevelopmentSubmit": "Generate"
 }

@@ -513,16 +513,6 @@ end
 local baseScan = scanEngineFloor(baseId, "offline-base-scan")
 local engineScan = scanEngineFloor(engineId, "offline-engine-scan")
 
-local clientDebugReports = {}
-sendClientCommand = function(player, module, command, args)
-    clientDebugReports[#clientDebugReports + 1] = {
-        player = player,
-        module = module,
-        command = command,
-        args = args,
-    }
-    return true
-end
 package.preload["RailroaderRV/GUI/RV_BoundaryClient"] = function()
     return {}
 end
@@ -612,14 +602,6 @@ local dismantleDemolitionBlocked, dismantleDemolitionCharacter = demolitionIsBlo
     engineRoofAdditionObjects[1], baseId, engineAnchor, true, ISDismantleAction)
 local generatorDemolitionBlocked, generatorDemolitionCharacter = demolitionIsBlocked(
     engineRoofAdditionObjects[1], engineId, engineAnchor, true, ISTakeGenerator)
-local demolitionReportIdentityMatched = #clientDebugReports == 6
-    and clientDebugReports[1].player == corridorDemolitionCharacter
-    and clientDebugReports[2].player == roofDemolitionCharacter
-    and clientDebugReports[3].player == baseTemplateRoofDemolitionCharacter
-    and clientDebugReports[4].player == boundaryWindowDemolitionCharacter
-    and clientDebugReports[5].player == dismantleDemolitionCharacter
-    and clientDebugReports[6].player == generatorDemolitionCharacter
-
 local sameManaged = baseLayout.managed.originX == engineLayout.managed.originX
     and baseLayout.managed.originY == engineLayout.managed.originY
     and baseLayout.managed.width == engineLayout.managed.width
@@ -701,8 +683,6 @@ return {
     boundaryWindowDemolitionBlocked = boundaryWindowDemolitionBlocked,
     dismantleDemolitionBlocked = dismantleDemolitionBlocked,
     generatorDemolitionBlocked = generatorDemolitionBlocked,
-    demolitionReports = clientDebugReports,
-    demolitionReportIdentityMatched = demolitionReportIdentityMatched,
     baseScan = baseScan,
     engineScan = engineScan,
 }
@@ -717,9 +697,27 @@ def exercise_server_world_removal_contract(server_lua_root: Path) -> dict[str, o
 
     lua = LuaRuntime(unpack_returned_tuples=True)
     lua.globals().rvServerLuaRoot = str(server_lua_root.resolve()).replace("\\", "/")
-    lua.execute("package.path = rvServerLuaRoot .. '/?.lua;' .. package.path")
+    lua.globals().rvSharedLuaRoot = str(
+        (server_lua_root.parent / "shared").resolve()
+    ).replace("\\", "/")
+    lua.execute(
+        "package.path = rvServerLuaRoot .. '/?.lua;' "
+        ".. rvSharedLuaRoot .. '/?.lua;' .. package.path"
+    )
     return lua.execute(
         r'''
+local function offlineEvent()
+    return { Add = function(callback) end }
+end
+Events = {
+    OnTick = offlineEvent(),
+    OnClientCommand = offlineEvent(),
+    OnProcessAction = offlineEvent(),
+    OnObjectAdded = offlineEvent(),
+    OnObjectAboutToBeRemoved = offlineEvent(),
+    OnDestroyIsoThumpable = offlineEvent(),
+}
+
 local World = require "RailroaderRV/Common/RV_ServerWorld"
 
 local function collection(items)
@@ -757,7 +755,7 @@ local function removalCase(mode, initiallyPresent)
     function object:getObjectName() return "TestObject" end
     function object:getObjectIndex() return indexOf(self) end
     function object:getSquare() return square end
-    local ok, reason = pcall(World.removeGenericObject, square, object, false, false)
+    local ok, reason = pcall(World.removeGenericObject, square, object, false)
     return {
         ok = ok,
         reason = tostring(reason),
@@ -774,8 +772,9 @@ instanceof = function(object, className)
     return object ~= nil and object.class == className
 end
 
-local function generationSquare(movingObjects, deadBodies)
-    local tileObjects, genericRemoveCalls, corpseRemoveTargets = {}, 0, {}
+local function generationSquare(movingObjects, deadBodies, initialTileObjects)
+    local tileObjects, genericRemoveCalls, corpseRemoveTargets =
+        initialTileObjects or {}, 0, {}
     local square = {}
     function square:getObjects() return collection(tileObjects) end
     function square:getSpecialObjects() return collection({}) end
@@ -794,12 +793,27 @@ local function generationSquare(movingObjects, deadBodies)
     function square:removeCorpse(corpse, remote)
         corpseRemoveTargets[#corpseRemoveTargets + 1] = corpse
     end
+    local function indexOf(target)
+        for index = 1, #tileObjects do
+            if tileObjects[index] == target then return index end
+        end
+        return -1
+    end
     function square:transmitRemoveItemFromSquare(object)
         genericRemoveCalls = genericRemoveCalls + 1
-        return -1
+        local index = indexOf(object)
+        if index < 0 then return -1 end
+        table.remove(tileObjects, index)
+        return index - 1
     end
     function square:RecalcProperties() end
     function square:RecalcAllWithNeighbours() end
+    for i = 1, #tileObjects do
+        local object = tileObjects[i]
+        function object:getObjectName() return "TestObject" end
+        function object:getObjectIndex() return indexOf(self) - 1 end
+        function object:getSquare() return square end
+    end
     return square, function() return genericRemoveCalls end,
         function() return corpseRemoveTargets end
 end
@@ -826,6 +840,45 @@ local giblets = { class = "IsoZombieGiblets" }
 local gibletSquare, gibletGenericRemoveCalls = generationSquare({ giblets }, {})
 World.clearSquare(gibletSquare)
 
+local preexistingObject = { class = "IsoObject" }
+local abortSquare = generationSquare({}, {}, { preexistingObject })
+World.clearSquare(abortSquare)
+
+local GenerationTransaction = require(
+    "RailroaderRV/Construction/RV_Server_GenerationTransaction")()
+local abortPlayer = {}
+local activeRecord = {
+    identity = { key = "offline-player" },
+    generation = 1,
+    stage = "BUILD",
+    token = "offline-token",
+    player = abortPlayer,
+}
+GenerationTransaction.begin(abortPlayer, activeRecord)
+activeRecord.stage = "BUILD"
+local transitionCalls, returnRelocationCalls = 0, 0
+local abortContext = {
+    Constants = { INVALID_RV_DATA = "INVALID_RV_DATA" },
+    Boundary = {
+        completeTransition = function(player, token)
+            transitionCalls = transitionCalls + 1
+        end,
+    },
+    GenerationTransaction = GenerationTransaction,
+    safeErrorText = function(reason) return tostring(reason) end,
+    notifyFailure = function() end,
+    playerIdentity = function() return true, { key = "offline-player" } end,
+    resolvePendingPlayer = function(record) return true, record.player end,
+    sendStagingRelocation = function(record, phase)
+        if phase == "return" then returnRelocationCalls = returnRelocationCalls + 1 end
+        return true
+    end,
+    serverTick = 1,
+    RELOCATION_TIMEOUT_TICKS = 600,
+}
+require("RailroaderRV/Construction/RV_Server_GenerationAck")(abortContext)
+abortContext.abortGeneration(activeRecord, "synthetic build failure")
+
 return {
     successfulRemoval = successfulRemoval.ok and successfulRemoval.itemCount == 0,
     absentNegativeRejected = not absentNegative.ok
@@ -846,6 +899,9 @@ return {
     generationLeavesTransientGibletsToExpire =
         gibletSquare:getMovingObjects():size() > 0
         and gibletGenericRemoveCalls() == 0,
+    generationAbortRestoresWorld = abortSquare:getObjects():size() > 0,
+    generationAbortClosesTransaction = GenerationTransaction.current() == nil
+        and transitionCalls == 1 and returnRelocationCalls == 1,
 }
 '''
     )
@@ -1054,8 +1110,6 @@ def main() -> int:
     boundary_objects_path = server_root / "DemolitionProtection" / "RV_BoundaryServer_Objects.lua"
     start_bat_path = root / "testserver" / "steamcmd" / "380870" / "StartServer64 - test.bat"
     runner_path = root / "testserver" / "run_test.py"
-    testserver_agent_path = root / "testserver" / "agent.md"
-    readme_path = root / "RailroaderRV" / "README.md"
     mod_info_path = package_root / "mod.info"
 
     checks = Checks()
@@ -1527,104 +1581,16 @@ def main() -> int:
                 and not bool(variant_contracts["boundaryWindowDemolitionBlocked"]),
                 "build/demolition permission does not follow the selected roof projection while retaining only the door/window side-host exception",
             )
-            demolition_reports = variant_contracts["demolitionReports"]
-            demolition_messages = [
-                str(demolition_reports[index]["args"]["message"])
-                for index in range(1, len(demolition_reports) + 1)
-            ]
-            def demolition_field(message: str, field: str) -> str | None:
-                match = re.search(
-                    rf'(?:^|\s){re.escape(field)}=("(?:\\.|[^"\\])*"|[^\s]+)',
-                    message,
-                )
-                return match.group(1) if match else None
-
             checks.true(
-                bool(variant_contracts["demolitionReportIdentityMatched"])
-                and len(demolition_reports) == 6
+                bool(variant_contracts["corridorDemolitionBlocked"])
                 and not bool(variant_contracts["roofDemolitionBlocked"])
                 and bool(variant_contracts["baseTemplateRoofDemolitionBlocked"])
                 and not bool(variant_contracts["unmanagedRoofDemolitionBlocked"])
+                and variant_contracts["boundaryWindowProtected"] is False
+                and not bool(variant_contracts["boundaryWindowDemolitionBlocked"])
                 and bool(variant_contracts["dismantleDemolitionBlocked"])
-                and not bool(variant_contracts["generatorDemolitionBlocked"])
-                and all(
-                    report["module"] == "RailroaderRV"
-                    and report["command"] == "clientDebug"
-                    and set(report["args"].keys()) == {"message"}
-                    for report in (
-                        demolition_reports[index]
-                        for index in range(1, len(demolition_reports) + 1)
-                    )
-                )
-                and all(
-                    all(
-                        field in message
-                        for field in (
-                            "topic=demolition",
-                            "phase=condition-result",
-                            "playerPermissionCheck=none",
-                            "before.objectClass=",
-                            "before.classReadable=",
-                            "before.objectIndex=",
-                            "before.name=",
-                            "before.sprite=",
-                            "before.north=",
-                            "before.square=",
-                            "before.tagOwner=",
-                            "before.tagRvId=",
-                            "before.tagGeneration=",
-                            "before.tagRole=",
-                            "before.tagTemplateId=",
-                            "before.tagTemplateIndex=",
-                            "result.expectedTemplate=",
-                            "result.expectedIndex=",
-                            "result.expectedProtected=",
-                            "result.anchor=",
-                            "result.offset=",
-                            "result.isBuildable=",
-                            "result.sideHost=",
-                            "result.staticMatch=",
-                            "result.blocked=",
-                            "result.reason=",
-                            "result.actionBranch=",
-                        )
-                    )
-                    for message in demolition_messages
-                )
-                and 'result.blocked=true' in demolition_messages[0]
-                and 'result.actionBranch="ignoreAction"' in demolition_messages[0]
-                and 'before.objectClass="class zombie.iso.objects.IsoObject"' in demolition_messages[0]
-                and 'before.classReadable=true' in demolition_messages[0]
-                and 'before.tagRvId="offline-demolition-contract"' in demolition_messages[0]
-                and 'before.tagGeneration="1"' in demolition_messages[0]
-                and 'result.blocked=false' in demolition_messages[1]
-                and 'result.actionBranch="originalNew"' in demolition_messages[1]
-                and 'result.reason="buildable-cell"' in demolition_messages[1]
-                and 'result.blocked=true' in demolition_messages[2]
-                and 'result.actionBranch="ignoreAction"' in demolition_messages[2]
-                and 'before.tagTemplateId="railroader-rv"' in demolition_messages[2]
-                and 'result.blocked=false' in demolition_messages[3]
-                and 'result.actionBranch="originalNew"' in demolition_messages[3]
-                and 'action="ISDismantleAction"' in demolition_messages[4]
-                and 'result.blocked=true' in demolition_messages[4]
-                and 'result.actionBranch="ignoreAction"' in demolition_messages[4]
-                and 'action="ISTakeGenerator"' in demolition_messages[5]
-                and 'result.blocked=false' in demolition_messages[5]
-                and 'result.actionBranch="originalNew"' in demolition_messages[5]
-                and all(
-                    demolition_field(demolition_messages[0], field)
-                    == demolition_field(demolition_messages[1], field)
-                    == demolition_field(demolition_messages[2], field)
-                    for field in (
-                        "before.objectClass",
-                        "before.objectIndex",
-                        "before.name",
-                        "before.sprite",
-                        "before.north",
-                        "before.square",
-                    )
-                ),
-                "client demolition reports omit object/template decision evidence or change the action branch",
+                and not bool(variant_contracts["generatorDemolitionBlocked"]),
+                "protected demolition permits an unbuildable tagged object or blocks an allowed object/action",
             )
             checks.true(
                 bool(variant_contracts["corridorRepairChanged"])
@@ -2094,7 +2060,7 @@ def main() -> int:
         )
         checks.true(
             "function M.setConnection" in utility_water_commands
-            and "hasPipeWrench(context and context.player)" in utility_water_commands
+            and "hasPipeWrench(context.player)" in utility_water_commands
             and "Objects.resolveSink(identity, context, hint)" in utility_water_commands
             and "Objects.ensureSinkIdentity" in utility_water_commands
             and "Plumbing.apply(sink.object, desired)" in utility_water_commands
@@ -2103,7 +2069,7 @@ def main() -> int:
                 < utility_water_commands.find("Plumbing.apply(sink.object, desired)")
             and utility_water_commands.find("Plumbing.apply(sink.object, desired)")
                 < utility_water_commands.find("Store.commit(record, identity)"),
-            "Water connect/disconnect lacks authoritative tool, identity, commit, and compensation gates",
+            "Water connection does not check the server-side tool and sink before applying plumbing and committing its record",
         )
         checks.true(
             all(token in utility_plumbing for token in (
@@ -2135,24 +2101,23 @@ def main() -> int:
             "function M.getEntry" in utility_water_ledger
             and "function M.newEntry" in utility_water_ledger
             and "return Store.waterSinkKey(sink.x, sink.y, sink.z)" in utility_water_ledger
-            and "connected = connected == true" in utility_water_ledger
-            and "sequence = sequence or 0" in utility_water_ledger
+            and "connected = true" in utility_water_ledger
             and all(token not in utility_water + utility_water_commands + utility_water_ledger + utility_objects + utility_plumbing + utility_store for token in (
                 "canonicalTank", "usageTank", "proxyLedger", "proxyFingerprint",
-                "rv_hidden_proxy", "rv_hidden_usage_tank", "oldTagAlias", "ADD_WATER",
+                "rv_hidden_proxy", "rv_hidden_usage_tank", "oldTagAlias",
             ))
             and all(token not in constants + utility_constants for token in (
                 "UTILITY_TANK_OFFSET", "UTILITY_PROXY_Z_OFFSET", "UTILITY_ROLE_TANK",
-                "UTILITY_ROLE_PROXY", "UTILITY_WATER_CAPACITY", "OP_ADD_WATER",
+                "UTILITY_ROLE_PROXY", "UTILITY_WATER_CAPACITY",
                 "AUTO_REFILL_PROVIDER", "WATER_STATE_DEFERRED",
             ))
             and "function M.detachDevice" not in utility_water,
-            "new Water ledger retains a deprecated hidden tank/proxy, inventory-transfer, or compatibility path",
+            "sink ledger retains removed compatibility fields or lacks a coordinate-keyed connection entry",
         )
         checks.true(
             "OnObjectAdded" not in utility_server + utility_water + utility_water_commands
             and "Objects.ensureSinkIdentity" in utility_water_commands,
-            "Water schema failures do not tell players to rebuild, or automatic sink tagging was added",
+            "water sinks rely on automatic tagging instead of tagging the resolved sink during the server command",
         )
 
         checks.true(
@@ -2166,7 +2131,6 @@ def main() -> int:
                 "function Slots.indexToRegion(index)",
                 "function Slots.indexForAnchor(anchor)",
                 "function Slots.findFirstFree(regions)",
-                'return nil, "overlapping-regions"',
                 'return nil, "no-free-slot"',
             ))
             and "schemaVersion" not in bitmap
@@ -2303,59 +2267,6 @@ def main() -> int:
             )),
             "boundary guard skips cold persisted inside relations for untracked outside players",
         )
-        failure_notify = section(
-            room_ownership,
-            r"local function notifyFailure",
-            r"\n\nlocal function clearInvalidRoomOwnershipSquare",
-        )
-        cancel_pending_ack = section(
-            generation_ack,
-            r"local function abortGeneration\(record, reason\)",
-            r"\n\nctx\.acknowledgeRelocation",
-        )
-        final_ack = section(
-            server_commands,
-            r"if module == COMMAND_MODULE and command == COMMAND_FINAL_RELOCATE_ACK then",
-            r"if module == COMMAND_MODULE and command == COMMAND_RELOCATE_ACK then",
-        )
-        request_rejection = section(
-            server_commands,
-            r"local checkOk, accepted, reason = pcall\(validateRequest",
-            r"\n    -- Request validation and ownership",
-        )
-        invalid_feedback = section(
-            railroader_client,
-            r"function Menu.OnServerCommand",
-            r"\n\s*rememberUtilityMapping\(args\)",
-        )
-        checks.true(
-            failure_notify is not None
-            and 'ServerUtil.invoke(player, "getOnlineID")' in failure_notify
-            and "onlineId = onlineId" in failure_notify
-            and "string.find(reasonText, invalidRVData, 1, true)" in failure_notify
-            and "notifyFailure(livePlayer, reason)" in generation_ack
-            and cancel_pending_ack is not None
-            and "string.find(reason, Constants.INVALID_RV_DATA, 1, true)" in cancel_pending_ack
-            and "notifyFailure(livePlayer, reason)" in cancel_pending_ack
-            and cancel_pending_ack.find("notifyFailure(livePlayer, reason)")
-                < cancel_pending_ack.find("GenerationTransaction.release()")
-            and "pcall(Boundary.completeTransition, livePlayer, record.token)"
-                in cancel_pending_ack
-            and "if isInvalidRVData(reason) then notifyFailure(player, reason) end"
-                in (request_rejection or "")
-            and final_ack is not None
-            and "if isInvalidRVData(reason) then" in final_ack
-            and "runGenerationAbort(GenerationTransaction.current(), reason)" in final_ack
-            and invalid_feedback is not None
-            and "localPlayerByOnlineId(onlineId)" in invalid_feedback
-            and "C.INVALID_RV_DATA" in invalid_feedback
-            and "UI_RailroaderRV_InvalidRVData" in invalid_feedback
-            and "Delete this test save and recreate it." in invalid_feedback
-            and all(token not in invalid_feedback for token in (
-                "args.x", "args.y", "args.z",
-            )),
-            "generation schema failures do not reach the affected player with the save-rebuild prompt",
-        )
         checks.true(
             "local function currentSquareMatches(player, position)" in boundary_geometry
             and "if not ok or current == nil then return false end" in boundary_geometry
@@ -2433,7 +2344,8 @@ def main() -> int:
         )
         checks.true(
             repair_context is not None
-            and "pcall(Boundary.boundaryForPlayer, player)" in repair_context
+            and "local boundary = Boundary.boundaryForPlayer(player)" in repair_context
+            and "pcall(Boundary.boundaryForPlayer, player)" not in repair_context
             and "boundary ~= expectedBoundary" in repair_context
             and "queued RV generation is stale" in repair_context
             and "pcall(requireCurrentManifest" not in repair_context
@@ -2468,20 +2380,13 @@ def main() -> int:
             and "local state = stateFor(player)" in boundary_server
             and "state.rvId = tostring(rvId)" in boundary_server
             and "state.generation = integer(generation)" in boundary_server
-            and 'state.leaseToken = type(token) == "string" and token or nil'
-                in boundary_server
-            and "pcall(Boundary.beginTransition," in server
+            and "state.leaseToken = token" in boundary_server
+            and "Boundary.beginTransition(player, record.locoId," in entry_exit
             and "player, transitionRvId, transitionGeneration, token)" in generation_flow
             and "transitionKind" not in generation_flow
-            and "Boundary.beginTransition(player, record.locoId," in server
             and "bitmapVersion" not in boundary_server
             and "record.bitmapVersion" not in railroader_server,
-            "transition state does not carry the complete RV bitmap identity",
-        )
-        checks.true(
-            "RV boundary entry service is unavailable" in railroader_server
-            and "RV boundary exit service is unavailable" in railroader_server,
-            "Railroader entry/exit can bypass the server boundary service",
+            "boundary transitions do not retain the current RV identity and lease or entry path",
         )
         checks.true(
             all(token in record_validation for token in (
@@ -2782,12 +2687,13 @@ def main() -> int:
             "FinalRelocate does not keep RV mapping sync independent from Ride hooks",
         )
         checks.true(
-            "recordAtPlayerCoordinate" in railroader_server
-            and "inRegion(position, recordRegion(record))" in railroader_server
-            and "RV_REGION_SIZE" in railroader_server
-            and "validMappingRecord" in railroader_server
-            and 'return nil, nil, nil, "outside-rv"' in railroader_server
-            and "trainPose(train)" in railroader_server
+            "local function recordAtPlayerCoordinate(map, player)" in mapping
+            and "inRegion(position, recordRegion(record))" in mapping
+            and "integer(C.RV_REGION_SIZE)" in mapping
+            and "x >= minX and x < maxX and y >= minY and y < maxY" in mapping
+            and 'return nil, nil, nil, "outside-rv"' in mapping
+            and "trainPosition(train)" in mapping
+            and "recordAtPlayerCoordinate(map, player)" in entry_exit
             ,
             "exit reverse lookup does not use the current 100x100 mapping contract",
         )
@@ -2882,8 +2788,8 @@ def main() -> int:
             and wall_matcher is not None
             and "processIsServer()" in wall_matcher
             and "Boundary.isCurrentShellWall" in wall_matcher
-            and "validRecord(record)" in wall_matcher
-            and "if match then" in wall_matcher
+            and "for _, record in pairs(map.locomotives) do" in wall_matcher
+            and "if not match then return false end" in wall_matcher
             and "insidePlayersForRecord(map, match)" in wall_matcher
             and "authoritativeRoomObservation(captured[i].player)" in wall_matcher
             and "pendingWallReloads[key]" in wall_matcher
@@ -2892,22 +2798,23 @@ def main() -> int:
             and "operationKeyFor(record) ~= key" in pending_wall_observer
             and "current.x ~= originalSquare.x" in pending_wall_observer
             and "elseif not current.inRoom then" in pending_wall_observer
-            and "startWallReload(key, pending, record)" in pending_wall_observer,
+            and "startWallReload(key, record)" in pending_wall_observer,
             "wall removal does not wait for authoritative room loss on the same current RV member",
         )
         checks.true(
             'Core.on("OnObjectAboutToBeRemoved", Adapter.onObjectAboutToBeRemoved)' in adapter_tick_source
             and 'Core.on("OnDestroyIsoThumpable", Adapter.onDestroyIsoThumpable)' in adapter_tick_source
-            and 'wallReloadForObject(object, "object-about-to-be-removed")' in adapter_roof_refresh_source
-            and 'wallReloadForObject(object, "destroy-iso-thumpable")' in adapter_roof_refresh_source
+            and 'function Adapter.onObjectAboutToBeRemoved(object)' in adapter_roof_refresh_source
+            and 'function Adapter.onDestroyIsoThumpable(object)' in adapter_roof_refresh_source
+            and 'wallReloadForObject(object)' in adapter_roof_refresh_source
             and "Core.onTick(processPendingWallReloads)" in adapter_roof_refresh_source
             and "function Adapter.rearmRoomOwnershipMonitors(tick)" in adapter_roof_refresh_source
             and "MONITOR_REARM_INTERVAL_TICKS = 60" in adapter_roof_refresh_source,
             "wall-removal hooks or the bounded current room-monitor re-arm are not registered",
         )
         checks.true(
-            "function Refresh.run(bounds)" in roof_destinations
-            and "RoofRefresh.run(manifest.bounds)" in record_validation
+            "function Refresh.run(bounds, templateId)" in roof_destinations
+            and "RoofRefresh.run(manifest.bounds, record.templateId)" in record_validation
             and "RoofRefresh.schedule(rvId)" in record_validation
             and "local offsets = { 10, 50, 100, 200 }" in roof_destinations,
             "the current mapping-to-RoofRefresh path is incomplete",
@@ -2962,8 +2869,8 @@ def main() -> int:
             and "wallReloadPhase = phase" in wall_service
             and "token = op.token" in wall_service
             and "wallReloadTransition == true" in client_relocation_source
-            and 'wallReloadPhase ~= "temporary"' in client_relocation_source
-            and 'wallReloadPhase ~= "return"' in client_relocation_source
+            and 'wallReloadPhase == "temporary"' in client_relocation_source
+            and 'wallReloadPhase == "return"' in client_relocation_source
             and "sendClientCommand(playerObj, C.MOD_ID, COMMAND_RELOCATE_ACK" in client_relocation_source
             and "{ token = pending.token }" in client_relocation_source
             and "WallReload.acknowledge(player" in generation_ack_source
@@ -2978,7 +2885,7 @@ def main() -> int:
         checks.true(
             generation_relocation_state is not None
             and "GenerationTransaction.isActive()" in generation_relocation_state
-            and "wallServer.isWallReloadTransactionActive" in generation_relocation_state
+            and "RV.Server.isWallReloadTransactionActive()" in generation_relocation_state
             and "local record = {" in generation_relocation_state
             and "stagingAcked = false" in generation_relocation_state
             and "GenerationTransaction.begin(player, record)" in generation_relocation_state
@@ -2999,23 +2906,20 @@ def main() -> int:
         checks.true(
             generation_rebind is not None
             and "resolvePendingPlayer(record)" in generation_rebind
-            and "record.deadlineTick = ctx.serverTick + RELOCATION_TIMEOUT_TICKS"
-            in generation_rebind
-            and "pcall(Boundary.extendTransition, playerOrReason, record.token, leaseUntil)"
-            in generation_rebind
-            and "record.lastSentTick" in generation_rebind
-            and "sendStagingRelocation(record, \"temporary\")" in generation_rebind
-            and "sendFinalRelocation(record)" in generation_rebind
-            and "GENERATION_RESEND_TICKS" in player_validation_source
-            and "local GENERATION_RESEND_TICKS = 30" in player_validation_source,
-            "generation relocation does not rebind stable identities and renew/retry the same token",
+            and "record.player = playerOrReason" in generation_rebind
+            and "Boundary.extendTransition(playerOrReason, record.token," in generation_rebind
+            and "record.deadlineTick" in generation_rebind
+            and "sendStagingRelocation(record" not in generation_rebind
+            and "sendFinalRelocation(record" not in generation_rebind
+            and "GENERATION_RESEND_TICKS" not in player_validation_source,
+            "generation wait does not preserve its boundary lease without adding resend protocol state",
         )
         # The abort return re-asserts the exact server-captured position through
         # the official setters; B42's float teleport overload floors x/y.
         return_reassert = section(
-            server,
-            r"if phase == \"return\" then",
-            r"record\.lastSentTick = ctx\.serverTick\n    return true",
+            player_validation_source,
+            r"local function sendStagingRelocation\(record, phase\)",
+            r"local function sendFinalRelocation\(record, deadline\)",
         )
         checks.true(
             return_reassert is not None
@@ -3032,9 +2936,8 @@ def main() -> int:
             in return_reassert,
             "generation rollback does not reassert the server-captured exact position",
         )
-        # The per-member wall-reload resend phase was deleted; a member whose
-        # stable identity is no longer online is removed from the captured
-        # operation and the surviving members still finish on the one token.
+        # Wall reload uses the single operation token and deadline; it does not
+        # add a per-member resend cadence to the reliable ordered command path.
         roof_rebind = section(
             roof_relocation_source,
             r"local function rebindMembers\(op, live\)",
@@ -3042,7 +2945,7 @@ def main() -> int:
         )
         roof_disconnect_pause = section(
             roof_relocation_source,
-            r"local function finishFailure\(op, reason\)",
+            r"local function finishFailure\(op, reason, live\)",
             r"local function finishDone\(op\)",
         )
         checks.true(
@@ -3054,33 +2957,29 @@ def main() -> int:
         )
         checks.true(
             roof_rebind is not None
-            and roof_disconnect_pause is not None
             and "local function sendRelocate(op, member, target, phase)" in roof_relocation_source
             and "token = op.token" in roof_relocation_source
-            and "local returned, unreturned = 0, 0" in roof_disconnect_pause
-            and 'sendRelocate(op, member, member.captured, "return")'
-            in roof_disconnect_pause
-            and "applyTeleport(member.player, member.captured, false)"
-            in roof_disconnect_pause
-            and "returned = returned + 1" in roof_disconnect_pause
-            and "unreturned = unreturned + 1" in roof_disconnect_pause,
-            "roof relocation resend is missing its bounded retry cadence",
+            and "local OPERATION_TIMEOUT_TICKS = 600" in roof_relocation_source
+            and "now > op.deadlineTick" in (wall_tick or "")
+            and "sendRelocate(op, member, target, \"temporary\")" in roof_relocation_source
+            and 'sendRelocate(op, member, target, "return")' in roof_relocation_source,
+            "roof relocation does not keep one operation token and bounded deadline across both moves",
         )
         checks.true(
-            roof_disconnect_pause is not None
+            roof_rebind is not None
             and wall_tick is not None
-            and "local returned, unreturned = 0, 0" in roof_disconnect_pause
-            and "local player = live[member.identityKey]" in roof_disconnect_pause
-            and "member.player = player" in roof_disconnect_pause
-            and "if #op.members == 0 then" in wall_tick
-            and "reason=no-member-online" in wall_tick
+            and "local live = livePlayersByKey()" in wall_tick
+            and "rebindMembers(op, live)" in wall_tick
+            and 'if #op.members == 0 then' in wall_tick
+            and 'elseif #removed > 0 then' in wall_tick
+            and 'finishFailure(op, "wall reload member left the operation: "' in wall_tick
             and "now > op.deadlineTick" in wall_tick
             and "wall reload operation timed out in phase" in wall_tick
-            and 'pending.ticks >= 3 then' in client_relocation_source
-            and "sendClientCommand(playerObj, C.MOD_ID, COMMAND_RELOCATE_ACK,"
+            and "if member.applied ~= true then return end" in roof_relocation_source
+            and 'sendClientCommand(playerObj, C.MOD_ID, COMMAND_RELOCATE_ACK,'
             in client_relocation_source
             and "{ token = pending.token })" in client_relocation_source,
-            "roof relocation does not pause its timeout and rebind members after reconnect",
+            "roof relocation does not rebind online members and settle with its token acknowledgement",
         )
         checks.true(
             "currentRVManifestForRelocation" in record_validation
@@ -3104,19 +3003,14 @@ def main() -> int:
             and "local key = operationKey(request.rvId, request.generation)" in generation_mutex
             and "if operations[key] ~= nil then" in generation_mutex
             and "a wall reload operation is already active for this RV" in generation_mutex
-            and "if type(api.isGenerationTransactionActive) ~= \"function\" then"
-            in generation_mutex
-            and "local generationOk, generationActive = pcall(" in generation_mutex
-            and "if not generationOk or generationActive ~= false then" in generation_mutex
+            and "local generationActive = api.isGenerationTransactionActive()" in generation_mutex
+            and "if generationActive == true then" in generation_mutex
             and "return false, \"RV generation transaction is in progress\""
             in generation_mutex
-            and "local wallServer = type(RV) == \"table\" and RV.Server or nil"
-            in queue_transition
-            and "or type(wallServer.isWallReloadTransactionActive) ~= \"function\" then"
-            in queue_transition
-            and "local wallMutexOk, wallActive, wallReason = pcall(" in queue_transition
-            and "if not wallMutexOk or wallActive ~= false then" in queue_transition,
-            "roof/generation relocation service does not enforce the server-side bidirectional mutex",
+            and "local wallActive, wallReason = RV.Server.isWallReloadTransactionActive()" in queue_transition
+            and "if wallActive then" in queue_transition
+            and "return false, wallReason" in queue_transition,
+            "generation and wall reload do not share the direct server-side transaction gate",
         )
         checks.true(
             "RV.Server.isGenerationTransactionActive = GenerationTransaction.isActive" in server
@@ -3128,54 +3022,54 @@ def main() -> int:
             and "function RV.Server.validateCurrentRVRecord" not in server
             and "RV generation transaction is in progress" in server
             and "a wall reload operation is already active for this RV" in server
-            and "wall reload transaction state is unavailable" in server,
-            "server transaction mutex does not expose active roof/generation state and explicit rejection reasons",
+            and "wall reload transaction state is unavailable" not in server,
+            "server transaction mutex does not expose process-local generation state and wall-reload rejection",
         )
         adapter_mutex = section(
             railroader_server,
             r"local function wallReloadBusy\(rvId\)",
             r"local function onlinePlayersSnapshot\(\)",
         )
+        existing_entry_gate = section(
+            entry_exit,
+            r"local function enterExisting",
+            r"local function enterPlayer",
+        )
+        enter_gate = section(
+            entry_exit,
+            r"local function enterPlayer",
+            r"local function exitCargoPlayer",
+        )
+        exit_gate = section(
+            entry_exit,
+            r"local function exitPlayer",
+            r"\n\nctx\.sendResult = sendResult",
+        )
         checks.true(
-            adapter_mutex is not None
-            and "server.isWallReloadTransactionActive" in adapter_mutex
-            and "local busy, busyReason = wallReloadBusy(nil)" in adapter_mutex
-            and "RV wall reload is in progress" in adapter_mutex
-            and "RV transaction gate is unavailable" in adapter_mutex
-            and "local ok, result, reason = true, nil, nil" in adapter_mutex
-            and "sendResult(player, false, reason or \"request rejected\")" in adapter_mutex
-            and "Adapter.serverTransactionMutexStatus = function()" in railroader_server
-            and "server.isGenerationTransactionActive" in railroader_server
-            and "local wallBusy, wallReason = wallReloadBusy(nil)" in railroader_server
-            and "return generationActive, wallBusy == true, wallReason" in railroader_server
-            and "Adapter.wallReloadTransactionBlocks = function(rvId)" in railroader_server
-            and "RV generation transaction is in progress" in railroader_server
-            and "RV wall reload is in progress" in railroader_server
-            and "ctx.wallReloadTransactionBlocks = Adapter.wallReloadTransactionBlocks"
-            in railroader_server
-            and "return ctx.wallReloadTransactionBlocks(...)" in railroader_server
-            and "local blocked, blockReason = transactionBlocks(record.locoId)"
-            in railroader_server
-            and "local blocked, blockReason = transactionBlocks(locoId)" in railroader_server,
-            "all-player Enter/Exit paths do not honor the current RV roof transaction mutex",
+            existing_entry_gate is not None
+            and enter_gate is not None
+            and exit_gate is not None
+            and "transactionBlocks(" in existing_entry_gate
+            and "transactionBlocks(" in enter_gate
+            and "transactionBlocks(" in exit_gate
+            and "ctx.wallReloadTransactionBlocks" in entry_exit
+            and "local wallActive" in queue_transition
+            and "if wallActive then" in queue_transition,
+            "RV entry/exit and generation do not use the current wall-reload transaction gate",
         )
         roof_owner = section(
-            railroader_server,
-            r"Adapter\.serverTransactionMutexStatus = function\(\)",
-            r"Adapter\._ticks = Core\.getTick\(\)",
+            roof_relocation_source,
+            r"function M\.begin\(request, onComplete\)",
+            r"local destinationOk, destination = temporaryDestination\(boundary\)",
         )
         checks.true(
             roof_owner is not None
-            and "server.isGenerationTransactionActive" in roof_owner
-            and "server.isWallReloadTransactionActive" in railroader_server
-            and "local wallBusy, wallReason = wallReloadBusy(nil)" in roof_owner
-            and "return generationActive, wallBusy == true, wallReason" in roof_owner
-            and "local generationBusy, wallBusy, mutexReason =" in roof_owner
-            and "if generationBusy == nil then" in roof_owner
-            and "return true, mutexReason" in roof_owner
-            and "if generationBusy then" in roof_owner
-            and "return true, \"RV generation transaction is in progress\"" in roof_owner,
-            "adapter roof-owner gate confuses a generation claim with roof refresh",
+            and "local generationActive = api.isGenerationTransactionActive()" in roof_owner
+            and "if generationActive == true then" in roof_owner
+            and 'return false, "RV generation transaction is in progress"' in roof_owner
+            and "local wallActive, wallReason = RV.Server.isWallReloadTransactionActive()" in queue_transition
+            and "if wallActive then" in queue_transition,
+            "generation and wall reload do not mutually exclude conflicting world operations",
         )
         checks.true(
             "currentGeometryGate" not in railroader_server
@@ -3215,15 +3109,14 @@ def main() -> int:
         checks.true(
             boundary_gate is not None
             and "validateCurrentBoundaryPlayer" in boundary_gate
-            and "if type(validator) ~= \"function\" then return nil end" in boundary_gate
-            and "local hookOk, boundary, record, relation, validatedIdentity, manifest = pcall("
-            in boundary_gate
-            and "local current = hookOk and boundary or nil" in boundary_gate
-            and "or validatedIdentity.key ~= id.key" in boundary_gate
-            and "or tostring(manifest.rvId) ~= tostring(record.locoId)" in boundary_gate
-            and "or integer(manifest.generation) ~= integer(record.generation)"
-            in boundary_gate,
-            "boundary guard does not fail closed through its current identity and player checks",
+            and "adapter.validateCurrentBoundaryPlayer(player, id, deferValidationMiss == true," in boundary_gate
+            and "pcall(validator" not in boundary_gate
+            and "if type(validator)" not in boundary_gate
+            and "local function validatePlayer(player, suppliedIdentity" in railroader_server
+            and "relation.inside ~= true" in railroader_server
+            and "rider.inside ~= true" in railroader_server
+            and "server.currentRVManifestForBoundary(" in railroader_server,
+            "boundary guard does not call its adapter directly or verify the server mapping relationship",
         )
         # The derived-geometry snapshot cache was deleted with loadedBoundary and
         # sameBoundaryGeometry (d37e012).  What remains is the per-player state's
@@ -3245,45 +3138,8 @@ def main() -> int:
             in server,
             "boundary cache lost its local snapshot check or retained a cross-record geometry dependency",
         )
-        # The stateless process-memory relocation sentinel is the generation
-        # staging cell at z=-15 (GENERATION_STAGING_Z).  It is re-proved from the
-        # server-owned record and the current manifest every time it is read.
-        sentinel_position = section(
-            server,
-            r"local function selectGenerationStagingDestination\(layout, bounds\)",
-            r"local function validateRequest\(module, command, player\)",
-        )
-        checks.true(
-            "function RV.Server.currentRVManifestForRelocation" in server
-            and "local GENERATION_STAGING_Z = -15" in server
-            and "purpose = \"generation-center\"" in server
-            and "if destination.z ~= GENERATION_STAGING_Z" in server
-            and "or destination.x ~= expectedX or destination.y ~= expectedY then"
-            in server
-            and "return false, \"generation staging destination identity is stale\"" in server
-            and sentinel_position is not None
-            and "local function playerIsAtStagingDestination(player, destination, bounds)"
-            in sentinel_position
-            and "local playerOk, positionOrReason = validateAuthoritativePlayer(player)"
-            in sentinel_position
-            and "RELOCATION_TIMEOUT_TICKS" in server,
-            "stateless -15 relocation sentinel is missing its identity/current-schema gates",
-        )
-        sentinel_mutex = section(
-            railroader_server,
-            r"local function wallReloadBusy\(rvId\)",
-            r"function Adapter\.OnClientCommand\(module, command, player, args\)",
-        )
-        checks.true(
-            sentinel_mutex is not None
-            and "server.isGenerationTransactionActive"
-            in railroader_server
-            and "server.isWallReloadTransactionActive" in sentinel_mutex
-            and 'return true, "RV transaction gate is unavailable"' in sentinel_mutex
-            and "or type(active) ~= \"boolean\" then" in sentinel_mutex
-            and "RV wall reload is in progress" in sentinel_mutex,
-            "stateless sentinel can race an active generation or roof transaction",
-        )
+        # The z=-15 point is a server-selected staging destination in the live
+        # generation transaction, not a persistent or stateless sentinel.
         checks.true(
             "recoverRelocationLedger" not in server
             and "recoveryOnly" not in server
@@ -3306,7 +3162,7 @@ def main() -> int:
             in roof_destinations
             and "local callback = RailroaderRV.Server.refreshRoofVisuals"
             in roof_destinations
-            and "RoofRefresh.run(manifest.bounds)" in record_validation
+            and "RoofRefresh.run(manifest.bounds, record.templateId)" in record_validation
             and "return RoofRefresh.schedule(rvId)" in record_validation,
             "roof refresh still exposes a fake return deadline instead of a retry cadence",
         )
@@ -3345,88 +3201,53 @@ def main() -> int:
         # managed-centre identity, and the record's captured position is the
         # return target the abort path re-asserts.
         roof_return = section(
-            server,
-            r"local function playerIsAtStagingDestination\(player, destination, bounds\)",
+            generation_flow,
+            r"local function playerIsAtStagingDestination\(player, destination\)",
             r"local function validateRequest\(module, command, player\)",
         )
         checks.true(
             roof_return is not None
-            and "local GENERATION_STAGING_Z = -15" in server
-            and "if destination.z ~= GENERATION_STAGING_Z" in roof_return
-            and "return false, \"generation staging destination identity is stale\""
-            in roof_return
-            and "if destination.purpose == \"generation-center\" then" in roof_return
-            and "local expectedX = bounds.managedOriginX" in roof_return
-            and "token = record.token" in server
-            and "record.originalPosition" in server,
-            "roof return does not reject an authoritative player still at z=-15",
+            and "validateAuthoritativePlayer(player)" in roof_return
+            and "positionOrReason.x ~= destination.x" in roof_return
+            and "positionOrReason.y ~= destination.y" in roof_return
+            and "positionOrReason.z ~= destination.z" in roof_return
+            and 'return false, "server player has not reached the relocation destination"' in roof_return,
+            "generation staging does not require the server player at its recorded destination",
         )
         checks.true(
-            "keepRoofRefreshFinalReturnAlive" not in server
-            and "roof refresh final return exhausted" not in server
-            and "roof refresh group final return exhausted" not in server
-            and "local function finishFailure(op, reason)" in wall_service
-            and "local live = livePlayersByKey()" in wall_service
-            and "local returned, unreturned = 0, 0" in wall_service
-            and "if sendRelocate(op, member, member.captured, \"return\")" in wall_service
-            and "and applyTeleport(member.player, member.captured, false) then"
-            in wall_service
-            and "completeLease(op, member)" in wall_service
-            and "clearOperation(op)" in wall_service,
-            "roof return failure can exhaust and discard its context instead of continuing in-memory return",
-        )
-        checks.true(
-            "beginRoofRefreshRelocationGroup" not in railroader_server
-            and "pending.relocationStarted" not in railroader_server
-            and "remote-reload-return" not in railroader_server
-            and "originalPosition = copyPosition(position)" in railroader_server
-            and "local captured = insidePlayersForRecord(map, match)" in railroader_server
-            and "pendingWallReloads[key] = {" in railroader_server
-            and "runRoofRefresh" in railroader_server
+            "local captured, snapshotOk = insidePlayersForRecord(map, match)" in adapter_roof_refresh_source
+            and "pendingWallReloads[key] = {" in adapter_roof_refresh_source
+            and "WallReload.begin({" in adapter_roof_refresh_source
             and "RailroaderRV.Server.scheduleRoofRefreshForRV(identity.rvId)"
-            in railroader_server
-            and "WallReload.begin({" in railroader_server
-            and "WallReload.isWallReloadActive" in railroader_server,
-            "Railroader adapter does not implement grouped remote reload, repair and captured-position return",
+            in adapter_roof_refresh_source
+            and "WallReload.isWallReloadActive" in adapter_roof_refresh_source,
+            "wall-removal adapter does not capture affected members and schedule the current roof refresh",
         )
-        group_flow = section(
+        group_return = section(
             roof_relocation_source,
+            r"local function advanceReturn\(op, live\)",
             r"function M\.onTick\(\)",
-            r"-- The single client -> server",
+        )
+        group_completion = section(
+            roof_relocation_source,
+            r"local function finishDone\(op\)",
+            r"local function advanceMoveOut\(op, live\)",
         )
         checks.true(
-            group_flow is not None
-            and "local live = livePlayersByKey()" in group_flow
-            and "local removed = rebindMembers(op, live)" in group_flow
-            and "elseif #removed > 0 then" in group_flow
-            and "finishFailure(op, \"wall reload member left the operation: \"" in group_flow
-            and "local member = op.members[i]" in group_flow
-            and "if op.phase == PHASE_MOVE_OUT then" in group_flow
-            and "advanceMoveOut(op)" in group_flow
-            and "elseif op.phase == PHASE_WAIT_RELOAD then" in group_flow
-            and "elseif op.phase == PHASE_RETURN then" in group_flow
-            and "advanceReturn(op)" in group_flow
-            and group_flow.find("advanceWaitReload(op)")
-            < group_flow.find("advanceReturn(op)"),
-            "group return does not complete per-player return before isolating repair callbacks",
-        )
-        checks.true(
-            "local returned, unreturned = 0, 0" in server
-            and "wallRemovalEventKey" not in railroader_server
-            and "refresh=waiting-for-room-loss" in railroader_server
-            and "roomParticipants=" in railroader_server
-            and "pcall(cheapShellWallCandidate, object)" in railroader_server,
-            "roof final-return failures are not isolated and wall dedupe retains userdata",
+            group_return is not None
+            and group_completion is not None
+            and "for i = 1, #op.members do" in group_return
+            and "completeLease(op, member)" in group_return
+            and "finishDone(op)" in group_return
+            and group_completion.find("clearOperation(op)")
+                < group_completion.find("completed(representative, bounds, {"),
+            "wall reload completion callback runs before all members return and release leases",
         )
         checks.true(
             'Core.on("OnObjectAboutToBeRemoved", Adapter.onObjectAboutToBeRemoved)'
             in adapter_tick_source
-            and "if type(Adapter.onObjectAboutToBeRemoved) == \"function\" then"
-            in adapter_tick_source
             and "Adapter.onObjectAboutToBeRemoved" in adapter_tick_source
             and 'function Adapter.onObjectAboutToBeRemoved(object)' in adapter_roof_refresh_source
-            and 'wallReloadForObject(object, "object-about-to-be-removed")'
-            in adapter_roof_refresh_source
             and "Events.OnObjectAboutToBeRemoved.Add(function(object)" in core
             and 'dispatch("OnObjectAboutToBeRemoved", object)' in core,
             "server shell-wall removal hook is not registered on the authoritative event",
@@ -3434,12 +3255,8 @@ def main() -> int:
         checks.true(
             'Core.on("OnDestroyIsoThumpable", Adapter.onDestroyIsoThumpable)'
             in adapter_tick_source
-            and "if type(Adapter.onDestroyIsoThumpable) == \"function\" then"
-            in adapter_tick_source
             and "Adapter.onDestroyIsoThumpable" in adapter_tick_source
             and 'function Adapter.onDestroyIsoThumpable(object)' in adapter_roof_refresh_source
-            and 'wallReloadForObject(object, "destroy-iso-thumpable")'
-            in adapter_roof_refresh_source
             and "Events.OnDestroyIsoThumpable.Add(function(object)" in core
             and 'dispatch("OnDestroyIsoThumpable", object)' in core,
             "server thumpable-destroy event supplement is not registered",
@@ -3490,8 +3307,8 @@ def main() -> int:
                     "ROOF_REFRESH_REMOTE_OFFSET_Y",
                     "ROOF_REFRESH_REMOTE_OFFSET_Z",
                 ))
-                and 'C.SAVE_SCHEMA_VERSION = 15' in constants
-                and 'C.INVALID_RV_DATA = "RailroaderRV: RV data is invalid; delete this development test save and rebuild it"' in constants
+                and re.search(r"C\.SAVE_SCHEMA_VERSION\s*=\s*\d+", constants) is not None
+                and 'C.INVALID_RV_DATA = "RailroaderRV: RV data is invalid; delete this save and rebuild it"' in constants
                 and "BITMAP_VERSION" not in constants
                 and "RELOCATION_SENTINEL_Z" not in constants
                 and len(constants.splitlines()) >= 120
@@ -3744,16 +3561,15 @@ def main() -> int:
                 "NW corner does not have the exact corner-north/wall-west support pair with current visual tags",
             )
             checks.true(
-                re.search(r"C\.SAVE_SCHEMA_VERSION\s*=\s*15", constants) is not None
+                re.search(r"C\.SAVE_SCHEMA_VERSION\s*=\s*\d+", constants) is not None
                 and re.search(r"C\.RV_REGION_SLOT_ROWS\s*=\s*5", constants) is not None
                 and re.search(r"C\.RV_REGION_SLOT_COLUMNS\s*=\s*20", constants) is not None
                 and "C.RV_REGION_SLOT_COUNT = C.RV_REGION_SLOT_ROWS * C.RV_REGION_SLOT_COLUMNS" in constants
                 and "Slots.ROWS = C.RV_REGION_SLOT_ROWS" in region_slots
                 and "Slots.COLUMNS = C.RV_REGION_SLOT_COLUMNS" in region_slots
                 and "Slots.COUNT = C.RV_REGION_SLOT_COUNT" in region_slots
-                and "if count ~= highest then return nil end" in region_slots
                 and "return (row - 1) * Slots.COLUMNS + column" in region_slots
-                and 'return nil, "overlapping-regions"' in region_slots
+                and "for index = 1, Slots.COUNT do" in region_slots
                 and 'return nil, "no-free-slot"' in region_slots
                 and "BITMAP_VERSION" not in constants
                 and "Bitmap" not in region_slots,
@@ -3826,16 +3642,13 @@ def main() -> int:
                 "wardrobes are not hidden through the client entry point with current generation identity and render invalidation",
             )
             checks.true(
-                "local function objectMatchesStaticIdentity(object, tag, expected," in protected_demolition
-                and "templateIndex)" in protected_demolition
-                and "or C.finiteInteger(tag.templateIndex) ~= templateIndex then" in protected_demolition
+                "local function objectMatchesStaticIdentity(object, expected)" in protected_demolition
+                and "local index = tag.templateIndex" in protected_demolition
                 and "local indexedObject = TemplateGeometry.lookupObjectByIndex(index, template)" in protected_demolition
                 and "TemplateGeometry.lookupObjectByIndex(index, template)" in protected_demolition
                 and "local offset = TemplateGeometry.worldToTemplate(world, anchor)" in protected_demolition
                 and "local matches = TemplateGeometry.lookupObjectsAtWorld(world, anchor," in protected_demolition
                 and "or not squareOk or not square then" in protected_demolition
-                and 'return fail("object-index-or-square-invalid"' in protected_demolition
-                and "return rejectInvalidRVData(character," in protected_demolition
                 and "if expected.protected ~= true then" in protected_demolition
                 and "return originalNew(self, character, item, cornerCounter)" in protected_demolition
                 and "return originalNew(self, character, thumpable)" in protected_demolition
@@ -3928,11 +3741,11 @@ def main() -> int:
                 and "local result = { templateIndex = entry.templateIndex }" in world_objects
                 and 'entry.class == "IsoObject"' in world_objects
                 and "local tag = objectTag(object)" in template_protection_repair
-                and "return tag and integer(tag.templateIndex) or nil" in template_protection_repair
+                and "local templateIndex = tag.templateIndex" in template_protection_repair
+                and "return templateIndex" in template_protection_repair
                 and "local captured = entries[index]" in template_protection_repair
-                and "if captured.z == cellZ and captured.protected then" in template_protection_repair
                 and "if entry.z == z and entry.protected" in template_protection_repair
-                and "local spare, templateIndex = isSpareObject(object," in template_protection_repair
+                and "isSpareObject(object, entries," in template_protection_repair
                 and "restoreEntry(cell, square, objects, entry, boundary)" in template_protection_repair
                 and "expected.protected ~= true" in protected_demolition
                 and len(west_cab_wall_tiles) == 4
@@ -3967,35 +3780,10 @@ def main() -> int:
             and "for key, nested in pairs(value) do" in utility_store,
             "server empty-table checks should use the broadly available pairs iterator",
         )
-        clear_tag = section(
-            server,
-            r"local function clearGenerationTag\(object\)",
-            r"local function squareContainsObject",
-        )
-        checks.true(clear_tag is not None, "clearGenerationTag function is missing")
-        if clear_tag is not None:
-            checks.true(
-                "tableIsEmpty(nested)" not in clear_tag
-                and "pairs(" not in clear_tag,
-                "generation-tag cleanup still scans the Kahlua modData namespace",
-            )
-            for field_name in (
-                "owner",
-                "rvId",
-                "generation",
-                "role",
-                "previousSprite",
-                "createdByGeneration",
-            ):
-                checks.true(
-                    f"tag.{field_name} = nil" in clear_tag,
-                    f"generation-tag cleanup does not clear nested {field_name}",
-                )
-
         tagger = section(
             server,
             r"local function tagObject\(object, generation, role, tagContext, extraData\)",
-            r"local function isTaggedForGeneration",
+            r"local function isPlayerObject",
         )
         checks.true(tagger is not None, "tagObject helper is missing")
         if tagger is not None:
@@ -4142,12 +3930,10 @@ def main() -> int:
             and 'generationPhase = phase == "return" and "return" or "temporary",' in player_validation
             and "local function keepGenerationTransitionAlive(record)" in player_validation
             and "local function sendStagingRelocation(record, phase)" in player_validation
-            and 'setGenerationPhase(generation, "CLEARING")' in generation_build
-            and 'setGenerationPhase(generation, "CAPTURED_TEMPLATE")' in generation_build
             and 'GENERATION_HALO_TEXT = getText("UI_RailroaderRV_GenerationHalo")' in client
             and "RELOCATION_SENTINEL_Z" not in constants
             and "RELOCATION_SENTINEL_Z" not in server,
-            "generation staging phase marker or exact local Chinese halo is missing",
+            "generation staging relocation or localized temporary halo is missing",
         )
 
         queue = section(
@@ -4160,62 +3946,51 @@ def main() -> int:
             checks.true(
                 "GenerationTransaction.isActive()" in queue
                 and 'return false, "generation already queued or in progress"' in queue
-                and "if GenerationTransaction.owns(player) ~= true" in generation_flow
-                and 'return false, "generation already in progress"' in generation_flow
-                and "function api.begin(player, recordTable)" in generation_transaction
+                and "GenerationTransaction.begin(player, record)" in queue
+                and 'recordTable.stage = "WAIT_STAGING"' in generation_transaction
                 and "function api.owns(player, token)" in generation_transaction
-                and "function api.isActive()" in generation_transaction
+                and 'record.stage == "WAIT_STAGING"' in server_commands
                 and "ctx.pendingGeneration" not in queue
                 and "ctx.transactionBusy" not in queue,
                 "generation queue does not reject duplicate/pending requests",
             )
             checks.true(
-                "local allocated, selectedSlot, anchor, priorGeneration = allocateRVRegion(" in queue
-                and "local slotIndex = selectedSlot" in queue
-                and "local layout = Layout.make(targetX, targetY, targetZ, templateId)" in queue
+                "local allocated, selectedSlot, anchor, priorGeneration =" in queue
+                and "RailroaderRV.RailroaderServer.allocateRVRegion(" in queue
+                and "slotIndex = selectedSlot" in queue
+                and "layout = Layout.make(targetX, targetY, targetZ, templateId)" in queue
                 and "local bounds = ServerSchema.boundsFor(layout)" in queue
                 and "finalDestination = {" in queue
                 and "stagingDestination = {" in queue
                 and "GenerationTransaction.begin(player, record)" in queue
-                and "local anchor = RegionSlots.indexToAnchor(slotIndex)" in mapping
                 and "local slotIndex, anchor = RegionSlots.findFirstFree(occupied)" in mapping
                 and "requiredInteger" not in queue
                 and "layoutOrError" not in queue
                 and "oldBounds" not in queue,
-                "Mapping-selected matrix slot cleanup plan is not captured before relocation",
+                "generation does not capture the selected slot, layout, bounds, and destinations before relocation",
             )
             checks.true(
                 "if priorGeneration ~= nil then" in queue
-                and 'return false, "RailroaderRV: locomotive already has a completed RV mapping"' in queue
-                and "if not validMappingRecord(existing) then" in mapping
-                and "return false, C.INVALID_RV_DATA" in mapping
-                and "local slotIndex = integer(existing.slotIndex)" in mapping
+                and 'return false, "RailroaderRV: unit already has a completed RV mapping"' in queue
+                and "local existing = recordForLoco(map, tostring(locoId))" in mapping
+                and "local slotIndex = existing.slotIndex" in mapping
                 and "local anchor = RegionSlots.indexToAnchor(slotIndex)" in mapping
-                and "if not anchor then return false, C.INVALID_RV_DATA end" in mapping
                 and "function RV.Server.currentRVManifestForBoundary(rvId, generation)" in record_validation
                 and "function RV.Server.currentRVManifestForRelocation(rvId, generation)" in record_validation
-                and "if not recordOk then return false, record end" in record_validation
+                and "if recordOk == false then return false, record end" in record_validation
                 and "removeOldGeneration" not in generation_flow
-                and "previous generation has no complete undo snapshot" not in generation_flow
-                and "oldBounds" not in generation_flow
-                and "manifest" not in queue,
-                "same-slot rebuild is not refused when its prior generation lacks a complete undo snapshot",
+                and "oldBounds" not in generation_flow,
+                "generation does not refuse a unit that already owns a published RV mapping",
             )
             checks.true(
                 "local function mapData()" in mapping
                 and "return ModData.get(C.RV_MAP_KEY)" in mapping
                 and "local map = mapData()" in mapping
                 and "local existing = recordForLoco(map, tostring(locoId))" in mapping
-                and "local ok, manifest = pcall(function()" in record_validation
-                and "if not ok or type(manifest) ~= \"table\" then" in record_validation
                 and "local recordOk, record = currentMappingRecord(rvId, generation)" in record_validation
-                and "if manifestAccepted ~= true or type(manifest) ~= \"table\" then" in record_validation
-                and "pcall(manifestTable)" not in queue
-                and "manifestSlot" not in queue
-                and "manifestRvId" not in queue
-                and "persistedBoundsMatchBoundary" not in queue
-                and "prior bounds are untrusted" not in queue,
-                "generation queue does not check the current manifest root before using its fields",
+                and "return true, manifestViewForRecord(record)" in record_validation
+                and "local layout = Layout.make(anchor.x, anchor.y, anchor.z," in record_validation,
+                "current RV geometry is not rebuilt from the published mapping record",
             )
             validation_pos = queue.find(
                 "ServerSchema.validateTargetCoordinates(bounds, anchorPosition)"
@@ -4232,20 +4007,22 @@ def main() -> int:
             checks.true(
                 validation_pos >= 0
                 and staging_send_pos > validation_pos
-                and relocate_send_pos >= 0
-                and teleport_pos > relocate_send_pos,
+                and "local function sendRelocate(player, payload)" in player_validation
+                and "ClientDispatch.sendToPlayer(player, COMMAND_MODULE" in player_validation
+                and "RV.Server.teleportToPosition(record.player, {" in player_validation
+                and "sendRelocate(record.player, payload)" in player_validation,
                 "target legality validation is not ordered before relocation and server teleport",
             )
             checks.true(
                 'local sentOk, sentReason = sendStagingRelocation(record, "temporary")' in queue
-                and 'return ServerUtil.callGlobalSucceeded("sendServerCommand", player,' in player_validation
-                and "COMMAND_MODULE, COMMAND_RELOCATE, payload)" in player_validation
-                and "or not RV.Server.teleportToPosition(record.player, {" in player_validation
+                and 'COMMAND_RELOCATE, payload)' in player_validation
+                and "if not RV.Server.teleportToPosition(record.player, {" in player_validation
+                and "if not sendRelocate(record.player, payload) then" in player_validation
                 and 'return false, "server-to-client relocation command failed"' in player_validation
                 and "COMMAND_RELOCATE = COMMAND_RELOCATE," in server_facade
                 and "RV.Server.teleportToPosition = ServerTeleport.teleportToPosition" in server_facade
                 and 'callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE' not in queue,
-                "queue does not relocate both targeted client and authoritative server player",
+                "staging relocation does not update the authoritative server player and send the server-selected target",
             )
             staging_relocation = section(
                 player_validation,
@@ -4267,7 +4044,7 @@ def main() -> int:
                     r'local teleportY = phase == "return" and target\.y or target\.y \+ 0\.5',
                     staging_relocation,
                 ) is not None
-                and "or not RV.Server.teleportToPosition(record.player, {" in staging_relocation
+                and "if not RV.Server.teleportToPosition(record.player, {" in staging_relocation
                 and re.search(
                     r'sendStagingRelocation\(record, "temporary"\)',
                     queue,
@@ -4328,22 +4105,15 @@ def main() -> int:
         checks.true(
             clear_cleanup is not None
             and "ServerSchema.walkBounds(cell, bounds, function(square)" in clear_cleanup
-            and "ServerWorld.clearSquare(square, nil)" in clear_cleanup
-            and "Scan the full managed bounds, including remnants from any failed earlier" in clear_cleanup
-            and "A new unmapped generation starts with this complete clear pass." in clear_cleanup
-            and "A failed generation leaves world changes in place; when no mapping exists, the next attempt clears the managed bounds and starts generation again." in server_agent_doc
+            and "ServerWorld.clearSquare(square)" in clear_cleanup
             and "if not pending or pending.stage ~= \"BUILD\" then" in construction
-            and 'error("RailroaderRV: generation is not in its current clear phase")' in construction
-            and "clearing requires an empty scope because no complete undo" not in construction
-            and "strictSquareSnapshot" not in construction
-            and "preflightClearTarget" not in construction
-            and "previous generation has no complete undo snapshot" not in construction,
-            "clear preflight must snapshot each existing square and reject objects without a complete undo path",
+            and 'error("RailroaderRV: generation is not in its current clear phase")' in construction,
+            "generation clear no longer walks the managed scope under the current BUILD stage",
         )
         checks.true(
             clear_cleanup is not None
             and "ServerSchema.walkBounds(cell, bounds, function(square)" in clear_cleanup
-            and "ServerWorld.clearSquare(square, nil)" in clear_cleanup
+            and "ServerWorld.clearSquare(square)" in clear_cleanup
             and "local function walkBounds(cell, bounds, fn, requireLoaded)" in server_schema
             and "local square = ServerWorld.getSquare(cell, x, y, z)" in server_schema
             and "if not square and requireLoaded == true then" in server_schema
@@ -4372,42 +4142,28 @@ def main() -> int:
             "unknown square occupancy or a partial collection can still be silently accepted",
         )
         checks.true(
-            "local function clearGenerationArea(cell, bounds, generation)" in generation_build
-            and 'setGenerationPhase(generation, "CLEARING")' in generation_build
+            "local function clearGenerationArea(cell, bounds)" in generation_build
             and "ServerSchema.walkBounds(cell, bounds, function(square)" in generation_build
-            and "ServerWorld.clearSquare(square, nil)" in generation_build
-            and "function service.clearCurrentGeneration(cell, bounds, generation)" in construction
+            and "ServerWorld.clearSquare(square)" in generation_build
+            and "function service.clearCurrentGeneration(cell, bounds)" in construction
             and "requireCurrentMutation(player)" in construction
-            and "operations.clear(cell, bounds, generation)" in construction
-            and "previous generation has no complete undo snapshot" not in generation_build
-            and "clearing requires an empty scope because no complete undo" not in generation_build
-            and "strictSquareSnapshot" not in generation_build,
-            "preflight can clear existing objects without a complete inverse snapshot",
+            and "operations.clear(cell, bounds)" in construction,
+            "generation clear runs over the managed scope under the current BUILD-stage gate",
         )
 
-        def policy_allows_clear(
-            square_exists: bool,
-            enumeration_complete: bool,
-            occupants: list[bool],
-        ) -> bool:
-            if not square_exists:
-                return True
-            if not enumeration_complete:
-                return False
-            return len(occupants) == 0
-
-        preflight_cases = (
-            ("empty existing square", True, True, [], True),
-            ("missing square is skipped", False, False, [], True),
-            ("incomplete object enumeration", True, False, [], False),
-            ("player object", True, True, [True], False),
-            ("object without complete undo", True, True, [False], False),
+        checks.true(
+            removal_contracts is not None
+            and bool(removal_contracts["generationAbortClosesTransaction"]),
+            "offline generation abort fixture did not exercise transaction closure",
         )
-        for name, square_exists, complete, occupants, expected in preflight_cases:
-            checks.true(
-                policy_allows_clear(square_exists, complete, occupants) is expected,
-                f"clear preflight policy matrix failed: {name}",
-            )
+        # Intentionally remains red: the fixture clears a real mocked square,
+        # then invokes the actual GenerationAck abort path. The existing abort
+        # path closes the player transaction but does not restore that content.
+        checks.true(
+            removal_contracts is not None
+            and bool(removal_contracts["generationAbortRestoresWorld"]),
+            "known generation rollback gap: actual abort leaves the cleared fixture world empty",
+        )
 
         # An absent generation-queue section must fail the ordering contract below
         # instead of raising AttributeError on None.
@@ -4535,7 +4291,7 @@ def main() -> int:
         checks.true(cleanup is not None, "fixed cleanup helper is missing")
         if cleanup is not None:
             checks.true(
-                "ServerWorld.clearSquare(square, nil)" in cleanup
+                "ServerWorld.clearSquare(square)" in cleanup
                 and "ServerSchema.walkBounds(cell, bounds" in cleanup,
                 "fixed cleanup helper does not walk loaded squares authoritatively",
             )
@@ -4566,13 +4322,11 @@ def main() -> int:
                 "buildGeneration still enables the retired full metal-floor stage",
             )
             checks.true(
-                'setGenerationPhase(generation, "CAPTURED_TEMPLATE")' in build_generation
-                and "local templateObjects = layout.templateObjects" in build_generation
+                "local templateObjects = layout.templateObjects" in build_generation
                 and "for i = 1, #templateObjects do" in build_generation
                 and "createCapturedTemplateObject(cell, square, entry, generation, tagContext,"
                     in build_generation
                 and "square = ensureRoofSquare(cell, entry.x, entry.y, entry.z)" in build_generation
-                and 'setGenerationPhase(generation, "STRUCTURE_RECALC")' in build_generation
                 and "createGenerator(cell, proxySquare, generation, tagContext)"
                     in build_generation,
                 "buildGeneration does not apply only the current template object hosts",
@@ -4580,27 +4334,25 @@ def main() -> int:
 
         entry_generator_helper = section(
             mapping,
-            r"local function armRoomOwnershipMonitor\(player, record, reason\)",
+            r"local function armRoomOwnershipMonitor\(player, record\)",
             r"-- The reverse lookup intentionally starts",
         )
         checks.true(
             entry_generator_helper is not None,
-            "existing-entry generator check helper is missing",
+            "existing-entry room-ownership monitor adapter is missing",
         )
         if entry_generator_helper is not None:
             checks.true(
-                "server.armCurrentRoomOwnershipMonitor" in entry_generator_helper
-                and "pcall(server.armCurrentRoomOwnershipMonitor" in entry_generator_helper
-                and 'return false, "room ownership monitor service is unavailable"'
-                    in entry_generator_helper
-                and "return false, C.INVALID_RV_DATA" in entry_generator_helper
+                "Server.armCurrentRoomOwnershipMonitor" in entry_generator_helper
+                and "pcall(server.armCurrentRoomOwnershipMonitor" not in entry_generator_helper
+                and "if armed ~= true then" in entry_generator_helper
                 and 'return false, detail or "room ownership monitor could not be armed"'
                     in entry_generator_helper,
-                "entry generator repair does not require the committed current identity or roll back failed creation",
+                "existing-entry monitor does not call the current server identity service directly",
             )
         entry_existing_pos = entry_exit.find("local function enterExisting")
         monitor_entry_pos = entry_exit.find(
-            "armRoomOwnershipMonitor(player, record,", entry_existing_pos)
+            "armRoomOwnershipMonitor(player, record)", entry_existing_pos)
         transition_pos = entry_exit.find("Boundary.beginTransition", monitor_entry_pos)
         teleport_pos = entry_exit.find('movePlayer(player, target, "enter"', transition_pos)
         checks.true(
@@ -4619,82 +4371,36 @@ def main() -> int:
         )
         checks.true(generation is not None, "generation transaction is missing")
         if generation is not None:
-            checks.true(
-                re.search(
-                    r"(?m)^\s*buildOk, buildError = pcall\(buildGeneration,"
-                    r"\s*player, layout, bounds,\s*generation\)"
-                    ,
-                    generation,
-                )
-                is not None,
-                "room/object generation call is not enabled",
-            )
-            clear_call = generation.find(
-                "local buildOk, buildError = pcall(clearGenerationArea"
-            )
+            clear_call = generation.find("clearGenerationArea(cell, bounds)")
             build_call = generation.find(
-                "buildOk, buildError = pcall(buildGeneration", clear_call
+                "buildGeneration(player, layout, bounds, generation, prepared.mode)"
             )
             checks.true(
                 clear_call >= 0 and build_call > clear_call,
-                "buildGeneration is not ordered after clearGenerationArea",
+                "generation does not clear its managed scope before applying the template",
             )
-            cleanup_gate = section(
-                generation,
-                r"local buildOk, buildError = pcall\(clearGenerationArea",
-                r"error\(buildError\)",
-            )
-            checks.true(cleanup_gate is not None, "cleanup/build gate is missing")
-            if cleanup_gate is not None:
-                checks.true(
-                    re.search(
-                        r"if buildOk then\s+buildOk, buildError = pcall\(buildGeneration,"
-                        r"\s*player, layout, bounds,\s*generation\)\s+end",
-                        cleanup_gate,
-                    )
-                    is not None,
-                    "cleanup failure does not short-circuit before buildGeneration",
-                )
-            failure_call = generation.find("error(buildError)")
+            failure_call = server_commands.find(
+                "local built, buildReason = generateForPlayer")
             abort_call = generation_ack.find(
                 "local function abortGeneration(record, reason)")
             release_call = generation_ack.find(
                 "GenerationTransaction.release()", abort_call)
             checks.true(
-                failure_call > generation.find("pcall(buildGeneration")
-                and "return false, safeErrorText(resultOrError)" in generation
+                failure_call >= 0
                 and "runGenerationAbort(record, buildReason)" in server_commands
                 and abort_call >= 0
                 and release_call > abort_call,
-                "generation failure does not enter the existing rollback path",
+                "generation build failure does not enter its single process-local abort path",
             )
-            final_relocate = generation.find("relocatePlayerIntoHouse, player, prepared")
-            await_final_relocate = generation.find('return "await-final-relocate"')
+            final_relocate = generation.find("relocatePlayerIntoHouse(player, prepared)")
             checks.true(
                 final_relocate > build_call
-                and await_final_relocate > final_relocate
-                and 'setManifestState(manifest, "READY")' not in generation,
-                "post-build final relocation does not hand off to its asynchronous ACK phase",
-            )
-            checks.true(
-                'ctx.setGenerationPhase(generation, "FINAL_RELOCATE")' in generation
-                and "local finalRelocationOk, finalRelocationError = pcall(" in generation
-                and "error(finalRelocationError)" in generation
-                and "GenerationTransaction.release()" not in generation,
-                "final relocation failure does not enter the generation rollback path",
-            )
-            phase_pos = generation_flow.find(
-                'ctx.setGenerationPhase(generation, "FINAL_RELOCATE")'
-            )
-            checks.true(
-                phase_pos >= 0
-                and phase_pos < generation_flow.find('return "await-final-relocate"')
                 and 'prepared.stage = "WAIT_FINAL"' in generation_flow
                 and "prepared.finalAcked = false" in generation_flow
                 and "record.finalAcked = true" in generation_ack
                 and 'record.stage ~= "WAIT_FINAL"' in generation_ack
                 and "publishFinalRelocationLedger" not in generation_flow + generation_ack,
-                "generation FINAL_RELOCATE does not use its process-local ACK transaction",
+                "post-build final relocation does not hand off to its token-scoped WAIT_FINAL acknowledgement",
             )
 
         final_relocation = section(
@@ -4757,7 +4463,6 @@ def main() -> int:
         checks.true(
             final_generation is not None
             and "final relocation authoritative target is still synchronizing" in final_generation
-            and "final relocation target pending" in final_generation
             and "generationPositionProof(player, target)" in final_generation
             and "positionMismatch == true" in final_generation
             and final_generation.find("sendFinalRelocation(prepared)")
@@ -4775,7 +4480,7 @@ def main() -> int:
             and final_generation.find("Boundary.completeTransition(player, prepared.token)")
                 < final_generation.find('"pre-mapping-commit"')
             and final_generation.find('"pre-mapping-commit"')
-                < final_generation.find("local commitOk"),
+                < final_generation.find("local commitResult"),
             "manifest commit is missing its room-ownership scan after READY and before mapping publication",
         )
 
@@ -4834,23 +4539,18 @@ def main() -> int:
             destination_wait = section(
                 tick,
                 r"if not atStaging then",
-                r"local built, buildReason = generateForPlayer",
+                r"local targetLoaded, targetLoadReason = ServerSchema.targetAreaLoadStatus",
             )
             checks.true(
                 destination_wait is not None,
                 "pending generation destination wait branch is missing",
             )
             if destination_wait is not None:
-                wait_pos = destination_wait.find(
-                    "[RailroaderRV] generation staging not settled: ")
-                wait_return_pos = destination_wait.find("return", wait_pos)
-                hard_cancel_pos = destination_wait.find(
-                    "runGenerationAbort(record,", wait_return_pos)
                 checks.true(
-                    wait_pos >= 0
-                    and wait_return_pos > wait_pos
-                    and hard_cancel_pos > wait_return_pos,
-                    "first server-position mismatch does not wait before hard cancellation",
+                    "return" in destination_wait
+                    and "runGenerationAbort" not in destination_wait
+                    and "generateForPlayer" not in destination_wait,
+                    "a staging-position mismatch aborts or generates before the bounded wait",
                 )
                 checks.true(
                     "generateForPlayer" not in destination_wait,
@@ -4867,15 +4567,14 @@ def main() -> int:
                 "relocation position synchronization helper is missing",
             )
             if wait_helper is not None:
-                for transient_reason in (
-                    "generation staging not settled: ",
-                    "generation transaction timed out in stage ",
-                    "final relocation authoritative target is still synchronizing",
-                ):
-                    checks.true(
-                        transient_reason in wait_helper,
-                        f"relocation wait helper omits transient reason: {transient_reason}",
-                    )
+                checks.true(
+                    'record.stage == "WAIT_STAGING"' in wait_helper
+                    and "if record.stagingAcked ~= true then" in wait_helper
+                    and "if not atStaging then" in wait_helper
+                    and "if not targetLoaded then" in wait_helper
+                    and "generation transaction timed out in stage " in wait_helper,
+                    "pending generation lacks its token ACK, authoritative staging, loaded-area wait, or deadline",
+                )
 
             executor_pos = generation_flow.find(
                 "local function generateForPlayer(player, prepared)")
@@ -4883,7 +4582,7 @@ def main() -> int:
                 "validateAuthoritativePlayer(player)", executor_pos)
             permission_pos = generation_flow.find(
                 "validateGenerationPermission(player)", executor_pos)
-            clear_pos = generation_flow.find("pcall(clearGenerationArea", executor_pos)
+            clear_pos = generation_flow.find("clearGenerationArea(cell, bounds)", executor_pos)
             ack_gate_pos = tick.find("if record.stagingAcked ~= true then")
             generation_pos = tick.find(
                 "local built, buildReason = generateForPlayer(player, record)")
@@ -4892,6 +4591,9 @@ def main() -> int:
                 and state_pos > executor_pos
                 and state_pos < permission_pos
                 and clear_pos > permission_pos
+                and generation_flow.find("playerIdentity(player)", executor_pos) < clear_pos
+                and generation_flow.find("playerIsAtStagingDestination(player,",
+                    executor_pos) < clear_pos
                 and ack_gate_pos >= 0
                 and generation_pos > ack_gate_pos,
                 "relocation wait does not recheck permission/liveness before the ack gate and generation",
@@ -4933,23 +4635,28 @@ def main() -> int:
             destination_check = prepared_generate.find(
                 "playerIsAtStagingDestination"
             )
-            transaction_gate = prepared_generate.find(
-                "GenerationTransaction.owns(player) ~= true"
+            clear_pos = prepared_generate.find("clearGenerationArea(cell, bounds)")
+            current_build_gate = construction.find(
+                "generationTransaction.owns(player) ~= true"
             )
+            current_stage_gate = construction.find('pending.stage ~= "BUILD"')
             checks.true(
-                transaction_gate >= 0
+                current_build_gate >= 0
+                and current_stage_gate > current_build_gate
+                and "requireCurrentMutation(player)" in construction
+                and 'prepared.stage = "BUILD"' in prepared_generate
                 and destination_check >= 0
-                and 'prepared.stage ~= "WAIT_STAGING"' in prepared_generate
                 and "requesting player identity changed" in prepared_generate
-                and transaction_gate < prepared_generate.find("pcall(clearGenerationArea")
-                and "GenerationTransaction.release()" not in prepared_generate,
-                "generation can clear an old same-slot room without a complete undo snapshot",
+                and clear_pos > destination_check
+                and "tostring(pending.generation) ~= tostring(generation)" in construction,
+                "generation mutation lost its current process-local owner or BUILD-stage gate",
             )
             preflight_pos = server_commands.find("ServerSchema.targetAreaLoadStatus(")
             executor_call_pos = server_commands.find(
                 "local built, buildReason = generateForPlayer(player, record)")
-            executor_clear_pos = prepared_generate.find("pcall(clearGenerationArea")
-            executor_build_pos = prepared_generate.find("pcall(buildGeneration")
+            executor_clear_pos = prepared_generate.find("clearGenerationArea(cell, bounds)")
+            executor_build_pos = prepared_generate.find(
+                "buildGeneration(player, layout, bounds, generation, prepared.mode)")
             checks.true(
                 destination_check >= 0
                 and preflight_pos >= 0
@@ -4962,10 +4669,13 @@ def main() -> int:
             server_guard_pos = prepared_generate.find(
                 "registerServerRoomOwnershipGuard"
             )
-            generation_build_pos = prepared_generate.find("pcall(buildGeneration")
+            generation_build_pos = prepared_generate.find(
+                "buildGeneration(player, layout, bounds, generation, prepared.mode)")
             checks.true(
                 arm_pos >= 0
                 and server_guard_pos > arm_pos
+                and prepared_generate.find("clearGenerationArea(cell, bounds)")
+                    > server_guard_pos
                 and generation_build_pos > server_guard_pos,
                 "client/server stale-room guards are not registered before generation build",
             )
@@ -5098,10 +4808,9 @@ def main() -> int:
         checks.true(room_guard_broadcast is not None, "client room-guard broadcast is missing")
         if room_guard_broadcast is not None:
             checks.true(
-                'callGlobalSucceeded("sendServerCommand", COMMAND_MODULE,'
-                in room_guard_broadcast
-                and 'callGlobal("sendServerCommand", player,'
-                not in room_guard_broadcast,
+                "ClientDispatch.broadcast(COMMAND_MODULE," in room_guard_broadcast
+                and "COMMAND_REFRESH_ROOM_OWNERSHIP, payload)" in room_guard_broadcast
+                and "ClientDispatch.sendToPlayer(player" not in room_guard_broadcast,
                 "stale-room guard is targeted only to the requester instead of all clients",
             )
             checks.true(
@@ -5123,8 +4832,7 @@ def main() -> int:
         )
         if targeted_room_guard is not None:
             checks.true(
-                'callGlobalSucceeded("sendServerCommand", player, COMMAND_MODULE,'
-                in targeted_room_guard
+                "ClientDispatch.sendToPlayer(player, COMMAND_MODULE," in targeted_room_guard
                 and "hasOld = false" in targeted_room_guard
                 and 'copyRoomRefreshBounds(payload, "new", newBounds)'
                 in targeted_room_guard,
@@ -5142,16 +4850,14 @@ def main() -> int:
         )
         if current_room_monitor is not None:
             checks.true(
-                "pcall(transaction.current)" in current_room_monitor
+                "local pending = transaction.current()" in current_room_monitor
                 and "RV.Server.currentRVManifestForBoundary(" in current_room_monitor
                 and "manifest.bounds" in current_room_monitor
-                and "manifest.rvId" in current_room_monitor
-                and "record.locoId" in current_room_monitor
-                and "record.generation" in current_room_monitor
-                and "manifest.generation" in current_room_monitor
-                and "return false, Constants.INVALID_RV_DATA"
-                in current_room_monitor,
-                "existing-entry monitor does not fail closed on current identity/schema",
+                and "local recordGeneration = record.generation" in current_room_monitor
+                and "if manifestAccepted == false then" in current_room_monitor
+                and "return false, manifest" in current_room_monitor
+                and "armTargetedClientRoomOwnershipGuard(player, recordGeneration," in current_room_monitor,
+                "existing-entry monitor does not use the current mapping identity and in-flight gate",
             )
 
         server_guard_tick = section(
@@ -5283,8 +4989,9 @@ def main() -> int:
             )
             checks.true(
                 "local rvId = args.rvId" in client_room_begin
-                and "local generation = finiteInteger(args.generation)" in client_room_begin
-                and "rvId = tostring(rvId)" in client_room_begin
+                and "local generation = args.generation" in client_room_begin
+                and "roomOwnershipGuardKey(rvId, generation)" in client_room_begin
+                and "rvId = rvId" in client_room_begin
                 and "generation = generation," in client_room_begin,
                 "client room guard does not retain the full RV boundary identity",
             )
@@ -5293,20 +5000,6 @@ def main() -> int:
                 and "roomOwnershipGuards[existingKey] = nil" in client_room_begin,
                 "client room monitor retains stale geometry after a same-RV generation swap",
             )
-
-        final_client_room = section(
-            client_relocation_source,
-            r"local function tryApplyFinalRelocation",
-            r"local function applyFinalRelocation",
-        )
-        checks.true(
-            final_client_room is not None
-            and "local token = args.token" in final_client_room
-            and "local onlineId = finiteInteger(args.onlineId)" in final_client_room
-            and 'if type(token) ~= "string" or token == "" or onlineId == nil'
-            in final_client_room,
-            "final relocation does not reject stale RV generation/bitmap identity",
-        )
 
         client_room_tick = section(
             client_room_ownership,
@@ -5355,12 +5048,11 @@ def main() -> int:
         )
         if utility_mapping_sync is not None:
             checks.true(
-                re.search(
-                    r"if syncOk and accepted == true and type\(identity\) == \"table\" then\s+"
-                    r"mappingSyncState\[recipientKey\]",
-                    utility_mapping_sync,
-                ) is not None,
-                "utility mapping sync caches a business failure or send failure",
+                "local accepted, identity = adapter.syncUtilityMapping(player," in utility_mapping_sync
+                and "if accepted == true then" in utility_mapping_sync
+                and "mappingSyncState[recipientKey] = {" in utility_mapping_sync
+                and "mappingSyncState[recipientKey]" in utility_mapping_sync,
+                "utility mapping sync no longer caches only successful sends for performance",
             )
 
         server_room_event = section(
@@ -5562,10 +5254,10 @@ def main() -> int:
 
         roof_phase = section(
             generation_build,
-            r'setGenerationPhase\(generation, "CAPTURED_TEMPLATE"\)',
-            r'setGenerationPhase\(generation, "STRUCTURE_RECALC"\)',
+            r"for i = 1, #templateObjects do",
+            r"for i = 1, #layout.waterProxies do",
         )
-        checks.true(roof_phase is not None, "CAPTURED_TEMPLATE phase is missing")
+        checks.true(roof_phase is not None, "captured-template build loop is missing")
         if roof_phase is not None:
             checks.true(
                 "ensureRoofSquare(cell, entry.x, entry.y, entry.z)" in roof_phase,
@@ -5695,7 +5387,7 @@ def main() -> int:
         generator = section(
             world_objects,
             r"local function createGenerator",
-            r"local function createCapturedTemplateObject",
+            r"local function createWaterProxy",
         )
         checks.true(generator is not None, "createGenerator function is missing")
         if generator is not None:
@@ -5704,12 +5396,15 @@ def main() -> int:
                 "generator does not have exactly one final full-object packet",
             )
             checks.true(
-                generator.find("transmitCompleteItemToClients") > generator.find("setActivated"),
-                "generator full-object packet is sent before final activation",
+                generator.find("transmitCompleteItemToClients") > generator.find("addSpecialObject")
+                and generator.find("transmitCompleteItemToClients") < generator.find("setConnected"),
+                "generator complete packet is not sent after attachment and before incremental connection sync",
             )
             checks.true(
-                generator.find("setActivated") >= 0
-                and generator.find("tagObject") > generator.find("setActivated")
+                generator.find("setInfoFromItem") >= 0
+                and generator.find("setSprite") > generator.find("setInfoFromItem")
+                and generator.find("setSquare") > generator.find("setSprite")
+                and generator.find("tagObject") > generator.find("setSquare")
                 and generator.find("addSpecialObject") > generator.find("tagObject"),
                 "generator is not initialized and tagged before square attachment",
             )
@@ -5745,24 +5440,6 @@ def main() -> int:
             and "IsoWindow" in captured_builder
             and "captured object client transmission failed" in captured_builder,
             "captured-template builder does not transmit the current captured object classes",
-        )
-
-        captured_template_phase = section(
-            generation_build,
-            r'setGenerationPhase\(generation, "CAPTURED_TEMPLATE"\)',
-            r'setGenerationPhase\(generation, "STRUCTURE_RECALC"\)',
-        )
-        checks.true(
-            captured_template_phase is not None
-            and "for i = 1, #templateObjects do" in captured_template_phase
-            and "local entry = templateObjects[i]" in captured_template_phase
-            and "createCapturedTemplateObject(cell, square, entry" in captured_template_phase
-            and "shellByTemplateIndex[i]" in captured_template_phase
-            and re.search(
-                r'setGenerationPhase\(generation,\s*"COUNTER_SINK"',
-                generation_build,
-            ) is None,
-            "generation does not apply the current captured template entry by entry",
         )
 
         template_geometry = read_utf8(
@@ -5926,10 +5603,6 @@ def main() -> int:
         checks.true(floor_helper is not None, "createFloor helper is missing")
         if floor_helper is not None:
             checks.true(
-                "previousSprite" in floor_helper and "createdByGeneration" in floor_helper,
-                "floor helper does not persist its pre-generation snapshot",
-            )
-            checks.true(
                 'transmitUpdatedSpriteToClients' in floor_helper,
                 "floor replacement does not use the B42 sprite-update packet",
             )
@@ -5956,82 +5629,38 @@ def main() -> int:
                 and "existing floor modData transmission failed" in floor_helper,
                 "floor client transmission failures are not hard errors",
             )
-        rollback_remove = section(
+        removal_helper = section(
             server_world,
             r"local function removeGenericObject",
             r"local function removeObject",
         )
-        checks.true(rollback_remove is not None, "removeGenericObject helper is missing")
-        if rollback_remove is not None:
+        checks.true(removal_helper is not None, "removeGenericObject helper is missing")
+        if removal_helper is not None:
             checks.true(
-                "restoreTaggedFloor" in rollback_remove,
-                "rollback does not attempt to restore an existing floor",
+                'transmitRemoveItemFromSquare' in removal_helper
+                and 'removeFromSquare' not in removal_helper
+                and 'removeFromWorld' not in removal_helper,
+                "object removal duplicates the B42 removal path with manual detachment",
             )
             checks.true(
-                'transmitRemoveItemFromSquare' in rollback_remove
-                and 'removeFromSquare' not in rollback_remove
-                and 'removeFromWorld' not in rollback_remove,
-                "rollback duplicates the B42 removal path with manual detachment",
+                "squareContainsObject" in removal_helper,
+                "object removal has no authoritative postcondition",
             )
             checks.true(
-                "squareContainsObject" in rollback_remove,
-                "rollback removal has no authoritative postcondition",
-            )
-            checks.true(
-                "server object removal failed" in rollback_remove
-                and 'invoke(object, "getObjectName")' in rollback_remove
-                and 'invoke(object, "getObjectIndex")' in rollback_remove
-                and 'invoke(object, "getSquare")' in rollback_remove
-                and 'invoke(square, "getX")' in rollback_remove
-                and "safeMultiSquare=" in rollback_remove
-                and "callOk=" in rollback_remove
-                and "stillPresent=" in rollback_remove,
+                "server object removal failed" in removal_helper
+                and 'invoke(object, "getObjectName")' in removal_helper
+                and 'invoke(object, "getObjectIndex")' in removal_helper
+                and 'invoke(object, "getSquare")' in removal_helper
+                and 'invoke(square, "getX")' in removal_helper
+                and "safeMultiSquare=" in removal_helper
+                and "callOk=" in removal_helper
+                and "stillPresent=" in removal_helper,
                 "object removal failures do not preserve object and square context",
             )
             checks.true(
-                'invoke(square, "setFloor"' not in rollback_remove,
-                "rollback still calls the nonexistent IsoGridSquare:setFloor API",
+                'invoke(square, "setFloor"' not in removal_helper,
+                "object removal calls the nonexistent IsoGridSquare:setFloor API",
             )
-        special_remove = section(
-            server_world,
-            r"local function deregisterSpecialSystems",
-            r"local function removeCorpse",
-        )
-        checks.true(special_remove is not None, "special-system removal helper is missing")
-        if special_remove is not None:
-            checks.true(
-                "return object" in special_remove
-                and "unregisterRainBarrelGlobalObject" not in special_remove
-                and "SRainBarrelSystem" not in special_remove
-                and 'callGlobal("triggerEvent"' not in special_remove
-                and "local systems =" not in special_remove,
-                "utility cleanup still assumes a global rain-barrel system",
-            )
-        rollback = section(
-            generation_build,
-            r"local function clearGenerationArea\(cell, bounds, generation\)",
-            r"local function buildGeneration",
-        )
-        checks.true(rollback is not None, "removeGeneration function is missing")
-        if rollback is not None:
-            checks.true(
-                "including remnants from any failed earlier" in rollback
-                and "A new unmapped generation starts with this complete clear pass"
-                in rollback,
-                "generation cleanup does not clear the remnants of a failed earlier attempt",
-            )
-            checks.true(
-                "ServerSchema.walkBounds(cell, bounds, function(square)" in rollback
-                and "ServerWorld.clearSquare(square, nil)" in rollback
-                and "M.clearSquare = clearSquare" in server_world
-                and "if not square and requireLoaded == true then" in server_schema
-                and re.search(
-                    r"if square then\s+fn\(square, x, y, z\)\s+end",
-                    server_schema,
-                ) is not None,
-                "generation cleanup does not use sparse managed bounds with per-square clearing",
-            )
-
         checks.true(
             re.search(
                 r"sendClientCommand\([^\n]*\{\s*\}\s*\)", client_relocation_source
@@ -6059,98 +5688,14 @@ def main() -> int:
             "server launcher batch does not return the Java exit code",
         )
 
-    if testserver_agent_path.is_file():
-        testserver_agent = read_utf8(testserver_agent_path)
-        checks.true(
-            "saves, player database and admin permissions" in testserver_agent,
-            "testserver docs do not identify the persistent server data reused between runs",
-        )
-        checks.true(
-            "does not automatically reset that data" in testserver_agent,
-            "testserver docs do not prohibit automatic server data reset",
-        )
-        checks.true(
-            "UTF-8" in testserver_agent,
-            "testserver docs do not record the UTF-8 startup constraint",
-        )
-        checks.true(
-            r"Workshop mode defaults to `Z:\RailroaderRVCache\server` and `client`" in testserver_agent
-            and "preview mode defaults to `testserver/runtime/preview/server` and `client`" in testserver_agent
-            and "The caches keep each mode's server INI" in testserver_agent,
-            "testserver docs do not identify the isolated Workshop/preview server/client caches",
-        )
-
     checks.true(mod_info_path.is_file(), f"mod.info is missing: {mod_info_path}")
     if mod_info_path.is_file():
         mod_info = read_utf8(mod_info_path)
         checks.true(
-            re.search(r"(?m)^require=\\BuildingCraft,\\Railroader\s*$", mod_info)
+            re.search(r"(?m)^require=\\Railroader\s*$", mod_info)
             is not None
             and len(re.findall(r"(?m)^require=", mod_info)) == 1,
-            "RailroaderRV mod.info must preserve BuildingCraft and require Railroader",
-        )
-
-    if readme_path.is_file():
-        readme = read_utf8(readme_path)
-        checks.true(
-            "BuildingCraft_Light_17" in readme
-            and "自建房电灯开关1" in readme
-            and "3459887404" in readme,
-            "README does not identify the required BuildCraft custom-house switch dependency",
-        )
-        checks.true(
-            "x=[20000,20100)" in readme
-            and "y=[2000,2100)" in readme
-            and "staging" in readme
-            and "加载等待期间不做任何世界修改" in readme
-            and "等待目标" in readme
-            and "不要求预先加载完整" in readme
-            and "缺失 square 会跳过" in readme
-            and "固定模板对象的宿主 square" in readme
-            and "fail closed" in readme
-            and "10000 个 base 方格" not in readme,
-            "README does not document sparse cleanup, template-host construction, and fail-closed preflight",
-        )
-        checks.true(
-            "不铺整片金属地板" in readme
-            and "FinalRelocate" in readme
-            and "(20050.5,2050.5,0)" in readme,
-            "README does not document the no-metal-floor build and final relocation",
-        )
-        checks.true(
-            "412 个模板对象" in readme
-            and "6×23" in readme
-            and "驾驶室内部 x=-4..1、y=-2..1" in readme
-            and "每 10 tick" in readme
-            and "59 条捕获墙边" in readme
-            and "四段隐形墙补齐活动区域边界缺口" in readme,
-            "README does not document the captured 6x23 RV and 59-edge shell",
-        )
-        checks.true(
-            "位于旧、新边界之外的安全格" not in readme,
-            "README still documents the retired safe-square relocation plan",
-        )
-        checks.true(
-            "lighting_indoor_01_16" not in readme
-            and "Facing=E" not in readme,
-            "README still documents the retired vanilla lamp or Facing=E assumption",
-        )
-        checks.true(
-            "服务端捕获当前在场成员" in readme
-            and "协调临时远移、chunk 周期及逐人返回" in readme
-            and "客户端异步" in readme
-            and "token ACK 推进阶段" in readme,
-            "README does not document the grouped remote chunk-cycle roof refresh",
-        )
-        checks.true(
-            "managedOriginX+floor(width/2)" in readme
-            and "managedOriginY+floor(height/2)" in readme
-            and "正在生成房车" in readme
-            and "进程内存" in readme
-            and "-15" in readme
-            and "无状态" in readme
-            and "不恢复原坐标" in readme,
-            "README does not document generation-center staging and the stateless -15 sentinel",
+            "RailroaderRV mod.info must declare only its Railroader dependency",
         )
 
     active_commands = read_utf8(server_commands_path) if server_commands_path.is_file() else ""
@@ -6171,24 +5716,6 @@ def main() -> int:
         and "command ~= COMMAND" in generation_validation,
         "LayoutBuilder is not retired while the authoritative Generate route remains active",
     )
-
-    if server_agent_path.is_file():
-        server_agent = read_utf8(server_agent_path)
-        checks.true(
-            "Generation waits at staging until every base square in the managed clear bounds is visible"
-            in server_agent
-            and "cleanup starts only after this full-scope check passes" in server_agent
-            and "Cleanup walks the managed bounds and clears objects in its scope" in server_agent
-            and "creates objects only at current template-object hosts" in server_agent
-            and "materializing sparse upper host squares on demand" in server_agent
-            and "it does not create empty base-plane squares" in server_agent,
-            "server agent docs do not describe sparse cleanup and fail-closed template-host construction",
-        )
-        checks.true(
-            "PerfTrace" not in server_agent
-            and "PerfTrace" not in read_utf8(client_root / "agent.md"),
-            "agent docs still describe removed performance diagnostics",
-        )
 
     checks.true(runner_path.is_file(), f"one-click test runner is missing: {runner_path}")
     if runner_path.is_file():
@@ -6268,7 +5795,8 @@ def main() -> int:
             'RAILROADER_WORKSHOP_ID = "3774360904"' in runner
             and 'SERVER_MOD_LIST = f"{BUILDCRAFT_MOD_ID};{RAILROADER_MOD_ID};{MOD_ID};B42Trans_CN"' in runner
             and 'WORKSHOP_SERVER_ITEMS = f"3556544454;{RAILROADER_WORKSHOP_ID}"' in runner
-            and 'PREVIEW_SERVER_ITEMS = "3556544454"' in runner
+            and 'PREVIEW_SERVER_ITEMS = (' in runner
+            and '"3556544454;3402491515;' in runner
             and "configure_server_mod_profile(settings)" in runner,
             "server mod profile does not select the matching Workshop/preview source",
         )

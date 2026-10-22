@@ -225,11 +225,6 @@ local function previousByTemplate(cache)
     return result
 end
 
-local function worldCoordinates(anchor, cell)
-    return anchor.x + cell.x, anchor.y + cell.y,
-        anchor.z + (cell.z or 0)
-end
-
 local function matchesTemplateObject(object, candidate)
     if spriteName(object) ~= candidate.sprite then return false end
     if candidate.objectClass == "IsoObject" then return true end

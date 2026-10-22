@@ -1,3 +1,12 @@
 {
-  "IGUI_CraftingCategories_RailroaderRV": "铁路房车"
+  "IGUI_CraftingCategories_RailroaderRV": "铁路房车",
+  "IGUI_RailroaderRV_Flatcar_DeckFull": "平车空间不足，无法再添加车辆。",
+  "IGUI_RailroaderRV_Flatcar_BoundRVCannotConvert": "该车厢已绑定房车，无法改造为平车。",
+  "IGUI_RailroaderRV_Flatcar_SourceNotFound": "附近找不到可装载的车辆。",
+  "IGUI_RailroaderRV_Flatcar_SourceOutOfRange": "目标车辆距离平车太远。",
+  "IGUI_RailroaderRV_Flatcar_SourceOccupied": "目标车辆内有人，无法装载。",
+  "IGUI_RailroaderRV_Flatcar_SourceTowing": "正在牵引其他车辆的车辆无法装载。",
+  "IGUI_RailroaderRV_Flatcar_CargoNotFound": "找不到要卸载的车辆。",
+  "IGUI_RailroaderRV_Flatcar_UnloadBlocked": "卸载位置被阻挡，无法卸载车辆。",
+  "IGUI_RailroaderRV_Flatcar_LoadingRampRequired": "装载或卸载车辆需要携带房车平车装卸跳板。"
 }

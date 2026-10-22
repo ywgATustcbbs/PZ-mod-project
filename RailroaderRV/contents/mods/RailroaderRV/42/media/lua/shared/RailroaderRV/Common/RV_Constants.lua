@@ -1,9 +1,7 @@
 -- RailroaderRV shared constants.
 --
--- This module has no dependency on a legacy Railroader adapter.  BuildingCraft
--- and Railroader are the runtime dependencies for the light/locomotive paths.
--- The server side owns all world mutation; these values are shared only so
--- that the client request and server layout use the same contract.
+-- This module has no dependency on a Railroader adapter. The server owns world
+-- mutation; these values are shared by client requests and server layout.
 
 RailroaderRV = RailroaderRV or {}
 RailroaderRV.Constants = RailroaderRV.Constants or {}
@@ -57,8 +55,21 @@ C.COMMAND_RV_CLIENT_DEBUG = "clientDebug"
 C.COMMAND_RV_SAFEHOUSE_CLAIM = "ClaimRVSafehouse"
 C.COMMAND_RV_SAFEHOUSE_RESULT = "ClaimRVSafehouseResult"
 C.COMMAND_RV_SAFEHOUSE_SYNC = "SyncRVSafehouse"
+C.COMMAND_RV_FLATCAR = "ConvertBX40ToFlatcar"
+C.COMMAND_RV_FLATCAR_SYNC = "SyncBX40Flatcar"
+C.COMMAND_RV_FLATCAR_NOTICE = "BX40CargoNotice"
+C.RV_LOADING_RAMP_ITEM = "RailroaderRV.LoadingRamp"
+C.RV_FLATCAR_NOTICE_DECK_FULL = "deck-full"
+C.RV_FLATCAR_NOTICE_BOUND_RV_CANNOT_CONVERT = "bound-rv-cannot-convert"
+C.RV_FLATCAR_NOTICE_SOURCE_NOT_FOUND = "source-not-found"
+C.RV_FLATCAR_NOTICE_SOURCE_OUT_OF_RANGE = "source-out-of-range"
+C.RV_FLATCAR_NOTICE_SOURCE_OCCUPIED = "source-occupied"
+C.RV_FLATCAR_NOTICE_SOURCE_TOWING = "source-towing"
+C.RV_FLATCAR_NOTICE_CARGO_NOT_FOUND = "cargo-not-found"
+C.RV_FLATCAR_NOTICE_UNLOAD_BLOCKED = "unload-blocked"
+C.RV_FLATCAR_NOTICE_LOADING_RAMP_REQUIRED = "loading-ramp-required"
 C.RV_MAP_KEY = "RailroaderRV.TrainMap"
-C.SAVE_SCHEMA_VERSION = 17
+C.SAVE_SCHEMA_VERSION = 20
 C.INVALID_RV_DATA = "RailroaderRV: RV data is invalid; delete this save and rebuild it"
 
 -- The current generation action always targets this server-selected destination.

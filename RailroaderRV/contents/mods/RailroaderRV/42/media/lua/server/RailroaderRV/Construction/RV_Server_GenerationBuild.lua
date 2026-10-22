@@ -85,7 +85,7 @@ local function clearGenerationArea(cell, bounds)
     -- Scan the full managed bounds, including remnants from any failed earlier
     -- attempt. A new unmapped generation starts with this complete clear pass.
     ServerSchema.walkBounds(cell, bounds, function(square)
-        ServerWorld.clearSquare(square, nil)
+        ServerWorld.clearSquare(square)
     end)
 end
 

@@ -52,6 +52,8 @@ local function checkSaveSchemaVersion()
         map.schemaVersion = C.SAVE_SCHEMA_VERSION
         map.locomotives = {}
         map.players = {}
+        map.flatcars = {}
+        map.nextCargoId = 1
         return
     end
     if map.schemaVersion ~= C.SAVE_SCHEMA_VERSION then

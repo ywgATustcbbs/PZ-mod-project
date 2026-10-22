@@ -1,0 +1,54 @@
+module RailroaderRV
+{
+    model RV_FlatcarCargoAnchor
+    {
+        mesh = Railroader/RR_BX40S_Floor,
+        texture = RR_BX40,
+        shader = RV_FlatcarAnchor,
+        static = false,
+        scale = 0.01,
+        undoCoreScale = true,
+        cullFace = NONE,
+        /* Paired with Catalog.anchorAttachmentScale in cargo visual transforms. */
+        attachment RVFlatcarCargoBody
+        {
+            offset = 0.0 1.028669333 0.0,
+            rotate = 0.0 0.0 0.0,
+            scale = 0.01,
+        }
+    }
+
+    model RV_FlatcarEndpointMarkerAnchor
+    {
+        mesh = Railroader/RR_BX40S_Floor,
+        texture = RR_BX40,
+        shader = RV_FlatcarAnchor,
+        static = false,
+        scale = 0.01,
+        undoCoreScale = true,
+        cullFace = NONE,
+        /* Camera attachments scale X/Z by 1.5 and map Y as 1.5 * (y - 0.48).
+           X=0, Y=0.506667, Z=+/-4.666667 place the anchors at centerline,
+           0.04m above deck, and +/-7m along the 14m deck. */
+        attachment RVFlatcarEndpointStart
+        {
+            offset = 0.0 0.506667 -4.666667,
+            rotate = 0.0 0.0 0.0,
+        }
+        attachment RVFlatcarEndpointEnd
+        {
+            offset = 0.0 0.506667 4.666667,
+            rotate = 0.0 0.0 0.0,
+        }
+    }
+
+    /* Source mesh Y is 0..0.492126; scale 6 gives a ~2.953m upright marker. */
+    model RV_FlatcarEndpointMarkerItemModel
+    {
+        mesh = weapons/1handed/Yardstick,
+        texture = weapons/1handed/Yardstick,
+        static = true,
+        scale = 6.0,
+        undoCoreScale = true,
+    }
+}

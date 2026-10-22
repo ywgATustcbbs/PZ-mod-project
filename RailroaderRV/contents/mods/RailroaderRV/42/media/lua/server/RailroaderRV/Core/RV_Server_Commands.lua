@@ -9,6 +9,7 @@ local COMMAND_FINAL_RELOCATE_ACK = ctx.COMMAND_FINAL_RELOCATE_ACK
 local COMMAND_RV_ENTER = ctx.COMMAND_RV_ENTER
 local COMMAND_RV_EXIT = ctx.COMMAND_RV_EXIT
 local Constants = ctx.Constants
+local ServerWorld = ctx.ServerWorld
 local Boundary = ctx.Boundary
 local RV = ctx.RV
 local ServerSchema = ctx.ServerSchema
@@ -34,6 +35,24 @@ local acknowledgeFinalRelocation = ctx.acknowledgeFinalRelocation
 local abortGeneration = ctx.abortGeneration
 local TemplateDevelopment = require(
     "RailroaderRV/TemplateDevelopment/RV_Server_TemplateDevelopment")(ctx)
+local FlatcarVisual = require(
+    "RailroaderRV/CarVisual/RV_FlatcarVisualServer")({
+        C = Constants,
+        ClientDispatch = ctx.ClientDispatch,
+        ServerWorld = ServerWorld,
+        validateAuthoritativePlayer = validateAuthoritativePlayer,
+    })
+local flatcarNoticeReasons = {
+    [Constants.RV_FLATCAR_NOTICE_DECK_FULL] = true,
+    [Constants.RV_FLATCAR_NOTICE_BOUND_RV_CANNOT_CONVERT] = true,
+    [Constants.RV_FLATCAR_NOTICE_SOURCE_NOT_FOUND] = true,
+    [Constants.RV_FLATCAR_NOTICE_SOURCE_OUT_OF_RANGE] = true,
+    [Constants.RV_FLATCAR_NOTICE_SOURCE_OCCUPIED] = true,
+    [Constants.RV_FLATCAR_NOTICE_SOURCE_TOWING] = true,
+    [Constants.RV_FLATCAR_NOTICE_CARGO_NOT_FOUND] = true,
+    [Constants.RV_FLATCAR_NOTICE_UNLOAD_BLOCKED] = true,
+    [Constants.RV_FLATCAR_NOTICE_LOADING_RAMP_REQUIRED] = true,
+}
 
 local function isInvalidRVData(reason)
     local marker = Constants and Constants.INVALID_RV_DATA
@@ -241,6 +260,21 @@ function RV.Server.OnClientCommand(module, command, player, args)
             print("[RailroaderRV][TemplateDevelopment] rejected operation="
                 .. tostring(args.operation)
                 .. " reason=" .. safeErrorText(reason))
+        end
+        return
+    end
+    if command == Constants.COMMAND_RV_FLATCAR then
+        local accepted, reason = FlatcarVisual.handle(player, args)
+        if accepted ~= true then
+            print("[RailroaderRV][FlatcarVisual] rejected reason="
+                .. safeErrorText(reason))
+            if flatcarNoticeReasons[reason] then
+                ctx.ClientDispatch.sendToPlayer(player, Constants.MOD_ID,
+                    Constants.COMMAND_RV_FLATCAR_NOTICE, {
+                        reason = reason,
+                        onlineId = player:getOnlineID(),
+                    })
+            end
         end
         return
     end

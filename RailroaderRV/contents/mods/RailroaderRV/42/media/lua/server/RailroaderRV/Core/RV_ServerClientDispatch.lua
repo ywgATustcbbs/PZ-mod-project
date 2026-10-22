@@ -14,6 +14,10 @@ local function dispatchLocal(module, command, args)
         or command == C.COMMAND_RV_SAFEHOUSE_SYNC then
         RailroaderRV.RailroaderContextMenu.OnServerCommand(
             module, command, args)
+    elseif command == C.COMMAND_RV_FLATCAR_SYNC
+        or command == C.COMMAND_RV_FLATCAR_NOTICE then
+        RailroaderRV.FlatcarVisualClient.onServerCommand(
+            module, command, args)
     elseif command == C.COMMAND_RV_BOUNDARY_CORRECTION then
         RailroaderRV.BoundaryClient.onServerCommand(module, command, args)
     elseif command == C.COMMAND_RV_UTILITY_ACK then

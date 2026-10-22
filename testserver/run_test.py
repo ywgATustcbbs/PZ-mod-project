@@ -37,7 +37,18 @@ BUILDCRAFT_MOD_ID = "BuildingCraft"
 BUILDCRAFT_WORKSHOP_ID = "3459887404"
 SERVER_MOD_LIST = f"{BUILDCRAFT_MOD_ID};{RAILROADER_MOD_ID};{MOD_ID};B42Trans_CN"
 WORKSHOP_SERVER_ITEMS = f"3556544454;{RAILROADER_WORKSHOP_ID}"
-PREVIEW_SERVER_ITEMS = "3556544454"
+PREVIEW_SERVER_MOD_LIST = (
+    f"{SERVER_MOD_LIST};"
+    "tsarslib;damnlib;Military_Tool_Kit;"
+    "U.S. M163 VADS by Papa_Chad by Papa_Chad;"
+    "U.S.M113_APC_by_Papa_Chad;"
+    "U.S. M163 VADS by Papa_Chad by Papa_Chad;"
+    "87fordB700;ATA_Bus"
+)
+PREVIEW_SERVER_ITEMS = (
+    "3556544454;3402491515;3171167894;2705406713;3598575779;"
+    "2705655822;3598575779;3110911330;3402812859"
+)
 SERVER_NAME = "test"
 DEFAULT_PORT = 16261
 DEFAULT_UDP_PORT = 16262
@@ -1346,13 +1357,18 @@ def prepare(settings: Settings) -> Path:
 def configure_server_mod_profile(settings: Settings) -> None:
     """Write the selected Railroader source into this mode's server cache."""
 
+    server_mod_list = (
+        SERVER_MOD_LIST
+        if settings.railroader_build == "workshop"
+        else PREVIEW_SERVER_MOD_LIST
+    )
     workshop_items = (
         WORKSHOP_SERVER_ITEMS
         if settings.railroader_build == "workshop"
         else PREVIEW_SERVER_ITEMS
     )
     options = {
-        "Mods": SERVER_MOD_LIST,
+        "Mods": server_mod_list,
         "WorkshopItems": workshop_items,
     }
     profile = settings.server_cache / "Server" / f"{SERVER_NAME}.ini"
@@ -1468,8 +1484,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--startup-timeout",
         type=float,
-        default=180.0,
-        help="等待服务器启动标记的秒数（默认 180）",
+        default=180000.0,
+        help="等待服务器启动标记的秒数（默认 180000）",
     )
     parser.add_argument("--dry-run", action="store_true", help="只检查并打印计划，不写文件或启动进程")
     parser.add_argument(

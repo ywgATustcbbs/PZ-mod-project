@@ -1,6 +1,5 @@
 -- RV_Server: WorldObjects responsibilities.
 return function(ctx)
-local OWNER = ctx.OWNER
 local Constants = ctx.Constants
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
@@ -301,25 +300,6 @@ local function createFloor(square, sprite, generation, role, tagContext,
     end
     local ok, floor = ServerUtil.invoke(square, "getFloor")
     local hadFloor = ok and floor ~= nil
-    local previousSprite
-    local createdByGeneration = not hadFloor
-    if hadFloor then
-        previousSprite = ServerWorld.getSpriteName(floor)
-        if not previousSprite then
-            error("RailroaderRV: existing floor has no sprite")
-        end
-        -- Metal and wood are two phases over the same object.  Keep the first
-        -- pre-generation sprite so rollback can restore the original floor;
-        -- the wood/roof stages never overwrite this initial snapshot.
-        local existingData = ServerWorld.objectModData(floor)
-        local existingTag = existingData and existingData.RailroaderRV or nil
-        if type(existingTag) == "table" and existingTag.owner == OWNER
-            and existingTag.previousSprite
-            and ServerUtil.toNumber(existingTag.generation) == ServerUtil.toNumber(generation) then
-            previousSprite = tostring(existingTag.previousSprite)
-            createdByGeneration = existingTag.createdByGeneration == true
-        end
-    end
     if not ok or not floor then
         local added = ServerUtil.callSucceeded(square, "addFloor", sprite)
         if not added then
@@ -347,8 +327,6 @@ local function createFloor(square, sprite, generation, role, tagContext,
     if mode == "production" then
         local floorTagData = capturedEntry
             and capturedTagData(capturedEntry, edge) or {}
-        floorTagData.previousSprite = previousSprite
-        floorTagData.createdByGeneration = createdByGeneration
         local tagged, tagError = pcall(ServerWorld.tagObject, floor,
             generation, role, tagContext, floorTagData)
         if not tagged then
@@ -452,8 +430,7 @@ local function createGenerator(cell, square, generation, tagContext)
     if not squareOk or actualSquare ~= square then
         error("RailroaderRV: generator square assignment did not match")
     end
-    -- Tag before attachment so rollback can identify the object as soon as it
-    -- becomes world-visible.
+    -- Attach the ownership tag before the object becomes world-visible.
     ServerWorld.tagObject(generator, generation, RoomTemplate.PROXY_ROLES.power, tagContext)
     addSpecialObject(square, generator)
     if type(cls.updateGenerator) == "function" then cls.updateGenerator(square) end
@@ -569,8 +546,8 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
         end
         addSpecialObject(square, thumpable)
         -- The B42 health setter resolves the object through its square. Apply
-        -- captured health after attachment, while the generation tag already
-        -- lets transaction rollback remove it if the setter or read-back fails.
+        -- captured health after attachment; a failure aborts generation, and
+        -- the next attempt clears this managed scope before rebuilding.
         applyCapturedHealthState(thumpable, entry)
         object = thumpable
     elseif entry.class == "IsoDoor" then

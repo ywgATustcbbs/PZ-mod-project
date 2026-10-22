@@ -229,6 +229,12 @@ class TemplateDevelopmentServerTests(unittest.TestCase):
                         onTick = function() end,
                     }
                 end
+            package.preload["RailroaderRV/CarVisual/RV_FlatcarVisualServer"] =
+                function()
+                    return function()
+                        return { handle = function() return true end }
+                    end
+                end
 
             require("RailroaderRV/Construction/RV_Server_WorldObjects")(ctx)
             ctx.createGenerator = function(...)
@@ -245,13 +251,28 @@ class TemplateDevelopmentServerTests(unittest.TestCase):
             require("RailroaderRV/Core/RV_Server_Commands")(ctx)
 
             assert(registeredCommandName == "*")
+            assert(Constants.ENABLE_TEMPLATE_DEVELOPMENT == false)
             RV.Server.OnClientCommand(Constants.MOD_ID,
                 Constants.COMMAND_RV_TEMPLATE_DEVELOPMENT, player, {
-                    operation = "new", kind = "car_box",
+                    operation = "new", kind = "car_cb",
+                    northSouthLength = 23, eastWestWidth = 6,
+                })
+            RV.Server.OnClientCommand(Constants.MOD_ID,
+                Constants.COMMAND_DUMP_TEMPLATE_CAPTURE, player, {})
+            assert(GenerationTransaction.current() == nil)
+            local disabledLog = table.concat(logs, "\n")
+            assert(string.find(disabledLog,
+                "template-development-disabled", 1, true))
+
+            Constants.ENABLE_TEMPLATE_DEVELOPMENT = true
+            RV.Server.OnClientCommand(Constants.MOD_ID,
+                Constants.COMMAND_RV_TEMPLATE_DEVELOPMENT, player, {
+                    operation = "new", kind = "car_cb",
                     northSouthLength = 23, eastWestWidth = 6,
                 })
             local customRecord = GenerationTransaction.current()
             assert(customRecord ~= nil
+                and customRecord.layout.templateId == "railroader-rv-caboose"
                 and #customRecord.layout.templateObjects == 23 * 6)
             assert(customRecord.layout.room.maxY
                 - customRecord.layout.room.minY + 1 == 23)
@@ -312,12 +333,12 @@ class TemplateDevelopmentServerTests(unittest.TestCase):
 
             RV.Server.OnClientCommand(Constants.MOD_ID,
                 Constants.COMMAND_RV_TEMPLATE_DEVELOPMENT, player, {
-                    operation = "save", kind = "car_box",
+                    operation = "save", kind = "car_cb",
                     walkAabbs = { "should not be logged" },
                     buildCells = { "should not be logged" },
                 })
             local logText = table.concat(logs, "\n")
-            assert(string.find(logText, "save kind=car_box templateId=railroader-rv-car-box", 1, true))
+            assert(string.find(logText, "save kind=car_cb templateId=railroader-rv-caboose", 1, true))
             assert(string.find(logText, "origin=150,450,0", 1, true))
             assert(string.find(logText, "rel=0,0,0", 1, true))
             assert(string.find(logText, "north=false", 1, true))
@@ -343,7 +364,7 @@ class TemplateDevelopmentServerTests(unittest.TestCase):
                 RoomTemplate.CAR_BOX_TEMPLATE_ID)
             local locomotiveTemplate = RoomTemplate.get(RoomTemplate.TEMPLATE_ID)
             assert(#carBoxTemplate.objects == 329
-                and #locomotiveTemplate.objects == 412)
+                and #locomotiveTemplate.objects == 365)
             assert(carBoxTemplate.objects[1].sprite == "industry_railroad_05_38")
             assert(locomotiveTemplate.objects[1].sprite
                 ~= carBoxTemplate.objects[1].sprite)
@@ -427,6 +448,10 @@ class TemplateDevelopmentServerTests(unittest.TestCase):
                 == RoomTemplate.CAR_BOX_TEMPLATE_ID)
             assert(RoomTemplate.templateIdForKind("car_bx40", false)
                 == RoomTemplate.CAR_BOX_TEMPLATE_ID)
+            assert(RoomTemplate.templateIdForKind("car_cb", false)
+                == RoomTemplate.CAR_CABOOSE_TEMPLATE_ID)
+            assert(RoomTemplate.templateIdForDevelopmentKind("car_cb", false)
+                == RoomTemplate.CAR_CABOOSE_TEMPLATE_ID)
             '''
         )
 

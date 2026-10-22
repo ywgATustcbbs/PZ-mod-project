@@ -1,0 +1,38 @@
+module RailroaderRV
+{
+	imports
+	{
+		Base
+	}
+
+	item LoadingRamp
+	{
+		DisplayCategory = VehicleMaintenance,
+		Weight = 30.0,
+		ItemType = base:normal,
+		DisplayName = Loading Ramp,
+		Icon = RailroaderRV_LoadingRamp,
+	}
+
+	craftRecipe Assemble Loading Ramp
+	{
+		/* At MetalWelding 3, 864 * 5 / (60 updates/s * 0.8) = 90 seconds. */
+		time = 864,
+		timedAction = Welding,
+		Tags = InHandCraft;Welding,
+		category = Metalworking,
+		Icon = RailroaderRV_LoadingRamp,
+		SkillRequired = MetalWelding:3,
+		inputs
+		{
+			item 6 [Base.SheetMetal],
+			item 12 [Base.MetalPipe],
+			item 6 [Base.BlowTorch],
+			item 1 [Base.WeldingMask] mode:keep,
+		}
+		outputs
+		{
+			item 1 RailroaderRV.LoadingRamp,
+		}
+	}
+}

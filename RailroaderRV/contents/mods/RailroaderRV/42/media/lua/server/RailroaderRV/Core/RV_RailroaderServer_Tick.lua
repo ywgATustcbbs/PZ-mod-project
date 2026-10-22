@@ -77,9 +77,7 @@ function Adapter.installTransactionHooks()
     server.setRailroaderValidationHook(validateGeneration)
     server.setRailroaderCommitHook(commitGeneration)
     server.setRailroaderFailureHook(function(...)
-        if type(Adapter.invalidateBoundaryValidationCache) == "function" then
-            Adapter.invalidateBoundaryValidationCache()
-        end
+        Adapter.invalidateBoundaryValidationCache()
         return restoreAfterGenerationFailure(...)
     end)
     if not Adapter._tickRegistered then
@@ -91,12 +89,8 @@ end
 
 Adapter.installTransactionHooks()
 
-if type(Adapter.onObjectAboutToBeRemoved) == "function" then
-    Core.on("OnObjectAboutToBeRemoved", Adapter.onObjectAboutToBeRemoved)
-end
-if type(Adapter.onDestroyIsoThumpable) == "function" then
-    Core.on("OnDestroyIsoThumpable", Adapter.onDestroyIsoThumpable)
-end
+Core.on("OnObjectAboutToBeRemoved", Adapter.onObjectAboutToBeRemoved)
+Core.on("OnDestroyIsoThumpable", Adapter.onDestroyIsoThumpable)
 
 
 end

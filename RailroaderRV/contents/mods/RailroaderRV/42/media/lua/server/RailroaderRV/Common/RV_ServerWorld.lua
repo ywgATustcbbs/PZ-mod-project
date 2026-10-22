@@ -137,9 +137,9 @@ local function tagObject(object, generation, role, tagContext, extraData)
         error("RailroaderRV: generated object boundary identity is incomplete")
     end
     -- `extraData` may add only facts that the object itself owns and that no
-    -- reader can derive: the template entry index, the shell edge key, and the
-    -- floor rollback snapshot.  Identity is assigned last, so descriptor data
-    -- can never override the RV/generation tokens.
+    -- reader can derive: the template entry index and the shell edge key.
+    -- Identity is assigned last, so descriptor data cannot override the
+    -- RV/generation tokens.
     local tag = {}
     if type(extraData) == "table" then
         for key, value in pairs(extraData) do
@@ -156,17 +156,6 @@ local function tagObject(object, generation, role, tagContext, extraData)
     -- modData delta here: the creator sends one complete object packet after
     -- attachment and all object-specific state is final.  Existing objects
     -- (notably replaced floors) explicitly send their deltas in createFloor.
-end
-
-local function isTaggedForGeneration(object, generation, rvId)
-    if generation == nil or rvId == nil then
-        return false
-    end
-    local data = objectModData(object)
-    local tag = data and data.RailroaderRV or nil
-    return type(tag) == "table" and tag.owner == OWNER
-        and ServerUtil.toNumber(tag.generation) == ServerUtil.toNumber(generation)
-        and tostring(tag.rvId) == tostring(rvId)
 end
 
 local function isPlayerObject(object)
@@ -254,28 +243,6 @@ local function getSpriteName(object)
     return tostring(name)
 end
 
-local function clearGenerationTag(object)
-    local data = objectModData(object)
-    if not data then
-        error("RailroaderRV: generated object has no modData while clearing tag")
-    end
-    local tag = data.RailroaderRV
-    if type(tag) == "table" and tag.owner == OWNER then
-        tag.owner = nil
-        tag.rvId = nil
-        tag.generation = nil
-        tag.role = nil
-        tag.previousSprite = nil
-        tag.createdByGeneration = nil
-        -- Keep the namespace itself.  The dedicated-server Kahlua runtime does
-        -- not provide Lua's `next` primitive, and an empty namespace is safe;
-        -- retaining it also avoids touching unrelated modData keys.
-    end
-    if not ServerUtil.callSucceeded(object, "transmitModData") then
-        error("RailroaderRV: generated object tag removal transmission failed")
-    end
-end
-
 local function squareContainsObject(square, object)
     local objectsOk, objects = ServerUtil.invoke(square, "getObjects")
     if not objectsOk or not objects then
@@ -298,41 +265,7 @@ local function squareContainsObject(square, object)
     return false
 end
 
--- The removal filter for a tagged floor: the rollback snapshot lives in the
--- same canonical namespace as the identity.
-local function restoreTaggedFloor(square, object)
-    local data = objectModData(object)
-    local tag = data and data.RailroaderRV or nil
-    if type(tag) ~= "table" or tag.owner ~= OWNER
-        or tag.createdByGeneration ~= false or not tag.previousSprite then
-        return false
-    end
-
-    local previousSprite = tostring(tag.previousSprite)
-    local currentSprite = getSpriteName(object)
-    if not currentSprite then
-        error("RailroaderRV: tagged floor has no current sprite during rollback")
-    end
-    if currentSprite ~= previousSprite then
-        local spriteOk, spriteObject = ServerUtil.callGlobal("getSprite", previousSprite)
-        if not spriteOk or not spriteObject then
-            error("RailroaderRV: previous floor sprite is unavailable: " .. previousSprite)
-        end
-        if not ServerUtil.callSucceeded(object, "setSprite", spriteObject)
-            or not ServerUtil.callSucceeded(object, "transmitUpdatedSpriteToClients") then
-            error("RailroaderRV: previous floor sprite restoration failed")
-        end
-    end
-    clearGenerationTag(object)
-    return true
-end
-
-local function removeGenericObject(square, object, restoreTaggedFloors,
-    safelyRemoveMultiSquare)
-    local floor = select(2, ServerUtil.invoke(square, "getFloor"))
-    if restoreTaggedFloors and floor == object and restoreTaggedFloor(square, object) then
-        return
-    end
+local function removeGenericObject(square, object, safelyRemoveMultiSquare)
     if safelyRemoveMultiSquare == nil then safelyRemoveMultiSquare = true end
     local removeOk, removeIndex = ServerUtil.invoke(square,
         "transmitRemoveItemFromSquare", object, safelyRemoveMultiSquare)
@@ -370,7 +303,7 @@ local function removeGenericObject(square, object, restoreTaggedFloors,
     end
 end
 
-local function removeObject(square, object, restoreTaggedFloors)
+local function removeObject(square, object)
     if isPlayerObject(object) then
         return
     end
@@ -398,7 +331,7 @@ local function removeObject(square, object, restoreTaggedFloors)
     -- clearSquare already visits each square in the managed bounds. Remove
     -- this tile through the server path without requiring Java to resolve the
     -- complete sprite grid first; a missing grid member otherwise returns -1.
-    removeGenericObject(square, object, restoreTaggedFloors, false)
+    removeGenericObject(square, object, false)
 end
 
 local function recalcSquare(square)
@@ -409,25 +342,17 @@ local function recalcSquare(square)
     ServerUtil.invoke(square, "RecalcAllWithNeighbours", true)
 end
 
-local function clearSquare(square, onlyGeneration, rvId)
+local function clearSquare(square)
     local objects = squareSnapshot(square)
-    -- Validate all vehicles before removing any object on this square.  This
-    -- makes an unknown vehicle API a clean transaction failure, not data loss.
+    -- Validate vehicles before mutating this square. A failure here does not
+    -- undo squares already processed by the caller.
     for i = 1, #objects do
-        if isVehicleObject(objects[i]) and (not onlyGeneration
-            or isTaggedForGeneration(objects[i], onlyGeneration, rvId)) then
+        if isVehicleObject(objects[i]) then
             validateVehiclePath(objects[i])
         end
     end
     for i = 1, #objects do
-        local object = objects[i]
-        if not onlyGeneration or isTaggedForGeneration(object, onlyGeneration,
-            rvId) then
-            -- Generation rollback restores a tagged pre-existing floor, while
-            -- the cleanup-only pass must remove every floor, including one
-            -- left tagged by an earlier generation.
-            removeObject(square, object, onlyGeneration ~= nil)
-        end
+        removeObject(square, objects[i])
     end
     recalcSquare(square)
 end
@@ -438,7 +363,6 @@ M.collectionSnapshot = collectionSnapshot
 M.squareSnapshot = squareSnapshot
 M.objectModData = objectModData
 M.tagObject = tagObject
-M.isTaggedForGeneration = isTaggedForGeneration
 M.isPlayerObject = isPlayerObject
 M.isVehicleObject = isVehicleObject
 M.getSpriteName = getSpriteName

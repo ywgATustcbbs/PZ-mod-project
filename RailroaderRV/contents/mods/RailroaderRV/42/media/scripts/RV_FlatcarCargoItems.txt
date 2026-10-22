@@ -1,0 +1,15 @@
+module RailroaderRV
+{
+    imports
+    {
+        Base
+    }
+
+    item RVFlatcarCargoModel
+    {
+        Weight = 0.1,
+        ItemType = base:normal,
+        DisplayName = RV flatcar cargo model,
+        StaticModel = RV_FlatcarCargoAnchor,
+    }
+}

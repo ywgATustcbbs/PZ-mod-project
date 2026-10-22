@@ -4,6 +4,8 @@
 -- for the enter intent. Safehouse claims carry no target hint; the server
 -- resolves the player's current RV.
 
+require("ISUI/ISToolTip")
+require("ISUI/ISVehicleMenu")
 require("Railroader/RR_API")
 require("RailroaderRV/Common/RV_Constants")
 require("RailroaderRV/Common/RV_UtilityConstants")
@@ -16,6 +18,8 @@ RailroaderRV.RailroaderContextMenu = RailroaderRV.RailroaderContextMenu or {}
 local Menu = RailroaderRV.RailroaderContextMenu
 local C = RailroaderRV.Constants
 local UtilityClient = require("RailroaderRV/GUI/RV_UtilityClient")
+local FlatcarVisualClient = require(
+    "RailroaderRV/GUI/RV_FlatcarVisualClient")
 
 local ICON_ENTER_RV = "media/ui/RailroaderRV/enterrv.png"
 local ICON_EXIT_RV = "media/ui/RailroaderRV/exitrv.png"
@@ -114,6 +118,8 @@ end
 
 local function clickedUnit(animal)
     if not animal then return nil end
+    local unitId = FlatcarVisualClient.unitIdForDecoration(animal)
+    if unitId ~= nil then return Units.find(unitId) end
     local id = animal:getAnimalID()
     return Units.find(id)
 end
@@ -151,6 +157,172 @@ local function requestExit(player)
         return
     end
     sendClientCommand(player, C.MOD_ID, C.COMMAND_RV_EXIT, {})
+end
+
+local function requestFlatcarConversion(player, unitId)
+    if not player or unitId == nil then return end
+    FlatcarVisualClient.requestConversion(player, unitId)
+end
+
+local function requestLoadVehicle(player, unitId, vehicleId)
+    if not player or unitId == nil or vehicleId == nil then return end
+    FlatcarVisualClient.requestLoadVehicle(player, unitId, vehicleId)
+end
+
+local function requestUnloadVehicle(player, unitId, cargoId)
+    if not player or unitId == nil or cargoId == nil then return end
+    FlatcarVisualClient.requestUnloadVehicle(player, unitId, cargoId)
+end
+
+local function newMenuOptionToolTip(title, description)
+    local toolTip = ISToolTip:new()
+    toolTip:initialise()
+    toolTip:setVisible(false)
+    toolTip:setName(title)
+    toolTip.description = description
+    return toolTip
+end
+
+local function transportTooltipDescription(isFlatcar, hasLoadingRamp)
+    local lines = {}
+    if not isFlatcar then
+        lines[#lines + 1] = text(
+            "ContextMenu_RailroaderRV_Transport_RequiresFlatcar",
+            "Convert to a flatcar first")
+    end
+    local rampColor = hasLoadingRamp and "<RGB:1,1,1>" or "<RGB:1,0,0>"
+    local rampCount = hasLoadingRamp and "1/1" or "0/1"
+    lines[#lines + 1] = text("Tooltip_craft_Needs", "Needs")
+        .. ": <LINE> " .. rampColor
+        .. getItemNameFromFullType(C.RV_LOADING_RAMP_ITEM)
+        .. " " .. rampCount .. " <RGB:1,1,1>"
+    lines[#lines + 1] = text(
+        "ContextMenu_RailroaderRV_Transport_LoadingRampNotConsumed",
+        "The loading ramp is not consumed.")
+    lines[#lines + 1] = text(
+        "ContextMenu_RailroaderRV_Transport_VisualOnly",
+        "Vehicles on the flatcar are visual models only. <LINE> "
+            .. "Visual errors may occur. <LINE> The model may differ from "
+            .. "the real vehicle. <LINE> It does not show the vehicle's "
+            .. "actual state.")
+    lines[#lines + 1] = text(
+        "ContextMenu_RailroaderRV_Transport_VehicleIDChanges",
+        "Transport deletes the original vehicle. <LINE> A new vehicle is "
+            .. "created at the destination. <LINE> It has the same saved "
+            .. "state. <LINE> The game engine prevents Lua from preserving "
+            .. "the vehicle ID. <LINE> Mods that depend on vehicle IDs may "
+            .. "break. <LINE> This includes some RV mods. <LINE> Loading "
+            .. "drops the vehicle's key and container contents. <LINE> They "
+            .. "fall to the ground. <LINE> This includes trunk and glove box "
+            .. "items. <LINE> Unloading does not recreate those items.")
+    return table.concat(lines, " <LINE> ")
+end
+
+local function nearbyVehicles(player)
+    local result = {}
+    local position = playerPosition(player)
+    if not position then return result end
+
+    local cell = getCell()
+    local centerX = math.floor(position.x)
+    local centerY = math.floor(position.y)
+    local centerZ = math.floor(position.z)
+    local seen = {}
+    for x = centerX - 6, centerX + 6 do
+        for y = centerY - 6, centerY + 6 do
+            local square = cell:getGridSquare(x, y, centerZ)
+            if square then
+                local objects = square:getMovingObjects()
+                for index = 0, objects:size() - 1 do
+                    local vehicle = objects:get(index)
+                    if instanceof(vehicle, "BaseVehicle") then
+                        local dx = vehicle:getX() - position.x
+                        local dy = vehicle:getY() - position.y
+                        local vehicleId = vehicle:getId()
+                        local key = tostring(vehicleId)
+                        if dx * dx + dy * dy <= 36 and not seen[key] then
+                            seen[key] = true
+                            local name = ISVehicleMenu.getVehicleDisplayName(vehicle)
+                            result[#result + 1] = {
+                                id = vehicleId,
+                                label = name .. " [" .. key .. "]",
+                            }
+                        end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(result, function(left, right)
+        return left.label < right.label
+    end)
+    return result
+end
+
+local function cargoDisplayName(cargo)
+    local script = getScriptManager():getVehicle(cargo.vehicleScript)
+    local carName = script:getCarModelName() or script:getName()
+    return text("IGUI_VehicleName" .. carName, carName)
+end
+
+local function addLoadVehicleSubmenu(context, option, player, unitId,
+        hasLoadingRamp)
+    local submenu = ISContextMenu:getNew(context)
+    context:addSubMenu(option, submenu)
+    local vehicles = nearbyVehicles(player)
+    if #vehicles == 0 then
+        local empty = submenu:addOption(text(
+            "ContextMenu_RailroaderRV_LoadVehicle_NoNearby",
+            "No nearby vehicles"))
+        empty.notAvailable = true
+        return
+    end
+    for _, vehicle in ipairs(vehicles) do
+        local vehicleOption = submenu:addOption(vehicle.label, player,
+            requestLoadVehicle,
+            unitId, vehicle.id)
+        vehicleOption.notAvailable = not hasLoadingRamp
+        vehicleOption.toolTip = newMenuOptionToolTip(vehicle.label,
+            transportTooltipDescription(true, hasLoadingRamp))
+    end
+end
+
+local function addUnloadVehicleSubmenu(context, option, player, unitId,
+        hasLoadingRamp)
+    local submenu = ISContextMenu:getNew(context)
+    context:addSubMenu(option, submenu)
+    local cars = FlatcarVisualClient.cargoForUnit(unitId)
+    if #cars == 0 then
+        local empty = submenu:addOption(text(
+            "ContextMenu_RailroaderRV_UnloadVehicle_Empty",
+            "No vehicles on this flatcar"))
+        empty.notAvailable = true
+        return
+    end
+    for _, cargo in ipairs(cars) do
+        local label = cargoDisplayName(cargo) .. " ["
+            .. tostring(cargo.cargoId) .. "]"
+        local cargoOption = submenu:addOption(label, player,
+            requestUnloadVehicle,
+            unitId, cargo.cargoId)
+        cargoOption.notAvailable = not hasLoadingRamp
+        cargoOption.toolTip = newMenuOptionToolTip(label,
+            transportTooltipDescription(true, hasLoadingRamp))
+        cargoOption.onHighlightParams = { player, unitId, cargo.cargoId,
+            hasLoadingRamp, cargo.vehicleScript }
+        cargoOption.onHighlight = function(_option, _menu, isHighlighted,
+                optionPlayer, optionUnitId, optionCargoId, canUnload,
+                optionVehicleScript)
+            if isHighlighted and canUnload then
+                FlatcarVisualClient.showUnloadPreview(optionPlayer,
+                    optionUnitId, optionCargoId, optionVehicleScript,
+                    _menu, _option)
+            else
+                FlatcarVisualClient.clearUnloadPreview(optionUnitId,
+                    optionCargoId)
+            end
+        end
+    end
 end
 
 local function safehouseWaterUnavailable(water)
@@ -373,19 +545,38 @@ local function addUnitOptions(playerNum, context, unit, test)
     end
     local dashboardLabel = text("ContextMenu_RailroaderRV_UtilityDashboard",
         "RV utility panel")
+    local flatcarLabel = text("ContextMenu_RailroaderRV_ConvertToFlatcar",
+        "Convert to flatcar")
+    local loadVehicleLabel = text(
+        "ContextMenu_RailroaderRV_LoadVehicle", "Load vehicle")
+    local unloadVehicleLabel = text(
+        "ContextMenu_RailroaderRV_UnloadVehicle", "Unload vehicle")
     local hasEnter = optionAlreadyExists(context, enterLabel)
     local hasDashboard = optionAlreadyExists(context, dashboardLabel)
+    local hasFlatcar = optionAlreadyExists(context, flatcarLabel)
+    local hasLoadVehicle = optionAlreadyExists(context, loadVehicleLabel)
+    local hasUnloadVehicle = optionAlreadyExists(context, unloadVehicleLabel)
     local showDashboard = Menu.hasUtilityDashboardCandidate(player, false,
         unit.id)
+    local isBX40 = unit.kind == "car_bx40"
+    local isFlatcar = isBX40 and FlatcarVisualClient.isFlatcar(unit.id)
+    local hasLoadingRamp = isBX40
+        and player:getInventory():containsTypeRecurse(C.RV_LOADING_RAMP_ITEM)
+    local showEnter = not isFlatcar
+    local showFlatcar = isBX40 and not isFlatcar
 
     if test then
-        if not hasEnter or (showDashboard and not hasDashboard) then
+        if (showEnter and not hasEnter)
+                or (showDashboard and not hasDashboard)
+                or (showFlatcar and not hasFlatcar)
+                or (isBX40 and not hasLoadVehicle)
+                or (isBX40 and not hasUnloadVehicle) then
             return markTest()
         end
         return false
     end
 
-    if not hasEnter then
+    if showEnter and not hasEnter then
         local option = context:addOption(enterLabel, player, requestEnter,
             unit.id)
         option.iconTexture = getTexture(ICON_ENTER_RV)
@@ -394,6 +585,39 @@ local function addUnitOptions(playerNum, context, unit, test)
         local option = context:addOption(dashboardLabel, player,
             RailroaderRV.UtilityContextMenu.openDashboard)
         option.iconTexture = getTexture(ICON_UTILITY_DASHBOARD)
+    end
+    if showFlatcar and not hasFlatcar then
+        local option = context:addOption(flatcarLabel, player,
+            requestFlatcarConversion, unit.id)
+        -- OnPreFill runs before vanilla returns used tooltips to its pool.
+        option.toolTip = newMenuOptionToolTip(text(
+            "ContextMenu_RailroaderRV_ConvertToFlatcar_TooltipTitle",
+            "Conversion warning"), text(
+            "ContextMenu_RailroaderRV_ConvertToFlatcar_Notice",
+            "Cannot be restored to an ordinary coach or bound as an RV after conversion")
+            .. " <LINE> " .. text(
+                "ContextMenu_RailroaderRV_ConvertToFlatcar_Bound",
+                "A car already bound to an RV cannot be converted to a flatcar"))
+    end
+    if isBX40 and not hasLoadVehicle then
+        local option = context:addOption(loadVehicleLabel)
+        if isFlatcar then
+            addLoadVehicleSubmenu(context, option, player, unit.id,
+                hasLoadingRamp)
+        end
+        option.notAvailable = not isFlatcar or not hasLoadingRamp
+        option.toolTip = newMenuOptionToolTip(loadVehicleLabel,
+            transportTooltipDescription(isFlatcar, hasLoadingRamp))
+    end
+    if isBX40 and not hasUnloadVehicle then
+        local option = context:addOption(unloadVehicleLabel)
+        if isFlatcar then
+            addUnloadVehicleSubmenu(context, option, player, unit.id,
+                hasLoadingRamp)
+        end
+        option.notAvailable = not isFlatcar or not hasLoadingRamp
+        option.toolTip = newMenuOptionToolTip(unloadVehicleLabel,
+            transportTooltipDescription(isFlatcar, hasLoadingRamp))
     end
     return true
 end

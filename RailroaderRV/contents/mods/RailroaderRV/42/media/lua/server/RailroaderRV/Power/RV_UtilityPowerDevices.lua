@@ -174,7 +174,8 @@ end
 local fixedTemplateCandidates = {}
 for _, templateId in ipairs({ RoomTemplate.TEMPLATE_ID,
     RoomTemplate.ENGINE_AREA_TEMPLATE_ID,
-    RoomTemplate.CAR_BOX_TEMPLATE_ID }) do
+    RoomTemplate.CAR_BOX_TEMPLATE_ID,
+    RoomTemplate.CAR_CABOOSE_TEMPLATE_ID }) do
     fixedTemplateCandidates[templateId] = templateCandidates(
         RoomTemplate.get(templateId))
 end
@@ -223,11 +224,6 @@ local function previousByTemplate(cache)
         result[cacheKey(cache[i])] = cache[i]
     end
     return result
-end
-
-local function worldCoordinates(anchor, cell)
-    return anchor.x + cell.x, anchor.y + cell.y,
-        anchor.z + (cell.z or 0)
 end
 
 local function matchesTemplateObject(object, candidate)

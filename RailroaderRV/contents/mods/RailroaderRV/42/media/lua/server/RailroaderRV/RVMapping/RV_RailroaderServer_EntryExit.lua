@@ -43,6 +43,10 @@ local pendingExitBoardings = {}
 local EXIT_BOARD_TIMEOUT_TICKS = 600
 local EXIT_BOARD_POSITION_TOLERANCE = 1.5
 
+local function isFlatcar(map, unitId)
+    return map.flatcars[tostring(unitId)] ~= nil
+end
+
 function Adapter.resolveCurrentUtilityRV(player, diagnosticOperation,
         diagnosticPhase)
     local relation
@@ -410,6 +414,9 @@ local function enterPlayer(player, locoId)
     if existingRecord then return false, "player is already inside an RV" end
     local train = findTrain(locoId)
     if not train then return false, "target is not an active Railroader unit" end
+    if isFlatcar(map, trainId(train)) then
+        return false, "flatcars cannot be bound as RVs"
+    end
     if train.isLocomotive ~= true
         and (not trainPose(train) or not trainGeometry(train)) then
         return false, "cargo car pose is unavailable"
@@ -490,6 +497,9 @@ end
 local function commitGeneration(player, data, prepared)
     local map = mapData()
     local locoId = tostring(data.locoId)
+    if isFlatcar(map, locoId) then
+        return false, "flatcars cannot be bound as RVs"
+    end
     local generation = prepared.generation
     local slotIndex = prepared.slotIndex
     local train = findTrain(locoId)
@@ -572,6 +582,9 @@ local function validateGeneration(player, data)
     if not player or playerDead(player) then return false, "player is dead" end
     local train = findTrain(data.locoId)
     if not train then return false, "Railroader unit disappeared during generation" end
+    if isFlatcar(mapData(), trainId(train)) then
+        return false, "flatcars cannot be bound as RVs"
+    end
     local geometry = trainGeometry(train)
     if not geometry or not trainPose(train) then
         return false, "Railroader unit pose is unavailable during generation"
@@ -815,7 +828,8 @@ local function exitPlayer(player)
     if not record then
         return false, C.INVALID_RV_DATA
     end
-    if record.templateId == RoomTemplate.CAR_BOX_TEMPLATE_ID then
+    if record.templateId == RoomTemplate.CAR_BOX_TEMPLATE_ID
+        or record.templateId == RoomTemplate.CAR_CABOOSE_TEMPLATE_ID then
         return exitCargoPlayer(player, record)
     end
     local blocked, blockReason = transactionBlocks(record.locoId)

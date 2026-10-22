@@ -4,6 +4,18 @@
     "ContextMenu_RailroaderRV_FinishLayout": "结束建造",
     "ContextMenu_RailroaderRV_Enter": "进入房车",
     "ContextMenu_RailroaderRV_EnterCargo": "进入车厢房车",
+    "ContextMenu_RailroaderRV_ConvertToFlatcar": "转换为平车",
+    "ContextMenu_RailroaderRV_ConvertToFlatcar_TooltipTitle": "改造提示",
+    "ContextMenu_RailroaderRV_ConvertToFlatcar_Notice": "转换后无法恢复为普通车厢，也无法再绑定为房车",
+    "ContextMenu_RailroaderRV_ConvertToFlatcar_Bound": "已绑定房车的车厢无法改造为平车",
+    "ContextMenu_RailroaderRV_LoadVehicle": "装载车辆",
+    "ContextMenu_RailroaderRV_UnloadVehicle": "放下车辆",
+    "ContextMenu_RailroaderRV_Transport_RequiresFlatcar": "需要先转换为平车",
+    "ContextMenu_RailroaderRV_Transport_LoadingRampNotConsumed": "登车跳板不会被消耗。",
+    "ContextMenu_RailroaderRV_Transport_VisualOnly": "平车上的车辆仅是视觉模型。 <LINE> 可能出现视觉错误，也可能与真实车辆不一致； <LINE> 模型不代表车辆实际状态。",
+    "ContextMenu_RailroaderRV_Transport_VehicleIDChanges": "运输会销毁当前车辆。 <LINE> 目的地会生成状态相同的新车辆。 <LINE> 游戏引擎限制导致 Lua 无法保留车辆 ID； <LINE> 依赖车辆 ID 的其他模组（例如部分房车模组）可能因此出错。 <LINE> 装载时，车辆钥匙及车内各容器中的物品会掉落到地面。 <LINE> 例如后备箱和手套箱中的物品；卸载不会重新生成这些物品。",
+    "ContextMenu_RailroaderRV_LoadVehicle_NoNearby": "附近没有可装载的车辆",
+    "ContextMenu_RailroaderRV_UnloadVehicle_Empty": "平车上没有可放下的车辆",
     "ContextMenu_RailroaderRV_Exit": "退出房车",
     "ContextMenu_RailroaderRV_ClaimSafehouse": "认领房车安全屋",
     "ContextMenu_RailroaderRV_ClaimSafehouse_WaterUnavailable": "认领安全屋需要房车供水系统正常运转",
@@ -16,5 +28,6 @@
     "ContextMenu_RailroaderRV_TemplateDevelopment_EditTemplate": "编辑已有模板",
     "ContextMenu_RailroaderRV_TemplateDevelopment_SaveTemplate": "保存模板",
     "ContextMenu_RailroaderRV_TemplateDevelopment_Loco": "机车",
-    "ContextMenu_RailroaderRV_TemplateDevelopment_CarBox": "货车厢 / BX40（共用）"
+    "ContextMenu_RailroaderRV_TemplateDevelopment_CarBox": "货车厢 / BX40（共用）",
+    "ContextMenu_RailroaderRV_TemplateDevelopment_Caboose": "守车（car_cb）"
 }

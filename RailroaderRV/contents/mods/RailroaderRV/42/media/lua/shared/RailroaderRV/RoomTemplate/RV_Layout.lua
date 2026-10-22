@@ -91,27 +91,27 @@ local function appendWall(result, x, y, z, north, sprite, role, corner)
 end
 
 local function isShellSprite(entry)
-    return entry.sprite:sub(1, 6) == "walls_"
-        or entry.sprite:sub(1, 21) == "fixtures_railings_01_"
+    return entry.name == "Wooden Wall"
+        or entry.name == "Wooden Door Frame"
+        or entry.name == "Wooden Door"
+        or entry.sprite:sub(1, 6) == "walls_"
         or entry.sprite:sub(1, 17) == "fixtures_windows_"
         or entry.sprite:sub(1, 31) == "location_restaurant_pileocrepe_"
 end
 
 local function shellPriority(entry)
     if entry.name == "Wooden Wall" then return 1 end
-    if entry.sprite:sub(1, 21) == "fixtures_railings_01_" then return 2 end
-    if entry.sprite:sub(1, 17) == "fixtures_windows_" then return 3 end
-    if entry.name == "Wooden Door Frame" then return 4 end
-    if entry.name == "Wooden Door" then return 5 end
+    if entry.sprite:sub(1, 17) == "fixtures_windows_" then return 2 end
+    if entry.name == "Wooden Door Frame" then return 3 end
+    if entry.name == "Wooden Door" then return 4 end
     return 6
 end
 
 -- The edge ledger represents captured shell objects and captured invisible
 -- wall supports that close gaps.
 -- Multiple captured objects can share one edge host (for example a wall and
--- railing); choose the wall/railing object deterministically for edge
--- ownership while generation still creates every object from the full
--- captured table.
+-- window); choose the structural object deterministically for edge ownership
+-- while generation still creates every object from the full captured table.
 local function wallCoordinatesForAnchor(cx, cy, cz, interior,
     templateObjects)
     local result = {}
@@ -349,6 +349,7 @@ function Layout.make(cx, cy, cz, templateId)
             class = captured.class,
             name = captured.name,
             sprite = captured.sprite,
+            openSprite = captured.openSprite,
             direction = captured.direction,
             protected = captured.protected,
             x = cx + captured.x,

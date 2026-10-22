@@ -4,6 +4,9 @@
 /.rv-lua-parse/
 /.venv/
 .tmp-railroader-2.1/
+.tmp-railroader-3.0/
+.tmp-minimap-3763913359/
+.tmp-minidoracat-ui-3789836701/
 /game-decompiled/
 /official lua scripts/
 /reference mods/

@@ -1,12 +1,14 @@
 -- Current shared template data and pure queries.
 local Source = require "RailroaderRV/RoomTemplate/RV_Template"
 local CarBoxSource = require "RailroaderRV/RoomTemplate/RV_Template_CarBox"
+local CabooseSource = require "RailroaderRV/RoomTemplate/RV_Template_Caboose"
 
 local RoomTemplate = {}
 
 RoomTemplate.TEMPLATE_ID = "railroader-rv"
 RoomTemplate.ENGINE_AREA_TEMPLATE_ID = "railroader-rv-engine-area"
 RoomTemplate.CAR_BOX_TEMPLATE_ID = "railroader-rv-car-box"
+RoomTemplate.CAR_CABOOSE_TEMPLATE_ID = "railroader-rv-caboose"
 RoomTemplate.CURRENT_TEMPLATE_VERSION = 11
 RoomTemplate.WIDTH = 100
 RoomTemplate.HEIGHT = 100
@@ -88,6 +90,7 @@ local function compileTemplate(templateId, source, buildCells, waterProxies,
             buildRects = buildRects,
         },
     }
+    local walkGeometry = source.walkAabbs[1]
 
     for index = 1, source.objectCount do
         local captured = source.objects[index]
@@ -98,11 +101,21 @@ local function compileTemplate(templateId, source, buildCells, waterProxies,
             and (captured.sprite == "walls_garage_02_0"
                 or captured.sprite == "walls_garage_02_1"
                 or captured.sprite == "walls_garage_02_2")
+        local cabooseOpening = templateId == RoomTemplate.CAR_CABOOSE_TEMPLATE_ID
+            and (captured.class == "IsoWindow"
+                or captured.name == "Wooden Door"
+                or captured.name == "Wooden Door Frame")
+        local cabooseWestWall = templateId == RoomTemplate.CAR_CABOOSE_TEMPLATE_ID
+            and captured.name == "Wooden Wall" and captured.north == false
+            and x == walkGeometry.minX
         if not demolitionAllowed and (captured.class == "IsoDoor"
-            or captured.class == "IsoWindow" or carBoxGarageWall) then
+            or captured.class == "IsoWindow" or carBoxGarageWall
+            or cabooseOpening) then
             demolitionAllowed = buildCellSet[cellKey(x - 1, y, z)]
                 or buildCellSet[cellKey(x, y - 1, z)]
         end
+        demolitionAllowed = demolitionAllowed or cabooseWestWall
+            or cabooseOpening
 
         local object = {
             templateIndex = index,
@@ -112,6 +125,7 @@ local function compileTemplate(templateId, source, buildCells, waterProxies,
             class = captured.class,
             name = captured.name,
             sprite = captured.sprite,
+            openSprite = captured.openSprite,
             north = captured.north,
             direction = captured.direction,
             state = captured.state,
@@ -140,6 +154,8 @@ compileTemplate(RoomTemplate.ENGINE_AREA_TEMPLATE_ID,
     Source.engineAreaBuildRects)
 compileTemplate(RoomTemplate.CAR_BOX_TEMPLATE_ID, CarBoxSource,
     CarBoxSource.buildCells, CarBoxSource.waterProxies)
+compileTemplate(RoomTemplate.CAR_CABOOSE_TEMPLATE_ID, CabooseSource,
+    CabooseSource.buildCells, CabooseSource.waterProxies)
 
 -- Every declared refresh point must name a real captured entry that sits on the
 -- exact template coordinates the point declares.  Both sides are this mod's own
@@ -166,7 +182,8 @@ end
 
 for _, templateId in ipairs({ RoomTemplate.TEMPLATE_ID,
     RoomTemplate.ENGINE_AREA_TEMPLATE_ID,
-    RoomTemplate.CAR_BOX_TEMPLATE_ID }) do
+    RoomTemplate.CAR_BOX_TEMPLATE_ID,
+    RoomTemplate.CAR_CABOOSE_TEMPLATE_ID }) do
     local value = templates[templateId]
     validateRoofRefreshPoints(value.roofRefreshPoints, value.objects)
 end
@@ -201,7 +218,16 @@ function RoomTemplate.templateIdForKind(kind, allowEngineArea)
         return RoomTemplate.templateIdForEngineAreaBuilding(allowEngineArea)
     elseif kind == "car_box" or kind == "car_bx40" then
         return RoomTemplate.CAR_BOX_TEMPLATE_ID
+    elseif kind == "car_cb" then
+        return RoomTemplate.CAR_CABOOSE_TEMPLATE_ID
     end
+end
+
+function RoomTemplate.templateIdForDevelopmentKind(kind, allowEngineArea)
+    if kind == "car_cb" then
+        return RoomTemplate.CAR_CABOOSE_TEMPLATE_ID
+    end
+    return RoomTemplate.templateIdForKind(kind, allowEngineArea)
 end
 
 function RoomTemplate.cellAt(value, x, y)

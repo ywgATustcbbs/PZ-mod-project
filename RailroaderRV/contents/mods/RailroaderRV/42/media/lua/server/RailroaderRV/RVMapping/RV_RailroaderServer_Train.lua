@@ -172,7 +172,8 @@ end
 local function playerRole(train, player)
     local engineId = engineIdForUnit(train)
     if engineId == nil then
-        if (train.kind == "car_box" or train.kind == "car_bx40")
+        if (train.kind == "car_box" or train.kind == "car_bx40"
+            or train.kind == "car_cb")
             and train.isCut == true then
             return "external", nil
         end

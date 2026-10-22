@@ -1,3 +1,12 @@
 {
-  "IGUI_CraftingCategories_RailroaderRV": "Railroader RV"
+  "IGUI_CraftingCategories_RailroaderRV": "Railroader RV",
+  "IGUI_RailroaderRV_Flatcar_DeckFull": "There is not enough deck space for another vehicle.",
+  "IGUI_RailroaderRV_Flatcar_BoundRVCannotConvert": "This car is bound to an RV and cannot be converted to a flatcar.",
+  "IGUI_RailroaderRV_Flatcar_SourceNotFound": "No loadable vehicle was found nearby.",
+  "IGUI_RailroaderRV_Flatcar_SourceOutOfRange": "The target vehicle is too far from the flatcar.",
+  "IGUI_RailroaderRV_Flatcar_SourceOccupied": "The target vehicle has occupants and cannot be loaded.",
+  "IGUI_RailroaderRV_Flatcar_SourceTowing": "A vehicle towing another vehicle cannot be loaded.",
+  "IGUI_RailroaderRV_Flatcar_CargoNotFound": "The vehicle to unload could not be found.",
+  "IGUI_RailroaderRV_Flatcar_UnloadBlocked": "The unload location is blocked.",
+  "IGUI_RailroaderRV_Flatcar_LoadingRampRequired": "Carry a flatcar loading ramp to load or unload vehicles."
 }

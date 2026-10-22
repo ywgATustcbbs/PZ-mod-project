@@ -379,7 +379,7 @@ local function queueGeneration(player, authoritativePosition, railroaderData,
 end
 
 local function queueTemplateDevelopment(player, request)
-    local templateId = RoomTemplate.templateIdForKind(request.kind,
+    local templateId = RoomTemplate.templateIdForDevelopmentKind(request.kind,
         SandboxVars.RailroaderRV.AllowEngineAreaBuilding)
     request.templateId = templateId
     return queueGeneration(player, nil, nil, request)

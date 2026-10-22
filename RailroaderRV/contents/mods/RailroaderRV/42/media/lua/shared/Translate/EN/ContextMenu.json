@@ -4,6 +4,18 @@
     "ContextMenu_RailroaderRV_FinishLayout": "Finish RV layout",
     "ContextMenu_RailroaderRV_Enter": "Enter RV",
     "ContextMenu_RailroaderRV_EnterCargo": "Enter cargo car RV",
+    "ContextMenu_RailroaderRV_ConvertToFlatcar": "Convert to flatcar",
+    "ContextMenu_RailroaderRV_ConvertToFlatcar_TooltipTitle": "Conversion warning",
+    "ContextMenu_RailroaderRV_ConvertToFlatcar_Notice": "Cannot be restored to an ordinary coach or bound as an RV after conversion",
+    "ContextMenu_RailroaderRV_ConvertToFlatcar_Bound": "A car already bound to an RV cannot be converted to a flatcar",
+    "ContextMenu_RailroaderRV_LoadVehicle": "Load vehicle",
+    "ContextMenu_RailroaderRV_UnloadVehicle": "Unload vehicle",
+    "ContextMenu_RailroaderRV_Transport_RequiresFlatcar": "Convert to a flatcar first",
+    "ContextMenu_RailroaderRV_Transport_LoadingRampNotConsumed": "The loading ramp is not consumed.",
+    "ContextMenu_RailroaderRV_Transport_VisualOnly": "Vehicles on the flatcar are visual models only. <LINE> Visual errors can occur. <LINE> The model may differ from the real vehicle. <LINE> It does not show the vehicle's actual state.",
+    "ContextMenu_RailroaderRV_Transport_VehicleIDChanges": "Transport deletes the current vehicle. <LINE> A new vehicle is created at the destination. <LINE> It has the same saved state. <LINE> The game engine does not let Lua preserve the vehicle ID. <LINE> Mods that depend on vehicle IDs may break. <LINE> This includes some RV mods. <LINE> Loading drops the vehicle's key and container contents. <LINE> They fall to the ground. <LINE> This includes items from the trunk and glove box. <LINE> Unloading does not recreate those items.",
+    "ContextMenu_RailroaderRV_LoadVehicle_NoNearby": "No nearby vehicles to load",
+    "ContextMenu_RailroaderRV_UnloadVehicle_Empty": "No vehicles on this flatcar",
     "ContextMenu_RailroaderRV_Exit": "Exit RV",
     "ContextMenu_RailroaderRV_ClaimSafehouse": "Claim RV safehouse",
     "ContextMenu_RailroaderRV_ClaimSafehouse_WaterUnavailable": "Claiming a safehouse requires the RV water system to function normally",
@@ -16,5 +28,6 @@
     "ContextMenu_RailroaderRV_TemplateDevelopment_EditTemplate": "Edit Existing Template",
     "ContextMenu_RailroaderRV_TemplateDevelopment_SaveTemplate": "Save Template",
     "ContextMenu_RailroaderRV_TemplateDevelopment_Loco": "Locomotive",
-    "ContextMenu_RailroaderRV_TemplateDevelopment_CarBox": "Car Box / BX40 (shared)"
+    "ContextMenu_RailroaderRV_TemplateDevelopment_CarBox": "Car Box / BX40 (shared)",
+    "ContextMenu_RailroaderRV_TemplateDevelopment_Caboose": "Caboose (car_cb)"
 }

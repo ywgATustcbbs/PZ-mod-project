@@ -1,0 +1,15 @@
+module RailroaderRV
+{
+    imports
+    {
+        Base
+    }
+
+    item RVFlatcarEndpointMarker
+    {
+        Weight = 0.1,
+        ItemType = base:normal,
+        DisplayName = RV flatcar endpoint marker,
+        StaticModel = RV_FlatcarEndpointMarkerItemModel,
+    }
+}

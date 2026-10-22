@@ -364,7 +364,7 @@ class RVTemplateDevelopmentMenuTests(unittest.TestCase):
             lua, menu.options[1].subMenu,
             "ContextMenu_RailroaderRV_TemplateDevelopment_EditTemplate",
         ).subMenu
-        self.assertEqual(len(edit_menu.options), 2)
+        self.assertEqual(len(edit_menu.options), 3)
 
     def test_new_template_dialog_sends_custom_dimensions_without_coords(self) -> None:
         lua = make_lua()
@@ -406,14 +406,15 @@ class RVTemplateDevelopmentMenuTests(unittest.TestCase):
         self.assertTrue(dialog.anchorTop)
         self.assertFalse(dialog.anchorBottom)
         self.assertTrue(java_dialog.visible)
-        self.assertEqual(len(dialog.kindCombo.options), 2)
+        self.assertEqual(len(dialog.kindCombo.options), 3)
         self.assertEqual(dialog.kindCombo.options[2].data, "car_box")
+        self.assertEqual(dialog.kindCombo.options[3].data, "car_cb")
         dialog.northSouthLengthEntry.setText(dialog.northSouthLengthEntry, "23")
         dialog.eastWestWidthEntry.setText(dialog.eastWestWidthEntry, "6")
         self.assertIsNone(dialog.northSouthLengthEntry.onlyNumbers)
         self.assertIsNone(dialog.eastWestWidthEntry.onlyNumbers)
         self.assertIsNone(dialog.errorLabel)
-        dialog.kindCombo.selected = 2
+        dialog.kindCombo.selected = 3
         lua.globals().clickButton(dialog.submitButton)
 
         self.assertEqual(len(lua.globals().sentCommands), 1)
@@ -424,7 +425,7 @@ class RVTemplateDevelopmentMenuTests(unittest.TestCase):
         self.assertEqual(command.module, "RailroaderRV")
         self.assertEqual(command.command, "TemplateDevelopment")
         self.assertEqual(command.args.operation, "new")
-        self.assertEqual(command.args.kind, "car_box")
+        self.assertEqual(command.args.kind, "car_cb")
         self.assertEqual(command.args.northSouthLength, 23)
         self.assertEqual(command.args.eastWestWidth, 6)
         self.assertEqual(lua.globals().fieldCount(command.args), 4)
@@ -443,24 +444,39 @@ class RVTemplateDevelopmentMenuTests(unittest.TestCase):
             lua, dev_menu,
             "ContextMenu_RailroaderRV_TemplateDevelopment_SaveTemplate",
         ).subMenu
-        self.assertEqual(len(edit_menu.options), 2)
-        self.assertEqual(len(save_menu.options), 2)
+        self.assertEqual(len(edit_menu.options), 3)
+        self.assertEqual(len(save_menu.options), 3)
 
         click(lua, named_option(
             lua, edit_menu, "ContextMenu_RailroaderRV_TemplateDevelopment_Loco"
         ))
         click(lua, named_option(
+            lua, edit_menu, "ContextMenu_RailroaderRV_TemplateDevelopment_Caboose"
+        ))
+        click(lua, named_option(
             lua, save_menu, "ContextMenu_RailroaderRV_TemplateDevelopment_CarBox"
         ))
+        click(lua, named_option(
+            lua, save_menu, "ContextMenu_RailroaderRV_TemplateDevelopment_Caboose"
+        ))
 
-        self.assertEqual(len(lua.globals().sentCommands), 2)
-        edit, save = lua.globals().sentCommands[1], lua.globals().sentCommands[2]
-        self.assertEqual(edit.args.operation, "edit")
-        self.assertEqual(edit.args.kind, "loco")
-        self.assertEqual(lua.globals().fieldCount(edit.args), 2)
+        self.assertEqual(len(lua.globals().sentCommands), 4)
+        edit_loco, edit_caboose, save, save_caboose = (
+            lua.globals().sentCommands[1], lua.globals().sentCommands[2],
+            lua.globals().sentCommands[3], lua.globals().sentCommands[4],
+        )
+        self.assertEqual(edit_loco.args.operation, "edit")
+        self.assertEqual(edit_loco.args.kind, "loco")
+        self.assertEqual(lua.globals().fieldCount(edit_loco.args), 2)
+        self.assertEqual(edit_caboose.args.operation, "edit")
+        self.assertEqual(edit_caboose.args.kind, "car_cb")
+        self.assertEqual(lua.globals().fieldCount(edit_caboose.args), 2)
         self.assertEqual(save.args.operation, "save")
         self.assertEqual(save.args.kind, "car_box")
         self.assertEqual(lua.globals().fieldCount(save.args), 2)
+        self.assertEqual(save_caboose.args.operation, "save")
+        self.assertEqual(save_caboose.args.kind, "car_cb")
+        self.assertEqual(lua.globals().fieldCount(save_caboose.args), 2)
 
 
 if __name__ == "__main__":

@@ -54,6 +54,9 @@ function TemplateDevelopmentDialog:initialise()
     self.kindCombo:addOptionWithData(
         getText("ContextMenu_RailroaderRV_TemplateDevelopment_CarBox"), "car_box"
     )
+    self.kindCombo:addOptionWithData(
+        getText("ContextMenu_RailroaderRV_TemplateDevelopment_Caboose"), "car_cb"
+    )
     self.kindCombo.selected = 1
     addControl(self, self.kindCombo)
 
@@ -148,6 +151,10 @@ local function addKindSubmenu(menu, player, C, operation, optionTextKey)
     kindMenu:addOption(
             getText("ContextMenu_RailroaderRV_TemplateDevelopment_CarBox"),
         player, sendKindCommand, C, operation, "car_box"
+    )
+    kindMenu:addOption(
+        getText("ContextMenu_RailroaderRV_TemplateDevelopment_Caboose"),
+        player, sendKindCommand, C, operation, "car_cb"
     )
 end
 

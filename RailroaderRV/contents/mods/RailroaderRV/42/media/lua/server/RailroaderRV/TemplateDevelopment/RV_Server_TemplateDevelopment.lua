@@ -1,5 +1,6 @@
 -- Server-side template development commands.
 return function(ctx)
+local Constants = ctx.Constants
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
 local TemplateGeometry = require("RailroaderRV/RoomTemplate/RV_TemplateGeometry")
@@ -50,7 +51,7 @@ local function captureState(object)
 end
 
 local function saveTemplate(player, kind, position)
-    local templateId = RoomTemplate.templateIdForKind(kind,
+    local templateId = RoomTemplate.templateIdForDevelopmentKind(kind,
         SandboxVars.RailroaderRV.AllowEngineAreaBuilding)
     local anchor = TemplateGeometry.templateAnchorForWorld(
         position.x, position.y, position.z)
@@ -100,6 +101,10 @@ local function saveTemplate(player, kind, position)
 end
 
 local function handle(player, args)
+    if not Constants.ENABLE_TEMPLATE_DEVELOPMENT then
+        return false, "template-development-disabled"
+    end
+
     local operation = args.operation
     local kind = args.kind
     local playerOk, positionOrReason = ctx.validateAuthoritativePlayer(player)

@@ -53,7 +53,8 @@ local function templateCellKey(x, y)
 end
 for _, templateId in ipairs({ RoomTemplate.TEMPLATE_ID,
     RoomTemplate.ENGINE_AREA_TEMPLATE_ID,
-    RoomTemplate.CAR_BOX_TEMPLATE_ID }) do
+    RoomTemplate.CAR_BOX_TEMPLATE_ID,
+    RoomTemplate.CAR_CABOOSE_TEMPLATE_ID }) do
     local template = RoomTemplate.get(templateId)
     local templateObjects = RoomTemplate.orderedObjects(template)
     local entriesByCell = {}
@@ -124,6 +125,7 @@ local function entryForCaptured(anchor, edgeMap, captured)
         class = captured.class,
         name = captured.name,
         sprite = captured.sprite,
+        openSprite = captured.openSprite,
         north = captured.north,
         direction = captured.direction,
         state = captured.state,
@@ -293,11 +295,22 @@ local function objectMatchesCaptured(object, expected)
     local directionOk, direction = ServerUtil.invoke(object, "getDir")
     local directionTable = rawget(_G, "IsoDirections")
     local expectedDirection = directionTable and directionTable[expected.direction]
+    local spriteName = tostring(ServerWorld.getSpriteName(object))
+    local spriteMatches = spriteName == tostring(expected.sprite)
+    if expected.class == "IsoThumpable" and expected.name == "Wooden Door" then
+        local doorOk, isDoor = ServerUtil.invoke(object, "isDoor")
+        local openSpriteOk, openSprite = ServerUtil.invoke(object,
+            "getOpenSprite")
+        local openNameOk, openName = ServerUtil.invoke(openSprite, "getName")
+        spriteMatches = doorOk and isDoor == true and openSpriteOk
+            and openNameOk and tostring(openName) == tostring(expected.openSprite)
+            and (spriteName == tostring(expected.sprite)
+                or spriteName == tostring(expected.openSprite))
+    end
     if not nameOk or tostring(name) ~= tostring(expected.name)
         or not directionOk or not expectedDirection
         or direction ~= expectedDirection
-        or tostring(ServerWorld.getSpriteName(object))
-            ~= tostring(expected.sprite) then
+        or not spriteMatches then
         return false
     end
     if expected.north ~= nil then
@@ -329,7 +342,11 @@ end
 -- state the template recorded.
 local function objectMatchesTemplate(object, expected)
     if not objectMatchesCaptured(object, expected) then return false end
-    if isOpenableClass(expected.class) then return true end
+    if isOpenableClass(expected.class)
+        or (expected.class == "IsoThumpable"
+            and expected.name == "Wooden Door") then
+        return true
+    end
     return objectMatchesStoredState(object, expected)
 end
 
@@ -357,16 +374,19 @@ local function objectIsTemplateEntry(objects, entry)
 end
 
 -- Every ordinary object on a protected template layer is a correction
--- candidate, regardless of its Java class. Captured template identity, shell
--- identity, and the documented side-host door/window rule decide what remains.
+-- candidate, regardless of its Java class. Protected entries must match their
+-- captured state; an existing unprotected entry is retained by identity only
+-- and is never recreated after it has been removed.
 local function isSpareObject(object, entries, sideHostDoorOrWindow)
     if isUtilityProxyObject(object) or sideHostDoorOrWindow then return false end
     local templateIndex = objectTemplateIndex(object)
     if not templateIndex then return true end
     for index = 1, #entries do
         local entry = entries[index]
-        if entry.protected and entry.templateIndex == templateIndex
+        local matches = entry.protected
             and objectMatchesTemplate(object, entry)
+            or not entry.protected and objectMatchesCaptured(object, entry)
+        if entry.templateIndex == templateIndex and matches
             and objectHasShellIdentity(object, entry.edge) then
             return false
         end

@@ -1,9 +1,8 @@
 # RailroaderRV 1.0 client Lua
 
-- `GUI/` owns client menus, input hooks, local presentation, and intent-only requests to the server.
-- Client command handlers consume server-selected identities, bounds, snapshots, and acknowledgements using the current interface. Client state is presentation/handshake state; server validation remains authoritative for permissions and world changes. Do not add repeated schema checks or interface compatibility/guard/migration paths between modules; let interface errors surface as normal game exceptions.
-- `GUI/RV_BoundaryClient.lua` applies identity-scoped corrections sent by the server. `GUI/RV_UtilityClient.lua` handles local utility visibility and connection/display state.
-- `GUI/RV_RecipeFurnitureInputPresentation.lua` supplies furniture previews for the recycling recipes that accept Moveable inputs; it does not alter recipe input identity or server authority.
-- `GUI/RV_ContextMenu_RoomOwnership.lua` checks each local player's current square every tick. It schedules a full bounds scan only after a local stale-reference/error hit, a relevant object event, or the initial refresh transaction. Persistent local API errors are edge-triggered until a successful check, and object-event bursts are coalesced by a cooldown with bounded delayed rechecks. A full scan reports incomplete if any base structure square or captured roof-object host is not loaded.
-- `GUI/RV_ContextMenu_Relocation.lua` waits for the server-selected destination square to load, applies the relocation, and acknowledges the final phase only after checking the resulting player position. The server owns the destination and transaction phase.
-- `GUI/RV_BoundaryClient.lua` keeps correction state by player identity and clears it on disconnect.
+- GUI/ owns context menus, panels, input hooks, local visuals, and requests sent to the server. Clients express intent; they do not choose trusted world coordinates or authoritative object state.
+- The server selects operation identities and destinations, checks permissions and current world state, then performs all world changes. Client snapshots and local state are for presentation or a required asynchronous step.
+- RV_ContextMenu.lua wires the general menu flow; RV_RailroaderContextMenu.lua adds Railroader unit interactions; RV_UtilityContextMenu.lua and RV_UtilityDashboard.lua handle water and power UI; RV_FlatcarVisualClient.lua renders flatcar cargo and sends load/unload intent.
+- Relocation or boarding acknowledgements are sent only for client-side asynchronous actions whose completion the server needs before advancing the transaction.
+- Template development is retained as a developer tool. Its menu is hidden while C.ENABLE_TEMPLATE_DEVELOPMENT is false; when enabled, the client also checks UseDebugContextMenu, and the server independently validates that capability.
+- Client code assumes the current shared schema and module interfaces. Do not add repeated schema checks, compatibility paths, fallback coordinates, or cross-module interface guards; let contract errors surface as normal game exceptions.

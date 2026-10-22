@@ -1,6 +1,5 @@
 -- RV_Server: WorldObjects responsibilities.
 return function(ctx)
-local OWNER = ctx.OWNER
 local Constants = ctx.Constants
 local ServerUtil = ctx.ServerUtil
 local ServerWorld = ctx.ServerWorld
@@ -107,6 +106,7 @@ local function applyCapturedIdentityAndState(object, entry, deferHealth)
     local stateKeys = { health = true, maxHealth = true, hoppable = true,
         locked = true, canPassThrough = true, blockAllTheSquare = true,
         doRender = true, thumpable = true }
+    if entry.class == "IsoFireplace" then stateKeys.fuel = true end
     for key in pairs(entry.state) do
         if not stateKeys[key] then
             error("RailroaderRV: captured object state has an unsupported field")
@@ -136,13 +136,14 @@ local function applyCapturedIdentityAndState(object, entry, deferHealth)
         if type(entry.state.hoppable) ~= "boolean" then
             error("RailroaderRV: captured object hoppable state is malformed")
         end
-        -- Plain captured IsoObject floors, captured IsoWindows, and captured
-        -- IsoLightSwitches have no hoppable setter path in this template. Keep
-        -- their recorded false state strict through the getter below.
+        -- Captured IsoObject floors, IsoWindows, IsoLightSwitches, and
+        -- IsoFireplaces expose sprite-derived hoppable state without a setter.
+        -- Keep their recorded false state strict through the getter below.
         local setter = "setIsHoppable"
         local applied = (entry.class == "IsoObject"
             or entry.class == "IsoWindow"
-            or entry.class == "IsoLightSwitch") and entry.state.hoppable == false
+            or entry.class == "IsoLightSwitch"
+            or entry.class == "IsoFireplace") and entry.state.hoppable == false
         if not applied then
             applied = ServerUtil.callSucceeded(object, "setIsHoppable",
                 entry.state.hoppable)
@@ -180,6 +181,10 @@ local function applyCapturedIdentityAndState(object, entry, deferHealth)
         "getDoRender")
     applyBooleanState(object, entry.state, "thumpable", "setIsThumpable",
         "isThumpable")
+    if entry.class == "IsoFireplace" then
+        applyIntegerState(object, entry.state, "fuel", "setFuelAmount",
+            "getFuelAmount")
+    end
 
     if entry.state.locked ~= nil then
         if type(entry.state.locked) ~= "boolean" or entry.state.locked == true then
@@ -258,7 +263,8 @@ end
 local function configureCapturedDoorFrame(object, entry)
     if type(entry) ~= "table" or entry.class ~= "IsoThumpable"
         or entry.name ~= "Wooden Door Frame"
-        or entry.sprite ~= "walls_interior_house_02_43"
+        or (entry.sprite ~= "walls_interior_house_02_43"
+            and entry.sprite ~= "industry_railroad_05_19")
         or entry.north ~= true or entry.direction ~= "N" then
         error("RailroaderRV: captured door frame identity is invalid")
     end
@@ -301,25 +307,6 @@ local function createFloor(square, sprite, generation, role, tagContext,
     end
     local ok, floor = ServerUtil.invoke(square, "getFloor")
     local hadFloor = ok and floor ~= nil
-    local previousSprite
-    local createdByGeneration = not hadFloor
-    if hadFloor then
-        previousSprite = ServerWorld.getSpriteName(floor)
-        if not previousSprite then
-            error("RailroaderRV: existing floor has no sprite")
-        end
-        -- Metal and wood are two phases over the same object.  Keep the first
-        -- pre-generation sprite so rollback can restore the original floor;
-        -- the wood/roof stages never overwrite this initial snapshot.
-        local existingData = ServerWorld.objectModData(floor)
-        local existingTag = existingData and existingData.RailroaderRV or nil
-        if type(existingTag) == "table" and existingTag.owner == OWNER
-            and existingTag.previousSprite
-            and ServerUtil.toNumber(existingTag.generation) == ServerUtil.toNumber(generation) then
-            previousSprite = tostring(existingTag.previousSprite)
-            createdByGeneration = existingTag.createdByGeneration == true
-        end
-    end
     if not ok or not floor then
         local added = ServerUtil.callSucceeded(square, "addFloor", sprite)
         if not added then
@@ -347,8 +334,6 @@ local function createFloor(square, sprite, generation, role, tagContext,
     if mode == "production" then
         local floorTagData = capturedEntry
             and capturedTagData(capturedEntry, edge) or {}
-        floorTagData.previousSprite = previousSprite
-        floorTagData.createdByGeneration = createdByGeneration
         local tagged, tagError = pcall(ServerWorld.tagObject, floor,
             generation, role, tagContext, floorTagData)
         if not tagged then
@@ -452,8 +437,7 @@ local function createGenerator(cell, square, generation, tagContext)
     if not squareOk or actualSquare ~= square then
         error("RailroaderRV: generator square assignment did not match")
     end
-    -- Tag before attachment so rollback can identify the object as soon as it
-    -- becomes world-visible.
+    -- Attach the ownership tag before the object becomes world-visible.
     ServerWorld.tagObject(generator, generation, RoomTemplate.PROXY_ROLES.power, tagContext)
     addSpecialObject(square, generator)
     if type(cls.updateGenerator) == "function" then cls.updateGenerator(square) end
@@ -549,14 +533,28 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
         -- DEFAULT_SPRITE_ID entry under this custom key.
         local expectedHiddenSprite = ensureCapturedHiddenSprite(entry)
         local cls = rawget(_G, "IsoThumpable")
-        local constructed, thumpable = ServerUtil.invokeClass(cls, {
-            { cell, square, entry.sprite, entry.north, nil },
-        })
+        local constructors
+        if entry.name == "Wooden Door" then
+            constructors = {
+                { cell, square, entry.sprite, entry.openSprite,
+                    entry.north, {} },
+            }
+        else
+            constructors = {
+                { cell, square, entry.sprite, entry.north, nil },
+            }
+        end
+        local constructed, thumpable = ServerUtil.invokeClass(cls,
+            constructors)
         if not constructed then
             error("RailroaderRV: captured IsoThumpable construction failed")
         end
         if not ServerUtil.callSucceeded(thumpable, "setIsThumpable", true) then
             error("RailroaderRV: captured IsoThumpable state failed")
+        end
+        if entry.name == "Wooden Door"
+            and not ServerUtil.callSucceeded(thumpable, "setIsDoor", true) then
+            error("RailroaderRV: captured IsoThumpable door state failed")
         end
         bindCapturedHiddenSprite(thumpable, entry, expectedHiddenSprite)
         applyCapturedIdentityAndState(thumpable, entry, true)
@@ -569,8 +567,8 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
         end
         addSpecialObject(square, thumpable)
         -- The B42 health setter resolves the object through its square. Apply
-        -- captured health after attachment, while the generation tag already
-        -- lets transaction rollback remove it if the setter or read-back fails.
+        -- captured health after attachment; a failure aborts generation, and
+        -- the next attempt clears this managed scope before rebuilding.
         applyCapturedHealthState(thumpable, entry)
         object = thumpable
     elseif entry.class == "IsoDoor" then
@@ -635,6 +633,25 @@ local function createCapturedTemplateObject(cell, square, entry, generation,
             error("RailroaderRV: captured light switch update failed")
         end
         object = light
+    elseif entry.class == "IsoFireplace" then
+        local spriteOk, spriteObject = ServerUtil.callGlobal("getSprite",
+            entry.sprite)
+        local cls = rawget(_G, "IsoFireplace")
+        local constructed, fireplace = ServerUtil.invokeClass(cls, {
+            { cell, square, spriteObject },
+        })
+        if not spriteOk or not spriteObject or not constructed then
+            error("RailroaderRV: captured IsoFireplace construction failed")
+        end
+        applyCapturedIdentityAndState(fireplace, entry)
+        if mode == "production" then
+            ServerWorld.tagObject(fireplace, generation, role,
+                tagContext, tagData)
+        end
+        if not ServerUtil.callSucceeded(square, "AddTileObject", fireplace) then
+            error("RailroaderRV: captured IsoFireplace attachment failed")
+        end
+        object = fireplace
     else
         error("RailroaderRV: unsupported captured object class "
             .. tostring(entry.class))

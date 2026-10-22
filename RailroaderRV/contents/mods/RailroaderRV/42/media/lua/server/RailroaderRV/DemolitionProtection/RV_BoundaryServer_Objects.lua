@@ -117,7 +117,7 @@ end
 -- The sledgehammer packet identifies an object only by its authoritative
 -- square coordinates and object-list index.  Keep RV wall attribution
 -- separate from that packet contract: only a currently attached captured
--- shell member (wall, railing, door, or window) with the complete generated
+-- shell member (wall, door, or window) with the complete generated
 -- identity and an exact current shell-ledger entry may trigger RV follow-up work. This is
 -- deliberately fail-closed for missing/ambiguous metadata.
 function Boundary.isCurrentShellWall(object, boundary)

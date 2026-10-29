@@ -1222,7 +1222,7 @@ local function duplicateRecordLocations()
     for _, record in ipairs(records) do
         local identity = recordIdentity(record)
         local recordId = record.id or record.trainId
-        for _, unit in ipairs(record.units) do
+        for _, unit in ipairs(record.units or {}) do
             if Client.isFlatcar(unit.id) then
                 local key = idKey(unit.id)
                 local rows = locations[key] or {}
@@ -1257,7 +1257,7 @@ local function duplicateRecordLocations()
 end
 
 local function visitRecord(record, seen, duplicates)
-    for _, unit in ipairs(record.units) do
+    for _, unit in ipairs(record.units or {}) do
         if forceFlatcar(unit) then
             local key = idKey(unit.id)
             local pose = unit.pose

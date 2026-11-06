@@ -746,6 +746,8 @@ local function spawnCargoVehicle(car, pose, key, cargoId, unitId)
     local animal = addAnimal(getCell(), math.floor(pose.x), math.floor(pose.y),
         math.floor(pose.z), Cargo.animalType, definition:getRandomBreed())
     animal:addToWorld()
+    -- This entity only anchors the cargo models; keep it out of character fall updates.
+    animal:setOnHook(true)
     animal:getModData()[CARGO_MARKER] = true
     animal:setGodMod(true, true)
     animal:setShootable(false)

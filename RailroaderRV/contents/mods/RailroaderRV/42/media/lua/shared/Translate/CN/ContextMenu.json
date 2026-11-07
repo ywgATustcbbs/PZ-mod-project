@@ -29,5 +29,15 @@
     "ContextMenu_RailroaderRV_TemplateDevelopment_SaveTemplate": "保存模板",
     "ContextMenu_RailroaderRV_TemplateDevelopment_Loco": "机车",
     "ContextMenu_RailroaderRV_TemplateDevelopment_CarBox": "货车厢 / BX40（共用）",
-    "ContextMenu_RailroaderRV_TemplateDevelopment_Caboose": "守车（car_cb）"
+    "ContextMenu_RailroaderRV_TemplateDevelopment_Caboose": "守车（car_cb）",
+    "ContextMenu_RailroaderRV_NameCurrentCar": "命名当前车厢",
+    "ContextMenu_RailroaderRV_NameCurrentCar_Prompt": "输入车厢名称",
+    "ContextMenu_RailroaderRV_MoveToAdjacentCar": "移动到相邻车厢",
+    "ContextMenu_RailroaderRV_ConsistLoading": "读取列车编组…",
+    "ContextMenu_RailroaderRV_ConsistUnavailable": "无法读取列车编组",
+    "ContextMenu_RailroaderRV_CurrentCarSuffix": "（当前车厢）",
+    "ContextMenu_RailroaderRV_UnitKind_Loco": "机车",
+    "ContextMenu_RailroaderRV_UnitKind_CarBox": "货车厢",
+    "ContextMenu_RailroaderRV_UnitKind_BX40": "BX40 货车厢",
+    "ContextMenu_RailroaderRV_UnitKind_Caboose": "守车"
 }

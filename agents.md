@@ -14,6 +14,7 @@
 - 当前基线的唯一事实源为 `game-decompiled/42.21.0/metadata.txt`；版本、BuildID、反编译元数据和复核结果只从此处读取。基线更新完成前不得在其他文档重复猜测数字或路径。
 - 官方 Lua 快照 `official lua scripts/` 只读，作为 API/脚本 ground truth；目录职责为 `client/`（UI、交互、渲染、客户端表现）、`server/`（服务端玩法、世界、物品、载具、AI、配方）、`shared/`（常量、工具、共享数据定义）。
 - `reference mods/` 只读，仅用于参考可复用代码和配置；禁止修改，禁止复制数据文件；需要导航时直接检查实际目录。
+- `Railroader/` 保存当前 Workshop Railroader 模组源码供 API 核验；更新时覆盖此稳定目录，不在目录名中标版本。RR 版本只在 `RailroaderRV/README.md` 保留一行记录。
 - `Railroader-prerelease/` 全目录只读；安装依据仅为其中的 `READ_ME_FIRST.txt`，禁止修改、移动或删除预览源文件。
 - `game-decompiled/` 只读，仅用于接口核验和静态分析，不能替代运行时测试。
 - `broken/` 当前为空；只有实际存在的待修复模组才能列入此处，不保留虚构清单。
@@ -23,6 +24,7 @@
 ```text
 official lua scripts/                 官方 Lua 只读参考
 reference mods/                       Workshop 模组只读参考
+Railroader/                            当前 Workshop Railroader 模组源码；更新时覆盖原目录
 Railroader-prerelease/                Railroader 预览包只读来源
 game-decompiled/42.21.0/              当前 Java 反编译基线
 broken/                                实际存在的待修复模组

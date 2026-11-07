@@ -227,5 +227,10 @@
     "UI_RailroaderRV_TemplateDevelopmentType": "车厢类型",
     "UI_RailroaderRV_TemplateDevelopmentNorthSouthLength": "南北长度（格）",
     "UI_RailroaderRV_TemplateDevelopmentEastWestWidth": "东西宽度（格）",
-    "UI_RailroaderRV_TemplateDevelopmentSubmit": "生成"
+    "UI_RailroaderRV_TemplateDevelopmentSubmit": "生成",
+    "UI_RailroaderRV_CarName_Saved": "车厢名称已保存",
+    "UI_RailroaderRV_CarName_Failed": "车厢名称未能保存",
+    "UI_RailroaderRV_CarName_Empty": "车厢名称不能为空",
+    "UI_RailroaderRV_CarName_ControlCharacters": "车厢名称不能包含控制字符",
+    "UI_RailroaderRV_CarName_TooLong": "车厢名称过长"
 }

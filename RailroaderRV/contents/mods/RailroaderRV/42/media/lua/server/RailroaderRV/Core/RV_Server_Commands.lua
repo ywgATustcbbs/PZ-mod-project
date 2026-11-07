@@ -282,7 +282,10 @@ function RV.Server.OnClientCommand(module, command, player, args)
     -- registered on the same event, so do not let the generic empty-payload
     -- validator log them as malformed Generate requests.
     if module == COMMAND_MODULE
-        and (command == COMMAND_RV_ENTER or command == COMMAND_RV_EXIT) then
+        and (command == COMMAND_RV_ENTER or command == COMMAND_RV_EXIT
+            or command == Constants.COMMAND_RV_CONSIST_REQUEST
+            or command == Constants.COMMAND_RV_SET_CAR_NAME
+            or command == Constants.COMMAND_RV_SWITCH_CAR) then
         return
     end
     if module == Constants.MOD_ID

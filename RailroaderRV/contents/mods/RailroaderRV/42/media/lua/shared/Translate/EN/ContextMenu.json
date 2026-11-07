@@ -29,5 +29,15 @@
     "ContextMenu_RailroaderRV_TemplateDevelopment_SaveTemplate": "Save Template",
     "ContextMenu_RailroaderRV_TemplateDevelopment_Loco": "Locomotive",
     "ContextMenu_RailroaderRV_TemplateDevelopment_CarBox": "Car Box / BX40 (shared)",
-    "ContextMenu_RailroaderRV_TemplateDevelopment_Caboose": "Caboose (car_cb)"
+    "ContextMenu_RailroaderRV_TemplateDevelopment_Caboose": "Caboose (car_cb)",
+    "ContextMenu_RailroaderRV_NameCurrentCar": "Name current car",
+    "ContextMenu_RailroaderRV_NameCurrentCar_Prompt": "Enter a car name",
+    "ContextMenu_RailroaderRV_MoveToAdjacentCar": "Move to an adjacent car",
+    "ContextMenu_RailroaderRV_ConsistLoading": "Reading consist...",
+    "ContextMenu_RailroaderRV_ConsistUnavailable": "Unable to read the Railroader consist",
+    "ContextMenu_RailroaderRV_CurrentCarSuffix": " (Current car)",
+    "ContextMenu_RailroaderRV_UnitKind_Loco": "Locomotive",
+    "ContextMenu_RailroaderRV_UnitKind_CarBox": "Box car",
+    "ContextMenu_RailroaderRV_UnitKind_BX40": "BX40 box car",
+    "ContextMenu_RailroaderRV_UnitKind_Caboose": "Caboose"
 }

@@ -276,6 +276,19 @@ local function markPlayerInside(map, record, player, sourcePosition,
     }
 end
 
+local function copyRiderMap(players)
+    local result = {}
+    for name, rider in pairs(players) do result[name] = rider end
+    return result
+end
+
+local function copyMappingRecord(record)
+    local result = {}
+    for key, value in pairs(record) do result[key] = value end
+    result.players = copyRiderMap(record.players)
+    return result
+end
+
 sourceWithinRange = function(player, train)
     local distance, reach = interactionGeometry(player, train)
     return distance ~= nil and reach ~= nil and distance <= reach
@@ -310,6 +323,55 @@ local function requestData(train, player, role, seat, sourcePosition)
         playerUsername = playerName(player), playerOnlineId = playerId(player),
         entryPosition = entryPosition,
     }
+end
+
+local function consistRowsForUnit(sourceUnitId, targetUnitId)
+    local sourceId = tonumber(sourceUnitId)
+    local consistId, sourceIndex, sourceIsCut = RRApi.unitOf(sourceId)
+    if consistId == nil then return nil, sourceIndex end
+    local rows, reason = RRApi.units(consistId, {})
+    if not rows then return nil, reason end
+    if targetUnitId == nil then
+        return rows, consistId, sourceIndex, nil, sourceIsCut
+    end
+    local targetId = integer(tonumber(targetUnitId))
+    if targetId == nil then return nil, "target Railroader unit id is invalid" end
+    local targetConsistId, targetIndex, targetIsCut = RRApi.unitOf(targetId)
+    if targetConsistId == nil then return nil, targetIndex end
+    if tostring(targetConsistId) ~= tostring(consistId)
+        or targetIsCut ~= sourceIsCut then
+        return nil, "target Railroader unit is no longer in this consist"
+    end
+    return rows, consistId, sourceIndex, targetIndex, sourceIsCut
+end
+
+local function currentResident(player)
+    if not player or playerDead(player) then
+        return false, "player is unavailable"
+    end
+    local blocked, blockReason = transactionBlocks(nil)
+    if blocked then return false, blockReason end
+    local accepted, context = Adapter.resolveCurrentUtilityRV(player)
+    if accepted ~= true then return false, context end
+    if context.locomotiveSide == true then
+        return false, "player is not inside a ready RV"
+    end
+    local name = playerName(player)
+    return true, {
+        map = mapData(), record = context.record, name = name,
+    }
+end
+
+local function sourceRVState(player, data, map)
+    local name = playerName(player)
+    local sourceRecord = data.sourceRecord
+    local rows, consistId =
+        consistRowsForUnit(sourceRecord.locoId, data.locoId)
+    if not rows then return false, consistId end
+    if map.flatcars[tostring(data.locoId)] ~= nil then
+        return false, "flatcars cannot be bound as RVs"
+    end
+    return true, sourceRecord, name
 end
 
 local function removeSeatForEntry(train, player)
@@ -477,7 +539,14 @@ local function enterPlayer(player, locoId)
     return true
 end
 
+local returnPlayerToSourceRV
+
 local function restoreAfterGenerationFailure(player, data)
+    if data.sourceFromRV == true then
+        returnPlayerToSourceRV(player, data.sourceRecord,
+            data.sourcePosition)
+        return
+    end
     local train = findTrain(data.locoId)
     if train and playerId(player) ~= nil then
         local restored, reason = restoreEntrySeat(train, player,
@@ -525,6 +594,16 @@ local function commitGeneration(player, data, prepared)
         candidateMap.players[name] = relation
     end
     candidateMap.locomotives[locoId] = candidateRecord
+    local sourceCandidate
+    if data.sourceFromRV == true then
+        local sourceOk, sourceOrReason, sourceName =
+            sourceRVState(player, data, map)
+        if sourceOk ~= true then return false, sourceOrReason end
+        sourceCandidate = copyMappingRecord(sourceOrReason)
+        sourceCandidate.players[sourceName] = nil
+        candidateMap.locomotives[tostring(sourceCandidate.locoId)] =
+            sourceCandidate
+    end
     -- Durable record state only: identity, slot allocation and the two
     -- cross-restart poses.  Anchor, region, bounds and shell edges are
     -- derived from slotIndex and the compiled template when they are read.
@@ -535,8 +614,14 @@ local function commitGeneration(player, data, prepared)
     candidateRecord.templateId = prepared.layout.templateId
     candidateRecord.rvPosition = copyPosition(prepared.finalDestination)
     candidateRecord.locoPosition = locoPosition
+    local entryPosition = data.entryPosition
+    local sourceRole, sourceSeat = data.sourceRole, data.sourceSeat
+    if data.sourceFromRV == true then
+        entryPosition = prepared.finalDestination
+        sourceRole, sourceSeat = "rv-interior", nil
+    end
     markPlayerInside(candidateMap, candidateRecord, player,
-        data.entryPosition, data.sourceRole, data.sourceSeat)
+        entryPosition, sourceRole, sourceSeat)
     local actionLedger = Boundary.builderActionLedger
     if actionLedger.invalidateForGeneration(candidateRecord.locoId,
         candidateRecord.generation) ~= true then
@@ -563,6 +648,7 @@ local function commitGeneration(player, data, prepared)
     markMappingChanged()
     map.locomotives, map.players = candidateMap.locomotives,
         candidateMap.players
+    if sourceCandidate then settleUtilityTransition(sourceCandidate, player) end
     local settled, settleReason = server.settleRVUtilityLoad({
         rvId = tostring(candidateRecord.locoId),
         generation = candidateRecord.generation,
@@ -585,11 +671,16 @@ local function validateGeneration(player, data)
     if isFlatcar(mapData(), trainId(train)) then
         return false, "flatcars cannot be bound as RVs"
     end
+    if data.sourceFromRV == true then
+        local sourceOk, sourceReason = sourceRVState(player, data, mapData())
+        if sourceOk ~= true then return false, sourceReason end
+    end
     local geometry = trainGeometry(train)
     if not geometry or not trainPose(train) then
         return false, "Railroader unit pose is unavailable during generation"
     end
-    if data.sourceRole ~= "passenger" and trainMoving(train) then
+    if data.sourceFromRV ~= true and data.sourceRole ~= "passenger"
+        and trainMoving(train) then
         return false, "Railroader unit started moving before RV generation completed"
     end
     return true
@@ -813,6 +904,192 @@ local function exitCargoPlayer(player, record)
         return false, "RV exit teleport failed"
     end
     return true
+end
+
+local function sendConsistResult(player, payload)
+    local onlineId = playerId(player)
+    if onlineId == nil then return false end
+    payload.onlineId = onlineId
+    return ClientDispatch.sendToPlayer(player, C.MOD_ID,
+        C.COMMAND_RV_CONSIST_DATA, payload)
+end
+
+function Adapter.sendCurrentConsist(player, requestId)
+    local resident, state = currentResident(player)
+    if resident ~= true then
+        return sendConsistResult(player, {
+            ok = false, reason = state, requestId = requestId,
+        })
+            or false, state
+    end
+    local rows, consistId, sourceIndex, _, sourceIsCut =
+        consistRowsForUnit(state.record.locoId)
+    if not rows then
+        return sendConsistResult(player,
+            { ok = false, reason = consistId, requestId = requestId })
+            or false, consistId
+    end
+    local map = state.map
+    local units = {}
+    for index, unit in ipairs(rows) do
+        local id = tostring(unit.id)
+        local record = recordForLoco(map, id)
+        units[#units + 1] = {
+            id = unit.id, index = unit.index,
+            kind = unit.kind, marking = unit.marking,
+            isLoco = unit.isLoco == true,
+            customName = record and record.customName or nil,
+            isFlatcar = map.flatcars[id] ~= nil,
+            isCurrent = index == sourceIndex,
+        }
+    end
+    return sendConsistResult(player, {
+        ok = true, rvId = tostring(state.record.locoId),
+        consistId = consistId, isCut = sourceIsCut == true,
+        currentName = state.record.customName, units = units,
+        requestId = requestId,
+    })
+end
+
+function Adapter.setCurrentCarName(player, requestedName)
+    if type(requestedName) ~= "string" then
+        return false, "car name must be text"
+    end
+    local name = string.match(requestedName, "^%s*(.-)%s*$")
+    if name == "" then return false, "name-empty" end
+    if string.find(name, "%c") then return false, "name-control-character" end
+    if #name > 240 then return false, "name-too-long" end
+    local resident, state = currentResident(player)
+    if resident ~= true then return false, state end
+    state.record.customName = name
+    markMappingChanged(false)
+    local onlineId = playerId(player)
+    return ClientDispatch.sendToPlayer(player, C.MOD_ID,
+        C.COMMAND_RV_CAR_NAME_RESULT, {
+            ok = true, onlineId = onlineId, name = name,
+            locoId = state.record.locoId,
+        })
+end
+
+local function switchSourceCandidate(map, sourceRecord, targetRecord,
+        player, targetPosition, sourceName)
+    local candidateMap = { locomotives = {}, players = {} }
+    for id, record in pairs(map.locomotives) do
+        candidateMap.locomotives[id] = record
+    end
+    for name, relation in pairs(map.players) do
+        candidateMap.players[name] = relation
+    end
+    local sourceCopy = copyMappingRecord(sourceRecord)
+    local targetCopy = copyMappingRecord(targetRecord)
+    sourceCopy.players[sourceName] = nil
+    candidateMap.locomotives[tostring(sourceRecord.locoId)] = sourceCopy
+    candidateMap.locomotives[tostring(targetRecord.locoId)] = targetCopy
+    markPlayerInside(candidateMap, targetCopy, player, targetPosition,
+        "rv-interior", nil)
+    return candidateMap, sourceCopy, targetCopy
+end
+
+local function restoreExistingSwitch(player, sourceRecord, sourcePosition,
+        reason)
+    returnPlayerToSourceRV(player, sourceRecord, sourcePosition)
+    return false, reason
+end
+
+function Adapter.switchToCar(player, targetUnitId)
+    local resident, state = currentResident(player)
+    if resident ~= true then return false, state end
+    local targetId = integer(tonumber(targetUnitId))
+    if targetId == nil then return false, "target Railroader unit id is invalid" end
+    if targetId == tonumber(state.record.locoId) then
+        return false, "current Railroader unit cannot be selected"
+    end
+    local rows, consistId = consistRowsForUnit(
+        state.record.locoId, targetId)
+    if not rows then return false, consistId end
+    local map = state.map
+    if map.flatcars[tostring(targetId)] ~= nil then
+        return false, "flatcars cannot be bound as RVs"
+    end
+    local targetTrain = findTrain(targetId)
+    if not targetTrain then
+        return false, "target Railroader unit is not active"
+    end
+    local sourcePosition = copyPosition(playerPosition(player))
+    if not sourcePosition then return false, "source RV position is unavailable" end
+    local sourceRecord = state.record
+    local targetRecord = recordForLoco(map, targetId)
+    if targetRecord then
+        local targetPosition = targetRecord.rvPosition
+        local monitorOk, monitorReason = armRoomOwnershipMonitor(player,
+            targetRecord)
+        if not monitorOk then return false, monitorReason end
+        local candidateMap, sourceCopy, targetCopy = switchSourceCandidate(
+            map, sourceRecord, targetRecord, player, targetPosition,
+            state.name)
+        local token = newTransitionToken("switch", targetRecord)
+        if Boundary.beginTransition(player, targetRecord.locoId,
+                targetRecord.generation, token, "entry") ~= true then
+            return false, "RV boundary switch transition could not be armed"
+        end
+        local moved = movePlayer(player, targetPosition, "switch", {
+            locoId = targetId, role = "rv-interior",
+            rvId = targetRecord.locoId,
+            generation = targetRecord.generation,
+        })
+        if not moved then
+            return restoreExistingSwitch(player, sourceRecord,
+                sourcePosition, "RV switch teleport failed")
+        end
+        map.locomotives, map.players = candidateMap.locomotives,
+            candidateMap.players
+        markMappingChanged()
+        if Boundary.completeTransition(player, token) ~= true then
+            error("RV boundary switch transition could not be completed")
+        end
+        settleUtilityTransition(sourceCopy, player)
+        settleUtilityTransition(targetCopy, player)
+        refreshRoofForPlayer(player, targetCopy, true, "rv-switch")
+        return true
+    end
+
+    local data = requestData(targetTrain, player, "rv-interior", nil,
+        sourcePosition)
+    if not data then return false, "target RV position is unavailable" end
+    data.sourceFromRV = true
+    data.sourceRecord = sourceRecord
+    data.sourcePosition = sourcePosition
+    local queued, reason = RailroaderRV.Server.requestRailroaderGeneration(
+        player, data)
+    if not queued then
+        return restoreExistingSwitch(player, sourceRecord, sourcePosition,
+            reason or "target RV generation could not start")
+    end
+    return true
+end
+
+returnPlayerToSourceRV = function(player, sourceRecord, sourcePosition)
+    Boundary.clearPlayer(player)
+    local token = newTransitionToken("switch-return", sourceRecord)
+    if Boundary.beginTransition(player, sourceRecord.locoId,
+            sourceRecord.generation, token, "entry") ~= true then
+        error("RailroaderRV: source RV switch rollback could not be armed")
+    end
+    local moved = movePlayer(player, sourcePosition, "switch-return", {
+        locoId = sourceRecord.locoId, role = "rv-interior",
+        rvId = sourceRecord.locoId, generation = sourceRecord.generation,
+    })
+    if moved ~= true then
+        error("RailroaderRV: failed to return player to the source RV")
+    end
+    if Boundary.completeTransition(player, token) ~= true then
+        error("RailroaderRV: source RV switch rollback could not be completed")
+    end
+    local monitorOk, monitorReason = armRoomOwnershipMonitor(player,
+        sourceRecord)
+    if not monitorOk then error(monitorReason) end
+    settleUtilityTransition(sourceRecord, player)
+    refreshRoofForPlayer(player, sourceRecord, true, "switch-return")
 end
 
 local function exitPlayer(player)

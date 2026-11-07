@@ -2512,7 +2512,8 @@ def main() -> int:
             and re.search(
                 r'local geometry = trainGeometry\(train\)[\s\S]*?'
                 r'if not geometry or not trainPose\(train\) then[\s\S]*?'
-                r'if data\.sourceRole ~= "passenger" and trainMoving\(train\)',
+                r'if data\.sourceFromRV ~= true and data\.sourceRole ~= "passenger"\s*'
+                r'and trainMoving\(train\)',
                 entry_exit,
             ) is not None,
             "API geometry/current pose is not checked before seat, boundary, or generation changes",

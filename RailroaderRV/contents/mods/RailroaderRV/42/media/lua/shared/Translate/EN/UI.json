@@ -227,5 +227,10 @@
     "UI_RailroaderRV_TemplateDevelopmentType": "Railroader unit type",
     "UI_RailroaderRV_TemplateDevelopmentNorthSouthLength": "North-south length (tiles)",
     "UI_RailroaderRV_TemplateDevelopmentEastWestWidth": "East-west width (tiles)",
-    "UI_RailroaderRV_TemplateDevelopmentSubmit": "Generate"
+    "UI_RailroaderRV_TemplateDevelopmentSubmit": "Generate",
+    "UI_RailroaderRV_CarName_Saved": "Car name saved",
+    "UI_RailroaderRV_CarName_Failed": "Car name was not saved",
+    "UI_RailroaderRV_CarName_Empty": "Car name cannot be empty",
+    "UI_RailroaderRV_CarName_ControlCharacters": "Car name cannot contain control characters",
+    "UI_RailroaderRV_CarName_TooLong": "Car name is too long"
 }

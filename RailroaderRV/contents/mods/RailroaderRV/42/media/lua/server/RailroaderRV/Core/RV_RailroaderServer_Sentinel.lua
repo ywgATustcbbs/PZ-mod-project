@@ -42,7 +42,40 @@ end
 
 function Adapter.OnClientCommand(module, command, player, args)
     if module ~= C.MOD_ID then return end
-    if command ~= C.COMMAND_RV_ENTER and command ~= C.COMMAND_RV_EXIT then return end
+    if command ~= C.COMMAND_RV_ENTER and command ~= C.COMMAND_RV_EXIT
+        and command ~= C.COMMAND_RV_CONSIST_REQUEST
+        and command ~= C.COMMAND_RV_SET_CAR_NAME
+        and command ~= C.COMMAND_RV_SWITCH_CAR then
+        return
+    end
+    if command == C.COMMAND_RV_CONSIST_REQUEST then
+        local accepted, reason = Adapter.sendCurrentConsist(player,
+            commandArgument(args, "requestId"))
+        if accepted ~= true then
+            print("[RailroaderRV] RV consist request rejected: "
+                .. tostring(reason or "request rejected"))
+        end
+        return
+    elseif command == C.COMMAND_RV_SET_CAR_NAME then
+        local name = commandArgument(args, "name")
+        local accepted, reason = Adapter.setCurrentCarName(player, name)
+        if accepted ~= true then
+            ClientDispatch.sendToPlayer(player, C.MOD_ID,
+                C.COMMAND_RV_CAR_NAME_RESULT, {
+                    ok = false, onlineId = playerId(player), reason = reason,
+                })
+        end
+        return
+    elseif command == C.COMMAND_RV_SWITCH_CAR then
+        local targetUnitId = commandArgument(args, "unitId")
+        local accepted, reason = Adapter.switchToCar(player, targetUnitId)
+        if accepted ~= true then
+            print("[RailroaderRV] RV car switch rejected: "
+                .. tostring(reason or "request rejected"))
+            sendResult(player, false, reason or "request rejected")
+        end
+        return
+    end
     if command == C.COMMAND_RV_EXIT
         and commandArgument(args, "boardToken") ~= nil then
         local acknowledged, reason = acknowledgeExitBoarding(player, {
@@ -201,6 +234,9 @@ function Adapter.installTransactionGate()
     Adapter._gateInstalled = true
     Core.onCommand(C.COMMAND_RV_ENTER, Adapter.OnClientCommand)
     Core.onCommand(C.COMMAND_RV_EXIT, Adapter.OnClientCommand)
+    Core.onCommand(C.COMMAND_RV_CONSIST_REQUEST, Adapter.OnClientCommand)
+    Core.onCommand(C.COMMAND_RV_SET_CAR_NAME, Adapter.OnClientCommand)
+    Core.onCommand(C.COMMAND_RV_SWITCH_CAR, Adapter.OnClientCommand)
     return true
 end
 

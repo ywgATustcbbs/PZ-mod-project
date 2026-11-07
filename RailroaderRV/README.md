@@ -2,11 +2,14 @@
 
 RailroaderRV 是本项目唯一维护的房车模组目标。模组正式名称、包 ID、Lua 命名空间和本地源包目录均为 RailroaderRV。产品版本与 ModData schema 版本独立；schema 只在 Lua 中集中声明，本文不重复其数值。
 
+RR Workshop 参考版本：3.1.2（Workshop ID 3774360904；源码位于根目录 Railroader/）。
+
 ## 功能范围
 
 - 房车内部由服务端按需程序化生成，不内置地图；只在目标区域已加载后执行生成。
-- 支持 Railroader 的 loco、car_box 与 car_bx40 物理 unit。每个 unit 保留独立稳定 mapping；car_box 与 car_bx40 保留各自 kind，但共用箱车模板类别。
+- 支持 Railroader 的 loco、car_box、car_bx40 与 car_cb 物理 unit。每个 unit 保留独立稳定 mapping；car_box 与 car_bx40 保留各自 kind，但共用箱车模板类别。
 - 玩家可进入房车，在允许的区域建造、布置和管理水电设施，也可按当前 mapping 将房车设为安全屋。
+- 玩家可为当前车厢设置持久化名称，并按当前 Railroader 编组顺序查看全部车厢、切换到其他已生成或可创建房车的车厢。当前车厢不可选；已转换为平车的车厢仍显示并禁用。
 - 未绑定为 RV 的 BX40 可转换为视觉平车，用于运输真实车辆。
 - 模组声明依赖 Railroader。
 

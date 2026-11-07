@@ -5,6 +5,7 @@
 -- resolves the player's current RV.
 
 require("ISUI/ISToolTip")
+require("ISUI/ISTextBox")
 require("ISUI/ISVehicleMenu")
 require("Railroader/RR_API")
 require("RailroaderRV/Common/RV_Constants")
@@ -26,6 +27,8 @@ local ICON_EXIT_RV = "media/ui/RailroaderRV/exitrv.png"
 local ICON_UTILITY_DASHBOARD = "media/ui/RailroaderRV/managementpannel.png"
 
 Menu._rvUtilityMapping = Menu._rvUtilityMapping or nil
+Menu._rvCarMenuStates = Menu._rvCarMenuStates or {}
+Menu._rvCarMenuRequestSequence = Menu._rvCarMenuRequestSequence or 0
 local pendingExitBoardings = {}
 
 local finiteNumber = C.finiteNumber
@@ -36,6 +39,10 @@ local function text(key, fallback)
     pcall(function() result = getText(key) end)
     if not result or result == "" or result == key then return fallback end
     return result
+end
+
+local function formattedText(key, ...)
+    return getText(key, ...)
 end
 
 local function localPlayer(playerNum)
@@ -107,13 +114,14 @@ end
 
 local function rememberUtilityMapping(args, action)
     if action == nil then action = args.action end
-    if action ~= "enter" and action ~= "exit" then return end
-    local mapping = {
-        rvId = args.rvId,
-        locoId = args.locoId,
-        generation = args.generation,
-    }
-    Menu._rvUtilityMapping = mapping
+    if action ~= "enter" and action ~= "exit" and action ~= "switch"
+        and action ~= "switch-return" then
+        return
+    end
+    UtilityClient.onServerCommand(C.MOD_ID, C.COMMAND_RV_UTILITY_MAPPING, {
+        ok = true, onlineId = args.onlineId, rvId = args.rvId,
+        locoId = args.locoId, generation = args.generation,
+    })
 end
 
 local function clickedUnit(animal)
@@ -157,6 +165,143 @@ local function requestExit(player)
         return
     end
     sendClientCommand(player, C.MOD_ID, C.COMMAND_RV_EXIT, {})
+end
+
+local function submitCurrentCarName(_target, button, playerNum)
+    if button.internal ~= "OK" then return end
+    local player = localPlayer(playerNum)
+    if not player then return end
+    sendClientCommand(player, C.MOD_ID, C.COMMAND_RV_SET_CAR_NAME, {
+        name = button.parent.entry:getText(),
+    })
+end
+
+local function openCurrentCarNameDialog(player, playerNum)
+    local state = Menu._rvCarMenuStates[playerNum]
+    local defaultName = state and state.currentName or ""
+    local modal = ISTextBox:new(0, 0, 320, 150,
+        text("ContextMenu_RailroaderRV_NameCurrentCar_Prompt",
+            "Enter a name for this car"),
+        defaultName, Menu, submitCurrentCarName,
+        player:getPlayerNum(), playerNum)
+    modal:initialise()
+    modal:addToUIManager()
+    modal.maxChars = 240
+end
+
+local function requestCurrentConsist(player, requestId)
+    sendClientCommand(player, C.MOD_ID, C.COMMAND_RV_CONSIST_REQUEST, {
+        requestId = requestId,
+    })
+end
+
+local function requestSwitchCar(player, unitId)
+    if not player or unitId == nil then return end
+    sendClientCommand(player, C.MOD_ID, C.COMMAND_RV_SWITCH_CAR, {
+        unitId = unitId,
+    })
+end
+
+local function rrUnitLabel(unit, locomotiveIndex)
+    local kindKeys = {
+        loco = "ContextMenu_RailroaderRV_UnitKind_Loco",
+        car_box = "ContextMenu_RailroaderRV_UnitKind_CarBox",
+        car_bx40 = "ContextMenu_RailroaderRV_UnitKind_BX40",
+        car_cb = "ContextMenu_RailroaderRV_UnitKind_Caboose",
+    }
+    local kindName = getText(kindKeys[unit.kind])
+    if unit.isLoco then
+        return kindName
+    end
+    local index = unit.index
+    if locomotiveIndex and unit.index > locomotiveIndex then
+        index = index - 1
+    end
+    if unit.marking ~= nil then
+        return formattedText("IGUI_RR_Rerail_UnitCarNum",
+            index, unit.marking, kindName)
+    end
+    return formattedText("IGUI_RR_Rerail_CarMenu",
+        index, kindName)
+end
+
+local function populateCurrentConsist(state, args)
+    local submenu = state.submenu
+    submenu:clear()
+    state.requestId = nil
+    if args.ok ~= true then
+        local option = submenu:addOption(text(
+            "ContextMenu_RailroaderRV_ConsistUnavailable",
+            "Unable to read the Railroader consist"), nil, nil)
+        option.notAvailable = true
+        return
+    end
+    state.currentId = args.rvId
+    state.currentName = args.currentName
+    local locomotiveIndex
+    for _, unit in ipairs(args.units) do
+        if unit.isLoco == true then locomotiveIndex = unit.index end
+    end
+    for _, unit in ipairs(args.units) do
+        local label = unit.customName or rrUnitLabel(unit, locomotiveIndex)
+        local current = unit.isCurrent == true
+        if current then
+            label = label .. text(
+                "ContextMenu_RailroaderRV_CurrentCarSuffix",
+                " (Current car)")
+        end
+        local onSelect = requestSwitchCar
+        if current or unit.isFlatcar == true then
+            onSelect = nil
+        end
+        local option = submenu:addOption(label, state.player,
+            onSelect, unit.id)
+        if current then
+            option.isDisabled = true
+        elseif unit.isFlatcar == true then
+            option.notAvailable = true
+        end
+    end
+end
+
+local function addAdjacentCarOption(playerNum, context, test)
+    local label = text("ContextMenu_RailroaderRV_MoveToAdjacentCar",
+        "Move to an adjacent car")
+    if optionAlreadyExists(context, label) then return true end
+    local player = localPlayer(playerNum)
+    local option = context:addOption(label, nil, nil)
+    local submenu = ISContextMenu:getNew(context)
+    context:addSubMenu(option, submenu)
+    if test then
+        local loading = submenu:addOption(text(
+            "ContextMenu_RailroaderRV_ConsistLoading",
+            "Reading consist..."), nil, nil)
+        loading.notAvailable = true
+        return markTest()
+    end
+    Menu._rvCarMenuRequestSequence = Menu._rvCarMenuRequestSequence + 1
+    local state = { player = player, playerNum = playerNum,
+        submenu = submenu, requestId = Menu._rvCarMenuRequestSequence }
+    Menu._rvCarMenuStates[playerNum] = state
+    local loading = submenu:addOption(text(
+        "ContextMenu_RailroaderRV_ConsistLoading",
+        "Reading consist..."), nil, nil)
+    loading.notAvailable = true
+    requestCurrentConsist(player, state.requestId)
+    return true
+end
+
+local function addNameCurrentCarOption(playerNum, context, test)
+    local label = text("ContextMenu_RailroaderRV_NameCurrentCar",
+        "Name current car")
+    if optionAlreadyExists(context, label) then return true end
+    local player = localPlayer(playerNum)
+    if test then
+        context:addOption(label, playerNum, nil)
+        return markTest()
+    end
+    context:addOption(label, player, openCurrentCarNameDialog, playerNum)
+    return true
 end
 
 local function requestFlatcarConversion(player, unitId)
@@ -782,6 +927,8 @@ function Menu.OnFillWorldObjectContextMenu(playerNum, context, worldObjects, tes
         return
     end
     addExit(playerNum, context, test)
+    addNameCurrentCarOption(playerNum, context, test)
+    addAdjacentCarOption(playerNum, context, test)
     addSafehouseClaim(playerNum, context, test)
 end
 
@@ -806,6 +953,7 @@ function Menu.OnPreFillWorldObjectContextMenu(playerNum, context, worldObjects, 
     if not player then
         return
     end
+    Menu._rvCarMenuStates[playerNum] = nil
     local dead = false
     pcall(function() dead = player:isDead() end)
     if dead then
@@ -817,11 +965,51 @@ function Menu.OnPreFillWorldObjectContextMenu(playerNum, context, worldObjects, 
         return
     end
     addExit(playerNum, context, test)
+    addNameCurrentCarOption(playerNum, context, test)
+    addAdjacentCarOption(playerNum, context, test)
     addSafehouseClaim(playerNum, context, test)
+end
+
+function Menu.OnFillInventoryObjectContextMenu(playerNum)
+    Menu._rvCarMenuStates[playerNum] = nil
 end
 
 function Menu.OnServerCommand(module, command, args)
     if module ~= C.MOD_ID then return end
+    if command == C.COMMAND_RV_CONSIST_DATA then
+        local player = localPlayerByOnlineId(args.onlineId)
+        if not player then return end
+        local playerNum = player:getPlayerNum()
+        local state = Menu._rvCarMenuStates[playerNum]
+        if state and state.requestId == args.requestId then
+            populateCurrentConsist(state, args)
+        end
+        return
+    elseif command == C.COMMAND_RV_CAR_NAME_RESULT then
+        local player = localPlayerByOnlineId(args.onlineId)
+        if not player then return end
+        if args.ok == true then
+            local playerNum = player:getPlayerNum()
+            local state = Menu._rvCarMenuStates[playerNum]
+            if state and tostring(state.currentId) == tostring(args.locoId) then
+                state.currentName = args.name
+            end
+            player:setHaloNote(text(
+                "UI_RailroaderRV_CarName_Saved", "Car name saved"),
+                100, 255, 100, 5000)
+        else
+            local reasonKeys = {
+                ["name-empty"] = "UI_RailroaderRV_CarName_Empty",
+                ["name-control-character"] = "UI_RailroaderRV_CarName_ControlCharacters",
+                ["name-too-long"] = "UI_RailroaderRV_CarName_TooLong",
+            }
+            local key = reasonKeys[args.reason]
+                or "UI_RailroaderRV_CarName_Failed"
+            UtilityClient.showFeedback(player, text(key,
+                "Car name was not saved"))
+        end
+        return
+    end
     if command == C.COMMAND_RV_UTILITY_MAPPING then
         if Menu._safehouseClaimOption then
             local state = updateSafehouseClaimOption(
@@ -837,6 +1025,10 @@ function Menu.OnServerCommand(module, command, args)
         end
         return
     elseif command == C.COMMAND_FINAL_RELOCATE then
+        local player = localPlayerByOnlineId(args.onlineId)
+        if player then
+            Menu._rvCarMenuStates[player:getPlayerNum()] = nil
+        end
         if args.locoId ~= nil then rememberUtilityMapping(args, "enter") end
         return
     end
@@ -894,6 +1086,7 @@ function Menu.OnServerCommand(module, command, args)
     end
     local player = localPlayerByOnlineId(onlineId)
     if not player then return end
+    Menu._rvCarMenuStates[player:getPlayerNum()] = nil
     if args.action == "exit-board" then
         pendingExitBoardings[onlineId] = {
             player = player, token = args.boardToken,
@@ -938,11 +1131,17 @@ if Events and Events.OnPreFillWorldObjectContextMenu
     and type(Events.OnPreFillWorldObjectContextMenu.Add) == "function" then
     Events.OnPreFillWorldObjectContextMenu.Add(Menu.OnPreFillWorldObjectContextMenu)
 end
+if Events and Events.OnFillInventoryObjectContextMenu
+    and type(Events.OnFillInventoryObjectContextMenu.Add) == "function" then
+    Events.OnFillInventoryObjectContextMenu.Add(
+        Menu.OnFillInventoryObjectContextMenu)
+end
 if Events and Events.OnServerCommand and type(Events.OnServerCommand.Add) == "function" then
     Events.OnServerCommand.Add(Menu.OnServerCommand)
 end
 local function clearContextConnectionState()
     Menu.clearUtilityMapping()
+    Menu._rvCarMenuStates = {}
     clearPendingExitBoardings()
 end
 

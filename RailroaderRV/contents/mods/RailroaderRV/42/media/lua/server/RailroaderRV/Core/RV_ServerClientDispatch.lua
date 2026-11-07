@@ -9,9 +9,15 @@ local function dispatchLocal(module, command, args)
     if command == "Relocate" or command == C.COMMAND_FINAL_RELOCATE
         or command == C.COMMAND_REFRESH_ROOM_OWNERSHIP then
         RailroaderRV.Client.onServerCommand(module, command, args)
+        if command == C.COMMAND_FINAL_RELOCATE then
+            RailroaderRV.RailroaderContextMenu.OnServerCommand(
+                module, command, args)
+        end
     elseif command == C.COMMAND_RV_TELEPORT
         or command == C.COMMAND_RV_SAFEHOUSE_RESULT
-        or command == C.COMMAND_RV_SAFEHOUSE_SYNC then
+        or command == C.COMMAND_RV_SAFEHOUSE_SYNC
+        or command == C.COMMAND_RV_CONSIST_DATA
+        or command == C.COMMAND_RV_CAR_NAME_RESULT then
         RailroaderRV.RailroaderContextMenu.OnServerCommand(
             module, command, args)
     elseif command == C.COMMAND_RV_FLATCAR_SYNC

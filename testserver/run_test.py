@@ -35,6 +35,15 @@ RAILROADER_WORKSHOP_ID = "3774360904"
 RAILROADER_PREVIEW_DIRECTORY = "railroader_pz_mod"
 BUILDCRAFT_MOD_ID = "BuildingCraft"
 BUILDCRAFT_WORKSHOP_ID = "3459887404"
+BUILDCRAFT_WORKSHOP_CACHE = (
+    Path(__file__).resolve().parent
+    / "steamcmd"
+    / "steamapps"
+    / "workshop"
+    / "content"
+    / "108600"
+    / BUILDCRAFT_WORKSHOP_ID
+)
 SERVER_MOD_LIST = f"{BUILDCRAFT_MOD_ID};{RAILROADER_MOD_ID};{MOD_ID};B42Trans_CN"
 WORKSHOP_SERVER_ITEMS = f"3556544454;{RAILROADER_WORKSHOP_ID}"
 PREVIEW_SERVER_MOD_LIST = (
@@ -220,18 +229,7 @@ def resolve_buildcraft_source(explicit: Path | None) -> Path:
     if explicit is not None:
         candidates = _buildcraft_package_candidates(explicit)
     else:
-        candidates = []
-        for library in find_steam_libraries():
-            item_root = (
-                library
-                / "steamapps"
-                / "workshop"
-                / "content"
-                / "108600"
-                / BUILDCRAFT_WORKSHOP_ID
-            )
-            candidates.extend(_buildcraft_package_candidates(item_root))
-        candidates = _unique_paths(candidates)
+        candidates = _buildcraft_package_candidates(BUILDCRAFT_WORKSHOP_CACHE)
 
     validation_errors: list[str] = []
     for candidate in candidates:
@@ -252,12 +250,10 @@ def resolve_buildcraft_source(explicit: Path | None) -> Path:
             f"BuildingCraft 目录（当前路径: {location}）。"
         )
 
-    libraries = ", ".join(str(path) for path in find_steam_libraries())
     raise RunnerError(
         f"找不到 BuildCraft（Workshop {BUILDCRAFT_WORKSHOP_ID}，mod id "
-        f"{BUILDCRAFT_MOD_ID}）。请在 Steam 安装/订阅该 Workshop，或用 "
-        "--buildcraft-source 指定本地 package root；已检查 Steam 库: "
-        f"{libraries or '（未发现 Steam 库）'}。"
+        f"{BUILDCRAFT_MOD_ID}）。请用 SteamCMD 更新测试缓存，或用 "
+        "--buildcraft-source 指定本地 package root。"
     )
 
 
@@ -1464,8 +1460,8 @@ def build_parser() -> argparse.ArgumentParser:
         dest="buildcraft_source",
         type=Path,
         help=(
-            "BuildCraft package root 或 Workshop item 目录；默认从 Steam 库发现 "
-            f"Workshop {BUILDCRAFT_WORKSHOP_ID}"
+            "BuildCraft package root 或 Workshop item 目录；默认使用测试环境 "
+            f"SteamCMD 缓存 Workshop {BUILDCRAFT_WORKSHOP_ID}"
         ),
     )
     parser.add_argument(

@@ -134,7 +134,7 @@ local function addDashboardOption(player, context)
     local candidateOk = false
     if candidate then
         local ok, value = pcall(railroader.hasUtilityDashboardCandidate,
-            player, true)
+            player, false)
         candidateOk = ok and value == true
     end
     if not candidateOk then return end

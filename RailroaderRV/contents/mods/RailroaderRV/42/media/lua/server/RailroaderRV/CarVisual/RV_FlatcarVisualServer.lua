@@ -39,15 +39,21 @@ return function(ctx)
     local function snapshot(player)
         local playerOk, reason = validateAuthoritativePlayer(player)
         if not playerOk then return false, reason end
-        local units = {}
+        local units, boundRVUnitIds = {}, {}
         for unitId, state in pairs(mapData().flatcars) do
             units[#units + 1] = { unitId = unitId, cars = manifest(state.cars) }
+        end
+        for unitId in pairs(mapData().locomotives) do
+            boundRVUnitIds[#boundRVUnitIds + 1] = unitId
         end
         table.sort(units, function(first, second)
             return first.unitId < second.unitId
         end)
+        table.sort(boundRVUnitIds)
         ClientDispatch.sendToPlayer(player, C.MOD_ID,
-            C.COMMAND_RV_FLATCAR_SYNC, { units = units })
+            C.COMMAND_RV_FLATCAR_SYNC, {
+                units = units, boundRVUnitIds = boundRVUnitIds,
+            })
         return true
     end
 

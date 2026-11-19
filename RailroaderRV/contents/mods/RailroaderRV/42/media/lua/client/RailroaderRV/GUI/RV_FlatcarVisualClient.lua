@@ -14,6 +14,7 @@ local Client = RailroaderRV.FlatcarVisualClient or {}
 RailroaderRV.FlatcarVisualClient = Client
 
 Client.flatcars = Client.flatcars or {}
+Client.boundRVs = Client.boundRVs or {}
 Client.floors = Client.floors or {}
 Client.vehicles = Client.vehicles or {}
 Client.endpointMarkers = Client.endpointMarkers or {}
@@ -200,6 +201,11 @@ end
 function Client.isFlatcar(unitId)
     local key = idKey(unitId)
     return key ~= nil and Client.flatcars[key] ~= nil
+end
+
+function Client.isBoundRV(unitId)
+    local key = idKey(unitId)
+    return key ~= nil and Client.boundRVs[key] == true
 end
 
 function Client.cargoForUnit(unitId)
@@ -1356,6 +1362,12 @@ function Client.onServerCommand(module, command, args)
     CargoNotice.onServerCommand(module, command, args)
     if module ~= C.MOD_ID then return end
     if command ~= C.COMMAND_RV_FLATCAR_SYNC then return end
+    if args.boundRVUnitIds then
+        Client.boundRVs = {}
+        for _, unitId in ipairs(args.boundRVUnitIds) do
+            Client.boundRVs[idKey(unitId)] = true
+        end
+    end
     if args.units then
         Client.flatcars = {}
         layoutSignatures = {}
@@ -1369,7 +1381,7 @@ function Client.onServerCommand(module, command, args)
         end
         print(("[RailroaderRV][FlatcarVisual] snapshot received flatcars=%d")
             :format(#args.units))
-    else
+    elseif args.unitId ~= nil then
         local key = idKey(args.unitId)
         Client.flatcars[key] = { cars = args.cars }
         layoutSignatures[key] = cargoLayoutSignature(args.cars)
@@ -1412,6 +1424,7 @@ local function resetVisualState()
     Client.visualGeneration = Client.visualGeneration + 1
     Client.clearUnloadPreview()
     Client.flatcars = {}
+    Client.boundRVs = {}
     layoutSignatures = {}
     traceUnits = {}
     duplicateRecords = {}

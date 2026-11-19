@@ -3,6 +3,7 @@ return function(ctx)
 local Boundary = ctx.Boundary
 local Adapter = ctx.Adapter
 local C = ctx.C
+local ClientDispatch = require("RailroaderRV/Core/RV_ServerClientDispatch")
 local RegionSlots = require("RailroaderRV/RVMapping/RV_RegionSlots")
 local WORLD_MIN_Z = ctx.WORLD_MIN_Z
 local WORLD_MAX_Z = ctx.WORLD_MAX_Z
@@ -34,8 +35,13 @@ local function markMappingChanged(boundaryChanged)
     if boundaryChanged ~= false then
         invalidateBoundaryValidationCache()
     end
-    -- The train map is server-persistent authority. No client code reads this
-    -- key, so keep the epoch/cache updates local and send no map snapshot.
+    local boundRVUnitIds = {}
+    for unitId in pairs(mapData().locomotives) do
+        boundRVUnitIds[#boundRVUnitIds + 1] = unitId
+    end
+    table.sort(boundRVUnitIds)
+    ClientDispatch.broadcast(C.MOD_ID, C.COMMAND_RV_FLATCAR_SYNC,
+        { boundRVUnitIds = boundRVUnitIds })
 end
 
 local function rvRegion(anchor)

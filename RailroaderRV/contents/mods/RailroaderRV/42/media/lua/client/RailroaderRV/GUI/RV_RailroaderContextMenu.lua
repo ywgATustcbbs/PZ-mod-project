@@ -625,14 +625,20 @@ end
 function Menu.hasUtilityDashboardCandidate(player, insideOnly, unitIdHint)
     local mapping = Menu.getUtilityMapping()
     if not mapping or not player then return false end
+    local unitId = unitIdHint
+    if unitId ~= nil and FlatcarVisualClient.isFlatcar(unitId) then
+        return false
+    end
     if mapContainsPlayer(player) then return true end
     if insideOnly then return false end
-    local id = unitIdHint
-    if id == nil then
+    if unitId == nil then
         local nearest = nearestUnitInReach(player)
-        id = nearest and nearest.id or nil
+        unitId = nearest and nearest.id or nil
     end
-    return id ~= nil and tostring(id) == mapping.locoId
+    if unitId ~= nil and FlatcarVisualClient.isFlatcar(unitId) then
+        return false
+    end
+    return unitId ~= nil and tostring(unitId) == mapping.locoId
 end
 
 local function visibleTrain(trainId)
@@ -653,7 +659,8 @@ end
 
 local function enterRVFromRadial(trainId, player)
     local train = visibleTrain(trainId)
-    if train and canEnterRV(train, player) then
+    if train and not FlatcarVisualClient.isFlatcar(train.id)
+        and canEnterRV(train, player) then
         requestEnter(player, train.id)
     end
 end
@@ -665,6 +672,7 @@ local function openUtilityFromRadial(trainId, player)
 end
 
 local function addRailroaderRadialOptions(train, player, add)
+    if FlatcarVisualClient.isFlatcar(train.id) then return end
     if canEnterRV(train, player) then
         add(text("ContextMenu_RailroaderRV_Enter", "Enter RV"),
             ICON_ENTER_RV, enterRVFromRadial)
@@ -701,14 +709,15 @@ local function addUnitOptions(playerNum, context, unit, test)
     local hasFlatcar = optionAlreadyExists(context, flatcarLabel)
     local hasLoadVehicle = optionAlreadyExists(context, loadVehicleLabel)
     local hasUnloadVehicle = optionAlreadyExists(context, unloadVehicleLabel)
-    local showDashboard = Menu.hasUtilityDashboardCandidate(player, false,
-        unit.id)
     local isBX40 = unit.kind == "car_bx40"
     local isFlatcar = isBX40 and FlatcarVisualClient.isFlatcar(unit.id)
+    local isBoundRV = FlatcarVisualClient.isBoundRV(unit.id)
+    local showDashboard = not isFlatcar
+        and Menu.hasUtilityDashboardCandidate(player, false, unit.id)
     local hasLoadingRamp = isBX40
         and player:getInventory():containsTypeRecurse(C.RV_LOADING_RAMP_ITEM)
     local showEnter = not isFlatcar
-    local showFlatcar = isBX40 and not isFlatcar
+    local showFlatcar = isBX40 and not isFlatcar and not isBoundRV
 
     if test then
         if (showEnter and not hasEnter)
@@ -1039,7 +1048,7 @@ function Menu.OnServerCommand(module, command, args)
         local player = localPlayerByOnlineId(args.onlineId)
         if player then
             local message = text("UI_RailroaderRV_Safehouse_Claimed",
-                "The RV driver's cab is now your safehouse.")
+                "The RV car is now your safehouse.")
             player:setHaloNote(message, 100, 255, 100, 5000)
         end
         return

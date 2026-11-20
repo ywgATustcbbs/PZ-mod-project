@@ -612,6 +612,14 @@ function Menu.acceptUtilityMapping(args)
     return true
 end
 
+function Menu.acceptUtilitySnapshot(snapshot)
+    Menu._rvUtilityMapping = {
+        rvId = tostring(snapshot.rvId),
+        locoId = tostring(snapshot.rvId),
+        generation = snapshot.generation,
+    }
+end
+
 function Menu.clearUtilityMapping()
     Menu._rvUtilityMapping = nil
 end
@@ -624,21 +632,34 @@ end
 
 function Menu.hasUtilityDashboardCandidate(player, insideOnly, unitIdHint)
     local mapping = Menu.getUtilityMapping()
-    if not mapping or not player then return false end
+    if not player then return false end
     local unitId = unitIdHint
     if unitId ~= nil and FlatcarVisualClient.isFlatcar(unitId) then
         return false
     end
-    if mapContainsPlayer(player) then return true end
-    if insideOnly then return false end
     if unitId == nil then
-        local nearest = nearestUnitInReach(player)
-        unitId = nearest and nearest.id or nil
+        if mapContainsPlayer(player) and mapping then
+            unitId = mapping.locoId
+        elseif not insideOnly then
+            local nearest = nearestUnitInReach(player)
+            if nearest then unitId = nearest.id end
+        end
     end
     if unitId ~= nil and FlatcarVisualClient.isFlatcar(unitId) then
         return false
     end
-    return unitId ~= nil and tostring(unitId) == mapping.locoId
+    if unitId == nil then return false end
+    local inside = mapContainsPlayer(player)
+    if FlatcarVisualClient.isBoundRV(unitId) then
+        if inside then
+            return mapping == nil
+                or tostring(mapping.locoId) == tostring(unitId), unitId
+        end
+        local unit = Units.find(unitId)
+        if unit and unitInReach(player, unit) then return true, unitId end
+        return false
+    end
+    return false
 end
 
 local function visibleTrain(trainId)
@@ -666,8 +687,10 @@ local function enterRVFromRadial(trainId, player)
 end
 
 local function openUtilityFromRadial(trainId, player)
-    if Menu.hasUtilityDashboardCandidate(player, false, trainId) then
-        RailroaderRV.UtilityContextMenu.openDashboard(player)
+    local candidate, unitId = Menu.hasUtilityDashboardCandidate(
+        player, false, trainId)
+    if candidate then
+        RailroaderRV.UtilityContextMenu.openDashboard(player, unitId)
     end
 end
 
@@ -712,19 +735,23 @@ local function addUnitOptions(playerNum, context, unit, test)
     local isBX40 = unit.kind == "car_bx40"
     local isFlatcar = isBX40 and FlatcarVisualClient.isFlatcar(unit.id)
     local isBoundRV = FlatcarVisualClient.isBoundRV(unit.id)
-    local showDashboard = not isFlatcar
-        and Menu.hasUtilityDashboardCandidate(player, false, unit.id)
+    local showDashboard, dashboardUnitId = false, nil
+    if not isFlatcar then
+        showDashboard, dashboardUnitId = Menu.hasUtilityDashboardCandidate(
+            player, false, unit.id)
+    end
     local hasLoadingRamp = isBX40
         and player:getInventory():containsTypeRecurse(C.RV_LOADING_RAMP_ITEM)
     local showEnter = not isFlatcar
     local showFlatcar = isBX40 and not isFlatcar and not isBoundRV
+    local showVehicleOptions = isBX40 and not isBoundRV
 
     if test then
         if (showEnter and not hasEnter)
                 or (showDashboard and not hasDashboard)
                 or (showFlatcar and not hasFlatcar)
-                or (isBX40 and not hasLoadVehicle)
-                or (isBX40 and not hasUnloadVehicle) then
+                or (showVehicleOptions and not hasLoadVehicle)
+                or (showVehicleOptions and not hasUnloadVehicle) then
             return markTest()
         end
         return false
@@ -737,7 +764,7 @@ local function addUnitOptions(playerNum, context, unit, test)
     end
     if showDashboard and not hasDashboard then
         local option = context:addOption(dashboardLabel, player,
-            RailroaderRV.UtilityContextMenu.openDashboard)
+            RailroaderRV.UtilityContextMenu.openDashboard, dashboardUnitId)
         option.iconTexture = getTexture(ICON_UTILITY_DASHBOARD)
     end
     if showFlatcar and not hasFlatcar then
@@ -753,7 +780,7 @@ local function addUnitOptions(playerNum, context, unit, test)
                 "ContextMenu_RailroaderRV_ConvertToFlatcar_Bound",
                 "A car already bound to an RV cannot be converted to a flatcar"))
     end
-    if isBX40 and not hasLoadVehicle then
+    if showVehicleOptions and not hasLoadVehicle then
         local option = context:addOption(loadVehicleLabel)
         if isFlatcar then
             addLoadVehicleSubmenu(context, option, player, unit.id,
@@ -763,7 +790,7 @@ local function addUnitOptions(playerNum, context, unit, test)
         option.toolTip = newMenuOptionToolTip(loadVehicleLabel,
             transportTooltipDescription(isFlatcar, hasLoadingRamp))
     end
-    if isBX40 and not hasUnloadVehicle then
+    if showVehicleOptions and not hasUnloadVehicle then
         local option = context:addOption(unloadVehicleLabel)
         if isFlatcar then
             addUnloadVehicleSubmenu(context, option, player, unit.id,

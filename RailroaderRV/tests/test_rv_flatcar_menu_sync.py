@@ -169,7 +169,13 @@ class RVFlatcarMenuSyncTests(unittest.TestCase):
             }
             FlatcarVisualClient = {
                 isFlatcar = function(id) return tostring(id) == "flatcar-1" end,
+                boundRVs = { ["boxcar-1"] = true, ["caboose-2"] = true },
+                isBoundRV = function(id)
+                    return FlatcarVisualClient.boundRVs[tostring(id)] == true
+                end,
             }
+            Units = { find = function(id) return { id = id } end }
+            function unitInReach() return true end
             insideRV = false
             nearbyUnit = nil
             function mapContainsPlayer() return insideRV end

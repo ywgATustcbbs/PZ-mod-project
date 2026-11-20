@@ -40,6 +40,14 @@ end
 
 local mappingKey = Client.mappingKey
 
+local function mappingKeyForUnit(unitId)
+    local mapping = RailroaderRV.RailroaderContextMenu.getUtilityMapping()
+    if mapping and tostring(mapping.locoId) == tostring(unitId) then
+        return mappingKey(mapping)
+    end
+    return nil
+end
+
 local function fluidFuel(item)
     if type(item.getFluidContainer) ~= "function" then return false end
     local container = item:getFluidContainer()
@@ -346,7 +354,9 @@ function PowerPage:refresh(snapshot)
 
     self:section(getText("UI_RailroaderRV_Utility_Overview"), {
         { text = getText("UI_RailroaderRV_Utility_Refresh"), tone = "neutral",
-            action = function(window) Client.requestSnapshot(window.player) end },
+            action = function(window)
+                Client.requestSnapshot(window.player, window.utilityUnitId)
+            end },
     })
     self:detail(getText("UI_RailroaderRV_Utility_LiveGeneration")
         .. ": " .. display(power.generationPowerW, 0) .. " W")
@@ -569,7 +579,8 @@ function PowerPage:refresh(snapshot)
             action = function(window)
                 Client.requestPowerOperation(window.player,
                     closed and U.OP_OPEN_CIRCUIT_BREAKER
-                        or U.OP_CLOSE_CIRCUIT_BREAKER)
+                        or U.OP_CLOSE_CIRCUIT_BREAKER, nil,
+                    window.utilityUnitId)
             end }
     else
         breakerButton = { text = getText("UI_RailroaderRV_Utility_Add"), tone = "positive",
@@ -727,7 +738,9 @@ function WaterPage:refresh(snapshot)
         buttons = {
             { text = getText("UI_RailroaderRV_Utility_Refresh"),
                 tone = "neutral",
-                action = function(window) Client.requestSnapshot(window.player) end },
+                action = function(window)
+                    Client.requestSnapshot(window.player, window.utilityUnitId)
+                end },
         } }, 34)
     addRow(list, { kind = "detail",
         text = getText("UI_RailroaderRV_Utility_WaterSystemStatus")
@@ -1007,12 +1020,14 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
         self.tabs.target = self
         self.tabs.onActivateView = function(window)
             window:clearLocalStatus()
-            Client.requestSnapshot(window.player)
+            Client.requestSnapshot(window.player, window.utilityUnitId)
         end
     end
 
     function Window:prerender()
-        if not Client.hasCurrentUtilityContext(self.player, self.mappingKey) then
+        if self.mappingKey ~= nil
+                and not Client.hasCurrentUtilityContext(self.player,
+                    self.mappingKey, self.utilityUnitId) then
             self:close(false)
             return
         end
@@ -1035,7 +1050,7 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
     function Window:requestTimed(operation, targetHint, item)
         self:clearLocalStatus()
         Client.queueTimedAction(self.player, operation, item, targetHint,
-            self.mappingKey)
+            self.mappingKey, false, nil, nil, self.utilityUnitId)
     end
 
     function Window:startWaterAction(operation, item)
@@ -1046,7 +1061,7 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
                     self:onWaterActionEnded(endedAction)
                 end
                 self.activeWaterAction = action
-            end)
+            end, nil, self.utilityUnitId)
         return queued == true
     end
 
@@ -1054,7 +1069,9 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
         if self.activeWaterAction ~= action then return end
         self.activeWaterAction = nil
         self.waterPage:refresh(Client.getSnapshot())
-        if self:getIsVisible() then Client.requestSnapshot(self.player) end
+        if self:getIsVisible() then
+            Client.requestSnapshot(self.player, self.utilityUnitId)
+        end
     end
 
     function Window:cancelWaterAction()
@@ -1078,7 +1095,7 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
     end
 
     function Window:addExtractionPump(anchor)
-        Client.requestSnapshot(self.player)
+        Client.requestSnapshot(self.player, self.utilityUnitId)
         itemMenu(self, anchor, function(item)
             local fullType = item:getFullType()
             return fullType == W.SMALL_PUMP_ITEM
@@ -1104,7 +1121,7 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
     function Window:addWaterFromContainer(anchor)
         local snapshot = Client.getSnapshot()
         if not snapshot or mappingKey(snapshot) ~= self.mappingKey then return false end
-        Client.requestSnapshot(self.player)
+        Client.requestSnapshot(self.player, self.utilityUnitId)
         if waterSystemUnavailable(snapshot.water) then
             local menu = ISContextMenu.get(self.player:getPlayerNum(), anchor.x, anchor.y)
             local option = menu:addOption(
@@ -1183,7 +1200,7 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
                                         window:onWaterActionEnded(endedAction)
                                     end
                                     window.activeWaterAction = action
-                                end)
+                                end, window.utilityUnitId)
                         end)
                 end
             end
@@ -1196,7 +1213,7 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
         self:clearLocalStatus()
         local snapshot = Client.getSnapshot()
         local missingFuelTank = #snapshot.power.fuelTanks == 0
-        Client.requestSnapshot(self.player)
+        Client.requestSnapshot(self.player, self.utilityUnitId)
         if missingFuelTank then
             itemMenu(self, anchor, function() return false end, function() end,
                 getText("UI_RailroaderRV_Utility_FuelTankRequired"))
@@ -1208,7 +1225,7 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
     end
 
     function Window:addFuelTank(anchor)
-        Client.requestSnapshot(self.player)
+        Client.requestSnapshot(self.player, self.utilityUnitId)
         itemMenu(self, anchor, function(item)
             return P.GAS_TANK_TYPES[item:getFullType()] == true
         end, function(window, item)
@@ -1221,7 +1238,7 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
     end
 
     function Window:addBattery(anchor)
-        Client.requestSnapshot(self.player)
+        Client.requestSnapshot(self.player, self.utilityUnitId)
         itemMenu(self, anchor, batteryItem, function(window, item)
             window:requestTimed(U.OP_ADD_BATTERY, nil, item)
         end, getText("UI_RailroaderRV_Utility_NoBatteriesInInventory"))
@@ -1232,7 +1249,7 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
     end
 
     function Window:addComponent(anchor, operation, fullType, emptyText, labelFor)
-        Client.requestSnapshot(self.player)
+        Client.requestSnapshot(self.player, self.utilityUnitId)
         itemMenu(self, anchor, function(item) return item:getFullType() == fullType end,
             function(window, item)
                 window:requestTimed(operation, nil, item)
@@ -1289,7 +1306,7 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
         end
         Client.requestPowerOperation(self.player,
             enabled and U.OP_STOP_GENERATOR or U.OP_START_GENERATOR,
-            { generatorId = generatorId })
+            { generatorId = generatorId }, self.utilityUnitId)
     end
 
     function Window:refresh(snapshot)
@@ -1311,17 +1328,19 @@ local Window = ISCollapsableWindow:derive("RVUtilityDashboardWindow")
         self:setVisible(false)
         self:removeFromUIManager()
         if Dashboard.instance == self then Dashboard.instance = nil end
-        if requestSnapshot ~= false then Client.requestSnapshot(self.player) end
+        if requestSnapshot ~= false then
+            Client.requestSnapshot(self.player, self.utilityUnitId)
+        end
     end
 
-    function Window:new(x, y, width, height, player)
+    function Window:new(x, y, width, height, player, unitId)
         local o = ISCollapsableWindow:new(x, y, width, height)
         setmetatable(o, self)
         self.__index = self
         o.player = player
+        o.utilityUnitId = unitId
         o.activeWaterAction = nil
-        o.mappingKey = mappingKey(
-            RailroaderRV.RailroaderContextMenu.getUtilityMapping())
+        o.mappingKey = mappingKeyForUnit(unitId)
         o:setResizable(false)
         o:setTitle(getText("UI_RailroaderRV_Utility_Title"))
         return o
@@ -1341,17 +1360,20 @@ function Dashboard.onConnectionReset()
     end
 end
 
-function Dashboard.show(player)
-    if not player then return false end
+function Dashboard.show(player, unitId)
+    if not player or unitId == nil then return false end
     if Dashboard.instance then
+        if Dashboard.instance.utilityUnitId ~= unitId then
+            Dashboard.instance.mappingKey = mappingKeyForUnit(unitId)
+            Dashboard.instance.utilityUnitId = unitId
+            Client.snapshot = nil
+        end
         Dashboard.instance.player = player
-        Dashboard.instance.mappingKey = mappingKey(
-            RailroaderRV.RailroaderContextMenu.getUtilityMapping())
         Dashboard.instance:setVisible(true)
         Dashboard.instance:bringToTop()
         Dashboard.instance:clearLocalStatus()
         Dashboard.instance:refresh()
-        Client.requestSnapshot(player)
+        Client.requestSnapshot(player, unitId)
         return true
     end
     local core = getCore()
@@ -1359,13 +1381,21 @@ function Dashboard.show(player)
     local width = math.min(980, screenWidth - 40)
     local height = math.min(760, screenHeight - 60)
     local window = Window:new((screenWidth - width) / 2,
-        (screenHeight - height) / 2, width, height, player)
+        (screenHeight - height) / 2, width, height, player, unitId)
     window:initialise()
     window:addToUIManager()
     Dashboard.instance = window
     window:refresh()
-    Client.requestSnapshot(player)
+    Client.requestSnapshot(player, unitId)
     return true
+end
+
+function Dashboard.getTargetUnitId()
+    local instance = Dashboard.instance
+    if instance and instance:getIsVisible() then
+        return instance.utilityUnitId
+    end
+    return nil
 end
 
 function Dashboard.onSnapshot(player, snapshot)
@@ -1374,7 +1404,12 @@ function Dashboard.onSnapshot(player, snapshot)
     if not instance or not instance:getIsVisible() or instance.player ~= player then
         return false
     end
-    if mappingKey(snapshot) ~= instance.mappingKey then return false end
+    if instance.utilityUnitId == nil
+            or tostring(snapshot.rvId) ~= tostring(instance.utilityUnitId) then
+        return false
+    end
+    instance.mappingKey = mappingKey(snapshot)
+    RailroaderRV.RailroaderContextMenu.acceptUtilitySnapshot(snapshot)
     instance:refresh(snapshot)
     return true
 end
@@ -1386,11 +1421,14 @@ function Dashboard.onMappingChanged(player, mapping)
         and instance.player == player
     if dashboardVisible then
         instance:cancelWaterAction()
-        instance.mappingKey = mappingKey(mapping)
+        instance.mappingKey = mappingKeyForUnit(instance.utilityUnitId)
         instance:clearLocalStatus()
         instance:refresh(nil)
     end
-    if roofChanged or dashboardVisible then Client.requestSnapshot(player) end
+    if roofChanged then Client.requestSnapshot(player) end
+    if dashboardVisible then
+        Client.requestSnapshot(player, instance.utilityUnitId)
+    end
 end
 
 return Dashboard

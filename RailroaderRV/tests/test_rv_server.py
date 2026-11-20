@@ -1065,6 +1065,7 @@ def main() -> int:
     utility_constants_path = shared_root / "Common" / "RV_UtilityConstants.lua"
     utility_context_path = client_root / "GUI" / "RV_UtilityContextMenu.lua"
     utility_client_path = client_root / "GUI" / "RV_UtilityClient.lua"
+    utility_dashboard_path = client_root / "GUI" / "RV_UtilityDashboard.lua"
     utility_server_path = server_root / "Core" / "RV_UtilityServer.lua"
     utility_water_path = server_root / "Water" / "RV_UtilityWater.lua"
     utility_water_commands_path = server_root / "Water" / "RV_UtilityWater_Commands.lua"
@@ -1326,6 +1327,9 @@ def main() -> int:
             read_utf8(railroader_units_path)
             if railroader_units_path.is_file()
             else ""
+        )
+        railroader_entry_exit = (
+            read_utf8(entry_exit_path) if entry_exit_path.is_file() else ""
         )
         railroader_client = aggregate_lua_sources(
             [railroader_client_path]
@@ -1920,6 +1924,10 @@ def main() -> int:
         utility_client = (
             read_utf8(utility_client_path) if utility_client_path.is_file() else ""
         )
+        utility_dashboard = (
+            read_utf8(utility_dashboard_path)
+            if utility_dashboard_path.is_file() else ""
+        )
         utility_server = (
             read_utf8(utility_server_path) if utility_server_path.is_file() else ""
         )
@@ -2038,6 +2046,17 @@ def main() -> int:
                 "hint.rvId", "hint.generation", "hint.slotIndex", "hint.anchor",
             )),
             "client Water intent includes trusted RV identity or omits the target-only hint",
+        )
+        checks.true(
+            "local function transmit(player, payload, unitId)" in utility_client
+            and "payload.unitId = unitId" in utility_client
+            and "Client.selectedRVUnitId" not in utility_client
+            and "targetObject, unitId, utilityMappingKey" in utility_client
+            and "function Window:new(x, y, width, height, player, unitId)" in utility_dashboard
+            and "o.mappingKey = mappingKeyForUnit(unitId)" in utility_dashboard
+            and "unitId = unitId or Client.selectedRVUnitId" not in utility_dashboard
+            and "Client.requestSnapshot(window.player, window.utilityUnitId)" in utility_dashboard,
+            "utility target identity escapes its dashboard and queued-action lifecycle",
         )
         water_resolution = section(
             utility_objects,
@@ -5290,24 +5309,23 @@ def main() -> int:
         checks.true(
             "function Menu.hasUtilityDashboardCandidate(player, insideOnly, unitIdHint)" in railroader_client
             and "local mapping = Menu.getUtilityMapping()" in railroader_client
-            and re.search(
-                r"Menu\.hasUtilityDashboardCandidate\(player,\s*false,\s*unit\.id\)",
-                railroader_client,
-            ) is not None
-            and "if mapContainsPlayer(player) then return true end" in railroader_client
-            and "if insideOnly then return false end" in railroader_client
-            and "local id = unitIdHint" in railroader_client
+            and "player, false, unit.id)" in railroader_client
+            and "local unitId = unitIdHint" in railroader_client
             and "local nearest = nearestUnitInReach(player)" in railroader_client
-            and "id = nearest and nearest.id or nil" in railroader_client
-            and "tostring(id) == mapping.locoId" in railroader_client
-            and re.search(
-                r"context:addOption\(enterLabel,\s*player,\s*requestEnter,\s*unit\.id\)",
-                railroader_client,
-            ) is not None
+            and "if nearest then unitId = nearest.id end" in railroader_client
+            and "FlatcarVisualClient.isBoundRV(unitId)" in railroader_client
+            and "context:addOption(enterLabel, player, requestEnter," in railroader_client
+            and "unit.id)" in railroader_client
             and "option.iconTexture = getTexture(ICON_ENTER_RV)" in railroader_client
             and "if showDashboard and not hasDashboard then" in railroader_client
             and "option.iconTexture = getTexture(ICON_UTILITY_DASHBOARD)" in railroader_client,
             "client utility menu does not preserve its two RV entry-point intents",
+        )
+        checks.true(
+            "local selectedRecord = recordForLoco(map, requestedUnitId)" in railroader_entry_exit
+            and "sourceWithinRange(player, selectedUnit)" in railroader_entry_exit
+            and "local selectedLocoId = selectedUnit.isLocomotive" not in railroader_entry_exit,
+            "utility resolver does not use the selected mapped unit as its identity and range target",
         )
         checks.true(
             "function Menu.OnClickedAnimalForContext(playerNum, context, animals, test)" in railroader_client
@@ -5328,7 +5346,7 @@ def main() -> int:
         )
         checks.true(
             "local function addDashboardOption(player, context)" in utility_context
-            and "player, true" in utility_context
+            and "player, false" in utility_context
             and "Menu.openDashboard" in utility_context
             and "option.iconTexture = getTexture(ICON_UTILITY_DASHBOARD)" in utility_context,
             "interior world right-click menu does not offer mapped utility management with its icon",

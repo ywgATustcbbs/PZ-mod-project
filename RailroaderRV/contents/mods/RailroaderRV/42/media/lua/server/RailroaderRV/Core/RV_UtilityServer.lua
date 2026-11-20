@@ -48,12 +48,12 @@ local function send(player, command, payload)
     return ClientDispatch.sendToPlayer(player, C.MOD_ID, command, payload)
 end
 
-local function resolveRV(player, operation, phase)
+local function resolveRV(player, operation, phase, unitId)
     local server = RailroaderRV.Server
     local diagnosticOperation = operation == WaterConstants.OP_DRAW_WATER_FROM_SOURCE
         and operation or nil
     local accepted, context = server.resolveCurrentUtilityRV(player,
-        diagnosticOperation, phase)
+        diagnosticOperation, phase, unitId)
     if accepted ~= true then return false, stableReason(context) end
     context.player = player
     return true, context
@@ -76,10 +76,15 @@ end
 
 local function validRequest(args)
     if type(args) ~= "table" then return false, U.REASONS.INVALID_REQUEST end
-    local allowed = { operation = true, targetHint = true, sourceHint = true }
+    local allowed = { operation = true, targetHint = true, sourceHint = true,
+        unitId = true }
     for field in pairs(args) do if not allowed[field] then return false, U.REASONS.INVALID_REQUEST end end
     if not validText(args.operation, 64)
         or not validHint(args.targetHint) or not validHint(args.sourceHint) then
+        return false, U.REASONS.INVALID_REQUEST
+    end
+    if args.unitId ~= nil and type(args.unitId) ~= "string"
+            and type(args.unitId) ~= "number" then
         return false, U.REASONS.INVALID_REQUEST
     end
     return true
@@ -116,11 +121,14 @@ local function broadcast(context, record)
     send(context.player, C.COMMAND_RV_UTILITY_SNAPSHOT, payload)
 end
 
-local function broadcastToRV(identity, record)
+local function broadcastToRV(identity, record, targetPlayer, targetUnitId)
     local players = RailroaderRV.RailroaderServer.onlinePlayersSnapshot()
+    local targetKey = targetPlayer and playerKey(targetPlayer) or nil
     for i = 1, #players do
         local player = players[i]
-        local contextOk, context = resolveRV(player)
+        local unitId = targetKey ~= nil and playerKey(player) == targetKey
+            and targetUnitId or nil
+        local contextOk, context = resolveRV(player, nil, nil, unitId)
         if contextOk and tostring(context.identity.rvId) == tostring(identity.rvId)
             and context.identity.generation == identity.generation then
             broadcast(context, record)
@@ -181,8 +189,9 @@ local function sweepAvailableRVRegions()
     end)
 end
 
-local function actionContext(player, operation, phase)
-    local accepted, contextOrReason = resolveRV(player, operation, phase)
+local function actionContext(player, operation, phase, unitId)
+    local accepted, contextOrReason = resolveRV(player, operation, phase,
+        unitId)
     if not accepted then return false, contextOrReason end
     local context = contextOrReason
     if serviceBusy(context.identity) then
@@ -204,9 +213,9 @@ local function logWaterDrawReject(phase, reason, context)
         .. " seat=" .. tostring(context.locomotiveSeat))
 end
 
-local function waterActionContext(player, operation, phase)
+local function waterActionContext(player, operation, phase, unitId)
     local contextOk, contextOrReason, rejectedContext = actionContext(player,
-        operation, phase)
+        operation, phase, unitId)
     if not contextOk then
         if operation == WaterConstants.OP_DRAW_WATER_FROM_SOURCE
             and rejectedContext then
@@ -260,14 +269,15 @@ local function actionHint(targetHint, item)
     return hint
 end
 
-function M.validateTimedAction(player, operation, item, targetHint)
+function M.validateTimedAction(player, operation, item, targetHint, unitId)
     if Water.isTimedActionOperation(operation) then
         if Water.isPartsOperation(operation) then
-            local contextOk = actionContext(player)
+            local contextOk = actionContext(player, operation, "validate",
+                unitId)
             return contextOk
         end
         local contextOk, context = waterActionContext(player, operation,
-            "validate")
+            "validate", unitId)
         if not contextOk then return false end
         local valid, reason = validateWaterTransfer(context, operation, item,
             targetHint)
@@ -288,7 +298,7 @@ function M.validateTimedAction(player, operation, item, targetHint)
         or operation == U.OP_INSTALL_CIRCUIT_BREAKER
         or operation == U.OP_REMOVE_CIRCUIT_BREAKER
     if not timedOperation then return false end
-    local contextOk, contextOrReason = actionContext(player)
+    local contextOk, contextOrReason = actionContext(player, nil, nil, unitId)
     if not contextOk then return false end
     if operation == U.OP_ADD_FUEL then
         local accepted = Power.fuelActionCapacity(contextOrReason.identity,
@@ -298,8 +308,8 @@ function M.validateTimedAction(player, operation, item, targetHint)
     return true
 end
 
-function M.beginFuelTimedAction(player, item)
-    local contextOk, contextOrReason = actionContext(player)
+function M.beginFuelTimedAction(player, item, unitId)
+    local contextOk, contextOrReason = actionContext(player, nil, nil, unitId)
     if not contextOk then return false, contextOrReason end
     local context = contextOrReason
     M.settleUtilities(context.identity, context.record,
@@ -307,8 +317,8 @@ function M.beginFuelTimedAction(player, item)
     return Power.fuelActionCapacity(context.identity, context, item)
 end
 
-function M.progressFuelTimedAction(player, item, amount)
-    local contextOk, contextOrReason = actionContext(player)
+function M.progressFuelTimedAction(player, item, amount, unitId)
+    local contextOk, contextOrReason = actionContext(player, nil, nil, unitId)
     if not contextOk then return false, contextOrReason end
     local context = contextOrReason
     M.settleUtilities(context.identity, context.record,
@@ -318,16 +328,16 @@ function M.progressFuelTimedAction(player, item, amount)
     if not accepted then return false, detail end
     local _, refreshedRecord = M.settleUtilities(context.identity,
         context.record, nil, player, detail.record)
-    broadcastToRV(context.identity, refreshedRecord)
+    broadcastToRV(context.identity, refreshedRecord, player, unitId)
     return true, { record = refreshedRecord }
 end
 
-function M.finishFuelTimedAction(player)
-    local contextOk, context = actionContext(player)
+function M.finishFuelTimedAction(player, unitId)
+    local contextOk, context = actionContext(player, nil, nil, unitId)
     if not contextOk then return false end
     local _, record = M.settleUtilities(context.identity, context.record,
         nil, player)
-    broadcastToRV(context.identity, record)
+    broadcastToRV(context.identity, record, player, unitId)
     return true
 end
 
@@ -365,7 +375,10 @@ local function endWaterTimedAction(action, settlementDone, record)
     end
     action.serverWaterInvalid = true
     action.serverWaterEnded = true
-    if recordAvailable then broadcastToRV(action.serverWaterIdentity, record) end
+    if recordAvailable then
+        broadcastToRV(action.serverWaterIdentity, record, action.character,
+            action.rvUtilityUnitId)
+    end
     if isServer() then
         action.netAction:forceComplete()
     else
@@ -377,7 +390,7 @@ end
 function M.beginWaterTimedAction(action)
     local player = action.character
     local contextOk, contextOrReason = waterActionContext(player,
-        action.operation, "begin")
+        action.operation, "begin", action.rvUtilityUnitId)
     if not contextOk then return false, contextOrReason end
     local context = contextOrReason
     local _, record, powerState = M.settleUtilities(context.identity,
@@ -411,7 +424,8 @@ function M.progressWaterTimedAction(action, deferBroadcast)
     if action.serverWaterInvalid or action.serverWaterEnded then return false end
     local player = action.character
     local contextOk, contextOrReason = waterActionContext(player,
-        action.operation, deferBroadcast and "finish" or "progress")
+        action.operation, deferBroadcast and "finish" or "progress",
+        action.rvUtilityUnitId)
     if not contextOk then return endWaterTimedAction(action) end
     local context = contextOrReason
     if tostring(context.identity.rvId)
@@ -475,7 +489,10 @@ function M.progressWaterTimedAction(action, deferBroadcast)
         end
         return endWaterTimedAction(action, true, record)
     end
-    if not deferBroadcast then broadcastToRV(context.identity, record) end
+    if not deferBroadcast then
+        broadcastToRV(context.identity, record, player,
+            action.rvUtilityUnitId)
+    end
     return true, record
 end
 
@@ -489,20 +506,22 @@ function M.finishWaterTimedAction(action)
             Power.clearPump(action.serverWaterIdentity, action)
         end
         action.serverWaterEnded = true
-        broadcastToRV(action.serverWaterIdentity, record)
+        broadcastToRV(action.serverWaterIdentity, record, action.character,
+            action.rvUtilityUnitId)
         return true
     end
     return false
 end
 
-function M.performTimedAction(player, operation, targetHint, item)
-    local resolved, contextOrReason = resolveRV(player)
+function M.performTimedAction(player, operation, targetHint, item, unitId)
+    local resolved, contextOrReason = resolveRV(player, nil, nil, unitId)
     if not resolved then return false, contextOrReason end
     local context = contextOrReason
     local identity = context.identity
     local persistedRecord = Store.getRecord(identity, false)
     local function reject(reason, record)
-        broadcastToRV(identity, record or Store.getRecord(identity, false))
+        broadcastToRV(identity, record or Store.getRecord(identity, false),
+            player, unitId)
         return false, reason
     end
     if serviceBusy(identity) then
@@ -533,7 +552,7 @@ function M.performTimedAction(player, operation, targetHint, item)
     if detail.transaction then detail.transaction:commit() end
     detail.record = refreshedRecord
     detail.transaction = nil
-    broadcastToRV(identity, detail.record)
+    broadcastToRV(identity, detail.record, player, unitId)
     return true, detail
 end
 
@@ -542,7 +561,7 @@ function M.handleCommand(player, args)
     if not requestOk then return false, requestReason end
     local operation = args.operation
     if not knownOperation(operation) then return false, U.REASONS.INVALID_REQUEST end
-    local rvOk, contextOrReason = resolveRV(player)
+    local rvOk, contextOrReason = resolveRV(player, nil, nil, args.unitId)
     if not rvOk then
         acknowledge(player, false, contextOrReason)
         return false, contextOrReason
@@ -583,12 +602,12 @@ function M.handleCommand(player, args)
         detail.record = refreshedRecord
     end
     if accepted ~= true then
-        broadcastToRV(identity, recordOrReason)
+        broadcastToRV(identity, recordOrReason, player, args.unitId)
         acknowledge(player, false, detail)
         return false, detail
     end
     local appliedRecord = detail.record
-    broadcastToRV(identity, appliedRecord)
+    broadcastToRV(identity, appliedRecord, player, args.unitId)
     acknowledge(player, true, detail)
     return true, detail
 end

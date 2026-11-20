@@ -5,6 +5,7 @@ local RoomTemplate = require("RailroaderRV/RoomTemplate/RV_RoomTemplate")
 local ServerTeleport = require("RailroaderRV/Common/RV_ServerTeleport")
 local WaterConstants = require("RailroaderRV/Water/RV_UtilityWaterConstants")
 local ClientDispatch = require("RailroaderRV/Core/RV_ServerClientDispatch")
+local Units = require("RailroaderRV/RVMapping/RV_RailroaderUnits")
 local RRApi = RR.API
 local processIsServer = ctx.processIsServer
 local Boundary = ctx.Boundary
@@ -48,9 +49,10 @@ local function isFlatcar(map, unitId)
 end
 
 function Adapter.resolveCurrentUtilityRV(player, diagnosticOperation,
-        diagnosticPhase)
+        diagnosticPhase, requestedUnitId)
     local relation
     local locomotiveSide = false
+    local requestedTarget = requestedUnitId ~= nil
     local locomotiveRole, locomotiveSeat
     local function reject(reason)
         if diagnosticOperation == WaterConstants.OP_DRAW_WATER_FROM_SOURCE then
@@ -77,7 +79,29 @@ function Adapter.resolveCurrentUtilityRV(player, diagnosticOperation,
     local onlineId = playerId(player)
     relation = name and map.players and map.players[name] or nil
     local record, _, train, status = recordAtPlayerCoordinate(map, player)
-    if not record and status == "outside-rv" and onlineId ~= nil and name
+    if requestedTarget then
+        local selectedRecord = recordForLoco(map, requestedUnitId)
+        if not selectedRecord then return reject("unmapped-rv") end
+        if record then
+            if record ~= selectedRecord then return reject("permission-denied") end
+            record = selectedRecord
+        else
+            if status ~= "outside-rv" then return reject(status or "outside-rv") end
+            local selectedUnit = Units.find(requestedUnitId)
+            local selectedTrain = findTrain(selectedRecord.locoId)
+            if not selectedUnit or not selectedTrain
+                    or not trainPosition(selectedTrain)
+                    or not sourceWithinRange(player, selectedUnit) then
+                return reject("outside-rv")
+            end
+            record, train, status = selectedRecord, selectedTrain,
+                "locomotive-candidate"
+            locomotiveSide = true
+            locomotiveRole, locomotiveSeat = playerRole(selectedTrain, player)
+            if locomotiveRole == nil then return reject(locomotiveSeat) end
+        end
+    end
+    if not requestedTarget and not record and status == "outside-rv" and onlineId ~= nil and name
         and type(relation) == "table" and relation.inside == false then
         local boundRecord = recordForLoco(map, relation.locoId)
         local rider = boundRecord and boundRecord.players[name] or nil
@@ -94,7 +118,7 @@ function Adapter.resolveCurrentUtilityRV(player, diagnosticOperation,
             end
         end
     end
-    if not record and status == "outside-rv" and relation == nil then
+    if not requestedTarget and not record and status == "outside-rv" and relation == nil then
         local nearbyRecord, nearbyTrain = nearestMappedTrain(map, player)
         if nearbyRecord then
             record, train, status = nearbyRecord, nearbyTrain,
@@ -107,7 +131,8 @@ function Adapter.resolveCurrentUtilityRV(player, diagnosticOperation,
     if not record then return reject(status or "outside-rv") end
     local rider = name and record.players and record.players[name] or nil
     local unboundLocomotiveVisitor = locomotiveSide
-        and relation == nil and rider == nil
+        and (relation == nil or (requestedTarget and relation.inside == false))
+        and (rider == nil or (requestedTarget and rider.inside == false))
     if onlineId == nil or not name or (not unboundLocomotiveVisitor
         and (not relation or not rider
             or tostring(relation.locoId) ~= tostring(record.locoId)

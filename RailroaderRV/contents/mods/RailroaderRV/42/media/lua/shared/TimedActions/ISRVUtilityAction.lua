@@ -25,7 +25,7 @@ function ISRVUtilityAction:isValid()
     if self.operation == U.OP_ADD_FUEL and not self.item then return false end
     if isClient() then return true end
     return serverUtility().validateTimedAction(self.character,
-        self.operation, self.item, self.targetHint)
+        self.operation, self.item, self.targetHint, self.rvUtilityUnitId)
 end
 
 function ISRVUtilityAction:start()
@@ -39,7 +39,7 @@ function ISRVUtilityAction:start()
     if isSinglePlayer() then
         if self.operation == U.OP_ADD_FUEL then
             local accepted, amount = serverUtility().beginFuelTimedAction(
-                self.character, self.item)
+                self.character, self.item, self.rvUtilityUnitId)
             if not accepted then
                 self.serverFuelInvalid = true
                 self:forceStop()
@@ -87,7 +87,7 @@ end
 function ISRVUtilityAction:serverStart()
     if self.operation == U.OP_ADD_FUEL then
         local accepted, amount = serverUtility().beginFuelTimedAction(
-            self.character, self.item)
+            self.character, self.item, self.rvUtilityUnitId)
         if not accepted then
             self.serverFuelInvalid = true
             self.netAction:forceComplete()
@@ -116,7 +116,7 @@ function ISRVUtilityAction:applyFuelProgress(progress)
     local delta = self.serverFuelAmount * (progress - self.lastFuelProgress)
     if delta <= 0 then return true end
     local accepted = serverUtility().progressFuelTimedAction(
-        self.character, self.item, delta)
+        self.character, self.item, delta, self.rvUtilityUnitId)
     if not accepted then
         self.serverFuelInvalid = true
         if isServer() then
@@ -144,7 +144,8 @@ function ISRVUtilityAction:serverStop()
             if not self.serverFuelInvalid then
                 self:applyFuelProgress(self.netAction:getProgress())
             end
-            serverUtility().finishFuelTimedAction(self.character)
+            serverUtility().finishFuelTimedAction(self.character,
+                self.rvUtilityUnitId)
         end
         return
     end
@@ -159,7 +160,8 @@ function ISRVUtilityAction:complete()
             if self.serverFuelStarted then
                 if not self.serverFuelInvalid then self:applyFuelProgress(1) end
                 if not self.serverFuelInvalid then
-                    serverUtility().finishFuelTimedAction(self.character)
+                    serverUtility().finishFuelTimedAction(self.character,
+                        self.rvUtilityUnitId)
                 end
             end
         elseif isWaterTransfer(self.operation) then
@@ -168,7 +170,8 @@ function ISRVUtilityAction:complete()
             end
         else
             local accepted = serverUtility().performTimedAction(self.character,
-                self.operation, self.targetHint, self.item)
+                self.operation, self.targetHint, self.item,
+                self.rvUtilityUnitId)
             return accepted == true
         end
     end
@@ -195,7 +198,8 @@ function ISRVUtilityAction:stop()
                 self:applyFuelProgress(self:getJobDelta())
             end
             if not self.serverFuelInvalid then
-                serverUtility().finishFuelTimedAction(self.character)
+                serverUtility().finishFuelTimedAction(self.character,
+                    self.rvUtilityUnitId)
             end
         elseif isWaterTransfer(self.operation) and self.serverWaterStarted
             and not self.serverWaterInvalid then
@@ -236,12 +240,15 @@ function ISRVUtilityAction:adjustMaxTime(time)
     return ISBaseTimedAction.adjustMaxTime(self, time)
 end
 
-function ISRVUtilityAction:new(character, operation, item, targetHint, targetObject)
+function ISRVUtilityAction:new(character, operation, item, targetHint,
+        targetObject, utilityUnitId, utilityMappingKey)
     local o = ISBaseTimedAction.new(self, character)
     o.operation = operation
     o.item = item
     o.targetHint = targetHint
     o.targetObject = targetObject
+    o.rvUtilityUnitId = utilityUnitId
+    o.rvUtilityMappingKey = utilityMappingKey
     o.maxTime = o:getDuration()
     return o
 end

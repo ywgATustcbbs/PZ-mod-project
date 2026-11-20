@@ -22,12 +22,13 @@ function Client.mappingKey(value)
     return value.rvId .. ":" .. value.generation
 end
 
-function Client.hasCurrentUtilityContext(player, expectedMappingKey)
+function Client.hasCurrentUtilityContext(player, expectedMappingKey, unitId)
     local menu = RailroaderRV.RailroaderContextMenu
     local mapping = menu.getUtilityMapping()
     return mapping ~= nil
         and Client.mappingKey(mapping) == expectedMappingKey
-        and menu.hasUtilityDashboardCandidate(player)
+        and menu.hasUtilityDashboardCandidate(player, false,
+            unitId)
 end
 
 function Client.showFeedback(player, message)
@@ -45,8 +46,9 @@ local function localPlayer(playerNum)
     return getSpecificPlayer(playerNum)
 end
 
-local function transmit(player, payload)
+local function transmit(player, payload, unitId)
     if not player then return false end
+    if unitId ~= nil then payload.unitId = unitId end
     return sendClientCommand(player, C.MOD_ID, C.COMMAND_RV_UTILITY,
         payload) ~= false
 end
@@ -178,11 +180,11 @@ local function notifyActionEnded(action)
     if roofCallback then roofCallback(action) end
 end
 
-function Client.send(player, operation, targetHint, sourceHint)
+function Client.send(player, operation, targetHint, sourceHint, unitId)
     local payload = { operation = operation }
     if targetHint ~= nil then payload.targetHint = targetHint end
     if sourceHint ~= nil then payload.sourceHint = sourceHint end
-    if not transmit(player, payload) then return rejectSend(player) end
+    if not transmit(player, payload, unitId) then return rejectSend(player) end
     return true
 end
 
@@ -212,24 +214,24 @@ function Client.requestRemoveFuelTank(player, fuelTankId)
         { fuelTankId = fuelTankId })
 end
 
-function Client.requestPowerOperation(player, operation, targetHint)
+function Client.requestPowerOperation(player, operation, targetHint, unitId)
     if operation == U.OP_REMOVE_CHARGER or operation == U.OP_REMOVE_INVERTER
         or operation == U.OP_INSTALL_CONTROLLER
         or operation == U.OP_REMOVE_CONTROLLER then
-        return Client.queueTimedAction(player, operation, nil, targetHint)
+        return Client.queueTimedAction(player, operation, nil, targetHint,
+            nil, false, nil, nil, unitId)
     end
-    return Client.send(player, operation, targetHint, nil)
+    return Client.send(player, operation, targetHint, nil, unitId)
 end
 
 function Client.queueTimedAction(player, operation, item, targetHint,
-        utilityMappingKey, clearQueue, beforeQueue, targetObject)
+        utilityMappingKey, clearQueue, beforeQueue, targetObject, unitId)
     if clearQueue then
         ISTimedActionQueue.clear(player)
     end
     local actionClass = require("TimedActions/ISRVUtilityAction")
     local action = actionClass:new(player, operation, item, targetHint,
-        targetObject)
-    action.rvUtilityMappingKey = utilityMappingKey
+        targetObject, unitId, utilityMappingKey)
     if beforeQueue then beforeQueue(action) end
     local queued = ISTimedActionQueue.add(action)
     if queued == nil then
@@ -250,9 +252,9 @@ function Client.cancelTimedAction(player, action)
 end
 
 -- The server settles utility state before returning its authoritative snapshot.
-function Client.requestSnapshot(player)
+function Client.requestSnapshot(player, unitId)
     local payload = { operation = U.OP_REQUEST_SNAPSHOT }
-    if not transmit(player, payload) then return rejectSend(player) end
+    if not transmit(player, payload, unitId) then return rejectSend(player) end
     return true
 end
 
@@ -265,11 +267,11 @@ function Client.requestWaterConnection(player, object, connected)
 end
 
 function Client.requestDrawWaterFromSource(player, object, utilityMappingKey,
-        beforeQueue)
+        beforeQueue, unitId)
     local hint = hintForObject(object)
     if not hint then return rejectSend(player) end
     return Client.queueTimedAction(player, W.OP_DRAW_WATER_FROM_SOURCE, nil,
-        hint, utilityMappingKey, false, beforeQueue, object)
+        hint, utilityMappingKey, false, beforeQueue, object, unitId)
 end
 
 function Client.clearConnectionState()
@@ -293,8 +295,15 @@ function Client.onServerCommand(module, command, args)
         return
     end
     if command == C.COMMAND_RV_UTILITY_SNAPSHOT then
-        Client.snapshot = args
-        RailroaderRV.UtilityDashboard.onSnapshot(localPlayer(0), args)
+        local accepted = RailroaderRV.UtilityDashboard.onSnapshot(
+            localPlayer(0), args)
+        local dashboardUnitId =
+            RailroaderRV.UtilityDashboard.getTargetUnitId()
+        if accepted then
+            Client.snapshot = args
+        elseif dashboardUnitId == nil then
+            Client.snapshot = args
+        end
         return
     end
     if command == C.COMMAND_RV_UTILITY_ACK then

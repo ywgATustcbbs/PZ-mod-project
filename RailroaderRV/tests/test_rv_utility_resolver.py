@@ -136,6 +136,16 @@ class RVUtilityResolverTests(unittest.TestCase):
                 end,
                 requestSnapshot = function() return true end,
             }
+            package.loaded["RailroaderRV/RVMapping/RV_RailroaderUnits"] = {
+                find = function(id) return { id = id, isLocomotive = true } end,
+                geometry = function()
+                    return { hullDistanceTiles = 1, mountReachTiles = 2 }
+                end,
+            }
+            package.loaded["RailroaderRV/GUI/RV_FlatcarVisualClient"] = {
+                isFlatcar = function() return false end,
+                isBoundRV = function(id) return tostring(id) == "18" end,
+            }
             ClientMenu = dofile(client_menu_path)
             assert(ClientMenu.acceptUtilityMapping({
                 ok = true, onlineId = 42,

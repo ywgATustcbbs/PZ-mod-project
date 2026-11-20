@@ -46,8 +46,8 @@ local function addFuelOption(player, item)
     Client.requestAddFuel(player, item)
 end
 
-function Menu.openDashboard(player)
-    Dashboard.show(player)
+function Menu.openDashboard(player, unitId)
+    Dashboard.show(player, unitId)
 end
 
 local function hasPipeWrench(player)
@@ -131,17 +131,19 @@ local function addDashboardOption(player, context)
     local railroader = rv and rv.RailroaderContextMenu
     local candidate = railroader
         and type(railroader.hasUtilityDashboardCandidate) == "function"
-    local candidateOk = false
+    local candidateOk, unitId = false, nil
     if candidate then
-        local ok, value = pcall(railroader.hasUtilityDashboardCandidate,
+        local ok, value, candidateUnitId = pcall(railroader.hasUtilityDashboardCandidate,
             player, false)
         candidateOk = ok and value == true
+        if candidateOk then unitId = candidateUnitId end
     end
     if not candidateOk then return end
     local label = text("ContextMenu_RailroaderRV_UtilityDashboard",
         "RV utility panel")
     if not already(context, label) then
-        local option = context:addOption(label, player, Menu.openDashboard)
+        local option = context:addOption(label, player, Menu.openDashboard,
+            unitId)
         option.iconTexture = getTexture(ICON_UTILITY_DASHBOARD)
     end
 end

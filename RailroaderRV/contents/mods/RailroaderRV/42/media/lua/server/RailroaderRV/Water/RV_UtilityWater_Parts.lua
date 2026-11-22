@@ -148,7 +148,7 @@ function M.validateDrawSource(player, sourceHint, water)
         return false, U.REASONS.CAPACITY_FULL
     end
     local inventory = player:getInventory()
-    if not inventory:contains("Base.RubberHose") then
+    if not inventory:contains("Base.RubberHose", true) then
         return false, U.REASONS.MISSING_TOOL
     end
     local resolved, sourceOrReason = Sources.resolveNaturalSource(player,

@@ -1,0 +1,23 @@
+module EasyPacking {
+    imports {
+        Base,
+    }
+
+    item Parcel {
+        DisplayName = Easy Packing Parcel,
+        ItemType = base:normal,
+        Weight = 0.1,
+        DisplayCategory = Container,
+    }
+
+    item FoodParcel {
+        DisplayName = Easy Packing Food Parcel,
+        ItemType = base:food,
+        Weight = 0.1,
+        DisplayCategory = Food,
+        DaysFresh = 1000000000,
+        DaysTotallyRotten = 1000000000,
+        IsCookable = false,
+        CantBeFrozen = false,
+    }
+}

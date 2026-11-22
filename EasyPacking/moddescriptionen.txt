@@ -1,0 +1,30 @@
+
+Pack multiple items of the same type into a single parcel. Each parcel holds up to 200 items. This can substantially reduce the number of items the game must load and help reduce stuttering, making it useful for hoarders.
+
+Supports B42.22+ SP/MP. Single-player has not been extensively tested.
+
+[h2]How It Works[/h2]
+The mod adds no large catalogs of custom items or crafting recipes, so it avoids the loading overhead associated with such catalogs. When packing, it searches nearby containers for items of the same type. Once the timed action finishes, it removes the selected items and creates a parcel that stores their quantity, weight, freshness, ModData, and other item data. Unpacking reads this data to recreate the items.
+
+[h2]Features[/h2]
+[list]
+[*]Multiple parcel sizes
+[*]Pack food
+[*]Take items out of a parcel in batches
+[*]Works with vanilla and modded items
+[*]Pack multiple parcels in a selected fixed size
+[*]Parcels weigh 80% of the original combined weight
+[*]Mark containers to skip or allow automatic packing
+[*]A parcel's freshness reflects the average age of its food. Each item keeps its own freshness record, and spoilage during storage is applied to that item when unpacked.
+[/list]
+
+[h2]Limitations[/h2]
+[list]
+[*]If the sandbox option to remove rotten food is enabled, a parcel may be removed when its average age reaches the rotten threshold, even if some of its contents are still fresh. Try packing food with similar freshness.
+[*]Large quantities may make a parcel too heavy for a backpack or container.
+[*]Some special item states cannot be preserved, including liquids, weapon state, and certain mod data. This mod is intended for ordinary items.
+[*]Different item types cannot be packed together.
+[*]Packing may fail because of the game's ModData limits.
+[/list]
+tags=Build 42;Items;Multiplayer;
+visibility=public

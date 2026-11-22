@@ -1,0 +1,5 @@
+name=简单打包 Easy Packing
+id=EasyPacking
+description=Pack matching items into portable parcels while preserving item state.
+versionMin=42.22.0
+modversion=1.0

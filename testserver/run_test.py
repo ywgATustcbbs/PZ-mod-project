@@ -44,6 +44,19 @@ BUILDCRAFT_WORKSHOP_CACHE = (
     / "108600"
     / BUILDCRAFT_WORKSHOP_ID
 )
+ITEM_DETAILS_MOD_ID = "XingHeMods_ItemAndWeaponDetailsDisplay"
+ITEM_DETAILS_WORKSHOP_ID = "3631512406"
+ITEM_DETAILS_WORKSHOP_SOURCE = (
+    Path(__file__).resolve().parent
+    / "steamcmd"
+    / "steamapps"
+    / "workshop"
+    / "content"
+    / "108600"
+    / ITEM_DETAILS_WORKSHOP_ID
+    / "mods"
+    / ITEM_DETAILS_MOD_ID
+)
 SERVER_MOD_LIST = f"{BUILDCRAFT_MOD_ID};{RAILROADER_MOD_ID};{MOD_ID};B42Trans_CN"
 WORKSHOP_SERVER_ITEMS = f"3556544454;{RAILROADER_WORKSHOP_ID}"
 PREVIEW_SERVER_MOD_LIST = (
@@ -122,7 +135,7 @@ def parse_mod_id(mod_info: Path) -> str | None:
     return None
 
 
-def validate_mod_source(source: Path) -> None:
+def validate_mod_source(source: Path, expected_mod_id: str = MOD_ID) -> None:
     if not source.is_dir():
         raise RunnerError(f"找不到本地模组目录: {source}")
     mod_info = source / "mod.info"
@@ -133,9 +146,9 @@ def validate_mod_source(source: Path) -> None:
         mod_info = source / "42" / "mod.info"
     require_file(mod_info, "模组 mod.info（根目录或 42/ 目录）")
     mod_id = parse_mod_id(mod_info)
-    if mod_id != MOD_ID:
+    if mod_id != expected_mod_id:
         raise RunnerError(
-            f"模组 ID 不匹配: {mod_info} 中为 {mod_id!r}，预期 {MOD_ID!r}"
+            f"模组 ID 不匹配: {mod_info} 中为 {mod_id!r}，预期 {expected_mod_id!r}"
         )
 
 
@@ -255,6 +268,18 @@ def resolve_buildcraft_source(explicit: Path | None) -> Path:
         f"{BUILDCRAFT_MOD_ID}）。请用 SteamCMD 更新测试缓存，或用 "
         "--buildcraft-source 指定本地 package root。"
     )
+
+
+def resolve_item_details_source() -> Path:
+    """Find and validate the Workshop item details mod for EasyPacking tests."""
+
+    if not ITEM_DETAILS_WORKSHOP_SOURCE.is_dir():
+        raise RunnerError(
+            f"找不到物品详情辅助模组（Workshop {ITEM_DETAILS_WORKSHOP_ID}，"
+            f"mod id {ITEM_DETAILS_MOD_ID}）。请先通过 SteamCMD 下载该 Workshop 项。"
+        )
+    validate_mod_source(ITEM_DETAILS_WORKSHOP_SOURCE, ITEM_DETAILS_MOD_ID)
+    return ITEM_DETAILS_WORKSHOP_SOURCE
 
 
 def _copy_mod_tree(source: Path, destination: Path, dry_run: bool) -> tuple[int, int]:
@@ -1012,6 +1037,7 @@ class Settings:
     dry_run: bool
     prepare_only: bool
     no_client: bool
+    easy_packing: bool
 
 
 def _is_reparse_point(path: Path) -> bool:
@@ -1124,7 +1150,7 @@ def _read_cache_layout(path: Path) -> dict[str, object] | None:
 def initialize_ramdisk_caches(settings: Settings) -> None:
     """Initialize the default Workshop client cache, migrating it once."""
 
-    if settings.railroader_build == "preview" or not settings.client_cache_is_default:
+    if settings.easy_packing or settings.railroader_build == "preview" or not settings.client_cache_is_default:
         return
 
     requested = {
@@ -1289,8 +1315,10 @@ def initialize_ramdisk_caches(settings: Settings) -> None:
 
 
 def prepare(settings: Settings) -> Path:
-    validate_mod_source(settings.mod_source)
-    buildcraft_source = resolve_buildcraft_source(settings.buildcraft_source)
+    mod_id = "EasyPacking" if settings.easy_packing else MOD_ID
+    validate_mod_source(settings.mod_source, mod_id)
+    buildcraft_source = None if settings.easy_packing else resolve_buildcraft_source(settings.buildcraft_source)
+    item_details_source = resolve_item_details_source() if settings.easy_packing else None
     require_file(settings.run_bat, "testserver\\run.bat")
     start_bat = settings.run_bat.parent / "steamcmd" / "380870" / "StartServer64 - test.bat"
     require_file(start_bat, "服务器启动批处理")
@@ -1302,16 +1330,52 @@ def prepare(settings: Settings) -> Path:
         validate_ports(settings.port, settings.udp_port)
 
     log(f"项目根目录: {settings.project_root}")
-    log(f"Railroader 版本来源: {settings.railroader_build}")
+    test_mods = f"{mod_id};{ITEM_DETAILS_MOD_ID}" if settings.easy_packing else mod_id
+    log(f"测试模组: {test_mods}")
+    if not settings.easy_packing:
+        log(f"Railroader 版本来源: {settings.railroader_build}")
     log(f"本地模组源: {settings.mod_source}")
-    log(f"BuildCraft 本地源包（Workshop {BUILDCRAFT_WORKSHOP_ID}）: {buildcraft_source}")
+    if buildcraft_source is not None:
+        log(f"BuildCraft 本地源包（Workshop {BUILDCRAFT_WORKSHOP_ID}）: {buildcraft_source}")
     ensure_directory(settings.client_cache, "客户端缓存", settings.dry_run)
     if settings.server_cache.resolve() == settings.client_cache.resolve():
         raise RunnerError("服务器缓存与客户端缓存必须是不同目录")
 
     configure_server_mod_profile(settings)
 
-    stage_mod(settings.mod_source, settings.server_cache, "服务器", settings.dry_run)
+    stage_mod(
+        settings.mod_source,
+        settings.server_cache,
+        "服务器",
+        settings.dry_run,
+        mod_id,
+    )
+    if settings.easy_packing:
+        stage_mod(
+            item_details_source,
+            settings.server_cache,
+            "服务器物品详情辅助",
+            settings.dry_run,
+            ITEM_DETAILS_MOD_ID,
+        )
+        if not settings.no_client:
+            stage_mod(
+                settings.mod_source,
+                settings.client_cache,
+                "客户端",
+                settings.dry_run,
+                mod_id,
+            )
+            stage_mod(
+                item_details_source,
+                settings.client_cache,
+                "客户端物品详情辅助",
+                settings.dry_run,
+                ITEM_DETAILS_MOD_ID,
+            )
+            configure_client_mod_profile(settings)
+        return settings.server_cache / "server-console.txt"
+
     if settings.railroader_build == "preview":
         stage_mod(
             settings.railroader_preview_source,
@@ -1351,14 +1415,14 @@ def prepare(settings: Settings) -> Path:
 
 
 def configure_server_mod_profile(settings: Settings) -> None:
-    """Write the selected Railroader source into this mode's server cache."""
+    """Write this test mode's selected mod list into its server profile."""
 
-    server_mod_list = (
+    server_mod_list = f"EasyPacking;{ITEM_DETAILS_MOD_ID}" if settings.easy_packing else (
         SERVER_MOD_LIST
         if settings.railroader_build == "workshop"
         else PREVIEW_SERVER_MOD_LIST
     )
-    workshop_items = (
+    workshop_items = ITEM_DETAILS_WORKSHOP_ID if settings.easy_packing else (
         WORKSHOP_SERVER_ITEMS
         if settings.railroader_build == "workshop"
         else PREVIEW_SERVER_ITEMS
@@ -1373,7 +1437,8 @@ def configure_server_mod_profile(settings: Settings) -> None:
             template = _server_profile_template(settings, profile)
             if template is not None:
                 log(f"[dry-run] 将从完整测试服务器配置复制: {template} -> {profile}")
-        log(f"[dry-run] 将更新服务器模组配置: {profile} ({settings.railroader_build})")
+        mode = "Easy Packing" if settings.easy_packing else settings.railroader_build
+        log(f"[dry-run] 将更新服务器模组配置: {profile} ({mode})")
         return
 
     if not profile.is_file():
@@ -1441,9 +1506,46 @@ def _server_profile_template(settings: Settings, profile: Path) -> Path | None:
     return None
 
 
+def configure_client_mod_profile(settings: Settings) -> None:
+    """Select the EasyPacking test mods in this client's vanilla ActiveMods file."""
+
+    if not settings.easy_packing:
+        return
+
+    profile = settings.client_cache / "mods" / "default.txt"
+    if settings.dry_run:
+        log(
+            "[dry-run] 将在客户端 ActiveMods 配置中启用 EasyPacking 与 "
+            f"{ITEM_DETAILS_MOD_ID}: {profile}"
+        )
+        return
+
+    profile.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        profile.write_text(
+            "VERSION = 1,\n\nmods\n{\n"
+            "    mod = EasyPacking,\n"
+            f"    mod = {ITEM_DETAILS_MOD_ID},\n"
+            "}\n\nmaps\n{\n}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+    except OSError as exc:
+        raise RunnerError(f"无法写入客户端模组配置 {profile}: {exc}") from exc
+    log(
+        "已在客户端 ActiveMods 配置中启用 EasyPacking 与 "
+        f"{ITEM_DETAILS_MOD_ID}: {profile}"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="准备并启动 Railroader RV 的独立服务器与常规 Project Zomboid 客户端。"
+        description="准备并启动本地 Project Zomboid 模组的服务器与常规游戏客户端。"
+    )
+    parser.add_argument(
+        "--easy-packing",
+        action="store_true",
+        help="启动独立 Easy Packing 与物品详情辅助模组测试，不加载 RailroaderRV 或 BuildCraft",
     )
     parser.add_argument("--project-root", type=Path, help="项目根目录（默认按脚本位置发现）")
     parser.add_argument("--run-bat", type=Path, help="服务器入口 run.bat")
@@ -1507,14 +1609,16 @@ def make_settings(args: argparse.Namespace) -> Settings:
     project_root = resolve_path(args.project_root, Path.cwd()) or script_project_root
     run_bat = resolve_path(args.run_bat, project_root) or (project_root / "testserver" / "run.bat")
     mod_source = resolve_path(args.mod_source, project_root) or (
-        project_root / "RailroaderRV" / "contents" / "mods" / MOD_ID
+        project_root / "EasyPacking" / "contents" / "mods" / "EasyPacking"
+        if args.easy_packing
+        else project_root / "RailroaderRV" / "contents" / "mods" / MOD_ID
     )
     buildcraft_source = resolve_path(args.buildcraft_source, project_root)
     # Accept the version directory mentioned in the project README while
     # still staging the package root expected by PZ's mod scanner.
     if (
         mod_source.name == "42"
-        and mod_source.parent.name == MOD_ID
+        and mod_source.parent.name == ("EasyPacking" if args.easy_packing else MOD_ID)
         and (mod_source / "mod.info").is_file()
     ):
         mod_source = mod_source.parent
@@ -1531,7 +1635,9 @@ def make_settings(args: argparse.Namespace) -> Settings:
         if client_cache is not None:
             client_cache = client_cache / "preview"
     mode_cache_root = (
-        run_bat.parent / "runtime" / "preview"
+        run_bat.parent / "runtime" / "easypacking"
+        if args.easy_packing
+        else run_bat.parent / "runtime" / "preview"
         if args.railroader_build == "preview"
         else RAMDISK_CACHE_ROOT
     )
@@ -1560,6 +1666,7 @@ def make_settings(args: argparse.Namespace) -> Settings:
         dry_run=args.dry_run,
         prepare_only=args.prepare_only,
         no_client=args.no_client,
+        easy_packing=args.easy_packing,
     )
 
 
@@ -1601,7 +1708,9 @@ def run(settings: Settings) -> int:
 
     runtime_root = settings.run_bat.parent / "runtime"
     instance_state_path = (
-        runtime_root / "preview" / INSTANCE_STATE_FILENAME
+        runtime_root / "easypacking" / INSTANCE_STATE_FILENAME
+        if settings.easy_packing
+        else runtime_root / "preview" / INSTANCE_STATE_FILENAME
         if settings.railroader_build == "preview"
         else runtime_root / INSTANCE_STATE_FILENAME
     )
@@ -1658,7 +1767,8 @@ def run(settings: Settings) -> int:
             time.sleep(1.0)
             now = time.monotonic()
             if (
-                settings.railroader_build == "workshop"
+                not settings.easy_packing
+                and settings.railroader_build == "workshop"
                 and (
                     settings.server_cache_is_default
                     or settings.client_cache_is_default

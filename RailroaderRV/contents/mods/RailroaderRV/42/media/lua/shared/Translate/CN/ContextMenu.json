@@ -10,6 +10,8 @@
     "ContextMenu_RailroaderRV_ConvertToFlatcar_Bound": "已绑定房车的车厢无法改造为平车",
     "ContextMenu_RailroaderRV_LoadVehicle": "装载车辆",
     "ContextMenu_RailroaderRV_UnloadVehicle": "放下车辆",
+    "ContextMenu_RailroaderRV_LoadAnimal": "装载动物",
+    "ContextMenu_RailroaderRV_UnloadAnimal": "卸载动物",
     "ContextMenu_RailroaderRV_Transport_RequiresFlatcar": "需要先转换为平车",
     "ContextMenu_RailroaderRV_Transport_LoadingRampNotConsumed": "登车跳板不会被消耗。",
     "ContextMenu_RailroaderRV_Transport_VisualOnly": "平车上的车辆仅是视觉模型。 <LINE> 可能出现视觉错误，也可能与真实车辆不一致； <LINE> 模型不代表车辆实际状态。",

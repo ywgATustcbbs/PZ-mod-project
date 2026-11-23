@@ -6,6 +6,8 @@
     "UI_RailroaderRV_Utility_Confirmed": "Operation confirmed; refreshing values",
     "UI_RailroaderRV_Utility_Rejected": "Operation rejected",
     "UI_RailroaderRV_Utility_SendFailed": "Utility request could not be sent",
+    "UI_RailroaderRV_AnimalCargo_Success": "Animal cargo operation completed",
+    "UI_RailroaderRV_AnimalCargo_Failed": "Animal cargo operation failed",
     "UI_RailroaderRV_Safehouse_Claimed": "The RV car is now your safehouse.",
     "UI_RailroaderRV_Safehouse_Reject_InvalidRequest": "The safehouse claim request is invalid.",
     "UI_RailroaderRV_Safehouse_Reject_PlayerUnavailable": "You cannot claim an RV safehouse right now.",

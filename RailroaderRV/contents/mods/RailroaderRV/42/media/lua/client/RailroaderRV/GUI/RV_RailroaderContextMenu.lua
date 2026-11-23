@@ -21,6 +21,7 @@ local C = RailroaderRV.Constants
 local UtilityClient = require("RailroaderRV/GUI/RV_UtilityClient")
 local FlatcarVisualClient = require(
     "RailroaderRV/GUI/RV_FlatcarVisualClient")
+local AnimalCargo = require("RailroaderRV/Animals/RV_AnimalCargo")
 
 local ICON_ENTER_RV = "media/ui/RailroaderRV/enterrv.png"
 local ICON_EXIT_RV = "media/ui/RailroaderRV/exitrv.png"
@@ -128,8 +129,28 @@ local function clickedUnit(animal)
     if not animal then return nil end
     local unitId = FlatcarVisualClient.unitIdForDecoration(animal)
     if unitId ~= nil then return Units.find(unitId) end
+    if type(animal.getAnimalID) ~= "function" then return nil end
     local id = animal:getAnimalID()
     return Units.find(id)
+end
+
+local function clickedRailroaderUnit(animal)
+    if not animal then return nil end
+    local decorationId = FlatcarVisualClient.unitIdForDecoration(animal)
+    if decorationId ~= nil then return Units.find(decorationId), true end
+    local animalType
+    if type(animal.getAnimalType) == "function" then
+        animalType = animal:getAnimalType()
+    end
+    local modData
+    if type(animal.getModData) == "function" then
+        modData = animal:getModData()
+    end
+    if (type(animalType) == "string" and animalType:sub(1, 3) == "rr_")
+        or (modData and (modData.rrLoco == true or modData.rrWall == true)) then
+        return clickedUnit(animal), true
+    end
+    return nil, false
 end
 
 local function optionAlreadyExists(context, label)
@@ -803,19 +824,233 @@ local function addUnitOptions(playerNum, context, unit, test)
     return true
 end
 
-local function addNearbyUnitOptions(playerNum, context, test, clickedAnimal)
+local function addNearbyUnitOptions(playerNum, context, test, clickedAnimal,
+        clickedRailroaderTarget)
     local player = localPlayer(playerNum)
     if not player then return false end
     local unit
     if clickedAnimal then
+        if not clickedRailroaderTarget then return false end
         unit = clickedUnit(clickedAnimal)
         if not unit or not unitInReach(player, unit) then
             return false
         end
+    elseif clickedRailroaderTarget then
+        return false
     else
         unit = nearestUnitInReach(player)
     end
     return addUnitOptions(playerNum, context, unit, test)
+end
+
+local function recordContainsAnimalPosition(record, x, y, z)
+    local region = RegionSlots.indexToRegion(record.slotIndex)
+    return x >= region.minX and x < region.maxX
+        and y >= region.minY and y < region.maxY
+        and z >= C.RV_IDENTITY_MIN_Z and z < C.RV_IDENTITY_MAX_Z
+end
+
+local function animalCargoUnit(player, inside, clickedAnimal,
+        clickedRailroaderTarget)
+    local unit
+    if inside then
+        local map = ModData and ModData.get(C.RV_MAP_KEY)
+        local x, y, z = player:getX(), player:getY(), player:getZ()
+        for _, record in pairs(map and map.locomotives or {}) do
+            if recordContainsAnimalPosition(record, x, y, z) then
+                return { id = record.locoId }
+            end
+        end
+        return nil
+    end
+    if clickedAnimal then
+        unit = clickedRailroaderUnit(clickedAnimal)
+        if not unit or FlatcarVisualClient.isFlatcar(unit.id)
+            or unit.z == nil
+            or math.floor(unit.z) ~= math.floor(player:getZ())
+            or not unitInReach(player, unit)
+            or (unit.kind ~= "loco" and unit.kind ~= "car_box"
+                and unit.kind ~= "car_bx40" and unit.kind ~= "car_cb") then
+            unit = nil
+        end
+    end
+    local function eligibleUnit(candidate)
+        return candidate and not FlatcarVisualClient.isFlatcar(candidate.id)
+            and (candidate.kind == "loco" or candidate.kind == "car_box"
+                or candidate.kind == "car_bx40" or candidate.kind == "car_cb")
+    end
+    if not clickedRailroaderTarget and not eligibleUnit(unit) then
+        local position = playerPosition(player)
+        local units = position and Units.list() or nil
+        local nearest, nearestDistance
+        for _, candidate in ipairs(units or {}) do
+            if eligibleUnit(candidate) then
+                local geometry = Units.geometry(candidate,
+                    position.x, position.y)
+                if geometry and geometry.hullDistanceTiles ~= nil
+                    and candidate.z ~= nil
+                    and math.floor(candidate.z) == math.floor(position.z) then
+                    local reach = candidate.isLocomotive
+                        and geometry.mountReachTiles or C.RV_MOUNT_REACH
+                    local distance = geometry.hullDistanceTiles
+                    if reach ~= nil and distance <= reach
+                        and (nearestDistance == nil
+                            or distance < nearestDistance) then
+                        nearest, nearestDistance = candidate, distance
+                    end
+                end
+            end
+        end
+        unit = nearest
+    end
+    if not eligibleUnit(unit)
+        or (unit.kind ~= "loco" and unit.kind ~= "car_box"
+            and unit.kind ~= "car_bx40" and unit.kind ~= "car_cb") then
+        return nil
+    end
+    if RR.API.seatOf(player) ~= nil or player:isSeatedInVehicle() then
+        return nil
+    end
+    if not unit.isLocomotive and not unit.isCut then
+        local rider = RR.API.riderState(unit.locomotiveId, player)
+        if not rider or rider.role ~= "outside" then return nil end
+    end
+    return unit
+end
+
+local animalSquareInSpace
+
+local function nearbyAnimals(player, unitId, inside)
+    local centerX, centerY, z = math.floor(player:getX()),
+        math.floor(player:getY()), math.floor(player:getZ())
+    local cell, found = player:getCell(), {}
+    for dx = -5, 5 do
+        for dy = -5, 5 do
+            if AnimalCargo.withinRadius(0, 0, dx, dy, 5) then
+                local square = cell:getGridSquare(centerX + dx,
+                    centerY + dy, z)
+                if square then
+                    local animals = square:getAnimals()
+                    for index = 0, animals:size() - 1 do
+                        local animal = animals:get(index)
+                        if AnimalCargo.isEligible(animal)
+                            and animalSquareInSpace(square, unitId, inside) then
+                            found[#found + 1] = animal
+                        end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(found, function(first, second)
+        return AnimalCargo.label(first) < AnimalCargo.label(second)
+    end)
+    return found
+end
+
+animalSquareInSpace = function(square, unitId, inside)
+    local map = ModData and ModData.get(C.RV_MAP_KEY)
+    if not map then return true end
+    local x, y, z = square:getX(), square:getY(), square:getZ()
+    if inside then
+        local record = map.locomotives[tostring(unitId)]
+        return record ~= nil
+            and recordContainsAnimalPosition(record, x, y, z)
+    end
+    for _, record in pairs(map.locomotives) do
+        if recordContainsAnimalPosition(record, x, y, z) then return false end
+    end
+    return true
+end
+
+local function clickedTrainAnimal(player, worldObjects)
+    local fetch = ISWorldObjectContextMenu
+        and ISWorldObjectContextMenu.fetchVars
+    local foundRailroaderTarget = false
+    for _, object in ipairs(fetch and fetch.clickedAnimals or {}) do
+        local unit, isRailroaderTarget = clickedRailroaderUnit(object)
+        if isRailroaderTarget then
+            foundRailroaderTarget = true
+            if unit and unit.z ~= nil
+                and math.floor(unit.z) == math.floor(player:getZ())
+                and unitInReach(player, unit) then
+                return object, true
+            end
+        end
+    end
+    for _, object in ipairs(worldObjects or {}) do
+        local unit, isRailroaderTarget = clickedRailroaderUnit(object)
+        if isRailroaderTarget then
+            foundRailroaderTarget = true
+            if unit and unit.z ~= nil
+                and math.floor(unit.z) == math.floor(player:getZ())
+                and unitInReach(player, unit) then
+                return object, true
+            end
+        end
+    end
+    return nil, foundRailroaderTarget
+end
+
+local function requestAnimalCargo(player, unitId, operation, value)
+    local args = { unitId = unitId, operation = operation }
+    if operation == "load" then
+        args.animalOnlineId = value.onlineId
+        args.animalId = value.animalId
+    elseif operation == "unload" then
+        args.cargoId = value
+    end
+    sendClientCommand(player, C.MOD_ID, C.COMMAND_RV_ANIMAL_CARGO, args)
+end
+
+local function addAnimalCargoOptions(playerNum, context, test, inside,
+        clickedAnimal, clickedRailroaderTarget)
+    local player = localPlayer(playerNum)
+    if not player then return false end
+    local unit = animalCargoUnit(player, inside, clickedAnimal,
+        clickedRailroaderTarget)
+    if not unit then return false end
+    local unitId, optionsAdded = tostring(unit.id), false
+    local animals = nearbyAnimals(player, unitId, inside)
+    if #animals > 0 then
+        local label = text("ContextMenu_RailroaderRV_LoadAnimal",
+            "Load animal")
+        if not optionAlreadyExists(context, label) then
+            local option = context:addOption(label)
+            local submenu = ISContextMenu:getNew(context)
+            context:addSubMenu(option, submenu)
+            for _, animal in ipairs(animals) do
+                local onlineId, animalId =
+                    AnimalCargo.selectionIds(animal)
+                submenu:addOption(AnimalCargo.label(animal), player,
+                    requestAnimalCargo, unitId, "load", {
+                        onlineId = onlineId, animalId = animalId,
+                    })
+            end
+            optionsAdded = true
+        end
+    end
+
+    local map = ModData and ModData.get(C.RV_MAP_KEY)
+    local rows = map and map.animalsByUnit[unitId]
+    if rows and #rows > 0 then
+        local label = text("ContextMenu_RailroaderRV_UnloadAnimal",
+            "Unload animal")
+        if not optionAlreadyExists(context, label) then
+            local option = context:addOption(label)
+            local submenu = ISContextMenu:getNew(context)
+            context:addSubMenu(option, submenu)
+            for _, row in ipairs(rows) do
+                local data = row.data
+                local animalLabel = AnimalCargo.savedLabel(data)
+                submenu:addOption(animalLabel, player, requestAnimalCargo,
+                    unitId, "unload", row.id)
+            end
+            optionsAdded = true
+        end
+    end
+    if optionsAdded and test then return markTest() end
+    return optionsAdded
 end
 
 local CURRENT_SQUARE_REFRESH_TICKS = 120
@@ -960,19 +1195,29 @@ function Menu.OnFillWorldObjectContextMenu(playerNum, context, worldObjects, tes
     end
     if not mapContainsPlayer(player) then
         addNearbyUnitOptions(playerNum, context, test)
+        local clickedAnimal, clickedRailroaderTarget =
+            clickedTrainAnimal(player, worldObjects)
+        addAnimalCargoOptions(playerNum, context, test, false,
+            clickedAnimal, clickedRailroaderTarget)
         return
     end
     addExit(playerNum, context, test)
     addNameCurrentCarOption(playerNum, context, test)
     addAdjacentCarOption(playerNum, context, test)
     addSafehouseClaim(playerNum, context, test)
+    addAnimalCargoOptions(playerNum, context, test, true)
 end
 
 function Menu.OnClickedAnimalForContext(playerNum, context, animals, test)
+    local player = localPlayer(playerNum)
+    local inside = player and mapContainsPlayer(player) or false
     for _, animal in ipairs(animals) do
-        if addNearbyUnitOptions(playerNum, context, test, animal) then
-            return true
-        end
+        local _, isRailroaderTarget = clickedRailroaderUnit(animal)
+        local nearbyAdded = addNearbyUnitOptions(playerNum, context, test,
+            animal, isRailroaderTarget)
+        local cargoAdded = addAnimalCargoOptions(playerNum, context, test,
+            inside, animal, isRailroaderTarget)
+        if nearbyAdded or cargoAdded then return true end
     end
     return false
 end
@@ -998,12 +1243,17 @@ function Menu.OnPreFillWorldObjectContextMenu(playerNum, context, worldObjects, 
     local inside = mapContainsPlayer(player)
     if not inside then
         addNearbyUnitOptions(playerNum, context, test)
+        local clickedAnimal, clickedRailroaderTarget =
+            clickedTrainAnimal(player, worldObjects)
+        addAnimalCargoOptions(playerNum, context, test, false,
+            clickedAnimal, clickedRailroaderTarget)
         return
     end
     addExit(playerNum, context, test)
     addNameCurrentCarOption(playerNum, context, test)
     addAdjacentCarOption(playerNum, context, test)
     addSafehouseClaim(playerNum, context, test)
+    addAnimalCargoOptions(playerNum, context, test, true)
 end
 
 function Menu.OnFillInventoryObjectContextMenu(playerNum)
@@ -1012,7 +1262,19 @@ end
 
 function Menu.OnServerCommand(module, command, args)
     if module ~= C.MOD_ID then return end
-    if command == C.COMMAND_RV_CONSIST_DATA then
+    if command == C.COMMAND_RV_ANIMAL_CARGO_RESULT then
+        local player = localPlayerByOnlineId(args.onlineId)
+        if player then
+            local message = args.ok == true
+                and text("UI_RailroaderRV_AnimalCargo_Success",
+                    "Animal cargo updated")
+                or text("UI_RailroaderRV_AnimalCargo_Failed",
+                    "Animal cargo operation failed")
+            player:setHaloNote(message, args.ok and 100 or 255,
+                args.ok and 255 or 100, 100, 4000)
+        end
+        return
+    elseif command == C.COMMAND_RV_CONSIST_DATA then
         local player = localPlayerByOnlineId(args.onlineId)
         if not player then return end
         local playerNum = player:getPlayerNum()
@@ -1195,5 +1457,24 @@ end
 
 RR.API.onBoardMenu(addRailroaderRadialOptions)
 RR.API.onCabMenu(addRailroaderRadialOptions)
+
+if Events and Events.OnReceiveGlobalModData
+    and type(Events.OnReceiveGlobalModData.Add) == "function"
+    and ModData and type(ModData.add) == "function" then
+    Events.OnReceiveGlobalModData.Add(function(tag, data)
+        if isClient() and tag == C.RV_MAP_KEY and data ~= false then
+            ModData.add(tag, data)
+        end
+    end)
+end
+
+if Events and Events.OnInitGlobalModData
+    and type(Events.OnInitGlobalModData.Add) == "function"
+    and ModData and type(ModData.exists) == "function"
+    and type(ModData.request) == "function" then
+    Events.OnInitGlobalModData.Add(function()
+        if isClient() then ModData.request(C.RV_MAP_KEY) end
+    end)
+end
 
 return Menu

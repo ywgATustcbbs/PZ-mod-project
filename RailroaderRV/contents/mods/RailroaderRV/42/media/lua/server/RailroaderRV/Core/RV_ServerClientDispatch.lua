@@ -17,6 +17,7 @@ local function dispatchLocal(module, command, args)
         or command == C.COMMAND_RV_SAFEHOUSE_RESULT
         or command == C.COMMAND_RV_SAFEHOUSE_SYNC
         or command == C.COMMAND_RV_CONSIST_DATA
+        or command == C.COMMAND_RV_ANIMAL_CARGO_RESULT
         or command == C.COMMAND_RV_CAR_NAME_RESULT then
         RailroaderRV.RailroaderContextMenu.OnServerCommand(
             module, command, args)

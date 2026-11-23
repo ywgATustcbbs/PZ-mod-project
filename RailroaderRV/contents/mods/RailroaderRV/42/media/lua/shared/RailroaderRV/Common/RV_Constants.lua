@@ -49,6 +49,8 @@ C.COMMAND_RV_CONSIST_REQUEST = "RequestRVConsist"
 C.COMMAND_RV_CONSIST_DATA = "RVConsistData"
 C.COMMAND_RV_SET_CAR_NAME = "SetRVCarName"
 C.COMMAND_RV_CAR_NAME_RESULT = "RVCarNameResult"
+C.COMMAND_RV_ANIMAL_CARGO = "RVAnimalCargo"
+C.COMMAND_RV_ANIMAL_CARGO_RESULT = "RVAnimalCargoResult"
 C.COMMAND_RV_SWITCH_CAR = "SwitchRVCar"
 C.COMMAND_RV_TELEPORT = "RVTeleport"
 C.COMMAND_RV_BOUNDARY_CORRECTION = "RVBoundaryCorrection"
@@ -74,7 +76,7 @@ C.RV_FLATCAR_NOTICE_CARGO_NOT_FOUND = "cargo-not-found"
 C.RV_FLATCAR_NOTICE_UNLOAD_BLOCKED = "unload-blocked"
 C.RV_FLATCAR_NOTICE_LOADING_RAMP_REQUIRED = "loading-ramp-required"
 C.RV_MAP_KEY = "RailroaderRV.TrainMap"
-C.SAVE_SCHEMA_VERSION = 20
+C.SAVE_SCHEMA_VERSION = 21
 C.INVALID_RV_DATA = "RailroaderRV: RV data is invalid; delete this save and rebuild it"
 
 -- The current generation action always targets this server-selected destination.

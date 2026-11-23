@@ -16,6 +16,8 @@ local ServerSchema = ctx.ServerSchema
 local UtilityServer = ctx.UtilityServer
 local GenerationTransaction = ctx.GenerationTransaction
 local WallReload = require("RailroaderRV/WallReloadProtection/RV_WallReloadProtection")
+local AnimalCargoServer = require(
+    "RailroaderRV/RVMapping/RV_AnimalCargoServer")
 local function safeErrorText(...) return ctx.safeErrorText(...) end
 local notifyFailure = ctx.notifyFailure
 local requestRoomOwnershipScan = ctx.requestRoomOwnershipScan
@@ -278,6 +280,28 @@ function RV.Server.OnClientCommand(module, command, player, args)
         end
         return
     end
+    if command == Constants.COMMAND_RV_ANIMAL_CARGO then
+        local accepted, reason = AnimalCargoServer.handle(player, args,
+            RV.RailroaderServer)
+        if accepted ~= true then
+            print("[RailroaderRV][AnimalCargo] rejected operation="
+                .. tostring(type(args) == "table" and args.operation)
+                .. " reason=" .. safeErrorText(reason))
+            if player and type(args) == "table" then
+                local onlineId = player:getOnlineID()
+                if onlineId == nil or onlineId < 0 then onlineId = 0 end
+                ctx.ClientDispatch.sendToPlayer(player, Constants.MOD_ID,
+                    Constants.COMMAND_RV_ANIMAL_CARGO_RESULT, {
+                        onlineId = onlineId,
+                        requestId = args.requestId,
+                        unitId = tostring(args.unitId or ""),
+                        ok = false,
+                        reason = reason,
+                    })
+            end
+        end
+        return
+    end
     -- The Railroader adapter owns these two commands.  This handler is also
     -- registered on the same event, so do not let the generic empty-payload
     -- validator log them as malformed Generate requests.
@@ -285,7 +309,8 @@ function RV.Server.OnClientCommand(module, command, player, args)
         and (command == COMMAND_RV_ENTER or command == COMMAND_RV_EXIT
             or command == Constants.COMMAND_RV_CONSIST_REQUEST
             or command == Constants.COMMAND_RV_SET_CAR_NAME
-            or command == Constants.COMMAND_RV_SWITCH_CAR) then
+            or command == Constants.COMMAND_RV_SWITCH_CAR
+            or command == Constants.COMMAND_RV_ANIMAL_CARGO) then
         return
     end
     if module == Constants.MOD_ID

@@ -80,6 +80,45 @@ def compile_current_room_template(shared_lua_root: Path) -> list[dict[str, objec
     return result
 
 
+def check_schema_save_lifecycle(server_source: str) -> bool:
+    """Check that startup advances only loaded ModData for its next save."""
+
+    from lupa import LuaRuntime
+
+    start = server_source.index("local function checkSaveSchemaVersion()")
+    end = server_source.index("Adapter._mappingEpoch", start)
+    hooks = server_source[start:end]
+    lua = LuaRuntime(unpack_returned_tuples=True)
+    lua.execute(
+        "C = { SAVE_SCHEMA_VERSION = 21, RV_MAP_KEY = 'rv' }; "
+        "Adapter = {}; "
+        "map = { schemaVersion = 20, preservedField = 'keep' }; "
+        "disk = { schemaVersion = 20, preservedField = 'keep' }; "
+        "warnings = {}; "
+        "transmits = 0; "
+        "ModData = { getOrCreate = function() return map end, "
+        "get = function() return map end, "
+        "transmit = function() transmits = transmits + 1 end }; "
+        "Events = { OnInitGlobalModData = { Add = function(fn) init = fn end } }; "
+        "print = function(message) warnings[#warnings + 1] = message end"
+    )
+    lua.execute(hooks)
+    lua.execute("init(); init()")
+    if lua.eval("map.schemaVersion") != 21:
+        return False
+    if lua.eval("disk.schemaVersion") != 20:
+        return False
+    if lua.eval("map.preservedField") != "keep" or lua.eval("#warnings") != 1:
+        return False
+    lua.execute("disk.schemaVersion = map.schemaVersion; disk.preservedField = map.preservedField")
+    return (
+        lua.eval("disk.schemaVersion") == 21
+        and lua.eval("disk.preservedField") == "keep"
+        and lua.eval("#warnings") == 1
+        and lua.eval("transmits") == 0
+    )
+
+
 def compile_current_template_metadata(shared_lua_root: Path) -> dict[str, object]:
     """Load the real shared template compiler and return its identity metadata."""
 
@@ -1965,6 +2004,11 @@ def main() -> int:
             [railroader_server_path]
             + sorted(server_root.rglob("RV_RailroaderServer_*.lua"))
         )
+        schema_bootstrap = (
+            read_utf8(railroader_server_path)
+            if railroader_server_path.is_file()
+            else ""
+        )
         boundary_server = aggregate_lua_sources(
             sorted(boundary_server_path.parent.glob("RV_BoundaryServer*.lua"))
             + [boundary_objects_path]
@@ -3337,7 +3381,7 @@ def main() -> int:
                 and "local GENERATION_STAGING_Z = -15" in generation_flow
                 and "GENERATION_STAGING_Z = Constants.RELOCATION_SENTINEL_Z" not in server
                 and all("schemaVersion" not in source for source in (
-                    mapping, generation_flow, server_schema,
+                    generation_flow, server_schema,
                     record_validation, layout, boundary_geometry, utility_store,
                 )),
                 "current schema constants do not expose the generic invalid-RV-data contract",
@@ -3369,10 +3413,20 @@ def main() -> int:
                 and "events.OnInitGlobalModData" in railroader_server
                 and "map.schemaVersion = C.SAVE_SCHEMA_VERSION" in railroader_server
                 and "map.schemaVersion ~= C.SAVE_SCHEMA_VERSION" in railroader_server
-                and "Continuing without migration" in railroader_server
-                and "The user promises not to use old saves" in railroader_server
-                and railroader_server.count("map.schemaVersion = C.SAVE_SCHEMA_VERSION") == 1
+                and "Reading with the current schema; the in-memory marker is updated for the next save." in railroader_server
+                and railroader_server.count("map.schemaVersion = C.SAVE_SCHEMA_VERSION") == 2
                 and railroader_server.count("map.schemaVersion ~= C.SAVE_SCHEMA_VERSION") == 1
+                and re.search(
+                    r"if empty then[\s\S]*?"
+                    r"map\.schemaVersion = C\.SAVE_SCHEMA_VERSION[\s\S]*?"
+                    r"elseif map\.schemaVersion ~= C\.SAVE_SCHEMA_VERSION then[\s\S]*?"
+                    r"print\([\s\S]*?map\.schemaVersion = C\.SAVE_SCHEMA_VERSION",
+                    railroader_server,
+                ) is not None
+                and "if map.animalsByUnit == nil then" not in railroader_server
+                and check_schema_save_lifecycle(schema_bootstrap)
+                and "events.OnSave" not in railroader_server
+                and "ModData.transmit" not in schema_bootstrap
                 and "pcall(mapData)" not in railroader_server
                 and "pcall(ModData.getOrCreate" not in railroader_server
                 and "return ModData.get(C.RV_MAP_KEY)" in mapping
@@ -3386,7 +3440,7 @@ def main() -> int:
                     record_validation, layout, bitmap,
                     boundary_geometry, utility_store,
                 )),
-                "the single warning-only startup schema check or unguarded runtime read path is missing",
+                "schema mismatch must be logged on startup, read unchanged, and updated only on save",
             )
             checks.true(
                 "C.RV_REGION_SLOT_ROWS = 5" in constants
@@ -3413,7 +3467,7 @@ def main() -> int:
                 and "bitmap" not in region_slots
                 and "bitmap" not in boundary_geometry
                 and all("schemaVersion" not in source for source in (
-                    mapping, generation_build, generation_flow, region_slots,
+                    generation_build, generation_flow, region_slots,
                     boundary_geometry, utility_store,
                 )),
                 "runtime paths must use current data without nested save-schema gates",

@@ -10,6 +10,8 @@
     "ContextMenu_RailroaderRV_ConvertToFlatcar_Bound": "A car already bound to an RV cannot be converted to a flatcar",
     "ContextMenu_RailroaderRV_LoadVehicle": "Load vehicle",
     "ContextMenu_RailroaderRV_UnloadVehicle": "Unload vehicle",
+    "ContextMenu_RailroaderRV_LoadAnimal": "Load animal",
+    "ContextMenu_RailroaderRV_UnloadAnimal": "Unload animal",
     "ContextMenu_RailroaderRV_Transport_RequiresFlatcar": "Convert to a flatcar first",
     "ContextMenu_RailroaderRV_Transport_LoadingRampNotConsumed": "The loading ramp is not consumed.",
     "ContextMenu_RailroaderRV_Transport_VisualOnly": "Vehicles on the flatcar are visual models only. <LINE> Visual errors can occur. <LINE> The model may differ from the real vehicle. <LINE> It does not show the vehicle's actual state.",

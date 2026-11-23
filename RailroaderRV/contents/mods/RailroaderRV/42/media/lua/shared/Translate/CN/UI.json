@@ -6,6 +6,8 @@
     "UI_RailroaderRV_Utility_Confirmed": "操作已确认，数值正在刷新",
     "UI_RailroaderRV_Utility_Rejected": "操作未执行",
     "UI_RailroaderRV_Utility_SendFailed": "请求未能发送",
+    "UI_RailroaderRV_AnimalCargo_Success": "动物运输操作已完成",
+    "UI_RailroaderRV_AnimalCargo_Failed": "动物运输操作失败",
     "UI_RailroaderRV_Safehouse_Claimed": "房车车厢已设为你的安全屋",
     "UI_RailroaderRV_Safehouse_Reject_InvalidRequest": "安全屋认领请求无效",
     "UI_RailroaderRV_Safehouse_Reject_PlayerUnavailable": "当前无法认领房车安全屋",

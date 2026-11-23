@@ -35,9 +35,8 @@ local Adapter = RailroaderRV.RailroaderServer
 local C = RailroaderRV.Constants
 local unpackFn = (table and table.unpack) or unpack
 
--- The user promises not to use old saves, so no old-schema guard, compatibility,
--- or migration path is needed. A mismatch only warns; modules trust current
--- interfaces, and malformed data follows the normal game error path.
+-- Existing ModData is read using the current schema. A mismatch is logged once
+-- at startup and its in-memory marker is advanced for the next normal save.
 local function checkSaveSchemaVersion()
     if Adapter._saveSchemaVersionChecked then return end
     Adapter._saveSchemaVersionChecked = true
@@ -54,13 +53,17 @@ local function checkSaveSchemaVersion()
         map.players = {}
         map.flatcars = {}
         map.nextCargoId = 1
-        return
-    end
-    if map.schemaVersion ~= C.SAVE_SCHEMA_VERSION then
+    elseif map.schemaVersion ~= C.SAVE_SCHEMA_VERSION then
         print("[RailroaderRV] This save has an old or missing schema version ("
             .. tostring(map.schemaVersion) .. "); current version is "
             .. tostring(C.SAVE_SCHEMA_VERSION)
-            .. ". Continuing without migration. If RV data errors occur, delete this save and rebuild it.")
+            .. ". Reading with the current schema; the in-memory marker is updated for the next save.")
+        map.schemaVersion = C.SAVE_SCHEMA_VERSION
+    end
+
+    if empty then
+        map.animalsByUnit = {}
+        map.nextAnimalCargoId = 1
     end
 end
 

@@ -39,6 +39,8 @@ local rvRegion = ctx.rvRegion
 local refreshRoofForPlayer = ctx.refreshRoofForPlayer
 local armRoomOwnershipMonitor = ctx.armRoomOwnershipMonitor
 local recordAtPlayerCoordinate = ctx.recordAtPlayerCoordinate
+local recordRegion = ctx.recordRegion
+local inRegion = ctx.inRegion
 local nearestMappedTrain
 local pendingExitBoardings = {}
 local EXIT_BOARD_TIMEOUT_TICKS = 600
@@ -673,6 +675,8 @@ local function commitGeneration(player, data, prepared)
     markMappingChanged()
     map.locomotives, map.players = candidateMap.locomotives,
         candidateMap.players
+    map.animalsByUnit[locoId] = map.animalsByUnit[locoId] or {}
+    ModData.transmit(C.RV_MAP_KEY)
     if sourceCandidate then settleUtilityTransition(sourceCandidate, player) end
     local settled, settleReason = server.settleRVUtilityLoad({
         rvId = tostring(candidateRecord.locoId),
@@ -1228,4 +1232,73 @@ ctx.validateGeneration = validateGeneration
 ctx.exitPlayer = exitPlayer
 ctx.acknowledgeExitBoarding = acknowledgeExitBoarding
 Adapter.processPendingExitBoardings = processPendingExitBoardings
+
+function Adapter.resolveAnimalCargoUnit(player, requestedUnitId)
+    local map = mapData()
+    local record, _, _, status = recordAtPlayerCoordinate(map, player)
+    if record then
+        local accepted, context = Adapter.resolveCurrentUtilityRV(player)
+        if accepted ~= true or context.locomotiveSide == true then
+            return false, "permission-denied"
+        end
+        local unitId = tonumber(record.locoId)
+        if requestedUnitId ~= nil
+            and tonumber(requestedUnitId) ~= unitId then
+            return false, "permission-denied"
+        end
+        local unit = unitId and Units.find(unitId) or nil
+        if not unit then return false, "unit-unavailable" end
+        if map.flatcars[tostring(unitId)] ~= nil then
+            return false, "flatcar-excluded"
+        end
+        if unit.kind ~= "loco" and unit.kind ~= "car_box"
+            and unit.kind ~= "car_bx40" and unit.kind ~= "car_cb" then
+            return false, "unit-excluded"
+        end
+        return true, unitId, unit, true
+    end
+    if status ~= "outside-rv" then return false, status end
+    if not RRApi.available() then return false, "railroader-api-unavailable" end
+    local seat = RRApi.seatOf(player)
+    if seat ~= nil then return false, "player-seated" end
+    if player:isSeatedInVehicle() then return false, "player-seated" end
+    local unitId = tonumber(requestedUnitId)
+    if unitId == nil or math.floor(unitId) ~= unitId then
+        return false, "invalid-unit"
+    end
+    if map.flatcars[tostring(unitId)] ~= nil then
+        return false, "flatcar-excluded"
+    end
+    local unit = Units.find(unitId)
+    if not unit or (unit.kind ~= "loco" and unit.kind ~= "car_box"
+        and unit.kind ~= "car_bx40" and unit.kind ~= "car_cb") then
+        return false, "unit-excluded"
+    end
+    local position = playerPosition(player)
+    if not position or unit.z == nil
+        or math.floor(position.z) ~= math.floor(unit.z) then
+        return false, "outside-range"
+    end
+    local distance, reach = interactionGeometry(player, unit)
+    if distance == nil or reach == nil or distance > reach then
+        return false, "outside-range"
+    end
+    local role = playerRole(unit, player)
+    if role ~= "external" then return false, "player-seated" end
+    return true, unitId, unit, false
+end
+
+function Adapter.animalCargoSquareAllowed(unitId, square, inside)
+    local position = { x = square:getX(), y = square:getY(), z = square:getZ() }
+    local map = mapData()
+    if inside then
+        local record = recordForLoco(map, tostring(unitId))
+        return record ~= nil and inRegion(position, recordRegion(record))
+    end
+    for _, record in pairs(map.locomotives) do
+        if inRegion(position, recordRegion(record)) then return false end
+    end
+    return true
+end
+
 end

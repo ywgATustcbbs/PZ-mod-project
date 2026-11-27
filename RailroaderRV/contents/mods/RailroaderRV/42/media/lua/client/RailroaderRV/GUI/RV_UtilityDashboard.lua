@@ -444,24 +444,27 @@ function PowerPage:refresh(snapshot)
                 }
             end
         elseif renewableType == "WIND" then
-            local windSpeed = getClimateManager():getWindspeedKph()
+            local trueWindSpeed = power.trueWindSpeedKph
+            local apparentWindSpeed = power.apparentWindSpeedKph
             local windStopReason
             if not generator.running and generator.currentPowerW == 0 then
-                if windSpeed <= 10 then
+                if apparentWindSpeed <= 10 then
                     windStopReason = getText("UI_RailroaderRV_Utility_WindStoppedLowSpeed")
-                elseif windSpeed >= 90 then
+                elseif apparentWindSpeed >= 90 then
                     windStopReason = getText("UI_RailroaderRV_Utility_WindStoppedHighSpeed")
                 end
             end
             generatorSub = getText("UI_RailroaderRV_Utility_WindSpeed") .. ": "
-                .. display(windSpeed, 1) .. " km/h  |  "
-                .. getText("UI_RailroaderRV_Utility_Power") .. ": "
+                .. display(trueWindSpeed, 1) .. " km/h  |  "
+                .. getText("UI_RailroaderRV_Utility_ApparentWindSpeed") .. ": "
+                .. display(apparentWindSpeed, 1) .. " km/h"
+            generatorSub2 = getText("UI_RailroaderRV_Utility_Power") .. ": "
                 .. display(generator.currentPowerW, 0) .. " / "
-                .. display(generator.maxPowerW, 0) .. " W"
-            generatorSub2 = getText("UI_RailroaderRV_Utility_GenerationEfficiency") .. ": "
+                .. display(generator.maxPowerW, 0) .. " W  |  "
+                .. getText("UI_RailroaderRV_Utility_GenerationEfficiency") .. ": "
                 .. display(generator.currentPowerW / generator.maxPowerW * 100, 0) .. "%"
             if windStopReason then
-                generatorSub2 = generatorSub2 .. "  |  " .. windStopReason
+                generatorSub3 = windStopReason
             end
         elseif renewableType == "SOLAR" then
             local gameTime = getGameTime()

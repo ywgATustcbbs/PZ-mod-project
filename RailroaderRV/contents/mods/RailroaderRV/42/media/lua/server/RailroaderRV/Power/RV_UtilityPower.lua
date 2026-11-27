@@ -175,7 +175,17 @@ local function applyOverloadProtection(power, requestedLoadW)
     return true
 end
 
-local function generatorRates(power, loadW)
+local function currentWindSpeedsKph(identity)
+    local Units = require("RailroaderRV/RVMapping/RV_RailroaderUnits")
+    local locomotive = Units.find(identity.rvId)
+    if not locomotive then
+        return Generation.currentWindSpeedsKph(0)
+    end
+    return Generation.currentWindSpeedsKph(locomotive.speed,
+        locomotive.dirX, locomotive.dirY)
+end
+
+local function generatorRates(power, loadW, identity, includeDisabledWind)
     local efficiency = chargerEfficiency(power)
     local inverter = inverterEfficiency(power)
     local batteryCapacityWh, maxChargePowerW, maxDischargePowerW =
@@ -197,6 +207,7 @@ local function generatorRates(power, loadW)
     local eligible, maxFuelPowerW = {}, 0
     local renewablePowerW, generatorPower = 0, {}
     local solarPowerW, windPowerW
+    local trueWindSpeedKph, apparentWindSpeedKph
     for _, generator in ipairs(power.generators) do
         local profile = P.GENERATOR_TYPES[generator.fullType]
         if profile.renewableType ~= nil
@@ -212,11 +223,19 @@ local function generatorRates(power, loadW)
                     solarPowerW = Generation.currentSolarPowerW()
                 end
                 watts = solarPowerW
-            elseif generator.enabled then
-                if windPowerW == nil then
-                    windPowerW = Generation.currentWindPowerW()
+            elseif profile.renewableType == "WIND"
+                and (generator.enabled or includeDisabledWind) then
+                if trueWindSpeedKph == nil then
+                    trueWindSpeedKph, apparentWindSpeedKph =
+                        currentWindSpeedsKph(identity)
                 end
-                watts = windPowerW
+                if generator.enabled then
+                    if windPowerW == nil then
+                        windPowerW = Generation.windPowerW(
+                            apparentWindSpeedKph)
+                    end
+                    watts = windPowerW
+                end
             end
             generatorPower[generator.id] = watts
             renewablePowerW = renewablePowerW + watts
@@ -244,10 +263,11 @@ local function generatorRates(power, loadW)
         local batteryChargeW = math.min(maxChargePowerW,
             totalPowerW * efficiency)
         return totalPowerW, fuelRate, batteryOutputW, batteryChargeW,
-            generatorPower, renewablePowerW, renewableUsedPowerW
+            generatorPower, renewablePowerW, renewableUsedPowerW,
+            trueWindSpeedKph, apparentWindSpeedKph
     end
     return 0, fuelRate, batteryOutputW, 0, generatorPower,
-        renewablePowerW, 0
+        renewablePowerW, 0, trueWindSpeedKph, apparentWindSpeedKph
 end
 
 local function setGeneratorEnabled(power, enabled)
@@ -281,9 +301,9 @@ local function applyController(power)
     return changed
 end
 
-local function settleEnergy(power, elapsedHours, loadW)
+local function settleEnergy(power, elapsedHours, loadW, identity)
     local _, fuelRate, batteryOutputW, batteryInputW =
-        generatorRates(power, loadW)
+        generatorRates(power, loadW, identity)
     power.virtualFuelL = clamp(power.virtualFuelL
         - fuelRate * elapsedHours, 0, fuelCapacity(power))
     local batteryCapacityWh = batteryPack(power)
@@ -326,7 +346,7 @@ function M.settlePower(identity, mappingRecord, player, providedRecord, action)
     assert(now >= power.lastSettlementTime, "RV utility world age moved backwards")
     local elapsedHours = now - power.lastSettlementTime
     local loadW = effectiveLoadW(identity, power, record.water)
-    settleEnergy(power, elapsedHours, loadW)
+    settleEnergy(power, elapsedHours, loadW, identity)
     applyOverloadProtection(power, loadW)
     syncCircuitProxy(record, mappingRecord, player, identity)
     power.lastSettlementTime = now
@@ -695,8 +715,13 @@ function M.snapshot(record, identity, context)
     result.potentialLoadW = Devices.potentialLoadW(record.power)
     result.deviceCount = Devices.count(record.power)
     local generationPowerW, fuelRate, batteryOutputW, batteryInputW,
-        generatorPower, renewableAvailablePowerW, renewableUsedPowerW =
-        generatorRates(record.power, loadW)
+        generatorPower, renewableAvailablePowerW, renewableUsedPowerW,
+        trueWindSpeedKph, apparentWindSpeedKph =
+        generatorRates(record.power, loadW, identity, true)
+    if trueWindSpeedKph ~= nil then
+        result.trueWindSpeedKph = trueWindSpeedKph
+        result.apparentWindSpeedKph = apparentWindSpeedKph
+    end
     result.activeDeviceCount = batteryOutputW > 0
         and requestedActiveDeviceCount or 0
     result.generationPowerW = generationPowerW

@@ -29,6 +29,8 @@ MEDIA_LUA = (
 
 HARNESS = r"""
 package.path = [[__MEDIA_LUA__/shared/?.lua;__MEDIA_LUA__/server/?.lua;]] .. package.path
+function isClient() return false end
+function isServer() return true end
 RailroaderRV = {}
 local U = require("RailroaderRV/Common/RV_UtilityConstants")
 local PowerConfig = require("RailroaderRV/Power/RV_UtilityPowerConfig")

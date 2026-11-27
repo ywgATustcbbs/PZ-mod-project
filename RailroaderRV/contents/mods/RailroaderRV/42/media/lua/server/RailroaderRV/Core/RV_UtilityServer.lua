@@ -5,6 +5,10 @@
 -- Lua server executes handlers sequentially, so no per-RV lock, session nonce
 -- or idempotency replay window is required.
 
+if isClient() and not isServer() then
+    return {}
+end
+
 local C = require("RailroaderRV/Common/RV_Constants")
 local U = require("RailroaderRV/Common/RV_UtilityConstants")
 local Store = require("RailroaderRV/Core/RV_UtilityStore")

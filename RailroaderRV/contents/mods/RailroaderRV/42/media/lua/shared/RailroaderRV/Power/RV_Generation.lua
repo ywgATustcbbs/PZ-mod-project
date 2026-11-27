@@ -29,6 +29,16 @@ function M.windPowerW(windSpeedKph)
     return 0
 end
 
+function M.apparentWindSpeedKph(trueWindSpeedKph, windAngleRadians,
+    trainSpeedMps, trainDirX, trainDirY)
+    local trueWindX = trueWindSpeedKph * math.sin(windAngleRadians)
+    local trueWindY = trueWindSpeedKph * math.cos(windAngleRadians)
+    local trainSpeedKph = trainSpeedMps * 3.6
+    local relativeX = trueWindX - trainSpeedKph * trainDirX
+    local relativeY = trueWindY - trainSpeedKph * trainDirY
+    return math.sqrt(relativeX * relativeX + relativeY * relativeY)
+end
+
 function M.currentSolarPowerW()
     local gameTime = getGameTime()
     local climate = getClimateManager()
@@ -37,8 +47,16 @@ function M.currentSolarPowerW()
         climate:getFogIntensity())
 end
 
-function M.currentWindPowerW()
-    return M.windPowerW(getClimateManager():getWindspeedKph())
+function M.currentWindSpeedsKph(trainSpeedMps, trainDirX, trainDirY)
+    local climate = getClimateManager()
+    local trueWindSpeedKph = climate:getWindspeedKph()
+    if trainSpeedMps == 0 then
+        return trueWindSpeedKph, trueWindSpeedKph
+    end
+    local apparentWindSpeedKph = M.apparentWindSpeedKph(
+        trueWindSpeedKph, climate:getWindAngleRadians(),
+        trainSpeedMps, trainDirX, trainDirY)
+    return trueWindSpeedKph, apparentWindSpeedKph
 end
 
 return M

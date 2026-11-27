@@ -82,11 +82,20 @@ class RenewableGenerationChecks(unittest.TestCase):
         self.assertEqual(wind(89), rated)
         self.assertEqual(wind(90), 0)
 
+    def test_apparent_wind_uses_signed_train_velocity_and_wind_vector(self) -> None:
+        apparent = self.generation.apparentWindSpeedKph
+        # Angle 0 points along +Y, matching ClimateManager's world wind vector.
+        self.assertAlmostEqual(apparent(45, 0, 10, 0, 1), 9)
+        self.assertAlmostEqual(apparent(45, 0, 10, 0, -1), 81)
+        self.assertAlmostEqual(apparent(45, 0, 0, 0, 1), 45)
+        self.assertAlmostEqual(
+            apparent(45, 0, 10, 1, 0), (45**2 + 36**2) ** 0.5)
+
     def test_current_outputs_read_game_time_and_climate_interfaces(self) -> None:
         self.lua.execute(
             """
             sampled = { hour = 12, month = 6, cloud = 0,
-                precipitation = 0, fog = 0, wind = 45 }
+                precipitation = 0, fog = 0, wind = 45, windAngle = 0 }
             function getGameTime()
                 return {
                     getTimeOfDay = function() return sampled.hour end,
@@ -99,15 +108,27 @@ class RenewableGenerationChecks(unittest.TestCase):
                     getPrecipitationIntensity = function() return sampled.precipitation end,
                     getFogIntensity = function() return sampled.fog end,
                     getWindspeedKph = function() return sampled.wind end,
+                    getWindAngleRadians = function() return sampled.windAngle end,
                 }
             end
             """
         )
         self.assertEqual(self.generation.currentSolarPowerW(), 250)
-        self.assertEqual(self.generation.currentWindPowerW(), 400)
-        self.lua.execute("sampled.month = 0; sampled.wind = 9")
+        self.lua.execute("sampled.windAngle = 0")
+        true_wind, apparent_wind = self.generation.currentWindSpeedsKph(
+            10, 0, 1)
+        self.assertEqual(true_wind, 45)
+        self.assertEqual(apparent_wind, 9)
+        self.assertEqual(self.generation.windPowerW(apparent_wind), 0)
+        self.lua.execute("sampled.month = 0; sampled.wind = 45; sampled.windAngle = 0")
         self.assertAlmostEqual(self.generation.currentSolarPowerW(), 120)
-        self.assertEqual(self.generation.currentWindPowerW(), 0)
+        self.assertEqual(self.generation.windPowerW(45), 400)
+        self.lua.execute("sampled.wind = 9")
+        true_wind, apparent_wind = self.generation.currentWindSpeedsKph(
+            0, 1, 0)
+        self.assertEqual(true_wind, 9)
+        self.assertEqual(apparent_wind, 9)
+        self.assertEqual(self.generation.windPowerW(apparent_wind), 0)
 
 
 if __name__ == "__main__":

@@ -28,8 +28,9 @@ local root = { records = {} }
 local commitCount, snapshotCount, scanCount = 0, 0, 0
 local scanResult, now, requestedLoadW = true, 1, 0
 local missingScanSquareReturned = false
+local locomotiveSpeedMps = 0
 local weather = { hour = 12, month = 6, cloud = 0,
-    precipitation = 0, fog = 0, wind = 45 }
+    precipitation = 0, fog = 0, wind = 45, windAngle = 0 }
 local activeContext, activePlayer, inventory
 
 ModData = {
@@ -74,6 +75,24 @@ function getClimateManager()
         getPrecipitationIntensity = function() return weather.precipitation end,
         getFogIntensity = function() return weather.fog end,
         getWindspeedKph = function() return weather.wind end,
+        getWindAngleRadians = function() return weather.windAngle end,
+    }
+end
+package.preload["Railroader/RR_API"] = function()
+    return {
+        trains = function(out)
+            out = out or {}
+            out[1] = { id = 101, speed = locomotiveSpeedMps }
+            if locomotiveSpeedMps ~= 0 then
+                out[1].dirX, out[1].dirY = 0, 1
+            end
+            for index = #out, 2, -1 do out[index] = nil end
+            return out
+        end,
+        unitOf = function() return nil, "unknown" end,
+        units = function() return nil, "unknown" end,
+        cuts = function() return {} end,
+        mode = function() return "server" end,
     }
 end
 RainManager = { isRaining = function() return false end }
@@ -187,7 +206,7 @@ function newItem(itemId, fullType, condition, maxCondition, usedDelta)
     return item
 end
 
-local identity = { rvId = "fixture-rv", generation = 7 }
+local identity = { rvId = "101", generation = 7 }
 local mappingRecord = { templateId = RoomTemplate.TEMPLATE_ID,
     rvPosition = { x = 0, y = 0, z = 0 }, slotIndex = 1 }
 activeContext = { identity = identity, record = mappingRecord, phase = "READY",
@@ -218,9 +237,10 @@ function reset(operation, itemType, target, alternateTemplate, scanSucceeds)
     items = {}
     commitCount, snapshotCount, scanCount = 0, 0, 0
     scanResult, now, requestedLoadW = scanSucceeds ~= false, 1, 0
+    locomotiveSpeedMps = 0
     weather = { hour = 12, month = 6, cloud = 0,
-        precipitation = 0, fog = 0, wind = 45 }
-    identity = { rvId = "fixture-rv", generation = 7 }
+        precipitation = 0, fog = 0, wind = 45, windAngle = 0 }
+    identity = { rvId = "101", generation = 7 }
     mappingRecord = { templateId = alternateTemplate and "fixture-roof-b"
             or RoomTemplate.TEMPLATE_ID,
         rvPosition = { x = 0, y = 0, z = 0 }, slotIndex = 1 }
@@ -385,6 +405,25 @@ function evaluateSolarMix(withFuel, fuelEnabled, fuelLiters,
             conditionMax = chargerConditionMax or 1000 } or nil
     power.inverter = { condition = 1000, conditionMax = 1000 }
     requestedLoadW = loadW
+    return Power.snapshot(record, identity, activeContext)
+end
+
+function evaluateWindSnapshot(speedMps, enabled)
+    locomotiveSpeedMps = speedMps
+    local record = Store.getRecord(identity, false)
+    local power = record.power
+    power.generators = {
+        { id = 1, fullType = "RailroaderRV.WindTurbine",
+            enabled = enabled, condition = 100 },
+    }
+    power.fuelTanks = {}
+    power.virtualFuelL = 0
+    power.batteries = { { id = 1, fullType = "Base.CarBattery1",
+        condition = 100, maxCondition = 100, usedDelta = 1 } }
+    power.batteryWh = 0
+    power.charger = { condition = 1000, conditionMax = 1000 }
+    power.inverter = { condition = 1000, conditionMax = 1000 }
+    requestedLoadW = 0
     return Power.snapshot(record, identity, activeContext)
 end
 
@@ -702,6 +741,27 @@ class InstallationFlowChecks(unittest.TestCase):
         self.assertTrue(discharged)
         self.assertEqual(empty_wh, 0)
         self.assertAlmostEqual(remaining_fuel, 8.8375)
+
+    def test_wind_snapshot_uses_apparent_speed_and_reports_disabled_turbines(self) -> None:
+        self.globals.reset(None, None, None, False, True)
+        with_wind = self.globals.evaluateWindSnapshot(10, True)
+        self.assertEqual(with_wind.trueWindSpeedKph, 45)
+        self.assertEqual(with_wind.apparentWindSpeedKph, 9)
+        self.assertEqual(with_wind.generators[1].currentPowerW, 0)
+
+        against_wind = self.globals.evaluateWindSnapshot(-10, True)
+        self.assertEqual(against_wind.trueWindSpeedKph, 45)
+        self.assertEqual(against_wind.apparentWindSpeedKph, 81)
+        self.assertEqual(against_wind.generators[1].currentPowerW, 400)
+
+        stopped = self.globals.evaluateWindSnapshot(0, True)
+        self.assertEqual(stopped.trueWindSpeedKph, 45)
+        self.assertEqual(stopped.apparentWindSpeedKph, 45)
+
+        disabled = self.globals.evaluateWindSnapshot(-10, False)
+        self.assertEqual(disabled.trueWindSpeedKph, 45)
+        self.assertEqual(disabled.apparentWindSpeedKph, 81)
+        self.assertEqual(disabled.generators[1].currentPowerW, 0)
 
     def test_unknown_internal_renewable_profile_fails_fast_when_disabled(self) -> None:
         self.globals.reset(None, None, None, False, True)
